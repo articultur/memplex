@@ -1,0 +1,38 @@
+#!/bin/bash
+# Code format check script - uses ruff
+
+set -e
+
+echo "🔍 Running code format checks..."
+
+# Check ruff
+if ! command -v ruff &> /dev/null; then
+    echo "⚠️  ruff not installed. Run: pip install ruff"
+    exit 0
+fi
+
+SRC_DIRS="memplex tests"
+
+# 1. Check import order
+echo "📦 Checking import order..."
+ruff check --select I $SRC_DIRS || {
+    echo "❌ Import order issues. Run 'ruff check --select I --fix' to auto-fix"
+    exit 1
+}
+
+# 2. Check common issues
+echo "🔧 Checking common issues..."
+ruff check $SRC_DIRS || {
+    echo "❌ Code issues found"
+    exit 1
+}
+
+# 3. Check code format
+echo "🎨 Checking code format..."
+ruff format --check $SRC_DIRS || {
+    echo "❌ Format issues found. Run 'ruff format' to auto-fix"
+    exit 1
+}
+
+echo "✅ All format checks passed!"
+exit 0

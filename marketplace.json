@@ -1,0 +1,20 @@
+{
+  "name": "memplex",
+  "interface": {
+    "displayName": "Memplex"
+  },
+  "plugins": [
+    {
+      "name": "memplex",
+      "source": {
+        "source": "git",
+        "url": "https://github.com/articultur/memplex.git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

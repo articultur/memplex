@@ -1,0 +1,54 @@
+#!/bin/bash
+# Push-time guard hook - 防止通过 --no-verify 绕过提交校验后直接推送
+
+set -e
+
+echo "🔍 推送前检查..."
+
+PATTERN='^(\[)?(feat|fix|style|refactor|test|chore|docs)(\([^)]*\))?(\])?:\ .+'
+
+check_commit_subject() {
+    local range="$1"
+    local failed=0
+
+    while IFS=$'\t' read -r commit_hash subject; do
+        [[ -z "$commit_hash" ]] && continue
+
+        if [[ "$subject" =~ ^Merge\  ]] || [[ "$subject" =~ ^Revert\  ]]; then
+            continue
+        fi
+
+        if ! [[ "$subject" =~ $PATTERN ]]; then
+            echo "❌ 非规范提交信息: $commit_hash $subject"
+            failed=1
+        fi
+    done < <(git log --format='%H%x09%s' "$range")
+
+    return $failed
+}
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ "$local_sha" =~ ^0+$ ]] && continue
+
+    if [[ "$remote_sha" =~ ^0+$ ]]; then
+        range=$(git rev-list "$local_sha" --not --all)
+        if [[ -n "$range" ]]; then
+            while read -r commit; do
+                check_commit_subject "$commit" || {
+                    echo ""
+                    echo "请先修正提交信息，再推送。"
+                    exit 1
+                }
+            done <<< "$range"
+        fi
+    else
+        check_commit_subject "$remote_sha..$local_sha" || {
+            echo ""
+            echo "请先修正提交信息，再推送。"
+            exit 1
+        }
+    fi
+done
+
+echo "✅ 推送前检查通过"
+exit 0

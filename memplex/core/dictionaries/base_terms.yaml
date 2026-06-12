@@ -1,0 +1,136 @@
+# Base terminology dictionary (50-80 core terms)
+# Used for term mapping in association - NOT passed to LLM
+
+user:
+  - user
+  - 用户
+  - users
+  - account
+  - 账户
+  - 账号
+
+auth:
+  - login
+  - sign_in
+  - 登录
+  - 认证
+  - authenticate
+  - authentication
+  - 验证
+  - signin
+
+password:
+  - password
+  - 密码
+  - pwd
+  - passwd
+
+payment:
+  - pay
+  - payment
+  - 支付
+  - 结账
+  - checkout
+  - settle
+  - 结算
+
+order:
+  - order
+  - 订单
+  - 订购
+  - purchase
+  - 购买
+
+refund:
+  - refund
+  - 退款
+  - 退费
+  - 退货
+  - return
+
+vip:
+  - vip
+  - 会员
+  - 会员等级
+  - premium
+  - 高级用户
+
+discount:
+  - discount
+  - 折扣
+  - 优惠
+  - coupon
+  - 优惠券
+
+points:
+  - points
+  - 积分
+  - credit
+  - score
+
+notification:
+  - notification
+  - 通知
+  - 消息
+  - message
+  - push
+  - 推送
+
+register:
+  - register
+  - 注册
+  - signup
+  - 登记
+
+logout:
+  - logout
+  - 登出
+  - signout
+  - 退出
+
+admin:
+  - admin
+  - 管理员
+  - administration
+  - 管理
+
+api:
+  - api
+  - 接口
+  - endpoint
+  - 服务端点
+
+database:
+  - database
+  - db
+  - 数据库
+  - data
+
+file:
+  - file
+  - 文件
+  - upload
+  - 上传
+  - download
+  - 下载
+
+email:
+  - email
+  - 邮件
+  - e-mail
+  - 邮箱
+
+phone:
+  - phone
+  - 手机
+  - mobile
+  - 电话
+  - tel
+
+verification:
+  - verification
+  - 验证码
+  - verify
+  - code
+  - 校验
+  - 验证

@@ -1,0 +1,46 @@
+{
+  "name": "memplex",
+  "version": "3.2.7",
+  "description": "Multi-agent memory system -- persistent knowledge graph with 3-layer retrieval, compaction, and wiki",
+  "author": {
+    "name": "articultur",
+    "url": "https://github.com/articultur"
+  },
+  "homepage": "https://github.com/articultur/memplex#readme",
+  "repository": "https://github.com/articultur/memplex",
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "plugin",
+    "memory",
+    "knowledge-graph",
+    "retrieval",
+    "compaction",
+    "wiki",
+    "python",
+    "fastapi"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Memplex",
+    "shortDescription": "Persistent knowledge graph memory with 3-layer retrieval for Claude Code sessions.",
+    "longDescription": "Memplex captures knowledge from documents, URLs, and conversations, extracts structured memories, and provides fast retrieval across sessions. Features 4 memory types, 5-dim reranking, and automatic compaction.",
+    "developerName": "articultur",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/articultur/memplex",
+    "defaultPrompt": [
+      "Find what I already learned about this codebase before I start a new task.",
+      "Show recent memories related to the files I am working on.",
+      "Summarize what we know about this topic."
+    ],
+    "brandColor": "#6366F1"
+  }
+}

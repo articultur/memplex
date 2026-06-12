@@ -1,0 +1,12 @@
+{
+  "name": "@articultur/memplex-hermes-installer",
+  "version": "0.2.0",
+  "description": "One-command Hermes installer for Memplex",
+  "bin": {
+    "memplex-install-hermes": "bin/memplex-install-hermes.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

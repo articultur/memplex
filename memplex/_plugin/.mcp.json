@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "memplex": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "memplex.adapters.mcp_server"]
+    }
+  }
+}

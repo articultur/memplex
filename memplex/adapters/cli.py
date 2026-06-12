@@ -1,0 +1,660 @@
+"""Memplex CLI -- command-line interface using argparse.
+
+Usage::
+
+    memplex query "login function"
+    memplex write --text "some observation"
+    memplex write --file ./notes.txt
+    memplex write --url https://example.com/doc
+    memplex get func_abc123
+    memplex delete func_abc123
+    memplex feedback func_abc123 --role trigger --index 0 --verdict correct
+    memplex pending
+    memplex compact --scope project
+    memplex health
+    memplex stats
+    memplex setup            # Install into detected local agents
+    memplex install --agent codex
+    memplex uninstall --agent openclaw
+    memplex agent install --agent all
+    memplex agent uninstall --agent openclaw
+    memplex unsetup          # Uninstall Claude Code plugin
+
+Global options::
+
+    --config <path>     Path to config YAML file
+    --output json|table Output format (default: table)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from typing import Optional, Sequence
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _make_service(config_path: Optional[str] = None):
+    """Create and return a MemplexService instance."""
+    from memplex.config import load_config
+    from memplex.service import MemplexService
+
+    config = load_config(path=config_path)
+    return MemplexService(config=config)
+
+
+def _fmt(data, output: str) -> str:
+    """Format *data* for the chosen output mode."""
+    if output == "json":
+        return json.dumps(data, indent=2, default=str, ensure_ascii=False)
+
+    # table / plain text
+    if isinstance(data, list):
+        if not data:
+            return "(empty)"
+        lines = []
+        for item in data:
+            if isinstance(item, dict):
+                lines.append(_dict_to_table(item))
+            else:
+                lines.append(str(item))
+        return "\n---\n".join(lines)
+
+    if isinstance(data, dict):
+        return _dict_to_table(data)
+
+    return str(data)
+
+
+def _dict_to_table(d: dict, indent: int = 0) -> str:
+    """Recursively format a dict as indented key-value lines."""
+    prefix = "  " * indent
+    lines = []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            lines.append(f"{prefix}{k}:")
+            lines.append(_dict_to_table(v, indent + 1))
+        elif isinstance(v, list):
+            lines.append(f"{prefix}{k}:")
+            for item in v:
+                if isinstance(item, dict):
+                    lines.append(_dict_to_table(item, indent + 1))
+                else:
+                    lines.append(f"{prefix}  - {item}")
+        else:
+            lines.append(f"{prefix}{k}: {v}")
+    return "\n".join(lines)
+
+
+def _result_to_dict(result) -> dict:
+    """Convert a SearchResult / QueryResult / dataclass to a dict."""
+    if hasattr(result, "__dataclass_fields__"):
+        return asdict(result)
+    if isinstance(result, dict):
+        return result
+    return {"value": str(result)}
+
+
+def _dataclass_to_dict(obj):
+    """Recursively convert dataclasses to dicts."""
+    if hasattr(obj, "__dataclass_fields__"):
+        return asdict(obj)
+    if isinstance(obj, list):
+        return [_dataclass_to_dict(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _dataclass_to_dict(v) for k, v in obj.items()}
+    return obj
+
+
+# ── Command implementations ────────────────────────────────────────
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    """Execute a memory query."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        result = svc.query(
+            text=args.text,
+            top_k=getattr(args, "top_k", 10),
+        )
+
+        out = []
+        for r in result.results:
+            out.append(
+                {
+                    "id": r.func_id,
+                    "name": r.name,
+                    "relevance": round(r.relevance_score, 4),
+                    "summary": r.summary,
+                    "scope": r.domain,
+                }
+            )
+
+        print(
+            _fmt(
+                {
+                    "total": len(out),
+                    "scope": result.scope.value
+                    if hasattr(result.scope, "value")
+                    else str(result.scope),
+                    "latency_ms": result.latency_ms,
+                    "results": out,
+                },
+                args.output,
+            )
+        )
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_write(args: argparse.Namespace) -> int:
+    """Write new content into memory."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        if args.text:
+            content = args.text
+            source_type = "text"
+        elif args.file:
+            with open(args.file, "r", encoding="utf-8") as f:
+                content = f.read()
+            source_type = "file"
+        elif args.url:
+            content = args.url
+            source_type = "url"
+        else:
+            print("Error: provide --text, --file, or --url", file=sys.stderr)
+            return 1
+
+        result = svc.write_text(text=content, source_type=source_type)
+
+        out = {
+            "functions_extracted": len(result.functions),
+            "edges": len(result.graph.edges),
+            "function_ids": [f.id for f in result.functions],
+        }
+        print(_fmt(out, args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_get(args: argparse.Namespace) -> int:
+    """Retrieve a single memory by ID."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        func = svc.get(args.memory_id)
+        if func is None:
+            print(f"Memory not found: {args.memory_id}", file=sys.stderr)
+            return 1
+
+        print(_fmt(_dataclass_to_dict(func), args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Delete a memory by ID."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        svc.delete(args.memory_id)
+        print(_fmt({"status": "deleted", "id": args.memory_id}, args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """Submit feedback for a memory field value."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        svc.submit_feedback(
+            memory_id=args.memory_id,
+            field_role=args.role,
+            value_index=args.index,
+            verdict=args.verdict,
+        )
+        print(
+            _fmt(
+                {
+                    "status": "recorded",
+                    "memory_id": args.memory_id,
+                    "role": args.role,
+                    "index": args.index,
+                    "verdict": args.verdict,
+                },
+                args.output,
+            )
+        )
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_pending(args: argparse.Namespace) -> int:
+    """List pending reviews."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        reviews = svc.get_pending_reviews()
+        out = [_dataclass_to_dict(r) for r in reviews]
+        print(_fmt({"total": len(out), "reviews": out}, args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    """Run the compaction pipeline."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        result = svc.compact(scope=getattr(args, "scope", "project"))
+        out = _dataclass_to_dict(result)
+        print(_fmt(out, args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_health(args: argparse.Namespace) -> int:
+    """Health check."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        info = svc.health()
+        print(_fmt(info, args.output))
+        return 0 if info.get("status") in {"healthy", "warning"} else 1
+    finally:
+        svc.stop()
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Display statistics."""
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        info = svc.stats()
+        print(_fmt(info, args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    """Portable agent integration commands."""
+    from memplex.adapters.agent_installer import install_agent, uninstall_agent
+    from memplex.adapters.agent_runtime import (
+        AgentMemoryRuntime,
+        get_agent_manifest,
+        list_agent_profiles,
+    )
+
+    action = getattr(args, "agent_command", None)
+    if action == "list":
+        print(_fmt(list_agent_profiles(), args.output))
+        return 0
+    if action == "manifest":
+        print(_fmt(get_agent_manifest(args.agent), args.output))
+        return 0
+    if action == "install":
+        result = install_agent(
+            args.agent,
+            target_dir=getattr(args, "target_dir", None),
+            user_id=getattr(args, "user_id", None),
+            project_path=getattr(args, "project_path", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+        print(_fmt(_dataclass_to_dict(result), args.output))
+        return 0
+    if action == "uninstall":
+        result = uninstall_agent(
+            args.agent,
+            target_dir=getattr(args, "target_dir", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+        print(_fmt(_dataclass_to_dict(result), args.output))
+        return 0
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        runtime = AgentMemoryRuntime(
+            service=svc,
+            agent=getattr(args, "agent", "codex"),
+            user_id=getattr(args, "user_id", None),
+            session_id=getattr(args, "session_id", "default"),
+            project_path=getattr(args, "project_path", None),
+            top_k=getattr(args, "top_k", 5),
+            token_budget=getattr(args, "token_budget", 1500),
+        )
+        if action == "recall":
+            recalled = runtime.before_prompt(args.prompt)
+            print(_fmt(recalled.__dict__, args.output))
+            return 0
+        if action == "capture":
+            runtime.after_response(
+                user_message=args.user_message,
+                assistant_message=args.assistant_message,
+                next_prompt_hint=getattr(args, "next_prompt_hint", None),
+            )
+            print(_fmt({"status": "captured", "agent": runtime.agent}, args.output))
+            return 0
+    finally:
+        svc.stop()
+
+    print("Error: unknown agent command", file=sys.stderr)
+    return 1
+
+
+# ── Claude Code Plugin Setup ────────────────────────────────────────
+
+_PLUGIN_AUTHOR = "articultur"
+_PLUGIN_NAME = "memplex"
+_MARKETPLACE_JSON = """{
+  "name": "memplex",
+  "interface": {
+    "displayName": "Memplex (local)"
+  },
+  "plugins": [
+    {
+      "name": "memplex",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
+"""
+
+
+def _get_plugin_source_dir() -> Path:
+    """Find the plugin directory within the memplex package."""
+    # Installed via pip: use bundled memplex/_plugin/
+    package_dir = Path(__file__).resolve().parent.parent
+    bundled = package_dir / "_plugin"
+    if bundled.exists() and (bundled / "hooks").exists():
+        return bundled
+    # Development mode: use project root plugin/
+    dev_plugin = package_dir / "plugin"
+    if dev_plugin.exists() and (dev_plugin / "hooks").exists():
+        return dev_plugin
+    raise FileNotFoundError("Cannot find plugin directory in memplex package")
+
+
+def _get_marketplace_dir() -> Path:
+    """Return the Claude Code marketplace target directory."""
+    claude_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+    return claude_dir / "plugins" / "marketplaces" / _PLUGIN_AUTHOR
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Install or uninstall Memplex in local agent hosts."""
+    from memplex.adapters.agent_installer import install_agent, uninstall_agent
+
+    should_uninstall = getattr(args, "uninstall", False) or args.command == "uninstall"
+    if should_uninstall:
+        result = uninstall_agent(
+            args.agent,
+            target_dir=getattr(args, "target_dir", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+    else:
+        result = install_agent(
+            args.agent,
+            target_dir=getattr(args, "target_dir", None),
+            user_id=getattr(args, "user_id", None),
+            project_path=getattr(args, "project_path", None),
+            dry_run=getattr(args, "dry_run", False),
+        )
+    print(_fmt(_dataclass_to_dict(result), args.output))
+    return 0
+
+
+def cmd_unsetup(args: argparse.Namespace) -> int:
+    """Uninstall Memplex Claude Code plugin."""
+    market_dir = _get_marketplace_dir()
+
+    print("Memplex Plugin Uninstall")
+    print("=" * 40)
+
+    if not market_dir.exists():
+        print("  Plugin not installed (directory not found).")
+        return 0
+
+    shutil.rmtree(market_dir)
+    print(f"  Removed: {market_dir}")
+    print("\nMemplex plugin uninstalled. Restart Claude Code to apply.")
+    return 0
+
+
+# ── Argument parser ────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the top-level argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="memplex",
+        description="Memplex -- multi-agent memory system",
+    )
+    parser.add_argument("--config", default=None, help="Path to config YAML file")
+    parser.add_argument(
+        "--output",
+        choices=["json", "table"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
+    sub = parser.add_subparsers(dest="command", help="Available commands")
+
+    # -- query --
+    p_query = sub.add_parser("query", help="Query memory")
+    p_query.add_argument("text", help="Query text")
+    p_query.add_argument("--top-k", type=int, default=10, help="Max results")
+
+    # -- write --
+    p_write = sub.add_parser("write", help="Write content to memory")
+    p_write.add_argument("--text", help="Raw text to write")
+    p_write.add_argument("--file", help="File path to read and write")
+    p_write.add_argument("--url", help="URL to write")
+
+    # -- get --
+    p_get = sub.add_parser("get", help="Get memory by ID")
+    p_get.add_argument("memory_id", help="Memory ID")
+
+    # -- delete --
+    p_del = sub.add_parser("delete", help="Delete memory by ID")
+    p_del.add_argument("memory_id", help="Memory ID")
+
+    # -- feedback --
+    p_fb = sub.add_parser("feedback", help="Submit feedback on a memory field")
+    p_fb.add_argument("memory_id", help="Memory ID")
+    p_fb.add_argument("--role", required=True, help="Field role (trigger|action|condition|benefit)")
+    p_fb.add_argument("--index", type=int, required=True, help="Value index")
+    p_fb.add_argument(
+        "--verdict",
+        required=True,
+        choices=["correct", "wrong"],
+        help="Verdict",
+    )
+
+    # -- pending --
+    sub.add_parser("pending", help="List pending reviews")
+
+    # -- compact --
+    p_compact = sub.add_parser("compact", help="Run compaction pipeline")
+    p_compact.add_argument(
+        "--scope",
+        default="project",
+        choices=["session", "project", "global"],
+        help="Compaction scope (default: project)",
+    )
+
+    # -- health --
+    sub.add_parser("health", help="Health check")
+
+    # -- stats --
+    sub.add_parser("stats", help="Show statistics")
+
+    # -- agent --
+    p_agent = sub.add_parser("agent", help="Portable agent integration commands")
+    agent_sub = p_agent.add_subparsers(dest="agent_command", help="Agent integration command")
+    agent_sub.add_parser("list", help="List supported agent profiles")
+
+    p_agent_manifest = agent_sub.add_parser("manifest", help="Show agent manifest")
+    p_agent_manifest.add_argument(
+        "--agent",
+        default="codex",
+        help="Agent id: codex | claude-code | openclaw | hermes | all",
+    )
+
+    p_agent_install = agent_sub.add_parser("install", help="Install Memplex into an agent host")
+    p_agent_install.add_argument(
+        "--agent",
+        default="all",
+        help="Agent id: auto | codex | claude-code | openclaw | hermes | all",
+    )
+    p_agent_install.add_argument(
+        "--target-dir",
+        default=None,
+        help="Override the agent config root directory for this install",
+    )
+    p_agent_install.add_argument("--user-id", default=None)
+    p_agent_install.add_argument("--project-path", default=None)
+    p_agent_install.add_argument(
+        "--dry-run", action="store_true", help="Show planned files without writing"
+    )
+
+    p_agent_uninstall = agent_sub.add_parser(
+        "uninstall", help="Uninstall Memplex from an agent host"
+    )
+    p_agent_uninstall.add_argument(
+        "--agent",
+        default="all",
+        help="Agent id: auto | codex | claude-code | openclaw | hermes | all",
+    )
+    p_agent_uninstall.add_argument(
+        "--target-dir",
+        default=None,
+        help="Override the agent config root directory for this uninstall",
+    )
+    p_agent_uninstall.add_argument(
+        "--dry-run", action="store_true", help="Show planned files without writing"
+    )
+
+    p_agent_recall = agent_sub.add_parser("recall", help="Recall memories for prompt")
+    p_agent_recall.add_argument("prompt", help="Prompt to recall against")
+    p_agent_recall.add_argument("--agent", default="codex")
+    p_agent_recall.add_argument("--user-id", default=None)
+    p_agent_recall.add_argument("--session-id", default="default")
+    p_agent_recall.add_argument("--project-path", default=None)
+    p_agent_recall.add_argument("--top-k", type=int, default=5)
+    p_agent_recall.add_argument("--token-budget", type=int, default=1500)
+
+    p_agent_capture = agent_sub.add_parser("capture", help="Capture a completed agent turn")
+    p_agent_capture.add_argument("--agent", default="codex")
+    p_agent_capture.add_argument("--user-id", default=None)
+    p_agent_capture.add_argument("--session-id", default="default")
+    p_agent_capture.add_argument("--project-path", default=None)
+    p_agent_capture.add_argument("--user-message", required=True)
+    p_agent_capture.add_argument("--assistant-message", required=True)
+    p_agent_capture.add_argument("--next-prompt-hint", default=None)
+
+    # -- setup / install / uninstall --
+    def add_setup_parser(name: str, *, uninstall: bool = False):
+        help_text = (
+            "Uninstall Memplex from local agent hosts"
+            if uninstall
+            else "Set up Memplex in detected local agent hosts"
+        )
+        p_setup = sub.add_parser(name, help=help_text)
+        p_setup.add_argument(
+            "--agent",
+            default="auto",
+            help="Agent id: auto | codex | claude-code | openclaw | hermes | all",
+        )
+        p_setup.add_argument(
+            "--target-dir",
+            default=None,
+            help="Override the selected agent config root directory",
+        )
+        p_setup.add_argument("--user-id", default=None)
+        p_setup.add_argument("--project-path", default=None)
+        p_setup.add_argument(
+            "--dry-run", action="store_true", help="Show planned files without writing"
+        )
+        if not uninstall:
+            p_setup.add_argument(
+                "--uninstall", action="store_true", help="Uninstall instead of install"
+            )
+        return p_setup
+
+    add_setup_parser("setup")
+    add_setup_parser("install")
+    add_setup_parser("stepup")
+    add_setup_parser("uninstall", uninstall=True)
+
+    # -- unsetup --
+    sub.add_parser("unsetup", help="Uninstall Memplex Claude Code plugin")
+
+    return parser
+
+
+# ── Entry point ─────────────────────────────────────────────────────
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI entry point.
+
+    Parameters
+    ----------
+    argv:
+        Argument list.  Defaults to ``sys.argv[1:]``.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    dispatch = {
+        "query": cmd_query,
+        "write": cmd_write,
+        "get": cmd_get,
+        "delete": cmd_delete,
+        "feedback": cmd_feedback,
+        "pending": cmd_pending,
+        "compact": cmd_compact,
+        "health": cmd_health,
+        "stats": cmd_stats,
+        "agent": cmd_agent,
+        "setup": cmd_setup,
+        "install": cmd_setup,
+        "stepup": cmd_setup,
+        "uninstall": cmd_setup,
+        "unsetup": cmd_unsetup,
+    }
+
+    handler = dispatch.get(args.command)
+    if handler is None:
+        parser.print_help()
+        return 1
+
+    try:
+        return handler(args)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,24 @@
+{
+  "name": "memplex",
+  "version": "3.2.7",
+  "description": "Multi-agent memory system -- persistent knowledge graph with 3-layer retrieval, compaction, and wiki",
+  "author": {
+    "name": "articultur"
+  },
+  "repository": "https://github.com/articultur/Memplex",
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "plugin",
+    "memory",
+    "knowledge-graph",
+    "retrieval",
+    "compaction",
+    "wiki",
+    "python",
+    "fastapi"
+  ],
+  "homepage": "https://github.com/articultur/Memplex#readme"
+}

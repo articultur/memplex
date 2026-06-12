@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Memplex data
+.memplex/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# OMC / Serena
+.omc/
+.serena/
+.superpowers/
+.claude/
+.codex/
+.agents/
+.gitnexus/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Temp
+~/output/

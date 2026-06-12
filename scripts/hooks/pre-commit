@@ -1,0 +1,19 @@
+#!/bin/bash
+# Dev flow check hook - 强制开发流程检查
+
+set -e
+
+echo "🔍 开发流程检查..."
+
+# ========== 1. 格式检查 (warning-only, not blocking) ==========
+if [[ -f "scripts/hooks/pre-commit-format" ]]; then
+    echo ""
+    echo "📐 运行格式检查..."
+    bash scripts/hooks/pre-commit-format || {
+        echo "⚠️  格式检查未通过 (non-blocking)"
+    }
+fi
+
+echo ""
+echo "✅ 开发流程检查通过"
+exit 0

@@ -1,0 +1,12 @@
+{
+  "name": "memplex",
+  "version": "3.2.7",
+  "description": "One-command Memplex setup for Codex, Claude Code, OpenClaw, Hermes, and other agents",
+  "bin": {
+    "memplex": "bin/memplex.js"
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  }
+}
