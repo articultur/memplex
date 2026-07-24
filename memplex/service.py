@@ -31,6 +31,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from memplex.compaction import CompactionPipeline
 from memplex.config import MemplexConfig, load_config
 from memplex.core import CoreEngine
+from memplex.intent import detect_memory_type as _detect_memory_type
+from memplex.intent import detect_scope_by_keywords
 from memplex.llm import LLMEnhancer
 from memplex.llm.injection_guard import IndirectInjectionGuard
 from memplex.llm.provider import create_provider
@@ -51,6 +53,7 @@ from memplex.models import (
 from memplex.processing.graph_builder import GraphBuilder
 from memplex.query_explainer import build_query_explanation
 from memplex.retrieval.embedding import EmbeddingService, Vector
+from memplex.retrieval.multi_path import MultiPathRetriever
 from memplex.retrieval.reranker import CrossEncoderReranker, Reranker
 from memplex.storage import MemoryStore, create_store
 from memplex.storage.feedback import FeedbackStore, create_feedback_store
@@ -82,65 +85,11 @@ def _package_version() -> str:
     return pkg_version("memplex")
 
 
-def _detect_memory_type(text: str) -> str:
-    """Heuristic: classify text into a memory type.
-
-    Returns one of ``"function"`` | ``"fact"`` | ``"preference"`` |
-    ``"observation"``.
-    """
-    text_lower = text.lower()
-
-    # Observation patterns
-    obs_keywords = [
-        "observe",
-        "observed",
-        "noticed",
-        "happened",
-        "occurred",
-        "事件",
-        "观察",
-        "发生",
-        "记录",
-    ]
-    if any(k in text_lower for k in obs_keywords):
-        return "observation"
-
-    # Preference patterns
-    pref_keywords = [
-        "prefer",
-        "like",
-        "dislike",
-        "want",
-        "always",
-        "never",
-        "喜欢",
-        "偏好",
-        "讨厌",
-        "倾向",
-        "总是",
-        "从不",
-    ]
-    if any(k in text_lower for k in pref_keywords):
-        return "preference"
-
-    # Fact patterns
-    fact_keywords = [
-        "is",
-        "are",
-        "means",
-        "defined as",
-        "refers to",
-        "是",
-        "意味着",
-        "定义为",
-        "指的是",
-        "事实",
-    ]
-    if any(k in text_lower for k in fact_keywords):
-        return "fact"
-
-    # Default: function (procedural / action-oriented)
-    return "function"
+# ``_detect_memory_type`` is imported from ``memplex.intent`` (see import
+# block above) and re-exported here under its original underscored name so
+# that ``from memplex.service import _detect_memory_type`` keeps working.
+# ``MemplexService._detect_memory_type`` (the bound staticmethod at the
+# bottom of this file) forwards to the same implementation.
 
 
 # ── MemplexService ──────────────────────────────────────────────────────
@@ -232,6 +181,9 @@ class MemplexService:
 
         # ── Core engine (extraction pipeline) ──────────────────
         self._engine = CoreEngine(store=self.store)
+
+        # ── Multi-path retrieval ───────────────────────────────
+        self._retriever = MultiPathRetriever(self.store)
 
         # ── Injection scan tracking ─────────────────────────────
         self._injection_scans_24h: Dict[
@@ -341,13 +293,13 @@ class MemplexService:
         futures: Dict[concurrent.futures.Future, str] = {}
         with ThreadPoolExecutor(max_workers=3) as pool:
             if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
-                futures[pool.submit(self._rag_search, text, top_k, query_vector)] = (
+                futures[pool.submit(self._retriever.rag_search, text, top_k, query_vector)] = (
                     "rag"
                 )
             if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
-                futures[pool.submit(self._wiki_search, text, top_k)] = "wiki"
+                futures[pool.submit(self._retriever.wiki_search, text, top_k)] = "wiki"
             if scope in (QueryScope.RELATION, QueryScope.ALL):
-                futures[pool.submit(self._graph_search, text, top_k, query_vector)] = (
+                futures[pool.submit(self._retriever.graph_search, text, top_k, query_vector)] = (
                     "graph"
                 )
 
@@ -378,7 +330,7 @@ class MemplexService:
                         )
 
         # Merge results
-        results = self._merge_multi_path(all_results)
+        results = MultiPathRetriever.merge_multi_path(all_results)
         if trace is not None:
             trace["stages"].append(
                 {
@@ -389,7 +341,7 @@ class MemplexService:
             )
         if namespace_filter:
             before_namespace = len(results)
-            results = self._filter_results_by_namespace(results, namespace_filter)
+            results = self._retriever.filter_by_namespace(results, namespace_filter)
             if trace is not None:
                 trace["stages"].append(
                     {
@@ -559,196 +511,9 @@ class MemplexService:
             except Exception:
                 pass  # LLM failed, fall through to keyword
 
-        # Keyword fallback
-        text_lower = text.lower()
-        negation_prefixes = [
-            "不",
-            "没有",
-            "没",
-            "非",
-            "不是",
-            "un",
-            "not",
-            "no ",
-            "non-",
-        ]
-        cleaned = text_lower
-        for neg in negation_prefixes:
-            cleaned = cleaned.replace(neg, " ")
-
-        scope_keywords = {
-            QueryScope.RELATION: [
-                "影响",
-                "依赖",
-                "调用",
-                "关系",
-                "哪些",
-                "affect",
-                "depend",
-                "call",
-                "relation",
-                "impact",
-            ],
-            QueryScope.SYNTHESIS: [
-                "设计",
-                "架构",
-                "概述",
-                "整体",
-                "概念",
-                "原理",
-                "design",
-                "architecture",
-                "overview",
-                "concept",
-                "how does",
-            ],
-            QueryScope.IMMEDIATE: [
-                "在哪",
-                "定义",
-                "是什么",
-                "查找",
-                "搜索",
-                "where",
-                "define",
-                "what is",
-                "find",
-                "search",
-            ],
-        }
-
-        scores = {
-            scope: sum(1 for k in kw if k in cleaned)
-            for scope, kw in scope_keywords.items()
-        }
-        max_score = max(scores.values())
-        if max_score == 0:
-            return QueryScope.IMMEDIATE
-        top_scopes = [s for s, v in scores.items() if v == max_score]
-        return QueryScope.ALL if len(top_scopes) > 1 else top_scopes[0]
-
-    # ════════════════════════════════════════════════════════════════
-    #  Multi-path retrieval
-    # ════════════════════════════════════════════════════════════════
-
-    def _rag_search(
-        self,
-        text: str,
-        top_k: int,
-        query_vector: Optional[Vector] = None,
-    ) -> List[SearchResult]:
-        """RAG vector + FTS hybrid search with FTS fallback."""
-        results = self.store.vector_search(text, top_k)
-        # FTS fallback when vector search returns nothing
-        if not results:
-            results = self.store.fts_search(text, top_k)
-        # Pre-fill vector_cache for Reranker reuse
-        if query_vector is not None:
-            for r in results:
-                r.vector_cache = query_vector
-        return results
-
-    def _wiki_search(self, text: str, top_k: int) -> List[SearchResult]:
-        """Wiki layer: FTS-based search over compiled wiki pages.
-
-        Falls back to ``store.fts_search`` when no WikiCompiler is
-        available.
-        """
-        return self.store.fts_search(text, top_k)
-
-    def _graph_search(
-        self,
-        text: str,
-        top_k: int,
-        query_vector: Optional[Vector] = None,
-    ) -> List[SearchResult]:
-        """Incremental graph traversal search.
-
-        1. Vector search to find seed Functions (top_k=3).
-        2. Expand 1-hop neighbours via ``get_neighbors()``.
-        3. Filter to relation-type edges.
-        """
-        seed_results = self.store.vector_search(text, top_k=3)
-        if not seed_results:
-            seed_results = self.store.fts_search(text, top_k=3)
-        if not seed_results:
-            return []
-
-        results: List[SearchResult] = []
-        seen: set = set()
-
-        for seed in seed_results:
-            if seed.func_id in seen:
-                continue
-            seen.add(seed.func_id)
-            if query_vector is not None:
-                seed.vector_cache = query_vector
-            results.append(seed)
-
-            # Incremental: only get this seed's neighbours
-            try:
-                neighbors = self.store.get_neighbors(seed.func_id, max_hops=1)
-            except Exception:
-                continue
-            for neighbor in neighbors:
-                if neighbor.id not in seen:
-                    results.append(
-                        SearchResult(
-                            func_id=neighbor.id,
-                            name=neighbor.name,
-                            domain=neighbor.domain or "",
-                            relevance_score=0.5,
-                            summary=neighbor.name,
-                            created_at=(
-                                datetime.fromisoformat(neighbor.created_at)
-                                if isinstance(neighbor.created_at, str)
-                                and neighbor.created_at
-                                else neighbor.created_at
-                            ),
-                            updated_at=(
-                                datetime.fromisoformat(neighbor.updated_at)
-                                if isinstance(neighbor.updated_at, str)
-                                and neighbor.updated_at
-                                else neighbor.updated_at
-                            ),
-                            origin=neighbor.origin_session or "",
-                        )
-                    )
-                    seen.add(neighbor.id)
-
-        return results[:top_k]
-
-    @staticmethod
-    def _merge_multi_path(
-        result_lists: List[List[SearchResult]],
-    ) -> List[SearchResult]:
-        """Merge multi-path results; deduplicate by ``func_id``, keeping
-        the highest ``relevance_score``."""
-        seen: Dict[str, SearchResult] = {}
-        for results in result_lists:
-            for r in results:
-                if (
-                    r.func_id not in seen
-                    or r.relevance_score > seen[r.func_id].relevance_score
-                ):
-                    seen[r.func_id] = r
-        return sorted(seen.values(), key=lambda x: x.relevance_score, reverse=True)
-
-    def _filter_results_by_namespace(
-        self,
-        results: List[SearchResult],
-        namespace_filter: Dict[str, str],
-    ) -> List[SearchResult]:
-        """Keep only results whose stored metadata matches a namespace."""
-
-        filtered: List[SearchResult] = []
-        for result in results:
-            func = self.store.get(result.func_id)
-            if func is None:
-                continue
-            attrs = getattr(func, "attributes", {}) or {}
-            if all(attrs.get(key) == value for key, value in namespace_filter.items()):
-                filtered.append(result)
-        return filtered
+        # Keyword fallback (delegated to memplex.intent so the keyword
+        # table and negation handling live in one testable place).
+        return detect_scope_by_keywords(text)
 
     def annotate_memories(
         self,

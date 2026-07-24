@@ -1,0 +1,303 @@
+"""Test MultiPathRetriever: the three retrieval paths, merge, and namespace filter.
+
+Previously these lived as five private methods on ``MemplexService`` with
+zero direct test coverage. After extraction to
+``memplex.retrieval.multi_path.MultiPathRetriever`` they are driven here
+via a stub store so each path is exercised in isolation.
+"""
+
+import os
+
+os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
+
+from datetime import datetime
+from types import SimpleNamespace
+
+from memplex.models import QueryScope, SearchResult  # noqa: E402
+from memplex.retrieval.multi_path import MultiPathRetriever  # noqa: E402
+
+# ── Stub helpers ──────────────────────────────────────────────────────
+
+
+def _sr(func_id: str, score: float = 0.5, name: str = "") -> SearchResult:
+    """Build a SearchResult with only the fields merge/rerank care about."""
+    return SearchResult(
+        func_id=func_id,
+        name=name or func_id,
+        domain="",
+        relevance_score=score,
+        summary=name or func_id,
+    )
+
+
+def _node(
+    nid: str,
+    *,
+    name: str = "",
+    domain: str = "",
+    created_at="2024-01-01T00:00:00",
+    updated_at="2024-01-02T00:00:00",
+    origin_session: str = "",
+):
+    """Build a neighbor node (duck-typed MemoryNode)."""
+    return SimpleNamespace(
+        id=nid,
+        name=name or nid,
+        domain=domain,
+        created_at=created_at,
+        updated_at=updated_at,
+        origin_session=origin_session,
+    )
+
+
+class _StubStore:
+    """Minimal MemoryStore stub: only the methods MultiPathRetriever calls."""
+
+    def __init__(
+        self,
+        *,
+        vector_hits=None,
+        fts_hits=None,
+        neighbors_by_id=None,
+        funcs_by_id=None,
+        vector_throws=False,
+    ):
+        self._vector_hits = vector_hits or []
+        self._fts_hits = fts_hits or []
+        self._neighbors_by_id = neighbors_by_id or {}
+        self._funcs_by_id = funcs_by_id or {}
+        self._vector_throws = vector_throws
+        # Call counters help assertions.
+        self.vector_calls = 0
+        self.fts_calls = 0
+
+    def vector_search(self, text, top_k):
+        self.vector_calls += 1
+        if self._vector_throws:
+            raise RuntimeError("vector store down")
+        return list(self._vector_hits)
+
+    def fts_search(self, text, top_k):
+        self.fts_calls += 1
+        return list(self._fts_hits)
+
+    def get_neighbors(self, func_id, max_hops=1):
+        return list(self._neighbors_by_id.get(func_id, []))
+
+    def get(self, memory_id):
+        return self._funcs_by_id.get(memory_id)
+
+
+# ── rag_search ────────────────────────────────────────────────────────
+
+
+def test_rag_search_uses_vector_results_when_available():
+    hits = [_sr("a", 0.9), _sr("b", 0.7)]
+    store = _StubStore(vector_hits=hits)
+    r = MultiPathRetriever(store).rag_search("q", top_k=5)
+    assert [x.func_id for x in r] == ["a", "b"]
+    assert store.vector_calls == 1
+    # Vector hit -> FTS must NOT be consulted.
+    assert store.fts_calls == 0
+
+
+def test_rag_search_falls_back_to_fts_when_vector_empty():
+    fts_hits = [_sr("c", 0.6)]
+    store = _StubStore(vector_hits=[], fts_hits=fts_hits)
+    r = MultiPathRetriever(store).rag_search("q", top_k=5)
+    assert [x.func_id for x in r] == ["c"]
+    assert store.fts_calls == 1
+
+
+def test_rag_search_prefills_vector_cache_when_query_vector_given():
+    hits = [_sr("a"), _sr("b")]
+    store = _StubStore(vector_hits=hits)
+    qv = [0.1, 0.2, 0.3]
+    r = MultiPathRetriever(store).rag_search("q", top_k=5, query_vector=qv)
+    assert all(x.vector_cache is qv for x in r)
+
+
+def test_rag_search_leaves_vector_cache_alone_when_no_query_vector():
+    hits = [_sr("a")]
+    store = _StubStore(vector_hits=hits)
+    r = MultiPathRetriever(store).rag_search("q", top_k=5)
+    assert r[0].vector_cache is None
+
+
+# ── wiki_search ───────────────────────────────────────────────────────
+
+
+def test_wiki_search_passes_through_to_fts():
+    fts_hits = [_sr("w1"), _sr("w2")]
+    store = _StubStore(fts_hits=fts_hits)
+    r = MultiPathRetriever(store).wiki_search("q", top_k=3)
+    assert [x.func_id for x in r] == ["w1", "w2"]
+
+
+# ── graph_search ──────────────────────────────────────────────────────
+
+
+def test_graph_search_returns_empty_when_no_seeds():
+    store = _StubStore(vector_hits=[], fts_hits=[])
+    assert MultiPathRetriever(store).graph_search("q", top_k=5) == []
+
+
+def test_graph_search_expands_one_hop_neighbors():
+    seed = _sr("seed", 0.8)
+    neighbor = _node("nbr1", name="neighbor one")
+    store = _StubStore(vector_hits=[seed], neighbors_by_id={"seed": [neighbor]})
+    r = MultiPathRetriever(store).graph_search("q", top_k=5)
+    ids = {x.func_id for x in r}
+    assert ids == {"seed", "nbr1"}
+
+
+def test_graph_search_falls_back_to_fts_for_seeds_when_vector_empty():
+    fts_seed = _sr("fts_seed", 0.5)
+    nbr = _node("nbr")
+    store = _StubStore(vector_hits=[], fts_hits=[fts_seed], neighbors_by_id={"fts_seed": [nbr]})
+    r = MultiPathRetriever(store).graph_search("q", top_k=5)
+    assert {x.func_id for x in r} == {"fts_seed", "nbr"}
+
+
+def test_graph_search_converts_iso_string_timestamps_to_datetime():
+    seed = _sr("seed")
+    nbr = _node("nbr", created_at="2024-03-01T10:00:00", updated_at="2024-03-02T11:00:00")
+    store = _StubStore(vector_hits=[seed], neighbors_by_id={"seed": [nbr]})
+    r = MultiPathRetriever(store).graph_search("q", top_k=5)
+    neighbor_result = next(x for x in r if x.func_id == "nbr")
+    assert isinstance(neighbor_result.created_at, datetime)
+    assert isinstance(neighbor_result.updated_at, datetime)
+
+
+def test_graph_search_passes_through_datetime_timestamps_unchanged():
+    seed = _sr("seed")
+    ts = datetime(2024, 5, 1)
+    nbr = _node("nbr", created_at=ts, updated_at=ts)
+    store = _StubStore(vector_hits=[seed], neighbors_by_id={"seed": [nbr]})
+    r = MultiPathRetriever(store).graph_search("q", top_k=5)
+    neighbor_result = next(x for x in r if x.func_id == "nbr")
+    assert neighbor_result.created_at is ts
+
+
+def test_graph_search_skips_seed_when_get_neighbors_raises():
+    seed1 = _sr("s1")
+    seed2 = _sr("s2")
+    store = _StubStore(
+        vector_hits=[seed1, seed2],
+        neighbors_by_id={"s1": RuntimeError("boom"), "s2": [_node("n2")]},
+    )
+    # get_neighbors is called via the stub; simulate by raising.
+    # Wrap to raise on s1.
+    orig = store.get_neighbors
+
+    def maybe_raise(func_id, max_hops=1):
+        v = orig(func_id, max_hops)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    store.get_neighbors = maybe_raise
+    r = MultiPathRetriever(store).graph_search("q", top_k=5)
+    ids = {x.func_id for x in r}
+    # s1 still appears (it was added before the neighbour call) but its
+    # neighbours do not; s2's neighbour n2 is present.
+    assert "s1" in ids
+    assert "s2" in ids
+    assert "n2" in ids
+
+
+def test_graph_search_respects_top_k():
+    seed = _sr("seed")
+    neighbors = [_node(f"n{i}") for i in range(10)]
+    store = _StubStore(vector_hits=[seed], neighbors_by_id={"seed": neighbors})
+    r = MultiPathRetriever(store).graph_search("q", top_k=3)
+    assert len(r) <= 3
+
+
+def test_graph_search_deduplicates_neighbor_seen_across_seeds():
+    s1 = _sr("s1")
+    s2 = _sr("s2")
+    shared = _node("shared")
+    store = _StubStore(
+        vector_hits=[s1, s2],
+        neighbors_by_id={"s1": [shared], "s2": [shared]},
+    )
+    r = MultiPathRetriever(store).graph_search("q", top_k=20)
+    assert sum(1 for x in r if x.func_id == "shared") == 1
+
+
+# ── filter_by_namespace ───────────────────────────────────────────────
+
+
+def _func(attrs=None):
+    return SimpleNamespace(attributes=attrs or {})
+
+
+def test_filter_by_namespace_keeps_matching_results():
+    r1, r2 = _sr("a"), _sr("b")
+    store = _StubStore(
+        funcs_by_id={"a": _func({"agent": "codex"}), "b": _func({"agent": "other"})}
+    )
+    out = MultiPathRetriever(store).filter_by_namespace([r1, r2], {"agent": "codex"})
+    assert [x.func_id for x in out] == ["a"]
+
+
+def test_filter_by_namespace_requires_all_keys_to_match():
+    r1 = _sr("a")
+    store = _StubStore(funcs_by_id={"a": _func({"agent": "codex", "user": "alice"})})
+    out = MultiPathRetriever(store).filter_by_namespace(
+        [r1], {"agent": "codex", "user": "bob"}
+    )
+    assert out == []
+
+
+def test_filter_by_namespace_skips_results_with_missing_function():
+    r1, r2 = _sr("present"), _sr("missing")
+    store = _StubStore(funcs_by_id={"present": _func({"k": "v"})})
+    out = MultiPathRetriever(store).filter_by_namespace([r1, r2], {"k": "v"})
+    assert [x.func_id for x in out] == ["present"]
+
+
+def test_filter_by_namespace_handles_func_with_no_attributes():
+    r1 = _sr("a")
+    store = _StubStore(funcs_by_id={"a": SimpleNamespace()})  # no .attributes
+    out = MultiPathRetriever(store).filter_by_namespace([r1], {"k": "v"})
+    # No attributes -> nothing matches -> dropped (no crash).
+    assert out == []
+
+
+# ── merge_multi_path ──────────────────────────────────────────────────
+
+
+def test_merge_dedups_keeping_highest_score():
+    a_low = _sr("x", 0.3)
+    a_high = _sr("x", 0.9)
+    out = MultiPathRetriever.merge_multi_path([[a_low], [a_high]])
+    assert len(out) == 1
+    assert out[0].relevance_score == 0.9
+
+
+def test_merge_combines_across_lists():
+    out = MultiPathRetriever.merge_multi_path([[_sr("a", 0.5)], [_sr("b", 0.7)]])
+    assert [x.func_id for x in out] == ["b", "a"]  # sorted desc
+
+
+def test_merge_sorts_descending_by_relevance():
+    out = MultiPathRetriever.merge_multi_path(
+        [[_sr("a", 0.1), _sr("b", 0.9), _sr("c", 0.5)]]
+    )
+    scores = [x.relevance_score for x in out]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_merge_empty_input_returns_empty():
+    assert MultiPathRetriever.merge_multi_path([]) == []
+    assert MultiPathRetriever.merge_multi_path([[], []]) == []
+
+
+def test_merge_within_list_dedup_also_keeps_highest():
+    a1 = _sr("a", 0.2)
+    a2 = _sr("a", 0.8)
+    out = MultiPathRetriever.merge_multi_path([[a1, a2]])
+    assert len(out) == 1
+    assert out[0].relevance_score == 0.8
