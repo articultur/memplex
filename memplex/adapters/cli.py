@@ -854,6 +854,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     argv:
         Argument list.  Defaults to ``sys.argv[1:]``.
     """
+    from memplex.logging_config import configure_logging
+
+    configure_logging()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

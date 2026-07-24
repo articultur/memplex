@@ -637,5 +637,7 @@ class MCPServer:
 # ── CLI entry point ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    from memplex.logging_config import configure_logging
+
+    configure_logging()
     MCPServer().run()
