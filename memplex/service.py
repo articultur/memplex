@@ -618,6 +618,15 @@ class MemplexService:
             The extracted Functions and graph data (including any
             merge results).
         """
+        # 0. Strip <private>...</private> blocks before extraction so
+        #    operator-marked secrets never reach storage. Applies to every
+        #    write caller (CLI/HTTP/MCP/corpus/agent_runtime), not only the
+        #    Claude Code hook runner which already stripped these.
+        from memplex.privacy import strip_private_tags
+
+        if getattr(source, "content", None):
+            source.content = strip_private_tags(source.content)
+
         # 1. CoreEngine: full extraction pipeline
         extracted = self._engine.extract(source)
 

@@ -28,18 +28,50 @@ class IndirectInjectionGuard:
        derived from its ``source_type``.
     """
 
-    # Multi-language injection patterns (compiled once at class load)
+    # Multi-language injection patterns (compiled once at class load).
+    # Organized by family; each family closes a known bypass class. This is
+    # a defense-in-depth tripwire, not a complete barrier -- the read path
+    # also drops flagged memories (service.query) and wraps the rest in
+    # [MEMORY ...] trust tags (filter_and_wrap).
     INJECTION_PATTERNS: list[str] = [
-        r"ignore\s+(all\s+)?previous\s+instructions?",
-        r"disregard\s+(all\s+)?prior\s+instructions?",
-        r"system\s*:\s*you\s+are",
-        r"<\|endoftext\|>",
-        r"<\|im_start\|>",
-        r"忽略(之前|前面|上面)的(所有|全部)?指令",
+        # --- Direct override (English) ---
+        r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
+        r"disregard\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
+        r"forget\s+(all\s+)?(the\s+)?(above|previous|prior)\s+(instructions?|rules?|context)",
+        r"disregard\s+(everything|all)\s+(above|before|prior)",
+        r"override\s+(your\s+)?(system\s+)?(prompt|instructions?)",
+        # --- Direct override (Chinese) ---
+        r"忽略(之前|前面|上面|此前|以上)的?(所有|全部|一切)?(指令|指示|规则|内容|上下文)",
         r"忽略系统提示",
+        r" disregard 上一条",  # bilingual mix
         r"你现在是",
         r"新的系统提示",
+        r"请(忽略|无视)(以上|之前|前面|上述)",
+        # --- Role hijack / persona rewrite ---
+        r"system\s*:\s*you\s+are",
+        r"act\s+as\s+(?:if\s+you\s+were\s+)?(?:a\s+|an\s+)?(?:different|new|unrestricted)\s+(?:ai|assistant|persona|character|model)",
+        r"pretend\s+(?:to\s+be|you\s+are)\s+(?:a|an\s+)?\s*(?:different|new|unrestricted)",
+        r"from\s+now\s+on\s+you\s+(are|will\s+be|act\s+as)",
+        r"你的新身份",
+        r"扮演(一个|新的)?(不同的|无限制的)?(角色|助手|AI)",
+        # --- Special-token boundary injection (multi-format) ---
+        r"<\|endoftext\|>",
+        r"<\|im_start\|>",
+        r"<\|system\|>",
+        r"<\|assistant\|>",
+        r"\[/?system\]",
+        r"\[/?INST\]",
+        r"<</?SYS>>",
+        # --- Pre-filled assistant turn / jailbreak scaffolding ---
         r"assistant\s*:\s*sure",
+        r"assistant\s*:\s*ok(ay)?[,\.]\s*(i\s+)?(will|can|do)",
+        r"chatgpt\s*:\s*sure",
+        # --- Tool / capability abuse disguised as memory ---
+        r"(execute|run|eval)\s+(the\s+)?following\s+(command|code|python)",
+        r"sudo\s+(rm|chmod|chown|cat|cp|mv)\s+",
+        # --- Exfiltration prompts ---
+        r"(reveal|show|print|repeat)\s+(the\s+)?(system\s+)?(prompt|instructions?|rules?)",
+        r"(输出|显示|打印)(你的)?(系统提示|系统指令|初始指令|隐藏规则)",
     ]
 
     _compiled: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
