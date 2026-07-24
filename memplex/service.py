@@ -932,6 +932,43 @@ class MemplexService:
             "embedding_model": self._config.embedding.model,
         }
 
+    def policy(self, *, agent: str = "codex") -> dict:
+        """Return the recall/capture policy this service will use by default.
+
+        Wraps :func:`memplex.product.policy_show` so adapters do not need
+        to reach into ``self._config`` (a private attribute) to render the
+        policy surface. The returned dict matches the product schema.
+        """
+        from memplex.product import policy_show
+
+        return policy_show(self._config, agent=agent)
+
+    def storage_namespace(self) -> str:
+        """Return the storage namespace tag for this service instance.
+
+        Used by adapters to stamp/recall memories by storage boundary
+        without reading ``store._path`` (a storage-internal attribute).
+        Falls back to ``"service:{id}"`` when the store exposes no path.
+        """
+        store_path = getattr(self.store, "_path", None)
+        if store_path is None:
+            return f"service:{id(self)}"
+        return str(store_path)
+
+    def filter_and_wrap_for_context(
+        self,
+        results: List[SearchResult],
+        *,
+        max_tokens: Optional[int] = None,
+    ) -> Optional[str]:
+        """Filter injection-suspected results and wrap the rest for LLM context.
+
+        Wraps :meth:`IndirectInjectionGuard.filter_and_wrap` so adapters
+        (notably ``agent_runtime``) do not import the guard directly. Keeps
+        the read-path injection defence behind the service boundary.
+        """
+        return IndirectInjectionGuard.filter_and_wrap(results, self.store)
+
     def compact(self, scope: str = "project") -> CompactionResult:
         """Run the compaction pipeline synchronously.
 

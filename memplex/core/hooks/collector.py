@@ -20,6 +20,12 @@ from memplex.core.hooks.registry import HookRegistry, get_default_registry
 from memplex.models import Observation
 
 if TYPE_CHECKING:
+    # Type-hint only: ``core`` is the pure computation layer and must not
+    # take a runtime dependency on ``storage``. This import is gated by
+    # TYPE_CHECKING (combined with ``from __future__ import annotations``
+    # above) so it never executes at runtime; the collector duck-types
+    # the store via ``self._store.add_observation(...)``. Kept as an
+    # allowed static-only exception for editor/type-checker support.
     from memplex.storage.base import MemoryStore
 
 logger = logging.getLogger(__name__)

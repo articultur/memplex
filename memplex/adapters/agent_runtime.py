@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from memplex.llm.injection_guard import IndirectInjectionGuard
 from memplex.models import QueryResult
 from memplex.service import MemplexService
 
@@ -333,7 +332,7 @@ class AgentMemoryRuntime:
     def _format_context(self, result: QueryResult) -> str:
         if not result.results:
             return ""
-        wrapped = IndirectInjectionGuard.filter_and_wrap(result.results, self.service.store)
+        wrapped = self.service.filter_and_wrap_for_context(result.results)
         if wrapped:
             return wrapped
         return "[MEMORY FILTERED | reason=indirect_injection]\nUnsafe recalled memory was omitted."
@@ -350,10 +349,7 @@ class AgentMemoryRuntime:
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def _storage_namespace(self) -> str:
-        store_path = getattr(getattr(self.service, "store", None), "_path", None)
-        if store_path is not None:
-            return str(store_path)
-        return f"service:{id(self.service)}"
+        return self.service.storage_namespace()
 
     def _namespace_metadata(self) -> Dict[str, str]:
         return {
@@ -366,20 +362,25 @@ class AgentMemoryRuntime:
 
     def _stamp_captured_memories(self, functions: list) -> None:
         metadata = self._namespace_metadata()
-        changed = False
+        # Stamp owner/origin_session + namespace attributes through the
+        # public service boundary so we never reach into store internals
+        # (store.get / store._save). For backends that return live objects,
+        # mutating the returned Function and then calling annotate_memories
+        # persists the full record (including owner/origin_session) via the
+        # backend's native save hook.
+        ids: list[str] = []
         for func in functions:
-            stored = self.service.store.get(func.id)
+            stored = self.service.get(func.id)
             if stored is None:
                 continue
             stored.owner = self.user_id
             stored.origin_session = self.session_id
-            stored.attributes.update(metadata)
-            changed = True
-        if changed and hasattr(self.service.store, "_save"):
-            self.service.store._save()
+            ids.append(func.id)
+        if ids:
+            self.service.annotate_memories(ids, attributes=metadata)
 
     def _result_in_namespace(self, func_id: str) -> bool:
-        func = self.service.store.get(func_id)
+        func = self.service.get(func_id)
         if func is None:
             return False
         attrs = getattr(func, "attributes", {}) or {}

@@ -371,7 +371,6 @@ def corpus_recall(service, query: str, *, top_k: int = 10, max_tokens: int = 400
 
 def run_doctor(
     service,
-    config: MemplexConfig,
     *,
     agent: str = "codex",
     profile: Optional[str] = None,
@@ -416,13 +415,14 @@ def run_doctor(
             }
         )
 
+    policy = service.policy(agent=agent)
     checks.append(
         {
             "name": "offline_first_boundary",
             "status": "pass",
             "details": {
-                "embedding_model": config.embedding.model,
-                "remote_default": config.embedding.model.startswith(("hf:", "openai:", "anthropic:")),
+                "embedding_model": policy["embedding"]["model"],
+                "remote_default": policy["embedding"]["remote_default"],
                 "boundary": "Remote embeddings are optional and never required by doctor.",
             },
         }
@@ -491,14 +491,14 @@ def lifecycle_counts(service) -> dict[str, int]:
     return counts
 
 
-def operator_report(service, config: MemplexConfig, *, agent: str = "codex") -> dict[str, Any]:
+def operator_report(service, *, agent: str = "codex") -> dict[str, Any]:
     """Generate a local operator report."""
 
     pending = service.get_pending_reviews(limit=100)
     return {
         "health": service.health(),
         "stats": service.stats(),
-        "policy": policy_show(config, agent=agent),
+        "policy": service.policy(agent=agent),
         "scope_catalog": scope_catalog(),
         "pending_reviews": len(pending),
         "lifecycle": {

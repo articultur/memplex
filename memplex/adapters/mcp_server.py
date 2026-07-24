@@ -526,7 +526,6 @@ class MCPServer:
         self._ensure_service()
         return run_doctor(
             self._service,
-            self._service._config,
             agent=args.get("agent", "codex"),
             profile=args.get("profile"),
             smoke=args.get("smoke", False),
@@ -537,14 +536,12 @@ class MCPServer:
         from memplex.product import scope_explain, scope_preview
 
         self._ensure_service()
-        store_path = getattr(getattr(self._service, "store", None), "_path", None)
-        storage_namespace = str(store_path) if store_path is not None else f"service:{id(self._service)}"
         explained = scope_explain(
             agent=args.get("agent", "codex"),
             user_id=args.get("user_id"),
             session_id=args.get("session_id", "default"),
             project_path=args.get("project_path"),
-            storage_namespace=storage_namespace,
+            storage_namespace=self._service.storage_namespace(),
         )
         if args.get("preview", False):
             explained["preview"] = scope_preview(self._service, explained["namespace_filter"])
@@ -552,10 +549,8 @@ class MCPServer:
 
     def _tool_memory_policy_show(self, args: dict) -> dict:
         """Show recall/capture policy."""
-        from memplex.product import policy_show
-
         self._ensure_service()
-        return policy_show(self._service._config, agent=args.get("agent", "codex"))
+        return self._service.policy(agent=args.get("agent", "codex"))
 
     def _tool_memory_agent_manifest(self, args: dict) -> dict:
         """Return portable agent integration manifest."""

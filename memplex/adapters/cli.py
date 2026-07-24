@@ -283,7 +283,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         report = run_doctor(
             svc,
-            svc._config,
             agent=getattr(args, "agent", "codex"),
             profile=getattr(args, "profile", None),
             smoke=getattr(args, "smoke", False) or getattr(args, "fix", False),
@@ -295,10 +294,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _service_storage_namespace(svc) -> str:
-    store_path = getattr(getattr(svc, "store", None), "_path", None)
-    if store_path is not None:
-        return str(store_path)
-    return f"service:{id(svc)}"
+    """Deprecated: use ``svc.storage_namespace()`` instead.
+
+    Kept temporarily for any external callers; routes to the public
+    service method so the storage-internal ``_path`` read no longer
+    happens in adapter code.
+    """
+    return svc.storage_namespace()
 
 
 def cmd_scope(args: argparse.Namespace) -> int:
@@ -317,7 +319,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
             user_id=getattr(args, "user_id", None),
             session_id=getattr(args, "session_id", "default"),
             project_path=getattr(args, "project_path", None),
-            storage_namespace=_service_storage_namespace(svc),
+            storage_namespace=svc.storage_namespace(),
         )
         if action == "explain":
             print(_fmt(explained, args.output))
@@ -343,11 +345,9 @@ def cmd_scope(args: argparse.Namespace) -> int:
 
 def cmd_policy(args: argparse.Namespace) -> int:
     """Show recall/capture policy."""
-    from memplex.product import policy_show
-
     svc = _make_service(getattr(args, "config", None))
     try:
-        print(_fmt(policy_show(svc._config, agent=getattr(args, "agent", "codex")), args.output))
+        print(_fmt(svc.policy(agent=getattr(args, "agent", "codex")), args.output))
         return 0
     finally:
         svc.stop()
@@ -444,7 +444,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     svc = _make_service(getattr(args, "config", None))
     try:
-        print(_fmt(operator_report(svc, svc._config, agent=getattr(args, "agent", "codex")), args.output))
+        print(_fmt(operator_report(svc, agent=getattr(args, "agent", "codex")), args.output))
         return 0
     finally:
         svc.stop()

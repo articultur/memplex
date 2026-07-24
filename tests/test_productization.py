@@ -359,7 +359,7 @@ def test_doctor_smoke_cleans_canary_when_query_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(service, "query", fail_query)
     try:
-        report = run_doctor(service, cfg, agent="codex", smoke=True)
+        report = run_doctor(service, agent="codex", smoke=True)
         assert report["status"] == "fail"
         funcs = service.store.list_functions(limit=100)
         assert all("memplex-doctor-smoke-token" not in func.name for func in funcs)
