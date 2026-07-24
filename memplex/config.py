@@ -19,9 +19,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StorageConfig:
-    """Storage backend configuration."""
+    """Storage backend configuration.
 
-    backend: str = "standard"  # lite | standard | enterprise
+    Only ``"lite"`` is currently implemented (in-memory + JSON persistence
+    with a SQLite FTS5 sidecar index). ``"standard"`` and ``"enterprise"``
+    are reserved for future pluggable backends; :class:`MemplexService`
+    falls back to ``"lite"`` with a warning when an unavailable backend is
+    requested, so we default to the implemented value to avoid a noisy
+    startup warning on every invocation.
+    """
+
+    backend: str = "lite"  # lite (implemented) | standard | enterprise (roadmap)
     path: str = "~/.memplex"
 
 

@@ -34,7 +34,10 @@ class TestDefaultConfig:
     def test_storage_defaults(self):
         cfg = MemplexConfig()
         assert isinstance(cfg.storage, StorageConfig)
-        assert cfg.storage.backend == "standard"
+        # "lite" is the only implemented backend; MemplexService falls back
+        # to it for any unavailable value, so the default itself must be the
+        # implemented value (avoids a startup warning on every invocation).
+        assert cfg.storage.backend == "lite"
         assert cfg.storage.path == "~/.memplex"
 
     def test_embedding_defaults(self):

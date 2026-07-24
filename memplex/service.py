@@ -26,7 +26,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from memplex.compaction import CompactionPipeline
 from memplex.config import MemplexConfig, load_config
@@ -49,6 +49,7 @@ from memplex.models import (
     UpdateResult,
 )
 from memplex.processing.graph_builder import GraphBuilder
+from memplex.query_explainer import build_query_explanation
 from memplex.retrieval.embedding import EmbeddingService, Vector
 from memplex.retrieval.reranker import CrossEncoderReranker, Reranker
 from memplex.storage import MemoryStore, create_store
@@ -257,49 +258,11 @@ class MemplexService:
             self._llm = None
 
     # ── Injection scan helper ──────────────────────────────────────
-
-    @staticmethod
-    def _extract_scan_text(func: object, memory_type: str) -> str:
-        """Extract the relevant text fields for injection scanning by memory type."""
-        if memory_type == "function":
-            return " ".join(
-                fv.desc
-                for role in ("trigger", "condition", "action", "benefit")
-                for fv in getattr(func, role, [])
-            )
-        if memory_type == "fact":
-            return " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(func, "subject", ""),
-                        getattr(func, "predicate", ""),
-                        getattr(func, "object_", ""),
-                    ],
-                )
-            )
-        if memory_type == "preference":
-            return " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(func, "aspect", ""),
-                        getattr(func, "preference", ""),
-                    ],
-                )
-            )
-        if memory_type == "observation":
-            return " ".join(
-                filter(
-                    None,
-                    [
-                        getattr(func, "event", ""),
-                        getattr(func, "context", ""),
-                    ],
-                )
-            )
-        # Unknown type: scan all string attributes
-        return " ".join(str(v) for v in vars(func).values() if isinstance(v, str))
+    # ``_extract_scan_text`` lives on ``IndirectInjectionGuard`` (llm/
+    # injection_guard.py) and is shared by both the write path (here,
+    # in ``write()``) and the read path (``filter_and_wrap``). Keeping a
+    # single copy prevents the two paths from drifting when a new memory
+    # type is added.
 
     # ════════════════════════════════════════════════════════════════
     #  Core query
@@ -312,6 +275,7 @@ class MemplexService:
         owner: Optional[str] = None,
         max_tokens: int = 4000,
         namespace_filter: Optional[Dict[str, str]] = None,
+        explain: bool = False,
     ) -> QueryResult:
         """Unified query entry point.
 
@@ -337,9 +301,32 @@ class MemplexService:
         namespace_filter:
             Optional exact-match metadata filter applied before rerank and
             ``access_count`` updates. Used by agent adapters to isolate turns.
+        explain:
+            Include a product-facing retrieval trace that explains the stages,
+            filters, budgets, and final injected candidates.
         """
         scope = self._detect_scope(text)
         start = datetime.now()
+        trace: Optional[Dict[str, Any]] = None
+        if explain:
+            trace = {
+                "query": text,
+                "top_k": top_k,
+                "max_tokens": max_tokens,
+                "scope": scope.value,
+                "namespace_filter": namespace_filter or {},
+                "embedding": {
+                    "enabled": self._embedding_service is not None,
+                    "model": self._config.embedding.model,
+                    "hyde_enabled": bool(self._config.embedding.hyde_enabled),
+                },
+                "reranker": {
+                    "enabled": self._reranker is not None,
+                    "cross_encoder_enabled": self._cross_reranker is not None
+                    and bool(getattr(self._cross_reranker, "enabled", False)),
+                },
+                "stages": [],
+            }
 
         # Pre-compute query_vector (multi-path reuse)
         query_vector: Optional[Vector] = None
@@ -347,6 +334,8 @@ class MemplexService:
             if self._llm is not None and self._config.embedding.hyde_enabled:
                 query_vector = self._compute_hyde_vector(text)
             query_vector = query_vector or self._embedding_service.embed(text)
+        if trace is not None:
+            trace["embedding"]["query_vector_available"] = query_vector is not None
 
         # Parallel multi-path retrieval
         futures: Dict[concurrent.futures.Future, str] = {}
@@ -364,25 +353,90 @@ class MemplexService:
 
             all_results: List[List[SearchResult]] = []
             for future in as_completed(futures):
+                path = futures[future]
                 try:
-                    all_results.append(future.result())
+                    path_results = future.result()
+                    all_results.append(path_results)
+                    if trace is not None:
+                        trace["stages"].append(
+                            {
+                                "stage": f"{path}_search",
+                                "status": "ok",
+                                "candidates": len(path_results),
+                            }
+                        )
                 except Exception as exc:
-                    logger.warning("Search path %s failed: %s", futures[future], exc)
+                    logger.warning("Search path %s failed: %s", path, exc)
+                    if trace is not None:
+                        trace["stages"].append(
+                            {
+                                "stage": f"{path}_search",
+                                "status": "failed",
+                                "error": str(exc),
+                                "candidates": 0,
+                            }
+                        )
 
         # Merge results
         results = self._merge_multi_path(all_results)
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "merge_deduplicate",
+                    "input_paths": len(all_results),
+                    "candidates": len(results),
+                }
+            )
         if namespace_filter:
+            before_namespace = len(results)
             results = self._filter_results_by_namespace(results, namespace_filter)
+            if trace is not None:
+                trace["stages"].append(
+                    {
+                        "stage": "namespace_filter",
+                        "before": before_namespace,
+                        "after": len(results),
+                        "boundary": "exact-match metadata filter; not an ACL engine",
+                    }
+                )
 
         # Stage 1: 5-dim bi-encoder rerank
         if self._reranker is not None:
+            before_rerank = len(results)
             results = self._reranker.rerank(text, results, top_k * 2, query_vector)
+            if trace is not None:
+                trace["stages"].append(
+                    {
+                        "stage": "rerank",
+                        "before": before_rerank,
+                        "after": len(results),
+                        "weights": dict(self._config.reranker.weights),
+                    }
+                )
 
         # Stage 2: Cross-encoder precision rerank (optional)
         if self._cross_reranker is not None:
+            before_cross = len(results)
             results = self._cross_reranker.rerank(text, results)
+            if trace is not None:
+                trace["stages"].append(
+                    {
+                        "stage": "cross_encoder_rerank",
+                        "before": before_cross,
+                        "after": len(results),
+                        "model": self._config.reranker.cross_encoder_model,
+                    }
+                )
 
         results = results[:top_k]
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "top_k",
+                    "limit": top_k,
+                    "after": len(results),
+                }
+            )
 
         # Update access_count (must persist for Reranker frequency dimension)
         for r in results:
@@ -409,6 +463,27 @@ class MemplexService:
             results = kept
         else:
             used = sum(r.token_estimate for r in results)
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "token_budget",
+                    "max_tokens": max_tokens,
+                    "tokens_used": used,
+                    "truncated": truncated,
+                    "after": len(results),
+                }
+            )
+            trace["final_results"] = [
+                {
+                    "id": r.func_id,
+                    "name": r.name,
+                    "score": r.relevance_score,
+                    "domain": r.domain,
+                    "token_estimate": r.token_estimate,
+                    "source_type": getattr(r.source_type, "value", str(r.source_type)),
+                }
+                for r in results
+            ]
 
         return QueryResult(
             results=results,
@@ -416,6 +491,7 @@ class MemplexService:
             latency_ms=latency,
             tokens_used=used,
             truncated=truncated,
+            explanation=build_query_explanation(trace),
         )
 
     async def query_async(
@@ -425,6 +501,7 @@ class MemplexService:
         owner: Optional[str] = None,
         max_tokens: int = 4000,
         namespace_filter: Optional[Dict[str, str]] = None,
+        explain: bool = False,
     ) -> QueryResult:
         """Async version of :meth:`query`.
 
@@ -440,6 +517,7 @@ class MemplexService:
                 owner=owner,
                 max_tokens=max_tokens,
                 namespace_filter=namespace_filter,
+                explain=explain,
             ),
         )
 
@@ -672,6 +750,45 @@ class MemplexService:
                 filtered.append(result)
         return filtered
 
+    def annotate_memories(
+        self,
+        memory_ids: Iterable[str],
+        *,
+        attributes: Optional[Dict[str, Any]] = None,
+        needs_review: Optional[bool] = None,
+    ) -> List[Function]:
+        """Annotate stored memories through the service boundary.
+
+        This keeps product workflows from mutating store internals directly.
+        Backends that return live objects can persist via their native save
+        hook; other backends fall back to re-adding the updated function through
+        the public store contract.
+        """
+
+        updated: List[Function] = []
+        for memory_id in memory_ids:
+            func = self.store.get(memory_id)
+            if func is None:
+                continue
+            if attributes:
+                func.attributes.update(attributes)
+            if needs_review is not None:
+                func.needs_review = needs_review
+            updated.append(func)
+
+        if not updated:
+            return []
+
+        save = getattr(self.store, "_save", None)
+        if callable(save):
+            save()
+        else:
+            source = SourceDocument(type="metadata_update", source_type=SourceType.WIKI)
+            for func in updated:
+                self.store.add(func, source)
+
+        return updated
+
     # ════════════════════════════════════════════════════════════════
     #  HyDE
     # ════════════════════════════════════════════════════════════════
@@ -720,19 +837,27 @@ class MemplexService:
         # 1. CoreEngine: full extraction pipeline
         extracted = self._engine.extract(source)
 
-        # 2. Merge into store
+        # 2. Flag indirect-injection-suspected functions at write time.
+        #    Memories are RETAINED (co-located legitimate content must not be
+        #    silently lost) but stamped ``memplex_injection_suspected=true``;
+        #    the LLM-facing read path (IndirectInjectionGuard.filter_and_wrap)
+        #    re-scans and omits them from injected context. Previously this
+        #    only logged "skipped" while neither skipping nor flagging.
         if extracted.functions:
-            # Scan each extracted function for indirect injection attacks
             today = datetime.now().strftime("%Y-%m-%d")
             for func in extracted.functions:
                 memory_type = getattr(func, "memory_type", "function")
-                scan_text = self._extract_scan_text(func, memory_type)
+                scan_text = IndirectInjectionGuard._extract_scan_text(func, memory_type)
                 if IndirectInjectionGuard.scan(scan_text):
                     logger.warning(
-                        "Indirect injection detected in function %s (type=%s), skipped.",
+                        "Indirect injection suspected in function %s (type=%s); "
+                        "retained but flagged, will be omitted at recall.",
                         func.id,
                         memory_type,
                     )
+                    attrs = getattr(func, "attributes", None)
+                    if isinstance(attrs, dict):
+                        attrs["memplex_injection_suspected"] = "true"
                     self._injection_scans_24h[today] = (
                         self._injection_scans_24h.get(today, 0) + 1
                     )
@@ -780,66 +905,6 @@ class MemplexService:
             source_type=SourceType.WIKI,
         )
         return self.write(source)
-
-    # ── Extraction helper ────────────────────────────────────────
-
-    def _extract_functions(self, source: SourceDocument) -> list:
-        """Rule-based Function extraction from a SourceDocument.
-
-        Splits content into paragraphs, creates one Function per
-        paragraph with detected trigger/action fields.
-        """
-        content = source.content or ""
-        if not content.strip():
-            return []
-
-        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-        functions: list = []
-        import hashlib
-
-        for i, para in enumerate(paragraphs):
-            # Generate stable ID from content hash
-            content_hash = hashlib.sha256(para.encode()).hexdigest()[:16]
-            func_id = f"func_{content_hash}"
-
-            memory_type = _detect_memory_type(para)
-
-            # Extract trigger/action via simple heuristics
-            sentences = [s.strip() for s in para.split("。") if s.strip()]
-            if not sentences:
-                sentences = [s.strip() for s in para.split(".") if s.strip()]
-
-            from memplex.models import FieldValue
-
-            triggers = []
-            actions = []
-            for s in sentences[:5]:
-                fv = FieldValue(
-                    desc=s,
-                    sources=[source.type],
-                    source_method="rule_based",
-                    weight=0.7,
-                )
-                # Heuristic: first sentence is trigger, rest are action
-                if not triggers:
-                    triggers.append(fv)
-                else:
-                    actions.append(fv)
-
-            from memplex.models.memory import Function as Func
-
-            func = Func(
-                id=func_id,
-                name=para[:50] + ("..." if len(para) > 50 else ""),
-                domain=None,
-                trigger=triggers,
-                action=actions,
-                source_type=source.source_type,
-                content_hash=hashlib.sha256(para.encode()).hexdigest(),
-            )
-            functions.append(func)
-
-        return functions
 
     # ════════════════════════════════════════════════════════════════
     #  Memory operations
@@ -1129,12 +1194,7 @@ class MemplexService:
         self._worker.stop()
 
     # ── Memory type detection ─────────────────────────────────────
-
-    @staticmethod
-    def _detect_memory_type(text: str) -> str:
-        """Classify content into a primary memory type.
-
-        Returns one of ``"function"`` | ``"fact"`` | ``"preference"`` |
-        ``"observation"``.
-        """
-        return _detect_memory_type(text)
+    # Exposed as a bound staticmethod for backward-compatible callers
+    # (e.g. ``MemplexService._detect_memory_type(text)``); the real
+    # implementation lives at module scope above.
+    _detect_memory_type = staticmethod(_detect_memory_type)
