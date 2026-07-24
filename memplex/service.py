@@ -372,6 +372,24 @@ class MemplexService:
                     }
                 )
 
+        # Injection-suspected results are dropped before top_k so they
+        # neither occupy the token budget nor reach any LLM-facing caller
+        # (MCP memory_search, HTTP /memories, CLI recall, AgentMemoryRuntime).
+        # The flag is stamped at write time in write(); this is the read-side
+        # enforcement that previously only AgentMemoryRuntime applied.
+        if results:
+            before_injection = len(results)
+            results = self._drop_injection_suspected(results)
+            if trace is not None and len(results) != before_injection:
+                trace["stages"].append(
+                    {
+                        "stage": "injection_filter",
+                        "before": before_injection,
+                        "after": len(results),
+                        "boundary": "Drops memories flagged memplex_injection_suspected=true at write time.",
+                    }
+                )
+
         results = results[:top_k]
         if trace is not None:
             trace["stages"].append(
@@ -954,6 +972,28 @@ class MemplexService:
         the read-path injection defence behind the service boundary.
         """
         return IndirectInjectionGuard.filter_and_wrap(results, self.store)
+
+    def _drop_injection_suspected(self, results: List[SearchResult]) -> List[SearchResult]:
+        """Drop results whose stored Function is flagged injection-suspected.
+
+        Read-side enforcement paired with the write-time flag in ``write()``.
+        A result is dropped when its Function's ``attributes`` map contains
+        ``memplex_injection_suspected == "true"``. Failures to look up the
+        Function (e.g. race with delete) keep the result rather than
+        silently dropping legitimate memory.
+        """
+        kept: List[SearchResult] = []
+        for r in results:
+            try:
+                func = self.store.get(r.func_id)
+            except Exception:
+                func = None
+            if func is not None:
+                attrs = getattr(func, "attributes", {}) or {}
+                if attrs.get("memplex_injection_suspected") == "true":
+                    continue
+            kept.append(r)
+        return kept
 
     def compact(self, scope: str = "project") -> CompactionResult:
         """Run the compaction pipeline synchronously.

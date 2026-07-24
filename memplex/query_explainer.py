@@ -84,6 +84,15 @@ def build_query_explanation(
                     "boundary": stage.get("boundary"),
                 }
             )
+        elif name == "injection_filter":
+            filters.append(
+                {
+                    "type": "injection",
+                    "before": stage.get("before", 0),
+                    "after": stage.get("after", 0),
+                    "boundary": stage.get("boundary"),
+                }
+            )
         elif name == "rerank":
             ranking["semantic_rerank"] = {
                 "before": stage.get("before", 0),
