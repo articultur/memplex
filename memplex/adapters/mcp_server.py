@@ -64,6 +64,11 @@ _TOOL_DEFINITIONS = [
                     "description": "Max results (default 10, max 100)",
                     "default": 10,
                 },
+                "explain": {
+                    "type": "boolean",
+                    "description": "Include retrieval-stage explanation and safety/filter trace.",
+                    "default": False,
+                },
             },
             "required": ["query"],
         },
@@ -196,6 +201,49 @@ _TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "memory_doctor",
+        "description": "Run productized readiness checks for Memplex and an agent integration.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "default": "codex"},
+                "profile": {
+                    "type": "string",
+                    "description": "Optional setup profile: local | privacy | max-recall | team",
+                },
+                "smoke": {
+                    "type": "boolean",
+                    "description": "Run a safe capture/recall smoke in the configured store.",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "memory_scope_explain",
+        "description": "Explain Memplex visibility scope metadata for an agent. This is not an ACL mutation tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "default": "codex"},
+                "user_id": {"type": "string", "default": "default"},
+                "session_id": {"type": "string", "default": "default"},
+                "project_path": {"type": "string"},
+                "preview": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "memory_policy_show",
+        "description": "Show recall/capture policy, token budgets, embedding mode, and safety boundaries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "default": "codex"},
+            },
         },
     },
     {
@@ -395,8 +443,9 @@ class MCPServer:
         result = self._service.query(
             text=args["query"],
             top_k=args.get("top_k", 10),
+            explain=args.get("explain", False),
         )
-        return {
+        payload = {
             "total": len(result.results),
             "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
             "latency_ms": result.latency_ms,
@@ -411,6 +460,9 @@ class MCPServer:
                 for r in result.results
             ],
         }
+        if args.get("explain", False):
+            payload["explanation"] = result.explanation
+        return payload
 
     def _tool_memory_add(self, args: dict) -> dict:
         """Add a new memory."""
@@ -480,6 +532,44 @@ class MCPServer:
         self._ensure_service()
         return self._service.health()
 
+    def _tool_memory_doctor(self, args: dict) -> dict:
+        """Run productized readiness checks."""
+        from memplex.product import run_doctor
+
+        self._ensure_service()
+        return run_doctor(
+            self._service,
+            self._service._config,
+            agent=args.get("agent", "codex"),
+            profile=args.get("profile"),
+            smoke=args.get("smoke", False),
+        )
+
+    def _tool_memory_scope_explain(self, args: dict) -> dict:
+        """Explain visibility scope metadata."""
+        from memplex.product import scope_explain, scope_preview
+
+        self._ensure_service()
+        store_path = getattr(getattr(self._service, "store", None), "_path", None)
+        storage_namespace = str(store_path) if store_path is not None else f"service:{id(self._service)}"
+        explained = scope_explain(
+            agent=args.get("agent", "codex"),
+            user_id=args.get("user_id"),
+            session_id=args.get("session_id", "default"),
+            project_path=args.get("project_path"),
+            storage_namespace=storage_namespace,
+        )
+        if args.get("preview", False):
+            explained["preview"] = scope_preview(self._service, explained["namespace_filter"])
+        return explained
+
+    def _tool_memory_policy_show(self, args: dict) -> dict:
+        """Show recall/capture policy."""
+        from memplex.product import policy_show
+
+        self._ensure_service()
+        return policy_show(self._service._config, agent=args.get("agent", "codex"))
+
     def _tool_memory_agent_manifest(self, args: dict) -> dict:
         """Return portable agent integration manifest."""
         from memplex.adapters.agent_runtime import get_agent_manifest
@@ -528,6 +618,9 @@ class MCPServer:
         "memory_pending_reviews": _tool_memory_pending_reviews,
         "memory_resolve": _tool_memory_resolve,
         "memory_health": _tool_memory_health,
+        "memory_doctor": _tool_memory_doctor,
+        "memory_scope_explain": _tool_memory_scope_explain,
+        "memory_policy_show": _tool_memory_policy_show,
         "memory_agent_manifest": _tool_memory_agent_manifest,
         "memory_turn_begin": _tool_memory_turn_begin,
         "memory_turn_end": _tool_memory_turn_end,

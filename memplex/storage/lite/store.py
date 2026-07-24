@@ -18,7 +18,7 @@ import json
 import logging
 import sqlite3
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -186,6 +186,38 @@ def _deserialize_edge(d: dict) -> GraphEdge:
     )
 
 
+def _serialize_observation(obs: Observation) -> dict:
+    return {
+        "id": obs.id,
+        "memory_type": obs.memory_type,
+        "name": obs.name,
+        "domain": obs.domain,
+        "event": obs.event,
+        "context": obs.context,
+        "observed_at": obs.observed_at,
+        "actor": obs.actor,
+        "origin_session": obs.origin_session,
+        "created_at": obs.created_at,
+        "updated_at": obs.updated_at,
+    }
+
+
+def _deserialize_observation(d: dict) -> Observation:
+    return Observation(
+        id=d.get("id", ""),
+        memory_type=d.get("memory_type", "observation"),
+        name=d.get("name", ""),
+        domain=d.get("domain"),
+        event=d.get("event", ""),
+        context=d.get("context", ""),
+        observed_at=d.get("observed_at"),
+        actor=d.get("actor", "system"),
+        origin_session=d.get("origin_session"),
+        created_at=d.get("created_at"),
+        updated_at=d.get("updated_at"),
+    )
+
+
 # ── Merge helpers ────────────────────────────────────────────────────
 
 
@@ -253,7 +285,7 @@ class LiteMemoryStore:
             for sp in func.source_paragraphs:
                 if sp not in existing.source_paragraphs:
                     existing.source_paragraphs.append(sp)
-            existing.updated_at = datetime.utcnow().isoformat()
+            existing.updated_at = datetime.now(timezone.utc).isoformat()
             existing.version += 1
 
             self._changelog.append(
@@ -309,13 +341,14 @@ class LiteMemoryStore:
 
     def add_observation(self, observation: Observation) -> None:
         self._observations.append(observation)
+        self._save()
 
     def increment_access(self, func_id: str) -> None:
         func = self._functions.get(func_id)
         if func is None:
             return
         func.access_count += 1
-        func.last_accessed_at = datetime.utcnow().isoformat()
+        func.last_accessed_at = datetime.now(timezone.utc).isoformat()
         self._save()
 
     # ── Public: Retrieval ───────────────────────────────────────────
@@ -432,7 +465,7 @@ class LiteMemoryStore:
                     existing.benefit = _merge_field_values(
                         existing.benefit, node.benefit
                     )
-                existing.updated_at = datetime.utcnow().isoformat()
+                existing.updated_at = datetime.now(timezone.utc).isoformat()
                 existing.version += 1
                 result.updated_functions += 1
             else:
@@ -471,6 +504,7 @@ class LiteMemoryStore:
         data = {
             "functions": [_serialize_function(f) for f in self._functions.values()],
             "edges": [_serialize_edge(e) for e in self._edges],
+            "observations": [_serialize_observation(o) for o in self._observations],
         }
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
         try:
@@ -501,6 +535,9 @@ class LiteMemoryStore:
 
         for ed in raw.get("edges", []):
             self._edges.append(_deserialize_edge(ed))
+
+        for od in raw.get("observations", []):
+            self._observations.append(_deserialize_observation(od))
 
     # ── Internal helpers ────────────────────────────────────────────
 

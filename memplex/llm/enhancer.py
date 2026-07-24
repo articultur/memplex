@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List
 
 from memplex.models import (
@@ -62,7 +62,7 @@ class LLMEnhancer:
                 source_method="llm_semantic",
                 weight=r.get("weight", 0.8),
                 observation=r.get("confidence", 1.0),
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
             )
             for r in result.get("triggers", [])
         ]

@@ -49,3 +49,4 @@ class QueryResult:
     latency_ms: int
     tokens_used: int = 0
     truncated: bool = False
+    explanation: Optional[Dict[str, Any]] = None

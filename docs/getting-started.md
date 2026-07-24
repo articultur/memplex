@@ -130,6 +130,95 @@ Run the normal health check:
 memplex health
 ```
 
+Run the productized doctor when you want one command that checks the installed
+memory loop and explains what it found:
+
+```bash
+memplex --output json doctor --agent codex --profile local --smoke
+```
+
+Setup profiles are transparent presets. They describe defaults and expected
+automation boundaries; they do not switch Memplex to a remote embedding service
+or a different storage architecture:
+
+```bash
+npx memplex setup --profile local --agent codex --project-path "$PWD"
+npx memplex setup --profile privacy --agent codex --project-path "$PWD"
+npx memplex setup --profile max-recall --agent codex --project-path "$PWD"
+npx memplex setup --profile team --agent codex --project-path "$PWD"
+```
+
+## Productized Memory Operations
+
+Explain why a memory was or was not recalled:
+
+```bash
+memplex --output json recall "release hygiene" --explain
+```
+
+Inspect visibility scopes without changing authorization or storage behavior:
+
+```bash
+memplex --output json scope list
+memplex --output json scope explain --agent codex --project-path "$PWD"
+memplex --output json scope preview --agent codex --project-path "$PWD"
+```
+
+Review pending corrections through the inbox vocabulary:
+
+```bash
+memplex --output json inbox list
+memplex inbox show <memory-id>
+memplex inbox accept <memory-id> --field-role trigger
+memplex inbox reject <memory-id> --field-role trigger
+memplex inbox merge <memory-id> --field-role action --value "Use the corrected action."
+```
+
+Show recall/capture budgets and safety boundaries:
+
+```bash
+memplex --output json policy show --agent codex
+```
+
+Generate a local operator report:
+
+```bash
+memplex --output json report --agent codex
+```
+
+### Canonical Corpus
+
+Corpus mode indexes explicit project memory files and keeps the files
+canonical. It is opt-in, manifest-driven, read-only by default, and denylists
+private agent directories such as `.codex`, `.agents`, and `.claude`.
+
+Example `memplex-corpus.toml`:
+
+```toml
+[corpus]
+name = "project-memory"
+scope = "project"
+include = ["MEMORY.md", "docs/**/*.md"]
+```
+
+Preview before indexing:
+
+```bash
+memplex --output json corpus preview --manifest memplex-corpus.toml
+```
+
+Index selected files without mutating the source files:
+
+```bash
+memplex --output json corpus index --manifest memplex-corpus.toml
+```
+
+Recall indexed corpus entries with source paths:
+
+```bash
+memplex --output json corpus recall "release gate"
+```
+
 ## Offline Or Mainland China
 
 Memplex does not require HuggingFace for the default local-agent path. The

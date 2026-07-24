@@ -122,6 +122,8 @@ def cmd_query(args: argparse.Namespace) -> int:
         result = svc.query(
             text=args.text,
             top_k=getattr(args, "top_k", 10),
+            max_tokens=getattr(args, "max_tokens", 4000),
+            explain=getattr(args, "explain", False),
         )
 
         out = []
@@ -136,19 +138,17 @@ def cmd_query(args: argparse.Namespace) -> int:
                 }
             )
 
-        print(
-            _fmt(
-                {
-                    "total": len(out),
-                    "scope": result.scope.value
-                    if hasattr(result.scope, "value")
-                    else str(result.scope),
-                    "latency_ms": result.latency_ms,
-                    "results": out,
-                },
-                args.output,
-            )
-        )
+        payload = {
+            "total": len(out),
+            "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
+            "latency_ms": result.latency_ms,
+            "tokens_used": result.tokens_used,
+            "truncated": result.truncated,
+            "results": out,
+        }
+        if getattr(args, "explain", False):
+            payload["explanation"] = result.explanation
+        print(_fmt(payload, args.output))
         return 0
     finally:
         svc.stop()
@@ -284,6 +284,181 @@ def cmd_stats(args: argparse.Namespace) -> int:
         svc.stop()
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run productized readiness checks."""
+    from memplex.product import run_doctor
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        report = run_doctor(
+            svc,
+            svc._config,
+            agent=getattr(args, "agent", "codex"),
+            profile=getattr(args, "profile", None),
+            smoke=getattr(args, "smoke", False) or getattr(args, "fix", False),
+        )
+        print(_fmt(report, args.output))
+        return 0 if report["status"] == "pass" else 1
+    finally:
+        svc.stop()
+
+
+def _service_storage_namespace(svc) -> str:
+    store_path = getattr(getattr(svc, "store", None), "_path", None)
+    if store_path is not None:
+        return str(store_path)
+    return f"service:{id(svc)}"
+
+
+def cmd_scope(args: argparse.Namespace) -> int:
+    """Visibility-first scope commands."""
+    from memplex.product import scope_catalog, scope_explain, scope_preview
+
+    action = getattr(args, "scope_command", None)
+    if action == "list":
+        print(_fmt(scope_catalog(), args.output))
+        return 0
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        explained = scope_explain(
+            agent=getattr(args, "agent", "codex"),
+            user_id=getattr(args, "user_id", None),
+            session_id=getattr(args, "session_id", "default"),
+            project_path=getattr(args, "project_path", None),
+            storage_namespace=_service_storage_namespace(svc),
+        )
+        if action == "explain":
+            print(_fmt(explained, args.output))
+            return 0
+        if action == "preview":
+            print(
+                _fmt(
+                    scope_preview(
+                        svc,
+                        explained["namespace_filter"],
+                        limit=getattr(args, "limit", 10),
+                    ),
+                    args.output,
+                )
+            )
+            return 0
+    finally:
+        svc.stop()
+
+    print("Error: unknown scope command", file=sys.stderr)
+    return 1
+
+
+def cmd_policy(args: argparse.Namespace) -> int:
+    """Show recall/capture policy."""
+    from memplex.product import policy_show
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        print(_fmt(policy_show(svc._config, agent=getattr(args, "agent", "codex")), args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
+def cmd_inbox(args: argparse.Namespace) -> int:
+    """Review pending memory items through an inbox vocabulary."""
+    action = getattr(args, "inbox_command", "list")
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        if action in {None, "list"}:
+            reviews = svc.get_pending_reviews(limit=getattr(args, "limit", 100))
+            print(_fmt({"total": len(reviews), "reviews": _dataclass_to_dict(reviews)}, args.output))
+            return 0
+        if action == "show":
+            reviews = [
+                review
+                for review in svc.get_pending_reviews(limit=100000)
+                if review.memory_id == args.memory_id
+            ]
+            memory = svc.get(args.memory_id)
+            print(
+                _fmt(
+                    {
+                        "memory": _dataclass_to_dict(memory) if memory is not None else None,
+                        "reviews": _dataclass_to_dict(reviews),
+                    },
+                    args.output,
+                )
+            )
+            return 0 if memory is not None or reviews else 1
+        if action in {"accept", "reject", "merge"}:
+            result = svc.apply_resolution(
+                memory_id=args.memory_id,
+                field_role=args.field_role,
+                action=action,
+                new_value=getattr(args, "value", None),
+            )
+            print(_fmt(result, args.output))
+            return 0
+    finally:
+        svc.stop()
+
+    print("Error: unknown inbox command", file=sys.stderr)
+    return 1
+
+
+def cmd_corpus(args: argparse.Namespace) -> int:
+    """Manifest-driven canonical corpus commands."""
+    from memplex.product import corpus_index, corpus_preview, corpus_recall
+
+    action = getattr(args, "corpus_command", None)
+    if action == "preview":
+        print(_fmt(corpus_preview(args.manifest, limit=getattr(args, "limit", 100)), args.output))
+        return 0
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        if action == "index":
+            print(
+                _fmt(
+                    corpus_index(
+                        svc,
+                        args.manifest,
+                        dry_run=getattr(args, "dry_run", False),
+                    ),
+                    args.output,
+                )
+            )
+            return 0
+        if action == "recall":
+            print(
+                _fmt(
+                    corpus_recall(
+                        svc,
+                        args.query,
+                        top_k=getattr(args, "top_k", 10),
+                        max_tokens=getattr(args, "max_tokens", 4000),
+                    ),
+                    args.output,
+                )
+            )
+            return 0
+    finally:
+        svc.stop()
+
+    print("Error: unknown corpus command", file=sys.stderr)
+    return 1
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Generate an operator report."""
+    from memplex.product import operator_report
+
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        print(_fmt(operator_report(svc, svc._config, agent=getattr(args, "agent", "codex")), args.output))
+        return 0
+    finally:
+        svc.stop()
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     """Portable agent integration commands."""
     from memplex.adapters.agent_installer import install_agent, uninstall_agent
@@ -399,6 +574,7 @@ def _get_marketplace_dir() -> Path:
 def cmd_setup(args: argparse.Namespace) -> int:
     """Install or uninstall Memplex in local agent hosts."""
     from memplex.adapters.agent_installer import install_agent, uninstall_agent
+    from memplex.product import setup_profile
 
     should_uninstall = getattr(args, "uninstall", False) or args.command == "uninstall"
     if should_uninstall:
@@ -415,7 +591,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
             project_path=getattr(args, "project_path", None),
             dry_run=getattr(args, "dry_run", False),
         )
-    print(_fmt(_dataclass_to_dict(result), args.output))
+    profile = setup_profile(getattr(args, "profile", None))
+    output = _dataclass_to_dict(result)
+    if profile is not None:
+        output = {"profile": profile, "result": output}
+    print(_fmt(output, args.output))
     return 0
 
 
@@ -459,6 +639,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_query = sub.add_parser("query", help="Query memory")
     p_query.add_argument("text", help="Query text")
     p_query.add_argument("--top-k", type=int, default=10, help="Max results")
+    p_query.add_argument("--max-tokens", type=int, default=4000, help="Token budget")
+    p_query.add_argument(
+        "--explain",
+        action="store_true",
+        help="Explain retrieval stages, scores, filters, and token budget",
+    )
+
+    p_recall = sub.add_parser("recall", help="Recall memory (alias for query)")
+    p_recall.add_argument("text", help="Recall query")
+    p_recall.add_argument("--top-k", type=int, default=10, help="Max results")
+    p_recall.add_argument("--max-tokens", type=int, default=4000, help="Token budget")
+    p_recall.add_argument("--explain", action="store_true", help="Explain retrieval stages")
 
     # -- write --
     p_write = sub.add_parser("write", help="Write content to memory")
@@ -503,6 +695,66 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- stats --
     sub.add_parser("stats", help="Show statistics")
+
+    # -- doctor --
+    p_doctor = sub.add_parser("doctor", help="Check Memplex product readiness")
+    p_doctor.add_argument("--agent", default="codex")
+    p_doctor.add_argument("--profile", choices=["local", "privacy", "max-recall", "team"])
+    p_doctor.add_argument("--smoke", action="store_true", help="Run capture/recall smoke")
+    p_doctor.add_argument("--fix", action="store_true", help="Run safe local smoke checks")
+
+    # -- scope --
+    p_scope = sub.add_parser("scope", help="Explain visibility scopes")
+    scope_sub = p_scope.add_subparsers(dest="scope_command", help="Scope command")
+    scope_sub.add_parser("list", help="List visibility scopes")
+    for name in ("explain", "preview"):
+        p_scope_cmd = scope_sub.add_parser(name, help=f"{name.title()} agent namespace")
+        p_scope_cmd.add_argument("--agent", default="codex")
+        p_scope_cmd.add_argument("--user-id", default=None)
+        p_scope_cmd.add_argument("--session-id", default="default")
+        p_scope_cmd.add_argument("--project-path", default=None)
+        if name == "preview":
+            p_scope_cmd.add_argument("--limit", type=int, default=10)
+
+    # -- policy --
+    p_policy = sub.add_parser("policy", help="Show recall/capture policy")
+    policy_sub = p_policy.add_subparsers(dest="policy_command", help="Policy command")
+    p_policy_show = policy_sub.add_parser("show", help="Show current policy")
+    p_policy_show.add_argument("--agent", default="codex")
+
+    # -- inbox --
+    p_inbox = sub.add_parser("inbox", help="Review pending memory inbox")
+    inbox_sub = p_inbox.add_subparsers(dest="inbox_command", help="Inbox command")
+    p_inbox_list = inbox_sub.add_parser("list", help="List pending reviews")
+    p_inbox_list.add_argument("--limit", type=int, default=100)
+    p_inbox_show = inbox_sub.add_parser("show", help="Show pending review and memory")
+    p_inbox_show.add_argument("memory_id")
+    for name in ("accept", "reject"):
+        p_inbox_resolve = inbox_sub.add_parser(name, help=f"{name.title()} pending review")
+        p_inbox_resolve.add_argument("memory_id")
+        p_inbox_resolve.add_argument("--field-role", required=True)
+    p_inbox_merge = inbox_sub.add_parser("merge", help="Merge a replacement value")
+    p_inbox_merge.add_argument("memory_id")
+    p_inbox_merge.add_argument("--field-role", required=True)
+    p_inbox_merge.add_argument("--value", required=True)
+
+    # -- corpus --
+    p_corpus = sub.add_parser("corpus", help="Manifest-driven canonical corpus")
+    corpus_sub = p_corpus.add_subparsers(dest="corpus_command", help="Corpus command")
+    p_corpus_preview = corpus_sub.add_parser("preview", help="Preview manifest files")
+    p_corpus_preview.add_argument("--manifest", required=True)
+    p_corpus_preview.add_argument("--limit", type=int, default=100)
+    p_corpus_index = corpus_sub.add_parser("index", help="Index selected corpus files")
+    p_corpus_index.add_argument("--manifest", required=True)
+    p_corpus_index.add_argument("--dry-run", action="store_true")
+    p_corpus_recall = corpus_sub.add_parser("recall", help="Recall indexed corpus entries")
+    p_corpus_recall.add_argument("query")
+    p_corpus_recall.add_argument("--top-k", type=int, default=10)
+    p_corpus_recall.add_argument("--max-tokens", type=int, default=4000)
+
+    # -- report --
+    p_report = sub.add_parser("report", help="Generate an operator report")
+    p_report.add_argument("--agent", default="codex")
 
     # -- agent --
     p_agent = sub.add_parser("agent", help="Portable agent integration commands")
@@ -588,6 +840,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         p_setup.add_argument("--user-id", default=None)
         p_setup.add_argument("--project-path", default=None)
+        if not uninstall:
+            p_setup.add_argument(
+                "--profile",
+                choices=["local", "privacy", "max-recall", "team"],
+                default=None,
+                help="Transparent setup profile",
+            )
         p_setup.add_argument(
             "--dry-run", action="store_true", help="Show planned files without writing"
         )
@@ -628,6 +887,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     dispatch = {
         "query": cmd_query,
+        "recall": cmd_query,
         "write": cmd_write,
         "get": cmd_get,
         "delete": cmd_delete,
@@ -636,6 +896,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "compact": cmd_compact,
         "health": cmd_health,
         "stats": cmd_stats,
+        "doctor": cmd_doctor,
+        "scope": cmd_scope,
+        "policy": cmd_policy,
+        "inbox": cmd_inbox,
+        "corpus": cmd_corpus,
+        "report": cmd_report,
         "agent": cmd_agent,
         "setup": cmd_setup,
         "install": cmd_setup,

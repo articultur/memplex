@@ -136,23 +136,33 @@ class ObservationCollector:
             return
 
         # 4. Build Observation and persist
+        import json
         import uuid
 
         obs = Observation(
             id=f"obs_{uuid.uuid4().hex[:12]}",
-            session_id=session_id,
-            timestamp=datetime.now(timezone.utc),
-            tool_name=tool_name,
-            tool_input_summary=self._summarize_input(tool_input),
+            memory_type="observation",
+            name=f"{tool_name} observation",
             event=narrative,
-            facts=[],
-            concepts=[],
-            files_read=self._extract_file_paths(tool_input, tool_result, "read"),
-            files_modified=self._extract_file_paths(
-                tool_input, tool_result, "modified"
+            context=json.dumps(
+                {
+                    "tool_name": tool_name,
+                    "tool_input_summary": self._summarize_input(tool_input),
+                    "facts": [],
+                    "concepts": [],
+                    "files_read": self._extract_file_paths(
+                        tool_input, tool_result, "read"
+                    ),
+                    "files_modified": self._extract_file_paths(
+                        tool_input, tool_result, "modified"
+                    ),
+                    "functions_mentioned": [],
+                },
+                ensure_ascii=False,
+                default=str,
             ),
-            functions_mentioned=[],
             actor="system",
+            origin_session=session_id,
             observed_at=datetime.now(timezone.utc).isoformat(),
         )
 

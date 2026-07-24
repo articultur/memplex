@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -80,7 +80,7 @@ class WikiCompiler:
         trigger / condition / action / benefit sections plus cross-references
         as ``[[target_name]]`` wikilinks.
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=func.id,
             name=func.name,
@@ -133,7 +133,7 @@ class WikiCompiler:
 
     def compile_fact(self, fact: Fact) -> WikiPage:
         """Generate a Wiki page for a Fact node."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=fact.id,
             name=fact.name or f"{fact.subject} {fact.predicate} {fact.object_}",
@@ -167,7 +167,7 @@ class WikiCompiler:
 
     def compile_preference(self, pref: Preference) -> WikiPage:
         """Generate a Wiki page for a Preference node."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=pref.id,
             name=pref.name or f"pref_{pref.aspect}",
@@ -202,7 +202,7 @@ class WikiCompiler:
 
     def compile_observation(self, obs: Observation) -> WikiPage:
         """Generate a Wiki page for an Observation node."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=obs.id,
             name=obs.name or f"obs_{obs.event[:30]}",
@@ -287,7 +287,7 @@ class WikiCompiler:
             )
         lines.append("")
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         frontmatter = self._build_frontmatter(
             page_id="index",
             name="Memplex Knowledge Base",
@@ -425,7 +425,7 @@ class WikiCompiler:
                 if line_count >= MAX_LOG_LINES:
                     self._rotate_log(log_path)
 
-            timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"- {timestamp}: {message}\n")
 

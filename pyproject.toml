@@ -88,8 +88,6 @@ line-length = 100
 "memplex/benchmarks/locomo.py" = ["E402"]
 # Unused optional import
 "memplex/storage/__init__.py" = ["F401"]
-# prometheus_client.metrics import (historical artifact)
-"memplex/metrics.py" = ["F401"]
 # Benchmark stub variables assigned for future use
 "memplex/benchmarks/nq_trivia.py" = ["F841"]
 "memplex/benchmarks/popqa_hotpot.py" = ["F841"]

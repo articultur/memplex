@@ -499,6 +499,39 @@ class TestLiteMemoryStoreObservation:
         # Observations are stored internally
         assert len(store._observations) == 1
 
+    def test_observations_survive_restart(self, tmp_path):
+        # Observations must be persisted to disk and reloaded on restart;
+        # previously add_observation only touched an in-memory list that was
+        # never serialized, so the auto-capture loop silently lost everything.
+        store = _make_store(tmp_path)
+        store.add_observation(
+            Observation(id="obs_persist", name="Reboot event", event="reboot survived")
+        )
+
+        reopened = _make_store(tmp_path)
+        assert len(reopened._observations) == 1
+        assert reopened._observations[0].id == "obs_persist"
+        assert reopened._observations[0].event == "reboot survived"
+
+
+class TestLiteMemoryStoreNoDeprecatedUtcnow:
+    """datetime.utcnow() is deprecated and slated for removal; store mutation
+    paths must use timezone-aware datetime.now(timezone.utc)."""
+
+    def test_mutation_paths_emit_no_utcnow_deprecation(self, tmp_path):
+        import warnings
+
+        store = _make_store(tmp_path)
+        func = _make_func("func_u", "U")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            store.add(func, _make_source())  # add path -> updated_at
+            store.increment_access("func_u")  # last_accessed_at
+            store.merge(store.get_graph())  # merge-existing path -> updated_at
+
+        utcnow = [str(w.message) for w in caught if "utcnow" in str(w.message).lower()]
+        assert utcnow == [], "deprecated utcnow() still used: " + repr(utcnow)
+
 
 # ── LiteMemoryStore: Increment Access ────────────────────────────────
 

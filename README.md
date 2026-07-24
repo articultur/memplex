@@ -148,7 +148,8 @@ the default local retrieval and embedding path for agent reliability.
 
 ## Docs
 
-- [Getting Started](docs/getting-started.md): install, verify, uninstall, and
+- [Getting Started](docs/getting-started.md): install, verify, doctor,
+  recall explain, scope, inbox, corpus, policy, report, uninstall, and
   troubleshoot.
 - [Explainer](docs/explainer.md): what Memplex is and how the memory loop works.
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for

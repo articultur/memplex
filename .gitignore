@@ -32,6 +32,7 @@ htmlcov/
 .codex/
 .agents/
 .gitnexus/
+.zcode/
 
 # Virtual envs
 venv/

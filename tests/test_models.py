@@ -5,7 +5,7 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -46,7 +46,7 @@ class TestFieldValue:
         assert fv.status == "active"
 
     def test_create_full(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         fv = FieldValue(
             desc="trigger text",
             sources=["text:para_1"],
