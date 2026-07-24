@@ -87,6 +87,14 @@ def _check_bind_security(app: FastAPI) -> None:
     historical open default.  A non-local bind without any configured
     credential would expose the API unauthenticated, so we raise rather
     than warn.
+
+    Operator contract: the guard keys off the ``MEMPLEX_HOST`` env var,
+    which must match the actual host passed to ``uvicorn ... --host``.
+    uvicorn's bind argument is not visible to Python at construction
+    time, so ``MEMPLEX_HOST`` is the authoritative signal -- if you run
+    ``uvicorn ... --host 0.0.0.0`` without also exporting
+    ``MEMPLEX_HOST=0.0.0.0`` (plus a credential), this guard will not
+    fire. Always set ``MEMPLEX_HOST`` to mirror your bind address.
     """
     host = os.environ.get("MEMPLEX_HOST", "127.0.0.1")
     non_local = host not in ("127.0.0.1", "localhost", "::1")
