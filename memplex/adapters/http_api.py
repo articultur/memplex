@@ -177,7 +177,13 @@ def create_app(config=None) -> "FastAPI":
         )
 
     from memplex.config import load_config
+    from memplex.logging_config import configure_logging
     from memplex.service import MemplexService
+
+    # Configure logging once at app construction (the HTTP API is a
+    # long-running daemon surface; honour MEMPLEX_LOG_JSON for structured
+    # logs the same way the MCP server and CLI do).
+    configure_logging()
 
     if config is None:
         config = load_config()
