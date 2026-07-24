@@ -547,6 +547,13 @@ class MemplexService:
         Backends that return live objects can persist via their native save
         hook; other backends fall back to re-adding the updated function through
         the public store contract.
+
+        Security contract: ``attributes`` is operator/system metadata
+        (namespace tags, corpus markers, review flags) -- NOT LLM-facing
+        content. It bypasses the injection scanner by design because it
+        never reaches an LLM context window. Never pass untrusted
+        user/document text as an attribute value; route such text through
+        :meth:`write` / :meth:`write_text` instead, where it is scanned.
         """
 
         updated: List[Function] = []
@@ -765,6 +772,23 @@ class MemplexService:
                 weight=1.0,
             ),
         )
+
+        # Injection scan on the manually-supplied value, mirroring the
+        # write() path. update_memory accepts caller text that becomes LLM
+        # context on recall, so it must not bypass the injection defence.
+        # Suspected payloads flag the Function (read path drops it) rather
+        # than rejecting the update -- legitimate co-located edits must
+        # not be silently lost.
+        if IndirectInjectionGuard.scan(new_value):
+            logger.warning(
+                "Indirect injection suspected in update_memory(%s, %s); "
+                "retained but flagged, will be omitted at recall.",
+                memory_id,
+                role,
+            )
+            attrs = getattr(func, "attributes", None)
+            if isinstance(attrs, dict):
+                attrs["memplex_injection_suspected"] = "true"
 
         # Re-merge to persist
         from memplex.models import SourceDocument as SD
