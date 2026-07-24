@@ -75,8 +75,8 @@ def _package_version() -> str:
             project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("pyproject version resolution failed, falling back to importlib: %s", exc)
 
     from importlib.metadata import version as pkg_version
 
@@ -400,12 +400,19 @@ class MemplexService:
                 }
             )
 
-        # Update access_count (must persist for Reranker frequency dimension)
+        # Update access_count (must persist for Reranker frequency dimension).
+        # Best-effort: a store hiccup here must not fail the query, but we
+        # log at debug so the lost frequency signal is diagnosable rather
+        # than silently swallowed.
         for r in results:
             try:
                 self.store.increment_access(r.func_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "increment_access failed for %s (frequency signal lost): %s",
+                    r.func_id,
+                    exc,
+                )
 
         latency = int((datetime.now() - start).total_seconds() * 1000)
 
@@ -518,8 +525,10 @@ class MemplexService:
                     "relation": QueryScope.RELATION,
                 }
                 return intent_map.get(enhanced.intent, QueryScope.IMMEDIATE)
-            except Exception:
-                pass  # LLM failed, fall through to keyword
+            except Exception as exc:
+                # LLM intent detection failed; fall through to keyword
+                # scoring but keep a debug trace for diagnosis.
+                logger.debug("LLM intent detection failed, using keyword fallback: %s", exc)
 
         # Keyword fallback (delegated to memplex.intent so the keyword
         # table and negation handling live in one testable place).
@@ -648,8 +657,11 @@ class MemplexService:
                     BackgroundTask.BUILD_INDEX,
                     {"func_id": func.id, "source_id": source.id if source else None},
                 )
-        except Exception:
-            pass  # Background tasks are best-effort
+        except Exception as exc:
+            # Background tasks are best-effort, but a submission failure
+            # should not vanish silently -- debug-log so the dropped index
+            # build is traceable.
+            logger.debug("background task submission failed: %s", exc)
 
         return extracted
 
@@ -878,14 +890,16 @@ class MemplexService:
         try:
             funcs = self.store.list_functions(limit=100000)
             functions_total = len(funcs)
-        except Exception:
+        except Exception as exc:
+            logger.debug("health: list_functions failed, reporting 0: %s", exc)
             functions_total = 0
 
         # Count edges
         try:
             graph = self.store.get_graph()
             edges_total = len(graph.edges)
-        except Exception:
+        except Exception as exc:
+            logger.debug("health: get_graph failed, reporting 0 edges: %s", exc)
             edges_total = 0
 
         # Queue depth
@@ -923,7 +937,8 @@ class MemplexService:
         try:
             funcs = self.store.list_functions(limit=100000)
             total = len(funcs)
-        except Exception:
+        except Exception as exc:
+            logger.debug("stats: list_functions failed, reporting 0: %s", exc)
             total = 0
 
         graph = self.store.get_graph()
@@ -986,7 +1001,12 @@ class MemplexService:
         for r in results:
             try:
                 func = self.store.get(r.func_id)
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "injection filter: store.get failed for %s, keeping result: %s",
+                    r.func_id,
+                    exc,
+                )
                 func = None
             if func is not None:
                 attrs = getattr(func, "attributes", {}) or {}
