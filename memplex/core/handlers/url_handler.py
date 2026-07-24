@@ -110,12 +110,7 @@ class URLHandler:
                 ip = ipaddress.ip_address(info[4][0])
             except (ValueError, IndexError):
                 return False
-            if (
-                ip.is_loopback
-                or ip.is_private
-                or ip.is_link_local
-                or ip.is_unspecified
-            ):
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
                 return False
 
         return True
@@ -183,9 +178,7 @@ class URLHandler:
 
                 req = urllib.request.Request(
                     current_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; Content-Extractor/1.0)"
-                    },
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; Content-Extractor/1.0)"},
                 )
                 try:
                     response = opener.open(req, timeout=30)
@@ -217,9 +210,7 @@ class URLHandler:
                 finally:
                     response.close()
                 if data is None:
-                    print(
-                        f"Response exceeds {self.MAX_RESPONSE_BYTES} bytes: {current_url}"
-                    )
+                    print(f"Response exceeds {self.MAX_RESPONSE_BYTES} bytes: {current_url}")
                     return None
 
                 if "text" in content_type or "markdown" in content_type:
@@ -229,9 +220,7 @@ class URLHandler:
 
                 if "image" in content_type or self.resolve_type(current_url) == "image":
                     ext = (
-                        os.path.splitext(
-                            self.extract_filename(current_url) or "image.png"
-                        )[1]
+                        os.path.splitext(self.extract_filename(current_url) or "image.png")[1]
                         or ".png"
                     )
                     temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)

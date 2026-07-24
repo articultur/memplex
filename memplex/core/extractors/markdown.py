@@ -174,9 +174,7 @@ class MarkdownExtractor:
                 next_sent = sentences[i + 1]
                 if next_sent.role == "action":
                     relations.append(
-                        SentenceRelation(
-                            from_id=sent.id, to_id=next_sent.id, type="if_then"
-                        )
+                        SentenceRelation(from_id=sent.id, to_id=next_sent.id, type="if_then")
                     )
 
         return relations

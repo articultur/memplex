@@ -64,9 +64,7 @@ def _serialize_field_value(fv: FieldValue) -> dict:
         "weight": fv.weight,
         "observation": fv.observation,
         "created_at": (
-            fv.created_at.isoformat()
-            if isinstance(fv.created_at, datetime)
-            else fv.created_at
+            fv.created_at.isoformat() if isinstance(fv.created_at, datetime) else fv.created_at
         ),
         "status": fv.status,
     }
@@ -294,9 +292,7 @@ class LiteMemoryStore:
                     timestamp=datetime.now(),
                     event_type="updated",
                     description="Merged fields from source",
-                    source=getattr(source, "source_path", None)
-                    or getattr(source, "url", "")
-                    or "",
+                    source=getattr(source, "source_path", None) or getattr(source, "url", "") or "",
                     actor="system",
                 )
             )
@@ -310,9 +306,7 @@ class LiteMemoryStore:
                     timestamp=datetime.now(),
                     event_type="created",
                     description=f"Created function: {func.name}",
-                    source=getattr(source, "source_path", None)
-                    or getattr(source, "url", "")
-                    or "",
+                    source=getattr(source, "source_path", None) or getattr(source, "url", "") or "",
                     actor="system",
                 )
             )
@@ -437,9 +431,7 @@ class LiteMemoryStore:
         for norm in to_remove:
             del self._name_index[norm]
         # Remove edges referencing this function
-        self._edges = [
-            e for e in self._edges if e.source != func_id and e.target != func_id
-        ]
+        self._edges = [e for e in self._edges if e.source != func_id and e.target != func_id]
         self._save()
 
     def merge(self, sub_graph: GraphData) -> MergeResult:
@@ -452,19 +444,13 @@ class LiteMemoryStore:
             if func_id in self._functions:
                 existing = self._functions[func_id]
                 if hasattr(node, "trigger"):
-                    existing.trigger = _merge_field_values(
-                        existing.trigger, node.trigger
-                    )
+                    existing.trigger = _merge_field_values(existing.trigger, node.trigger)
                 if hasattr(node, "condition"):
-                    existing.condition = _merge_field_values(
-                        existing.condition, node.condition
-                    )
+                    existing.condition = _merge_field_values(existing.condition, node.condition)
                 if hasattr(node, "action"):
                     existing.action = _merge_field_values(existing.action, node.action)
                 if hasattr(node, "benefit"):
-                    existing.benefit = _merge_field_values(
-                        existing.benefit, node.benefit
-                    )
+                    existing.benefit = _merge_field_values(existing.benefit, node.benefit)
                 existing.updated_at = datetime.now(timezone.utc).isoformat()
                 existing.version += 1
                 result.updated_functions += 1
@@ -509,9 +495,7 @@ class LiteMemoryStore:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
         try:
             with open(tmp_fd, "w", encoding="utf-8") as fh:
-                json.dump(
-                    data, fh, default=_json_serializer, ensure_ascii=False, indent=2
-                )
+                json.dump(data, fh, default=_json_serializer, ensure_ascii=False, indent=2)
             Path(tmp_path).replace(self._path)
         except Exception:
             Path(tmp_path).unlink(missing_ok=True)

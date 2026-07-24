@@ -97,30 +97,22 @@ class InMemoryVectorStore:
         query_emb = self._encode_with_vocab(query, self._get_words(query))
         return self._search_by_embedding(query_emb, top_k)
 
-    def _search_by_vector(
-        self, query_vec: Vector, top_k: int
-    ) -> List[VectorSearchResult]:
+    def _search_by_vector(self, query_vec: Vector, top_k: int) -> List[VectorSearchResult]:
         scores: list = []
         for vid, vec in self._stored_vectors.items():
             score = self._cosine(query_vec, vec)
             text = self._vectors.get(vid, ("", None))[0]
             scores.append((vid, score, text))
         scores.sort(key=lambda x: x[1], reverse=True)
-        return [
-            VectorSearchResult(id=s[0], score=s[1], text=s[2]) for s in scores[:top_k]
-        ]
+        return [VectorSearchResult(id=s[0], score=s[1], text=s[2]) for s in scores[:top_k]]
 
-    def _search_by_embedding(
-        self, query_emb: list, top_k: int
-    ) -> List[VectorSearchResult]:
+    def _search_by_embedding(self, query_emb: list, top_k: int) -> List[VectorSearchResult]:
         scores: list = []
         for vid, (text, emb) in self._vectors.items():
             score = self._cosine(query_emb, emb)
             scores.append((vid, score, text))
         scores.sort(key=lambda x: x[1], reverse=True)
-        return [
-            VectorSearchResult(id=s[0], score=s[1], text=s[2]) for s in scores[:top_k]
-        ]
+        return [VectorSearchResult(id=s[0], score=s[1], text=s[2]) for s in scores[:top_k]]
 
     def delete(self, id: str) -> None:
         self._vectors.pop(id, None)
@@ -174,9 +166,7 @@ class ChromaVectorStore:
         embedding_model: str = "all-MiniLM-L6-v2",
     ) -> None:
         if not _CHROMA_AVAILABLE:
-            raise ImportError(
-                "chromadb not installed: pip install chromadb sentence-transformers"
-            )
+            raise ImportError("chromadb not installed: pip install chromadb sentence-transformers")
         self.client = chromadb.Client(Settings(anonymized_telemetry=False))
         self.collection = self.client.get_or_create_collection(name=collection_name)
         self._embedding_model = embedding_model
@@ -223,9 +213,7 @@ class ChromaVectorStore:
         query_vector: Optional[Vector] = None,
     ) -> List[VectorSearchResult]:
         if query_vector is not None:
-            q_emb = (
-                query_vector if isinstance(query_vector, list) else list(query_vector)
-            )
+            q_emb = query_vector if isinstance(query_vector, list) else list(query_vector)
         else:
             q_emb = self._get_model().encode([query])[0].tolist()
         results = self.collection.query(query_embeddings=[q_emb], n_results=top_k)

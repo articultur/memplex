@@ -1,6 +1,5 @@
 """Rule-based LLM provider: zero-dependency fallback implementation."""
 
-
 from memplex.models import IntentType
 
 
@@ -51,9 +50,7 @@ class RuleBasedProvider:
         ],
     }
 
-    async def classify_intent(
-        self, query: str, context: dict | None = None
-    ) -> IntentType:
+    async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify intent using keyword matching."""
         q = query.lower()
         for intent_name, keywords in self._INTENT_KEYWORDS.items():

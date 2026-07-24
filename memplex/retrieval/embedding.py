@@ -145,9 +145,7 @@ class _LocalONNXEmbedder:
             else resolved_model.parent / "tokenizer.json"
         )
         if not resolved_tokenizer.exists():
-            raise FileNotFoundError(
-                f"Local ONNX tokenizer not found: {resolved_tokenizer}"
-            )
+            raise FileNotFoundError(f"Local ONNX tokenizer not found: {resolved_tokenizer}")
 
         self.model_path = str(resolved_model)
         self.dimension = dimension
@@ -291,9 +289,7 @@ class EmbeddingService:
         content = self.function_to_text(func)
         if use_contextual and source is not None:
             origin = (
-                getattr(source, "url", None)
-                or str(getattr(source, "source_path", ""))
-                or "unknown"
+                getattr(source, "url", None) or str(getattr(source, "source_path", "")) or "unknown"
             )
             content = f"[文档: {origin} | 领域: {func.domain or '未分类'}] {content}"
         return self.embed(content)
@@ -406,9 +402,7 @@ class EmbeddingService:
             )
 
         if model_lookup_key in self._OFFLINE_MODELS:
-            logger.debug(
-                "Using local TF-IDF embedder for embedding model %s", model_key
-            )
+            logger.debug("Using local TF-IDF embedder for embedding model %s", model_key)
             return _SimpleTFIDFEmbedder(dimension=dimension)
 
         if model_lookup_key.startswith(self._HF_PREFIX):
@@ -419,9 +413,7 @@ class EmbeddingService:
         try:
             return _SentenceTransformerEmbedder(model_name, dimension)
         except ImportError:
-            logger.info(
-                "sentence-transformers not available, falling back to TF-IDF embedder"
-            )
+            logger.info("sentence-transformers not available, falling back to TF-IDF embedder")
             return _SimpleTFIDFEmbedder(dimension=dimension)
         except Exception as exc:
             logger.warning(

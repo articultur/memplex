@@ -182,9 +182,7 @@ class TestCoreEngineGraphBuilding:
     def test_cross_reference_detection(self):
         """When functions mention each other, REFERENCES edges are created."""
         engine = CoreEngine()
-        source = _make_source(
-            "登录模块负责用户认证。\n\n首页模块展示用户信息，参见登录模块。"
-        )
+        source = _make_source("登录模块负责用户认证。\n\n首页模块展示用户信息，参见登录模块。")
         extracted = engine.extract(source)
 
         # At least some functions should exist
@@ -201,9 +199,7 @@ class TestCoreEngineDomainClassification:
         extracted = engine.extract(source)
 
         for func in extracted.functions:
-            if "登录" in func.name or any(
-                "登录" in fv.desc for fv in func.trigger + func.action
-            ):
+            if "登录" in func.name or any("登录" in fv.desc for fv in func.trigger + func.action):
                 assert func.domain in ("认证模块", "通用")
 
 

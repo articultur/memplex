@@ -64,9 +64,7 @@ def _serialize_feedback(fb: MemoryFeedback) -> dict:
         "memory_id": fb.memory_id,
         "field_role": fb.field_role,
         "value_index": fb.value_index,
-        "verdict": fb.verdict.value
-        if isinstance(fb.verdict, FeedbackVerdict)
-        else fb.verdict,
+        "verdict": fb.verdict.value if isinstance(fb.verdict, FeedbackVerdict) else fb.verdict,
         "reason": fb.reason,
         "source": fb.source,
         "timestamp": ts,
@@ -175,9 +173,7 @@ class LiteFeedbackStore:
     def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]:
         matching = [fb for fb in self._records if fb.memory_id == memory_id]
         matching.sort(
-            key=lambda fb: (
-                fb.timestamp if isinstance(fb.timestamp, datetime) else datetime.min
-            ),
+            key=lambda fb: fb.timestamp if isinstance(fb.timestamp, datetime) else datetime.min,
             reverse=True,
         )
         return matching[:limit]
@@ -437,9 +433,7 @@ class PostgresFeedbackStore:
                 field_role,
             )
 
-    async def get_history(
-        self, memory_id: str, limit: int = 50
-    ) -> List[MemoryFeedback]:
+    async def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]:
         await self._ensure_pool()
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(

@@ -95,9 +95,7 @@ class WikiCompiler:
         body_lines.append(f"**Domain:** {func.domain or 'uncategorized'}")
         body_lines.append(f"**Confidence:** {func.confidence:.2f}")
         if func.source_paragraphs:
-            body_lines.append(
-                f"**Source Paragraphs:** [{', '.join(func.source_paragraphs)}]"
-            )
+            body_lines.append(f"**Source Paragraphs:** [{', '.join(func.source_paragraphs)}]")
         body_lines.append("")
 
         # Field sections
@@ -115,9 +113,7 @@ class WikiCompiler:
                     reason = ref.get("reason", "")
                     if target:
                         link = f"[[{target}]]"
-                        body_lines.append(
-                            f"- {link}" + (f" -- {reason}" if reason else "")
-                        )
+                        body_lines.append(f"- {link}" + (f" -- {reason}" if reason else ""))
             body_lines.append("")
 
         content = frontmatter + "\n".join(body_lines)
@@ -257,8 +253,7 @@ class WikiCompiler:
         for func in sorted(all_funcs, key=lambda f: f.name):
             updated = func.updated_at or "-"
             lines.append(
-                f"| [[{func.id}]] | {func.domain or '-'} "
-                f"| {func.confidence:.2f} | {updated} |"
+                f"| [[{func.id}]] | {func.domain or '-'} | {func.confidence:.2f} | {updated} |"
             )
         lines.append("")
 
@@ -277,14 +272,9 @@ class WikiCompiler:
         # Recent changes
         lines.append("## Recent Changes")
         lines.append("")
-        sorted_funcs = sorted(
-            all_funcs, key=lambda f: f.updated_at or "", reverse=True
-        )[:10]
+        sorted_funcs = sorted(all_funcs, key=lambda f: f.updated_at or "", reverse=True)[:10]
         for func in sorted_funcs:
-            lines.append(
-                f"- {func.updated_at or '-'}: "
-                f"Updated `{func.name}` ({func.memory_type})"
-            )
+            lines.append(f"- {func.updated_at or '-'}: Updated `{func.name}` ({func.memory_type})")
         lines.append("")
 
         now = datetime.now(timezone.utc).isoformat()

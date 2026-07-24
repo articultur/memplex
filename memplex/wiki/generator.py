@@ -87,9 +87,7 @@ class LLMWikiGenerator:
         Produces a concept-level overview including core responsibilities,
         functional components, collaboration patterns, and key workflows.
         """
-        funcs_data = [
-            {"name": f.name, "action": [fv.desc for fv in f.action]} for f in functions
-        ]
+        funcs_data = [{"name": f.name, "action": [fv.desc for fv in f.action]} for f in functions]
 
         prompt = LLMPromptSanitizer.build_structured_prompt(
             instruction=(
@@ -162,11 +160,7 @@ class LLMWikiGenerator:
             summary = ""
             for line in p.content.splitlines():
                 stripped = line.strip()
-                if (
-                    stripped
-                    and not stripped.startswith("#")
-                    and not stripped.startswith("---")
-                ):
+                if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
                     summary = stripped[:200]
                     break
             page_summaries.append({"id": p.page_id, "summary": summary})
@@ -209,9 +203,7 @@ class LLMWikiGenerator:
                     ]
                     if link_lines:
                         cross_ref_block = (
-                            "\n## Cross-References (LLM)\n"
-                            + "\n".join(link_lines)
-                            + "\n"
+                            "\n## Cross-References (LLM)\n" + "\n".join(link_lines) + "\n"
                         )
                         new_content = page.content.rstrip() + cross_ref_block
                         updated.append(
@@ -253,8 +245,7 @@ class LLMWikiGenerator:
         Parsed JSON dict from the LLM response.
         """
         func_summaries = [
-            f"{f.name}: {', '.join(fv.desc for fv in f.action[:1])}"
-            for f in community_funcs[:20]
+            f"{f.name}: {', '.join(fv.desc for fv in f.action[:1])}" for f in community_funcs[:20]
         ]
         safe_text = LLMPromptSanitizer.sanitize(
             "\n".join(func_summaries),

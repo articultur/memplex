@@ -295,9 +295,7 @@ class PopQAHotpotDataset(EvaluationDataset):
             data = data["data"]
 
         if not isinstance(data, list):
-            raise ValueError(
-                f"Expected list of samples in JSON file, got {type(data).__name__}"
-            )
+            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")
 
         samples = []
         for item in data:
@@ -321,9 +319,7 @@ class PopQAHotpotDataset(EvaluationDataset):
                     if sample is not None:
                         samples.append(sample)
                 except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "Skipping invalid JSON on line %d: %s", line_num, exc
-                    )
+                    logger.warning("Skipping invalid JSON on line %d: %s", line_num, exc)
                     continue
 
         return samples
@@ -335,9 +331,7 @@ class PopQAHotpotDataset(EvaluationDataset):
         if "supporting_facts" in item_keys or "context" in item_keys:
             return self._parse_hotpotqa(item)
 
-        if "subject_id" in item_keys or (
-            "subject" in item_keys and "relation" in item_keys
-        ):
+        if "subject_id" in item_keys or ("subject" in item_keys and "relation" in item_keys):
             return self._parse_popqa(item)
 
         return self._parse_generic(item)
@@ -412,11 +406,7 @@ class PopQAHotpotDataset(EvaluationDataset):
         context = item.get("context", {})
         if isinstance(context, dict):
             context_texts = context.get("text", [])
-            context = (
-                " ".join(context_texts)
-                if isinstance(context_texts, list)
-                else str(context)
-            )
+            context = " ".join(context_texts) if isinstance(context_texts, list) else str(context)
         else:
             context = str(context) if context else ""
 
@@ -454,19 +444,12 @@ class PopQAHotpotDataset(EvaluationDataset):
             or item.get("text")
             or ""
         )
-        answer = (
-            item.get("answer")
-            or item.get("expected_answer")
-            or item.get("target")
-            or ""
-        )
+        answer = item.get("answer") or item.get("expected_answer") or item.get("target") or ""
 
         if not question:
             return None
 
-        sample_id = str(
-            item.get("id", item.get("sample_id", hash(str(question)) % 1000000))
-        )
+        sample_id = str(item.get("id", item.get("sample_id", hash(str(question)) % 1000000)))
 
         return BenchmarkSample(
             id=f"generic_{sample_id}",
@@ -518,9 +501,7 @@ class PopQAHotpotDataset(EvaluationDataset):
     def get_sample(self, index: int) -> BenchmarkSample:
         """Get a sample by index."""
         if index < 0 or index >= len(self._samples):
-            raise IndexError(
-                f"Sample index {index} out of range [0, {len(self._samples)})"
-            )
+            raise IndexError(f"Sample index {index} out of range [0, {len(self._samples)})")
         return self._samples[index]
 
 
@@ -553,16 +534,13 @@ def _compute_hop_metrics(
 
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
-        relevant_found = any(
-            _answer_in_text(s, answer_aliases) for s in top_k_summaries
-        )
+        relevant_found = any(_answer_in_text(s, answer_aliases) for s in top_k_summaries)
         metrics[f"precision@{k}"] = 1.0 / k if relevant_found else 0.0
         metrics[f"recall@{k}"] = 1.0 if relevant_found else 0.0
 
     metrics["exact_match"] = (
         1.0
-        if retrieved_summaries
-        and _answer_in_text(retrieved_summaries[0], answer_aliases)
+        if retrieved_summaries and _answer_in_text(retrieved_summaries[0], answer_aliases)
         else 0.0
     )
 
@@ -599,9 +577,7 @@ def _compute_multihop_metrics(
         top_k_summaries = retrieved_summaries[:k]
         top_k_lower = " ".join(top_k_summaries).lower()
         hops_in_top_k = sum(1 for entity in hop_entities if entity in top_k_lower)
-        metrics[f"hop_precision@{k}"] = (
-            hops_in_top_k / num_hops if num_hops > 0 else 0.0
-        )
+        metrics[f"hop_precision@{k}"] = hops_in_top_k / num_hops if num_hops > 0 else 0.0
         metrics[f"hop_recall@{k}"] = hops_in_top_k / num_hops if num_hops > 0 else 0.0
 
     metrics["multihop_accuracy"] = 1.0 if all(hops_covered) else 0.0
@@ -610,9 +586,7 @@ def _compute_multihop_metrics(
     answer_found = any(_answer_in_text(s, answer_aliases) for s in retrieved_summaries)
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
-        relevant_in_top_k = any(
-            _answer_in_text(s, answer_aliases) for s in top_k_summaries
-        )
+        relevant_in_top_k = any(_answer_in_text(s, answer_aliases) for s in top_k_summaries)
         metrics[f"precision@{k}"] = 1.0 / k if relevant_in_top_k else 0.0
         metrics[f"recall@{k}"] = 1.0 if relevant_in_top_k else 0.0
 
@@ -668,14 +642,10 @@ class PopQAHotpotRunner(BenchmarkRunner):
         results: List[BenchmarkResult] = []
 
         popqa_samples = [s for s in samples if s.metadata.get("dataset") == "popqa"]
-        hotpotqa_samples = [
-            s for s in samples if s.metadata.get("dataset") == "hotpotqa"
-        ]
+        hotpotqa_samples = [s for s in samples if s.metadata.get("dataset") == "hotpotqa"]
 
         popqa_metrics = self._run_popqa_retrieval(service, popqa_samples, top_k)
-        hotpotqa_metrics = self._run_hotpotqa_retrieval(
-            service, hotpotqa_samples, top_k
-        )
+        hotpotqa_metrics = self._run_hotpotqa_retrieval(service, hotpotqa_samples, top_k)
 
         all_metrics = {**popqa_metrics, **hotpotqa_metrics}
 
@@ -685,11 +655,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
         for metric_name, value in all_metrics.items():
             if metric_name.startswith("_"):
                 continue
-            dataset = (
-                "hotpotqa"
-                if "hop" in metric_name or "multihop" in metric_name
-                else "popqa"
-            )
+            dataset = "hotpotqa" if "hop" in metric_name or "multihop" in metric_name else "popqa"
             results.append(
                 BenchmarkResult(
                     name=f"{self.name}_retrieval",
@@ -723,9 +689,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
 
         mrr_scores: List[float] = []
         em_scores: List[float] = []
-        recall_scores: Dict[str, List[float]] = {
-            f"recall@{k}": [] for k in self._k_values
-        }
+        recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
@@ -775,9 +739,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
         hop_precision_scores: Dict[str, List[float]] = {
             f"hop_precision@{k}": [] for k in self._k_values
         }
-        hop_recall_scores: Dict[str, List[float]] = {
-            f"hop_recall@{k}": [] for k in self._k_values
-        }
+        hop_recall_scores: Dict[str, List[float]] = {f"hop_recall@{k}": [] for k in self._k_values}
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
@@ -820,9 +782,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 hop_precision_scores[f"hop_precision@{k}"].append(
                     metrics.get(f"hop_precision@{k}", 0.0)
                 )
-                hop_recall_scores[f"hop_recall@{k}"].append(
-                    metrics.get(f"hop_recall@{k}", 0.0)
-                )
+                hop_recall_scores[f"hop_recall@{k}"].append(metrics.get(f"hop_recall@{k}", 0.0))
 
         avg_metrics: Dict[str, float] = {}
 
@@ -835,9 +795,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 avg_metrics[f"hop_precision@{k}"] = (
                     sum(hop_precision_scores[f"hop_precision@{k}"]) / n
                 )
-                avg_metrics[f"hop_recall@{k}"] = (
-                    sum(hop_recall_scores[f"hop_recall@{k}"]) / n
-                )
+                avg_metrics[f"hop_recall@{k}"] = sum(hop_recall_scores[f"hop_recall@{k}"]) / n
 
         return avg_metrics
 
@@ -862,9 +820,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
 
             query_start = datetime.utcnow()
             query_result = service.query(sample.query, top_k=5)
-            query_latency = int(
-                (datetime.utcnow() - query_start).total_seconds() * 1000
-            )
+            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
             total_latency += query_latency
 
             prediction = ""

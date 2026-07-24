@@ -117,9 +117,7 @@ def ndcg_at_k(
         return 0.0
 
     expected_set = set(expected)
-    relevance_fn = relevance_fn or (
-        lambda item_id: 1.0 if item_id in expected_set else 0.0
-    )
+    relevance_fn = relevance_fn or (lambda item_id: 1.0 if item_id in expected_set else 0.0)
 
     def dcg(items: List[str]) -> float:
         result = 0.0
@@ -191,9 +189,7 @@ def bleu(prediction: str, reference: str, n: int = 4) -> float:
     if not valid_precisions:
         return 0.0
 
-    geo_mean = math.exp(
-        sum(math.log(p) for p in valid_precisions) / len(valid_precisions)
-    )
+    geo_mean = math.exp(sum(math.log(p) for p in valid_precisions) / len(valid_precisions))
 
     # Brevity penalty
     bp = (
@@ -362,9 +358,7 @@ class MemoryMetrics:
         # Compare temporal order with access_count order
         # Ideally, newer memories should have higher access counts
         temporal_order = sorted(memories, key=lambda m: m.get("created_at", ""))
-        access_order = sorted(
-            memories, key=lambda m: m.get("access_count", 0), reverse=True
-        )
+        access_order = sorted(memories, key=lambda m: m.get("access_count", 0), reverse=True)
 
         # Score: how many pairs are in correct relative order
         correct_pairs = 0
@@ -467,13 +461,9 @@ class MemoryMetrics:
 
             for source_id, target_id in required_edges:
                 neighbors = (
-                    store.get_neighbors(source_id)
-                    if hasattr(store, "get_neighbors")
-                    else []
+                    store.get_neighbors(source_id) if hasattr(store, "get_neighbors") else []
                 )
-                neighbor_ids = [
-                    n.get("id") if isinstance(n, dict) else str(n) for n in neighbors
-                ]
+                neighbor_ids = [n.get("id") if isinstance(n, dict) else str(n) for n in neighbors]
                 if target_id in neighbor_ids:
                     connected += 1
         except Exception as e:

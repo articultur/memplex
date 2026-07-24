@@ -42,9 +42,7 @@ class IndirectInjectionGuard:
         r"assistant\s*:\s*sure",
     ]
 
-    _compiled: list[re.Pattern] = [
-        re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS
-    ]
+    _compiled: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
 
     # Trust level mapping: source_type value -> trust level label
     TRUST_LEVELS: dict[str, str] = {
@@ -101,9 +99,7 @@ class IndirectInjectionGuard:
             trust = cls.TRUST_LEVELS.get(source_type_val, "LOW")
             summary = r.summary or func.name
             parts.append(
-                f"[MEMORY START | trust={trust} | id={r.func_id}]\n"
-                f"{summary}\n"
-                f"[MEMORY END]"
+                f"[MEMORY START | trust={trust} | id={r.func_id}]\n{summary}\n[MEMORY END]"
             )
         return "\n\n".join(parts)
 

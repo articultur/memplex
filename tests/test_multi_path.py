@@ -235,9 +235,7 @@ def _func(attrs=None):
 
 def test_filter_by_namespace_keeps_matching_results():
     r1, r2 = _sr("a"), _sr("b")
-    store = _StubStore(
-        funcs_by_id={"a": _func({"agent": "codex"}), "b": _func({"agent": "other"})}
-    )
+    store = _StubStore(funcs_by_id={"a": _func({"agent": "codex"}), "b": _func({"agent": "other"})})
     out = MultiPathRetriever(store).filter_by_namespace([r1, r2], {"agent": "codex"})
     assert [x.func_id for x in out] == ["a"]
 
@@ -245,9 +243,7 @@ def test_filter_by_namespace_keeps_matching_results():
 def test_filter_by_namespace_requires_all_keys_to_match():
     r1 = _sr("a")
     store = _StubStore(funcs_by_id={"a": _func({"agent": "codex", "user": "alice"})})
-    out = MultiPathRetriever(store).filter_by_namespace(
-        [r1], {"agent": "codex", "user": "bob"}
-    )
+    out = MultiPathRetriever(store).filter_by_namespace([r1], {"agent": "codex", "user": "bob"})
     assert out == []
 
 
@@ -283,9 +279,7 @@ def test_merge_combines_across_lists():
 
 
 def test_merge_sorts_descending_by_relevance():
-    out = MultiPathRetriever.merge_multi_path(
-        [[_sr("a", 0.1), _sr("b", 0.9), _sr("c", 0.5)]]
-    )
+    out = MultiPathRetriever.merge_multi_path([[_sr("a", 0.1), _sr("b", 0.9), _sr("c", 0.5)]])
     scores = [x.relevance_score for x in out]
     assert scores == sorted(scores, reverse=True)
 

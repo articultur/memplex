@@ -14,9 +14,7 @@ class LLMProvider(Protocol):
     HyDE generation, and general-purpose completion.
     """
 
-    async def classify_intent(
-        self, query: str, context: dict | None = None
-    ) -> IntentType:
+    async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify user query intent.
 
         Returns one of: IMMEDIATE, SYNTHESIS, RELATION, ALL.
@@ -125,6 +123,5 @@ def create_provider(
         return RuleBasedProvider()
 
     raise ValueError(
-        f"Unknown provider: {provider!r}. "
-        f"Choose from: auto, anthropic, local, rule-based"
+        f"Unknown provider: {provider!r}. Choose from: auto, anthropic, local, rule-based"
     )

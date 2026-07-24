@@ -211,9 +211,7 @@ class CoreEngine:
         # Step 9: ConfidenceCalculator -- compute confidence for each function
         for func in functions:
             if func.confidence == 1.0:
-                func.confidence = self._calculate_function_confidence(
-                    func, paragraphs, source_hint
-                )
+                func.confidence = self._calculate_function_confidence(func, paragraphs, source_hint)
 
         # Step 10: GraphBuilder -- build edges
         graph = self._build_graph(functions)
@@ -369,7 +367,6 @@ class CoreEngine:
         # All text goes through MarkdownExtractor (handles plain text too)
         return self.markdown_extractor.extract(text, source=source_hint)
 
-
     def _deduplicate_functions(self, functions: List[Function]) -> List[Function]:
         """Use EntityAligner to merge duplicate Functions."""
         if len(functions) <= 1:
@@ -377,13 +374,10 @@ class CoreEngine:
 
         # Build entity dicts for EntityAligner
         entity_dicts = [
-            {"id": f.id, "name": f.name, "name_normalized": f.name_normalized}
-            for f in functions
+            {"id": f.id, "name": f.name, "name_normalized": f.name_normalized} for f in functions
         ]
 
-        merge_groups = self.entity_aligner.find_merge_candidates(
-            entity_dicts, threshold=0.9
-        )
+        merge_groups = self.entity_aligner.find_merge_candidates(entity_dicts, threshold=0.9)
 
         if not merge_groups:
             return functions

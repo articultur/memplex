@@ -31,8 +31,7 @@ def _tokenize_search_text(text: str) -> List[str]:
             tokens.extend(chars)
             for size in (2, 3):
                 tokens.extend(
-                    "".join(chars[i : i + size])
-                    for i in range(0, max(len(chars) - size + 1, 0))
+                    "".join(chars[i : i + size]) for i in range(0, max(len(chars) - size + 1, 0))
                 )
             continue
 
@@ -53,19 +52,14 @@ def _character_ngrams(text: str, size: int = 3) -> set[str]:
 
 def _encoded_trigram_tokens(text: str) -> List[str]:
     """Encode fuzzy trigrams as FTS-safe ASCII tokens."""
-    return [
-        "tri" + gram.encode("utf-8").hex()
-        for gram in sorted(_character_ngrams(text))
-        if gram
-    ]
+    return ["tri" + gram.encode("utf-8").hex() for gram in sorted(_character_ngrams(text)) if gram]
 
 
 def _sqlite_match_query(tokens: List[str]) -> str:
     """Build a safe OR query for SQLite FTS5 MATCH."""
     unique_tokens = list(dict.fromkeys(token for token in tokens if token))
     quoted = [
-        '"' + token.replace('"', '""') + '"'
-        for token in unique_tokens[:_MAX_SQLITE_QUERY_TERMS]
+        '"' + token.replace('"', '""') + '"' for token in unique_tokens[:_MAX_SQLITE_QUERY_TERMS]
     ]
     return " OR ".join(quoted)
 
@@ -281,12 +275,8 @@ def local_bm25_search(
                 continue
             df = document_frequency[term]
             idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
-            denom = term_frequency + _BM25_K1 * (
-                1 - _BM25_B + _BM25_B * (doc_len / avg_doc_len)
-            )
-            bm25 += query_count * idf * (
-                (term_frequency * (_BM25_K1 + 1)) / denom
-            )
+            denom = term_frequency + _BM25_K1 * (1 - _BM25_B + _BM25_B * (doc_len / avg_doc_len))
+            bm25 += query_count * idf * ((term_frequency * (_BM25_K1 + 1)) / denom)
 
         phrase_boost = 0.0
         func_lower = func_text.lower()

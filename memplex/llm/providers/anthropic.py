@@ -86,9 +86,7 @@ class AnthropicProvider:
 
     # -- LLMProvider interface ------------------------------------------
 
-    async def classify_intent(
-        self, query: str, context: dict | None = None
-    ) -> IntentType:
+    async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify user query intent using Claude."""
         result = await self.complete_json(
             f"Classify the intent of the following query. "

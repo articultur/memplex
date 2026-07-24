@@ -74,12 +74,8 @@ class TestLiteMemoryStoreAdd:
     def test_add_merges_duplicate_name(self, tmp_path):
         store = _make_store(tmp_path)
 
-        func_a = _make_func(
-            "func_a", "Login", triggers=[FieldValue(desc="click button")]
-        )
-        func_b = _make_func(
-            "func_b", "Login", triggers=[FieldValue(desc="enter credentials")]
-        )
+        func_a = _make_func("func_a", "Login", triggers=[FieldValue(desc="click button")])
+        func_b = _make_func("func_b", "Login", triggers=[FieldValue(desc="enter credentials")])
 
         store.add(func_a, _make_source())
         store.add(func_b, _make_source())
@@ -194,9 +190,7 @@ class TestLiteMemoryStoreMerge:
 
         graph = GraphData(
             nodes=[],
-            edges=[
-                GraphEdge(source="func_ea", target="func_eb", edge_type="REFERENCES")
-            ],
+            edges=[GraphEdge(source="func_ea", target="func_eb", edge_type="REFERENCES")],
         )
         result = store.merge(graph)
         assert result.new_edges == 1
@@ -208,9 +202,7 @@ class TestLiteMemoryStoreMerge:
         store.add(func_a, _make_source())
         store.add(func_b, _make_source())
 
-        edge = GraphEdge(
-            source="func_dup_a", target="func_dup_b", edge_type="REFERENCES"
-        )
+        edge = GraphEdge(source="func_dup_a", target="func_dup_b", edge_type="REFERENCES")
         graph = GraphData(nodes=[], edges=[edge])
         store.merge(graph)
         result = store.merge(graph)  # Same edge again
@@ -281,11 +273,7 @@ class TestLiteMemoryStoreVectorSearch:
         specific = _make_func(
             "func_specific",
             "Offline HuggingFace fallback",
-            actions=[
-                FieldValue(
-                    desc="use local bm25 retrieval when huggingface is unavailable"
-                )
-            ],
+            actions=[FieldValue(desc="use local bm25 retrieval when huggingface is unavailable")],
         )
         generic = _make_func(
             "func_generic",
@@ -428,9 +416,7 @@ class TestLiteMemoryStoreFTSSearch:
         func = _make_func(
             "func_cn",
             "大陆离线检索",
-            actions=[
-                FieldValue(desc="中国大陆 HuggingFace 不可用时使用本地离线检索")
-            ],
+            actions=[FieldValue(desc="中国大陆 HuggingFace 不可用时使用本地离线检索")],
         )
         store.add(func, _make_source())
 
@@ -604,9 +590,7 @@ class TestLiteMemoryStoreClear:
 class TestLiteMemoryStorePersistence:
     def test_save_and_reload(self, tmp_path):
         store = _make_store(tmp_path)
-        func = _make_func(
-            "func_persist", "PersistTest", triggers=[FieldValue(desc="trigger text")]
-        )
+        func = _make_func("func_persist", "PersistTest", triggers=[FieldValue(desc="trigger text")])
         store.add(func, _make_source())
 
         # Reload from disk

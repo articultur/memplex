@@ -129,18 +129,14 @@ if _FASTAPI_AVAILABLE:
 
         # Validate the X-API-Key header against a configured API key.
         if api_key is not None and x_api_key is not None:
-            if hmac.compare_digest(
-                x_api_key.encode("utf-8"), api_key.encode("utf-8")
-            ):
+            if hmac.compare_digest(x_api_key.encode("utf-8"), api_key.encode("utf-8")):
                 return
 
         # Validate the Authorization: Bearer header against a configured token.
         if bearer_token is not None and authorization is not None:
             scheme, _, token = authorization.partition(" ")
             if scheme.lower() == "bearer" and token.strip():
-                if hmac.compare_digest(
-                    token.strip().encode("utf-8"), bearer_token.encode("utf-8")
-                ):
+                if hmac.compare_digest(token.strip().encode("utf-8"), bearer_token.encode("utf-8")):
                     return
 
         raise HTTPException(
@@ -169,8 +165,7 @@ def create_app(config=None) -> "FastAPI":
     """
     if not _FASTAPI_AVAILABLE:
         raise ImportError(
-            "FastAPI is required for the HTTP adapter. "
-            "Install it with: pip install fastapi uvicorn"
+            "FastAPI is required for the HTTP adapter. Install it with: pip install fastapi uvicorn"
         )
 
     from memplex.config import load_config
@@ -267,7 +262,8 @@ def create_app(config=None) -> "FastAPI":
         return JSONResponse(_dataclass_to_dict(result))
 
     @app.get("/memories", summary="Query memories")
-    async def query_memories(request: Request, 
+    async def query_memories(
+        request: Request,
         q: str = Query(..., description="Query text"),
         top_k: int = Query(10, ge=1, le=100),
         owner: Optional[str] = Query(None),
@@ -330,7 +326,8 @@ def create_app(config=None) -> "FastAPI":
         return JSONResponse({"status": "recorded"})
 
     @app.get("/memories/pending_reviews", summary="List pending reviews")
-    async def pending_reviews(request: Request, 
+    async def pending_reviews(
+        request: Request,
         owner: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=1000),
     ) -> JSONResponse:
@@ -366,13 +363,17 @@ def create_app(config=None) -> "FastAPI":
         return JSONResponse(result)
 
     @app.get("/health", summary="Health check")
-    async def health(request: Request, ) -> JSONResponse:
+    async def health(
+        request: Request,
+    ) -> JSONResponse:
         """Return service health status."""
         svc = _get_service(request)
         return JSONResponse(svc.health())
 
     @app.get("/stats", summary="Statistics")
-    async def stats(request: Request, ) -> JSONResponse:
+    async def stats(
+        request: Request,
+    ) -> JSONResponse:
         """Return storage and usage statistics."""
         svc = _get_service(request)
         return JSONResponse(svc.stats())

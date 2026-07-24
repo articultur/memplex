@@ -342,9 +342,7 @@ class NQTriviaDataset(EvaluationDataset):
     def _download_generic(self, num_samples: Optional[int] = None) -> str:
         """Generic HuggingFace download attempt."""
         hf_id = (
-            "natural_questions"
-            if "natural" in self.dataset_name.lower()
-            else "mAlexSie/TriviaQA"
+            "natural_questions" if "natural" in self.dataset_name.lower() else "mAlexSie/TriviaQA"
         )
         max_samples = num_samples or 100
 
@@ -372,8 +370,7 @@ class NQTriviaDataset(EvaluationDataset):
 
         if ds is None:
             raise ValueError(
-                f"Could not download {self.dataset_name} from HuggingFace. "
-                f"Tried: {hf_id}"
+                f"Could not download {self.dataset_name} from HuggingFace. Tried: {hf_id}"
             )
 
         if max_samples and max_samples < len(ds):
@@ -522,9 +519,7 @@ class NQTriviaDataset(EvaluationDataset):
             data = data["data"]
 
         if not isinstance(data, list):
-            raise ValueError(
-                f"Expected list of samples in JSON file, got {type(data).__name__}"
-            )
+            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")
 
         samples = []
         for item in data:
@@ -548,9 +543,7 @@ class NQTriviaDataset(EvaluationDataset):
                     if sample is not None:
                         samples.append(sample)
                 except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "Skipping invalid JSON on line %d: %s", line_num, exc
-                    )
+                    logger.warning("Skipping invalid JSON on line %d: %s", line_num, exc)
                     continue
 
         return samples
@@ -607,9 +600,7 @@ class NQTriviaDataset(EvaluationDataset):
             },
         )
 
-    def _parse_natural_questions(
-        self, item: Dict[str, Any]
-    ) -> Optional[BenchmarkSample]:
+    def _parse_natural_questions(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
         """Parse a Natural Questions format item."""
         question = item.get("question", item.get("question_text", ""))
         if not question:
@@ -661,19 +652,12 @@ class NQTriviaDataset(EvaluationDataset):
             or item.get("text")
             or ""
         )
-        answer = (
-            item.get("answer")
-            or item.get("expected_answer")
-            or item.get("target")
-            or ""
-        )
+        answer = item.get("answer") or item.get("expected_answer") or item.get("target") or ""
 
         if not question:
             return None
 
-        sample_id = str(
-            item.get("id", item.get("sample_id", hash(str(question)) % 1000000))
-        )
+        sample_id = str(item.get("id", item.get("sample_id", hash(str(question)) % 1000000)))
 
         return BenchmarkSample(
             id=f"generic_{sample_id}",
@@ -715,9 +699,7 @@ class NQTriviaDataset(EvaluationDataset):
     def get_sample(self, index: int) -> BenchmarkSample:
         """Get a sample by index."""
         if index < 0 or index >= len(self._samples):
-            raise IndexError(
-                f"Sample index {index} out of range [0, {len(self._samples)})"
-            )
+            raise IndexError(f"Sample index {index} out of range [0, {len(self._samples)})")
         return self._samples[index]
 
 
@@ -767,9 +749,7 @@ def _compute_retrieval_metrics(
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
         relevant_in_top_k = sum(
-            1
-            for alias in answer_aliases
-            if alias and alias in " ".join(top_k_summaries).lower()
+            1 for alias in answer_aliases if alias and alias in " ".join(top_k_summaries).lower()
         )
 
         precision = relevant_in_top_k / k if k > 0 else 0.0
@@ -849,12 +829,8 @@ class NQTriviaRunner(BenchmarkRunner):
 
         results: List[BenchmarkResult] = []
 
-        recall_scores: Dict[str, List[float]] = {
-            f"recall@{k}": [] for k in self._k_values
-        }
-        precision_scores: Dict[str, List[float]] = {
-            f"precision@{k}": [] for k in self._k_values
-        }
+        recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
+        precision_scores: Dict[str, List[float]] = {f"precision@{k}": [] for k in self._k_values}
         mrr_scores: List[float] = []
         total_latency = 0
 
@@ -865,9 +841,7 @@ class NQTriviaRunner(BenchmarkRunner):
 
             query_start = datetime.utcnow()
             query_result = service.query(sample.query, top_k=top_k)
-            query_latency = int(
-                (datetime.utcnow() - query_start).total_seconds() * 1000
-            )
+            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
             total_latency += query_latency
 
             retrieved_summaries = [r.summary for r in query_result.results]
@@ -881,9 +855,7 @@ class NQTriviaRunner(BenchmarkRunner):
             mrr_scores.append(metrics.get("mrr", 0.0))
             for k in self._k_values:
                 recall_scores[f"recall@{k}"].append(metrics.get(f"recall@{k}", 0.0))
-                precision_scores[f"precision@{k}"].append(
-                    metrics.get(f"precision@{k}", 0.0)
-                )
+                precision_scores[f"precision@{k}"].append(metrics.get(f"precision@{k}", 0.0))
 
         avg_latency = total_latency // max(len(samples), 1)
         timestamp = datetime.utcnow().isoformat() + "Z"
@@ -917,9 +889,7 @@ class NQTriviaRunner(BenchmarkRunner):
                 )
             )
 
-            avg_recall = sum(recall_scores[f"recall@{k}"]) / len(
-                recall_scores[f"recall@{k}"]
-            )
+            avg_recall = sum(recall_scores[f"recall@{k}"]) / len(recall_scores[f"recall@{k}"])
             results.append(
                 BenchmarkResult(
                     name=f"{self.name}_retrieval",
@@ -936,8 +906,7 @@ class NQTriviaRunner(BenchmarkRunner):
             "%s retrieval benchmark: MRR=%.4f, P@10=%.4f, R@10=%.4f",
             self.name,
             avg_mrr,
-            sum(precision_scores["precision@10"])
-            / len(precision_scores["precision@10"]),
+            sum(precision_scores["precision@10"]) / len(precision_scores["precision@10"]),
             sum(recall_scores["recall@10"]) / len(recall_scores["recall@10"]),
         )
 
@@ -976,9 +945,7 @@ class NQTriviaRunner(BenchmarkRunner):
 
             query_start = datetime.utcnow()
             query_result = service.query(sample.query, top_k=5)
-            query_latency = int(
-                (datetime.utcnow() - query_start).total_seconds() * 1000
-            )
+            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
             total_latency += query_latency
 
             retrieved_text = " ".join(r.summary for r in query_result.results)

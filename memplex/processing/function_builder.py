@@ -66,9 +66,7 @@ def build_functions_from_paragraphs(
         func_id = f"func_{content_hash}"
 
         name = para.section if para.section else para.raw_text[:50]
-        name_normalized = normalize_name(
-            para.section if para.section else para.raw_text[:50]
-        )
+        name_normalized = normalize_name(para.section if para.section else para.raw_text[:50])
 
         # Classify FieldValues from sentences
         triggers: List[FieldValue] = []
@@ -101,9 +99,7 @@ def build_functions_from_paragraphs(
         # If no structured sentences, use raw text as trigger/action
         if not triggers and not actions and para.raw_text:
             sentences_text = [
-                s.strip()
-                for s in re.split(r"[。.!?！？]", para.raw_text)
-                if s.strip()
+                s.strip() for s in re.split(r"[。.!?！？]", para.raw_text) if s.strip()
             ]
             if sentences_text:
                 triggers.append(

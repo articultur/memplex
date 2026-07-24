@@ -121,8 +121,7 @@ class LocomoDataset(EvaluationDataset):
             conversations = raw
         else:
             raise ValueError(
-                f"Unexpected LoCoMo format in {load_path}: "
-                "top-level must be dict or list"
+                f"Unexpected LoCoMo format in {load_path}: top-level must be dict or list"
             )
 
         samples: List[BenchmarkSample] = []
@@ -155,14 +154,10 @@ class LocomoDataset(EvaluationDataset):
         Query is the last user turn; expected answer is the next assistant turn.
         """
         user_turns = [
-            t
-            for t in turns
-            if t.get("speaker", "").lower() in ("user", "human", "question")
+            t for t in turns if t.get("speaker", "").lower() in ("user", "human", "question")
         ]
         assistant_turns = [
-            t
-            for t in turns
-            if t.get("speaker", "").lower() in ("assistant", "system", "agent")
+            t for t in turns if t.get("speaker", "").lower() in ("assistant", "system", "agent")
         ]
 
         query = user_turns[-1]["text"] if user_turns else ""
@@ -317,9 +312,7 @@ class LocomoDataset(EvaluationDataset):
             source_type=SourceType.MEETING,
             metadata={
                 "memory_objects": memory_objects,
-                "memory_type": "observation"
-                if sample_type == "summarization"
-                else "fact",
+                "memory_type": "observation" if sample_type == "summarization" else "fact",
                 "conversation_id": conv_id,
                 "sample_type": sample_type,
             },
@@ -427,9 +420,7 @@ class LocomoRunner(BenchmarkRunner):
 
         # Task-specific sub-metrics
         results.extend(self._run_recency_accuracy(service, samples, top_k, timestamp))
-        results.extend(
-            self._run_persona_consistency(service, samples, top_k, timestamp)
-        )
+        results.extend(self._run_persona_consistency(service, samples, top_k, timestamp))
         results.extend(self._run_event_tracking(service, samples, top_k, timestamp))
 
         return results
@@ -660,9 +651,7 @@ class LocomoRunner(BenchmarkRunner):
         if not expected or not retrieved:
             return 0.0
         pos_map = {rid: i for i, rid in enumerate(retrieved)}
-        correct = sum(
-            1 for i, eid in enumerate(expected) if eid in pos_map and pos_map[eid] == i
-        )
+        correct = sum(1 for i, eid in enumerate(expected) if eid in pos_map and pos_map[eid] == i)
         return correct / len(expected)
 
 

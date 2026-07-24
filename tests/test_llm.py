@@ -244,15 +244,11 @@ class TestRuleBasedProvider:
         assert result == "test query"
 
     def test_complete_returns_empty(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.provider.complete("prompt")
-        )
+        result = asyncio.get_event_loop().run_until_complete(self.provider.complete("prompt"))
         assert result == ""
 
     def test_complete_json_returns_empty(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.provider.complete_json("prompt")
-        )
+        result = asyncio.get_event_loop().run_until_complete(self.provider.complete_json("prompt"))
         assert result == {}
 
 
@@ -262,28 +258,20 @@ class TestRuleBasedProvider:
 class TestFallbackChain:
     def test_fallback_to_rule_based(self):
         chain = FallbackChain([])  # No providers
-        result = asyncio.get_event_loop().run_until_complete(
-            chain.classify_intent("test")
-        )
+        result = asyncio.get_event_loop().run_until_complete(chain.classify_intent("test"))
         assert result == IntentType.IMMEDIATE
 
     def test_fallback_summarize(self):
         chain = FallbackChain([])
-        result = asyncio.get_event_loop().run_until_complete(
-            chain.summarize("test content")
-        )
+        result = asyncio.get_event_loop().run_until_complete(chain.summarize("test content"))
         assert result == "test content"
 
     def test_fallback_complete_json(self):
         chain = FallbackChain([])
-        result = asyncio.get_event_loop().run_until_complete(
-            chain.complete_json("prompt")
-        )
+        result = asyncio.get_event_loop().run_until_complete(chain.complete_json("prompt"))
         assert result == {}
 
     def test_fallback_generate_hypothetical(self):
         chain = FallbackChain([])
-        result = asyncio.get_event_loop().run_until_complete(
-            chain.generate_hypothetical("query")
-        )
+        result = asyncio.get_event_loop().run_until_complete(chain.generate_hypothetical("query"))
         assert result == "query"

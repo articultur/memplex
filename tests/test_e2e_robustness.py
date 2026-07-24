@@ -164,9 +164,7 @@ def test_explicit_huggingface_failure_falls_back_through_service(monkeypatch, tm
 
     service = MemplexService(config=cfg)
     try:
-        service.write_text(
-            "explicit-hf-fallback-token: offline fallback still writes and recalls."
-        )
+        service.write_text("explicit-hf-fallback-token: offline fallback still writes and recalls.")
         result = service.query("explicit-hf-fallback-token")
     finally:
         service.stop()
@@ -176,9 +174,7 @@ def test_explicit_huggingface_failure_falls_back_through_service(monkeypatch, tm
 
 
 def test_release_version_surfaces_stay_in_sync_for_fresh_installs():
-    version = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())["project"][
-        "version"
-    ]
+    version = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())["project"]["version"]
 
     npm_package = json.loads((PROJECT_ROOT / "npm" / "memplex" / "package.json").read_text())
     assert npm_package["version"] == version

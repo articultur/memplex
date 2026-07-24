@@ -19,9 +19,7 @@ from memplex.storage.lite.store import LiteMemoryStore
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _make_func(
-    func_id, name, domain=None, triggers=None, actions=None, cross_refs=None
-):
+def _make_func(func_id, name, domain=None, triggers=None, actions=None, cross_refs=None):
     return Function(
         id=func_id,
         name=name,
@@ -93,9 +91,7 @@ class TestDependsOnEdge:
         builder = GraphBuilder(store=store)
 
         func_a = _make_func("func_a", "Login")
-        func_b = _make_func(
-            "func_b", "Dashboard", actions=[FieldValue(desc="uses Login module")]
-        )
+        func_b = _make_func("func_b", "Dashboard", actions=[FieldValue(desc="uses Login module")])
 
         from memplex.models import SourceDocument
 
@@ -133,9 +129,7 @@ class TestConflictsWithEdge:
         store.add(func_a, SourceDocument(type="text", source_type=SourceType.WIKI))
 
         edges = builder.process(func_b)
-        conflict_edges = [
-            e for e in edges if e.edge_type == EdgeType.CONFLICTS_WITH.value
-        ]
+        conflict_edges = [e for e in edges if e.edge_type == EdgeType.CONFLICTS_WITH.value]
         assert len(conflict_edges) >= 1
 
     def test_no_conflict_different_domains(self, tmp_path):
@@ -160,9 +154,7 @@ class TestConflictsWithEdge:
         store.add(func_a, SourceDocument(type="text", source_type=SourceType.WIKI))
 
         edges = builder.process(func_b)
-        conflict_edges = [
-            e for e in edges if e.edge_type == EdgeType.CONFLICTS_WITH.value
-        ]
+        conflict_edges = [e for e in edges if e.edge_type == EdgeType.CONFLICTS_WITH.value]
         assert len(conflict_edges) == 0
 
 
@@ -231,9 +223,7 @@ class TestAssociatedWithEdge:
         store.add(func_a, SourceDocument(type="text", source_type=SourceType.WIKI))
 
         edges = builder.process(func_b)
-        assoc_edges = [
-            e for e in edges if e.edge_type == EdgeType.ASSOCIATED_WITH.value
-        ]
+        assoc_edges = [e for e in edges if e.edge_type == EdgeType.ASSOCIATED_WITH.value]
         assert len(assoc_edges) >= 1
 
 

@@ -306,10 +306,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
             for other in functions:
                 if other.id == func.id:
                     continue
-                if (
-                    target.lower() in other.name.lower()
-                    or target.lower() in other.name_normalized
-                ):
+                if target.lower() in other.name.lower() or target.lower() in other.name_normalized:
                     key = (func.id, other.id, "REFERENCES")
                     if key not in seen:
                         seen.add(key)
@@ -319,9 +316,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
                                 target=other.id,
                                 edge_type="REFERENCES",
                                 weight=1.0,
-                                evidence=[
-                                    f"cross-reference: {func.name} -> {other.name}"
-                                ],
+                                evidence=[f"cross-reference: {func.name} -> {other.name}"],
                                 created_at=datetime.now(),
                             )
                         )

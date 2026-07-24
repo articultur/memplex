@@ -207,8 +207,7 @@ class TestServiceInjectionGuardWrite:
         flagged = [
             f
             for f in stored
-            if (getattr(f, "attributes", {}) or {}).get("memplex_injection_suspected")
-            == "true"
+            if (getattr(f, "attributes", {}) or {}).get("memplex_injection_suspected") == "true"
         ]
         assert flagged, "injection-suspected memory must be flagged at write time"
 
@@ -221,12 +220,9 @@ class TestServiceInjectionGuardWrite:
         stored = service.store.list_functions(limit=1000)
         assert stored, "legitimate content must still be stored"
         for func in stored:
-            assert (
-                (getattr(func, "attributes", {}) or {}).get(
-                    "memplex_injection_suspected"
-                )
-                != "true"
-            )
+            assert (getattr(func, "attributes", {}) or {}).get(
+                "memplex_injection_suspected"
+            ) != "true"
 
 
 # ── Get / Delete ─────────────────────────────────────────────────────

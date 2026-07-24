@@ -76,9 +76,7 @@ class DOCXExtractor:
             for table in doc.tables:
                 table_rows = []
                 for row in table.rows:
-                    row_texts = [
-                        cell.text.strip() for cell in row.cells if cell.text.strip()
-                    ]
+                    row_texts = [cell.text.strip() for cell in row.cells if cell.text.strip()]
                     if row_texts:
                         table_rows.append(" | ".join(row_texts))
                 if table_rows:

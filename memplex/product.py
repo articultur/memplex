@@ -334,7 +334,9 @@ def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[st
     }
 
 
-def corpus_recall(service, query: str, *, top_k: int = 10, max_tokens: int = 4000) -> dict[str, Any]:
+def corpus_recall(
+    service, query: str, *, top_k: int = 10, max_tokens: int = 4000
+) -> dict[str, Any]:
     """Recall only memories stamped as canonical corpus entries."""
 
     result = service.query(
@@ -466,7 +468,9 @@ def run_doctor(
         "agent": agent,
         "profile": setup_profile(profile),
         "checks": checks,
-        "next_steps": [] if not failed else ["Run memplex doctor --agent <agent> --smoke after fixing failed checks."],
+        "next_steps": []
+        if not failed
+        else ["Run memplex doctor --agent <agent> --smoke after fixing failed checks."],
     }
 
 

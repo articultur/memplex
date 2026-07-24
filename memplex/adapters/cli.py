@@ -360,7 +360,9 @@ def cmd_inbox(args: argparse.Namespace) -> int:
     try:
         if action in {None, "list"}:
             reviews = svc.get_pending_reviews(limit=getattr(args, "limit", 100))
-            print(_fmt({"total": len(reviews), "reviews": _dataclass_to_dict(reviews)}, args.output))
+            print(
+                _fmt({"total": len(reviews), "reviews": _dataclass_to_dict(reviews)}, args.output)
+            )
             return 0
         if action == "show":
             reviews = [

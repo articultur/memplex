@@ -91,9 +91,7 @@ class GraphCommunityDetector:
             import community as community_louvain  # type: ignore
             import networkx as nx  # type: ignore
         except ImportError:
-            logger.info(
-                "python-louvain/networkx not available, falling back to domain grouping"
-            )
+            logger.info("python-louvain/networkx not available, falling back to domain grouping")
             return self._fallback_domain_grouping(graph, threshold)
 
         # Build networkx graph with strong edges only

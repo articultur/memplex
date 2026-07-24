@@ -25,10 +25,7 @@ def test_empty_trace_still_emits_full_schema():
     assert out["query"] == "q"
     # Fixed boundaries copy must always be present (product-facing contract).
     assert out["boundaries"]["scope"] == "Visibility metadata only; not an ACL engine."
-    assert (
-        out["boundaries"]["remote_embedding"]
-        == "Remote embeddings are opt-in and not required."
-    )
+    assert out["boundaries"]["remote_embedding"] == "Remote embeddings are opt-in and not required."
     # Empty containers initialised, never missing.
     assert out["retrieval"] == {"paths": []}
     assert out["filters"] == []

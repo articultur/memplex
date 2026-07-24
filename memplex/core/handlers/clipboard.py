@@ -27,7 +27,4 @@ class ClipboardHandler:
     def _is_markdown(self, content: str) -> bool:
         """Simple markdown detection."""
         markdown_indicators = ["#", "```", "- ", "* ", "[ ]", "**", "__", "```"]
-        return any(
-            content.startswith(ind) or f"\n{ind}" in content
-            for ind in markdown_indicators
-        )
+        return any(content.startswith(ind) or f"\n{ind}" in content for ind in markdown_indicators)

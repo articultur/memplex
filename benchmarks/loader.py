@@ -314,9 +314,7 @@ def download_dataset(
 
     # Try HuggingFace
     if not force_synthetic:
-        hf_path = _fetch_from_huggingface(
-            dataset_name, split=split, num_samples=num_samples
-        )
+        hf_path = _fetch_from_huggingface(dataset_name, split=split, num_samples=num_samples)
         if hf_path is not None:
             # Copy to our data directory
             dest = output_dir / f"{dataset_name}.json"
@@ -332,8 +330,7 @@ def download_dataset(
         return generator(expected_file)
 
     raise ValueError(
-        f"Unknown dataset: {dataset_name!r}. "
-        f"Available: {list(_SYNTHETIC_GENERATORS.keys())}"
+        f"Unknown dataset: {dataset_name!r}. Available: {list(_SYNTHETIC_GENERATORS.keys())}"
     )
 
 

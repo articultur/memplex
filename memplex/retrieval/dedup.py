@@ -131,14 +131,10 @@ class MemoryDeduplicator:
 
         # field completeness
         a_fields = sum(
-            1
-            for role in ("trigger", "condition", "action", "benefit")
-            if getattr(a, role, [])
+            1 for role in ("trigger", "condition", "action", "benefit") if getattr(a, role, [])
         )
         b_fields = sum(
-            1
-            for role in ("trigger", "condition", "action", "benefit")
-            if getattr(b, role, [])
+            1 for role in ("trigger", "condition", "action", "benefit") if getattr(b, role, [])
         )
         if a_fields >= b_fields:
             return a
@@ -331,9 +327,7 @@ class MemoryDeduplicator:
         if len(memories) == 1:
             return memories[0]
 
-        base = copy.deepcopy(
-            max(memories, key=lambda m: str(getattr(m, "updated_at", "") or ""))
-        )
+        base = copy.deepcopy(max(memories, key=lambda m: str(getattr(m, "updated_at", "") or "")))
 
         for m in memories:
             if m.id == base.id:

@@ -41,9 +41,7 @@ class VisionMapper:
         "tab": "tab",
     }
 
-    def vision_to_functions(
-        self, vision_result: dict, source_id: str = "vision"
-    ) -> List[Function]:
+    def vision_to_functions(self, vision_result: dict, source_id: str = "vision") -> List[Function]:
         """Convert Vision LLM components to L2 Function objects."""
         components = vision_result.get("components", [])
         functions = []
@@ -71,9 +69,7 @@ class VisionMapper:
             name = label if label else function_name
             normalized = self._normalize_name(function_name)
             trigger_desc = (
-                f"点击 {label} 按钮"
-                if comp_type in ("button", "nav")
-                else f"与 {label} 交互"
+                f"点击 {label} 按钮" if comp_type in ("button", "nav") else f"与 {label} 交互"
             )
         else:
             name = label

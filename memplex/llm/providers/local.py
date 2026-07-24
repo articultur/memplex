@@ -11,8 +11,7 @@ try:
     from openai import AsyncOpenAI
 except ImportError:
     raise ImportError(
-        "The 'openai' package is required for LocalProvider. "
-        "Install it with: pip install openai"
+        "The 'openai' package is required for LocalProvider. Install it with: pip install openai"
     )
 
 
@@ -81,16 +80,12 @@ class LocalProvider:
                 return json.loads(text[start : end + 1])
             except json.JSONDecodeError:
                 pass
-        logger.warning(
-            "Failed to parse JSON from local LLM response, returning empty dict"
-        )
+        logger.warning("Failed to parse JSON from local LLM response, returning empty dict")
         return {}
 
     # -- LLMProvider interface ------------------------------------------
 
-    async def classify_intent(
-        self, query: str, context: dict | None = None
-    ) -> IntentType:
+    async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify user query intent using local LLM."""
         result = await self.complete_json(
             f"Classify the intent of the following query. "

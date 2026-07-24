@@ -84,9 +84,7 @@ class BenchmarkEvaluator:
         results: Dict[str, List[BenchmarkResult]] = {}
 
         if parallel:
-            results = self._run_parallel(
-                dataset_paths, retrieval_k, write_memories, max_workers
-            )
+            results = self._run_parallel(dataset_paths, retrieval_k, write_memories, max_workers)
         else:
             results = self._run_sequential(dataset_paths, retrieval_k, write_memories)
 
@@ -119,9 +117,7 @@ class BenchmarkEvaluator:
         -------
         List[BenchmarkResult]
         """
-        return self._run_benchmark(
-            dataset_name, dataset_path, retrieval_k, write_memories
-        )
+        return self._run_benchmark(dataset_name, dataset_path, retrieval_k, write_memories)
 
     def report(
         self,
@@ -251,9 +247,7 @@ class BenchmarkEvaluator:
 
         # Run retrieval benchmark
         start_time = time.perf_counter()
-        retrieval_results = runner.run_retrieval(
-            self.service, samples, top_k=retrieval_k
-        )
+        retrieval_results = runner.run_retrieval(self.service, samples, top_k=retrieval_k)
         results.extend(retrieval_results)
 
         # Run generation benchmark
@@ -442,8 +436,7 @@ class BenchmarkEvaluator:
         for dataset_name, dataset_results in sorted(results.items()):
             for r in dataset_results:
                 lines.append(
-                    f"| {r.dataset} | {r.metric} | "
-                    f"{r.value:.4f} | {r.samples} | {r.latency_ms} |"
+                    f"| {r.dataset} | {r.metric} | {r.value:.4f} | {r.samples} | {r.latency_ms} |"
                 )
 
         lines.append("")

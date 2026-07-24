@@ -148,9 +148,7 @@ def run_benchmark_command(
 
         # Print run plan
         print("\n=== Memplex Benchmark Run ===", file=sys.stderr)
-        print(
-            f"  Datasets : {', '.join(sorted(resolved_paths.keys()))}", file=sys.stderr
-        )
+        print(f"  Datasets : {', '.join(sorted(resolved_paths.keys()))}", file=sys.stderr)
         print(f"  Mode     : {'warm' if warm else 'cold'}", file=sys.stderr)
         print(f"  Top-K    : {retrieval_k}", file=sys.stderr)
         print(f"  Parallel : {parallel}", file=sys.stderr)
@@ -159,7 +157,6 @@ def run_benchmark_command(
         for name, p in sorted(resolved_paths.items()):
             # Quick count for display
             import json
-
 
             try:
                 with open(p) as f:

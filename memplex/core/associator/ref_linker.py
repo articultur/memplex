@@ -79,11 +79,7 @@ class RefLinker:
                     if match.lastindex and match.group(1)
                     else match.group(0).strip()
                 )
-                ref_type = (
-                    "implicit"
-                    if target in self.BACK_REFERENCE_PATTERNS
-                    else "cross_doc"
-                )
+                ref_type = "implicit" if target in self.BACK_REFERENCE_PATTERNS else "cross_doc"
                 references.append(
                     {
                         "type": ref_type,
@@ -143,9 +139,7 @@ class RefLinker:
 
         return references
 
-    def resolve_reference(
-        self, ref: Dict, known_entities: Dict[str, List[str]]
-    ) -> Optional[str]:
+    def resolve_reference(self, ref: Dict, known_entities: Dict[str, List[str]]) -> Optional[str]:
         """Resolve reference to entity ID."""
         target = ref["target"]
 

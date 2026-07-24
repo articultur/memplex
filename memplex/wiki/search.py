@@ -283,10 +283,6 @@ class DualIndexSearch:
                     continue
             if in_frontmatter:
                 continue
-            if (
-                stripped
-                and not stripped.startswith("#")
-                and not stripped.startswith("|")
-            ):
+            if stripped and not stripped.startswith("#") and not stripped.startswith("|"):
                 return stripped[:max_len]
         return ""

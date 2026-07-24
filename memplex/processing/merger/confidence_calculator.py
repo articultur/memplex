@@ -24,9 +24,7 @@ class ConfidenceCalculator:
         "file:": "file",
     }
 
-    def calculate_paragraph_confidence(
-        self, para: "Paragraph", source_hint: str = "text"
-    ) -> float:
+    def calculate_paragraph_confidence(self, para: "Paragraph", source_hint: str = "text") -> float:
         """
         Calculate confidence for a paragraph -> Function conversion.
 
@@ -60,9 +58,7 @@ class ConfidenceCalculator:
             adjustments.append(0.02)
 
         roles = [s.role for s in para.sentences] if para.sentences else []
-        field_count = sum(
-            1 for r in roles if r in ("trigger", "condition", "action", "result")
-        )
+        field_count = sum(1 for r in roles if r in ("trigger", "condition", "action", "result"))
         if field_count >= 3:
             adjustments.append(0.05)
         elif field_count == 1:
@@ -77,9 +73,7 @@ class ConfidenceCalculator:
         confidence = base + sum(adjustments)
         return max(0.5, min(0.99, confidence))
 
-    def calculate_vision_confidence(
-        self, page_type: str, component_count: int
-    ) -> float:
+    def calculate_vision_confidence(self, page_type: str, component_count: int) -> float:
         """
         Calculate confidence for Vision-derived functions.
 

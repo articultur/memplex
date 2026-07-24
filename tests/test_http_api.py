@@ -61,9 +61,7 @@ def test_write_then_query_round_trip(client):
 
 
 def test_get_memory_by_id_serializes(client):
-    write = client.post(
-        "/memories", json={"type": "text", "content": "Get-by-id target memory."}
-    )
+    write = client.post("/memories", json={"type": "text", "content": "Get-by-id target memory."})
     func_id = write.json()["functions"][0]["id"]
     r = client.get(f"/memories/{func_id}")
     assert r.status_code == 200, r.text

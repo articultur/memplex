@@ -37,9 +37,7 @@ def _hash_dict(d: dict) -> str:
     """Deterministic MD5 of a dict's sorted JSON representation."""
     import json
 
-    return hashlib.md5(
-        json.dumps(d, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()[:12]
+    return hashlib.md5(json.dumps(d, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
 
 
 # ── ObservationCollector ─────────────────────────────────────────────────
@@ -156,12 +154,8 @@ class ObservationCollector:
                     "tool_input_summary": self._summarize_input(tool_input),
                     "facts": [],
                     "concepts": [],
-                    "files_read": self._extract_file_paths(
-                        tool_input, tool_result, "read"
-                    ),
-                    "files_modified": self._extract_file_paths(
-                        tool_input, tool_result, "modified"
-                    ),
+                    "files_read": self._extract_file_paths(tool_input, tool_result, "read"),
+                    "files_modified": self._extract_file_paths(tool_input, tool_result, "modified"),
                     "functions_mentioned": [],
                 },
                 ensure_ascii=False,
@@ -194,9 +188,7 @@ class ObservationCollector:
             self._count_this_window += 1
             return True
 
-    def _extract_narrative(
-        self, tool_name: str, tool_input: dict, tool_result: Any
-    ) -> str:
+    def _extract_narrative(self, tool_name: str, tool_input: dict, tool_result: Any) -> str:
         """Generate a human-readable narrative from a tool execution."""
         # Most useful tool patterns
         if tool_name == "Read":

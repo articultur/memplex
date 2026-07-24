@@ -125,14 +125,12 @@ class MultiPathRetriever:
                             summary=neighbor.name,
                             created_at=(
                                 datetime.fromisoformat(neighbor.created_at)
-                                if isinstance(neighbor.created_at, str)
-                                and neighbor.created_at
+                                if isinstance(neighbor.created_at, str) and neighbor.created_at
                                 else neighbor.created_at
                             ),
                             updated_at=(
                                 datetime.fromisoformat(neighbor.updated_at)
-                                if isinstance(neighbor.updated_at, str)
-                                and neighbor.updated_at
+                                if isinstance(neighbor.updated_at, str) and neighbor.updated_at
                                 else neighbor.updated_at
                             ),
                             origin=neighbor.origin_session or "",
@@ -169,9 +167,6 @@ class MultiPathRetriever:
         seen: Dict[str, SearchResult] = {}
         for results in result_lists:
             for r in results:
-                if (
-                    r.func_id not in seen
-                    or r.relevance_score > seen[r.func_id].relevance_score
-                ):
+                if r.func_id not in seen or r.relevance_score > seen[r.func_id].relevance_score:
                     seen[r.func_id] = r
         return sorted(seen.values(), key=lambda x: x.relevance_score, reverse=True)

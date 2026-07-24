@@ -172,10 +172,7 @@ def detect_scope_by_keywords(text: str) -> QueryScope:
     for neg in NEGATION_PREFIXES:
         cleaned = cleaned.replace(neg, " ")
 
-    scores = {
-        scope: sum(1 for k in kw if k in cleaned)
-        for scope, kw in SCOPE_KEYWORDS.items()
-    }
+    scores = {scope: sum(1 for k in kw if k in cleaned) for scope, kw in SCOPE_KEYWORDS.items()}
     max_score = max(scores.values())
     if max_score == 0:
         return QueryScope.IMMEDIATE

@@ -196,9 +196,7 @@ class BenchmarkRunnerFactory:
             dataset_cls: EvaluationDataset subclass to instantiate.
         """
         if not issubclass(dataset_cls, EvaluationDataset):
-            raise TypeError(
-                f"{dataset_cls.__name__} must be an EvaluationDataset subclass"
-            )
+            raise TypeError(f"{dataset_cls.__name__} must be an EvaluationDataset subclass")
         cls._datasets[name] = dataset_cls
         logger.debug("Registered dataset: %s", name)
 
@@ -235,9 +233,7 @@ class BenchmarkRunnerFactory:
         """
         if name not in cls._datasets:
             available = list(cls._datasets.keys())
-            raise KeyError(
-                f"No dataset registered for '{name}'. Available: {available}"
-            )
+            raise KeyError(f"No dataset registered for '{name}'. Available: {available}")
         return cls._datasets[name]()
 
     @classmethod

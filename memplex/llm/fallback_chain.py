@@ -34,9 +34,7 @@ class FallbackChain:
 
     # -- LLMProvider interface ------------------------------------------
 
-    async def classify_intent(
-        self, query: str, context: dict | None = None
-    ) -> IntentType:
+    async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         errors: list[str] = []
         for p in self._providers:
             try:
@@ -59,9 +57,7 @@ class FallbackChain:
             try:
                 return await p.extract_structured(prompt, schema)
             except Exception as exc:
-                logger.debug(
-                    "extract_structured fallback: %s: %s", p.__class__.__name__, exc
-                )
+                logger.debug("extract_structured fallback: %s: %s", p.__class__.__name__, exc)
         return {}
 
     async def generate_hypothetical(self, query: str) -> str:
@@ -69,9 +65,7 @@ class FallbackChain:
             try:
                 return await p.generate_hypothetical(query)
             except Exception as exc:
-                logger.debug(
-                    "generate_hypothetical fallback: %s: %s", p.__class__.__name__, exc
-                )
+                logger.debug("generate_hypothetical fallback: %s: %s", p.__class__.__name__, exc)
         return query
 
     async def complete(self, prompt: str) -> str:
@@ -87,7 +81,5 @@ class FallbackChain:
             try:
                 return await p.complete_json(prompt)
             except Exception as exc:
-                logger.debug(
-                    "complete_json fallback: %s: %s", p.__class__.__name__, exc
-                )
+                logger.debug("complete_json fallback: %s: %s", p.__class__.__name__, exc)
         return {}

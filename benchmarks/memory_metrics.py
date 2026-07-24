@@ -144,8 +144,6 @@ def multi_hop_recall(
         # Overall multi-hop recall
         all_required = set().union(*[set(ids) for ids in required_hops])
         all_retrieved = set(retrieved_ids[:top_k])
-        scores["multihop_recall"] = len(all_retrieved & all_required) / len(
-            all_required
-        )
+        scores["multihop_recall"] = len(all_retrieved & all_required) / len(all_required)
 
     return scores

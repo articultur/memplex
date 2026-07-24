@@ -72,9 +72,7 @@ def _package_version() -> str:
 
         pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
         if pyproject.exists():
-            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get(
-                "project", {}
-            )
+            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
     except Exception:
@@ -186,9 +184,7 @@ class MemplexService:
         self._retriever = MultiPathRetriever(self.store)
 
         # ── Injection scan tracking ─────────────────────────────
-        self._injection_scans_24h: Dict[
-            str, int
-        ] = {}  # keyed by date string "YYYY-MM-DD"
+        self._injection_scans_24h: Dict[str, int] = {}  # keyed by date string "YYYY-MM-DD"
 
     # ── LLM initialisation ──────────────────────────────────────
 
@@ -204,9 +200,7 @@ class MemplexService:
             )
             self._llm = LLMEnhancer(llm_provider=provider, config=cfg.llm)
         except Exception as exc:
-            logger.info(
-                "LLM enhancer not available (%s); using rule-based fallback", exc
-            )
+            logger.info("LLM enhancer not available (%s); using rule-based fallback", exc)
             self._llm = None
 
     # ── Injection scan helper ──────────────────────────────────────
@@ -293,9 +287,7 @@ class MemplexService:
         futures: Dict[concurrent.futures.Future, str] = {}
         with ThreadPoolExecutor(max_workers=3) as pool:
             if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
-                futures[pool.submit(self._retriever.rag_search, text, top_k, query_vector)] = (
-                    "rag"
-                )
+                futures[pool.submit(self._retriever.rag_search, text, top_k, query_vector)] = "rag"
             if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
                 futures[pool.submit(self._retriever.wiki_search, text, top_k)] = "wiki"
             if scope in (QueryScope.RELATION, QueryScope.ALL):
@@ -494,9 +486,9 @@ class MemplexService:
                     # Inside an existing event loop (FastAPI/MCP) --
                     # use a thread to avoid nested loop issues.
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
-                        enhanced = _pool.submit(
-                            asyncio.run, self._llm.enhance_query(text)
-                        ).result(timeout=5.0)
+                        enhanced = _pool.submit(asyncio.run, self._llm.enhance_query(text)).result(
+                            timeout=5.0
+                        )
                 except RuntimeError:
                     # No running loop (CLI / sync call)
                     enhanced = asyncio.run(self._llm.enhance_query(text))
@@ -623,9 +615,7 @@ class MemplexService:
                     attrs = getattr(func, "attributes", None)
                     if isinstance(attrs, dict):
                         attrs["memplex_injection_suspected"] = "true"
-                    self._injection_scans_24h[today] = (
-                        self._injection_scans_24h.get(today, 0) + 1
-                    )
+                    self._injection_scans_24h[today] = self._injection_scans_24h.get(today, 0) + 1
 
             self.store.merge(extracted.graph)
 
@@ -862,11 +852,7 @@ class MemplexService:
             storage_status = f"error: {exc}"
 
         worker_running = self._worker._running
-        all_ok = (
-            storage_status == "ok"
-            and self._embedding_service is not None
-            and worker_running
-        )
+        all_ok = storage_status == "ok" and self._embedding_service is not None and worker_running
         has_warnings = storage_status != "ok" or not worker_running
         status = "healthy" if all_ok else ("warning" if has_warnings else "degraded")
 
@@ -980,9 +966,7 @@ class MemplexService:
         compaction_scope = CompactionScope(scope)
         # CompactionPipeline.run is async; run it in a thread
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(
-                asyncio.run, self._compaction.run(compaction_scope)
-            ).result()
+            result = pool.submit(asyncio.run, self._compaction.run(compaction_scope)).result()
         # Record last compaction timestamp
         self._worker._last_compaction = datetime.now()
         return result

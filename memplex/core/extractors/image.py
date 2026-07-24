@@ -98,9 +98,7 @@ class ImageExtractor:
             print(f"OCR failed for {image_path}: {e}")
             return None
 
-    def extract_with_vision(
-        self, image_path: str, prompt: str = None
-    ) -> Optional[dict]:
+    def extract_with_vision(self, image_path: str, prompt: str = None) -> Optional[dict]:
         """
         Extract visual understanding using vision model.
 

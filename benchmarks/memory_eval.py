@@ -339,9 +339,7 @@ class MemoryBenchmarkDataset(EvaluationDataset):
             content=sample.metadata.get("content", sample.query),
             source_type=SourceType.WIKI,
             metadata={
-                "memory": sample.metadata.get(
-                    sample.metadata.get("memory_type", "fact")
-                ),
+                "memory": sample.metadata.get(sample.metadata.get("memory_type", "fact")),
                 "memory_type": sample.metadata.get("memory_type", "fact"),
             },
         )
@@ -387,27 +385,15 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         timestamp = datetime.utcnow().isoformat()
 
         fact_samples = [s for s in samples if s.metadata.get("memory_type") == "fact"]
-        pref_samples = [
-            s for s in samples if s.metadata.get("memory_type") == "preference"
-        ]
-        obs_samples = [
-            s for s in samples if s.metadata.get("memory_type") == "observation"
-        ]
+        pref_samples = [s for s in samples if s.metadata.get("memory_type") == "preference"]
+        obs_samples = [s for s in samples if s.metadata.get("memory_type") == "observation"]
 
+        results.extend(self._run_fact_retention_test(service, fact_samples, top_k, timestamp))
+        results.extend(self._run_recency_decay_test(service, fact_samples, top_k, timestamp))
         results.extend(
-            self._run_fact_retention_test(service, fact_samples, top_k, timestamp)
+            self._run_preference_persistence_test(service, pref_samples, top_k, timestamp)
         )
-        results.extend(
-            self._run_recency_decay_test(service, fact_samples, top_k, timestamp)
-        )
-        results.extend(
-            self._run_preference_persistence_test(
-                service, pref_samples, top_k, timestamp
-            )
-        )
-        results.extend(
-            self._run_observation_tracking_test(service, obs_samples, top_k, timestamp)
-        )
+        results.extend(self._run_observation_tracking_test(service, obs_samples, top_k, timestamp))
 
         return results
 
@@ -615,9 +601,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         retrieved_ids = [r.func_id for r in query_result.results]
 
         # Most recent first
-        fact_ids_by_age = [
-            s.metadata.get("memory_id", "") for s in reversed(sorted_samples)
-        ]
+        fact_ids_by_age = [s.metadata.get("memory_id", "") for s in reversed(sorted_samples)]
         fact_ids_by_age = [fid for fid in fact_ids_by_age if fid]
 
         if not fact_ids_by_age:

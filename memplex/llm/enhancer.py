@@ -164,8 +164,7 @@ class LLMEnhancer:
 
         # Only send structured fields, not raw free text (reduces injection risk)
         summaries = [
-            f"{m.name}: {', '.join(fv.desc for fv in getattr(m, 'action', []))}"
-            for m in memories
+            f"{m.name}: {', '.join(fv.desc for fv in getattr(m, 'action', []))}" for m in memories
         ]
         prompt = LLMPromptSanitizer.build_structured_prompt(
             instruction="Extract key information from the following memories "

@@ -208,9 +208,7 @@ def _package_version(memplex_module: Any) -> str:
             pyproject = parent / "pyproject.toml"
             if not pyproject.exists():
                 continue
-            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get(
-                "project", {}
-            )
+            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
     except Exception:

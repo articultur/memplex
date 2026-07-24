@@ -32,9 +32,7 @@ class HookRegistry:
         are logged and swallowed.  Default: ``None``.
     """
 
-    def __init__(
-        self, on_error: Optional[Callable[[HookEvent, Exception], None]] = None
-    ) -> None:
+    def __init__(self, on_error: Optional[Callable[[HookEvent, Exception], None]] = None) -> None:
         self._handlers: Dict[HookEvent, List[Callable]] = defaultdict(list)
         self._lock = threading.RLock()
         self._on_error = on_error
