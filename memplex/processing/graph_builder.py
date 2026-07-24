@@ -280,3 +280,71 @@ class GraphBuilder:
         """Clear the internal function list cache."""
         if hasattr(self, "_funcs_cache"):
             del self._funcs_cache
+
+
+# ── Rule-based fallback (no store) ───────────────────────────────────
+
+
+def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
+    """Simple rule-based edge detection when no store is available.
+
+    Detects REFERENCES edges from ``func.cross_references`` (matching by
+    name/name_normalized) and ASSOCIATED_WITH edges from shared domains.
+    Used by :class:`CoreEngine._build_graph` as the fallback when the
+    store-aware :class:`GraphBuilder` cannot run (no store available).
+    """
+    edges: List[GraphEdge] = []
+    seen: set = set()
+
+    for func in functions:
+        # REFERENCES from cross-references
+        for ref in func.cross_references:
+            target = ref.get("target", "")
+            if not target:
+                continue
+            # Find matching function by name
+            for other in functions:
+                if other.id == func.id:
+                    continue
+                if (
+                    target.lower() in other.name.lower()
+                    or target.lower() in other.name_normalized
+                ):
+                    key = (func.id, other.id, "REFERENCES")
+                    if key not in seen:
+                        seen.add(key)
+                        edges.append(
+                            GraphEdge(
+                                source=func.id,
+                                target=other.id,
+                                edge_type="REFERENCES",
+                                weight=1.0,
+                                evidence=[
+                                    f"cross-reference: {func.name} -> {other.name}"
+                                ],
+                                created_at=datetime.now(),
+                            )
+                        )
+
+        # ASSOCIATED_WITH: shared domain
+        if func.domain:
+            for other in functions:
+                if other.id == func.id:
+                    continue
+                if other.domain == func.domain:
+                    key = (func.id, other.id, "ASSOCIATED_WITH")
+                    rev_key = (other.id, func.id, "ASSOCIATED_WITH")
+                    if key not in seen and rev_key not in seen:
+                        seen.add(key)
+                        edges.append(
+                            GraphEdge(
+                                source=func.id,
+                                target=other.id,
+                                edge_type="ASSOCIATED_WITH",
+                                weight=0.5,
+                                evidence=[f"shared domain: {func.domain}"],
+                                created_at=datetime.now(),
+                            )
+                        )
+
+    return edges

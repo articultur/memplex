@@ -41,7 +41,11 @@ from memplex.models import (
     SourceDocument,
 )
 from memplex.models.paragraph import ParagraphCollection
-from memplex.processing.graph_builder import GraphBuilder
+from memplex.processing.function_builder import (
+    build_functions_from_paragraphs as _build_functions_from_paragraphs,
+)
+from memplex.processing.function_builder import normalize_name as _normalize_name
+from memplex.processing.graph_builder import GraphBuilder, build_edges_rule_based
 from memplex.processing.merger.confidence_calculator import ConfidenceCalculator
 from memplex.processing.merger.conflict_resolver import ConflictResolver
 
@@ -49,78 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
-
-def _detect_memory_type(text: str) -> str:
-    """Heuristic: classify text into a memory type.
-
-    Returns one of ``"function"`` | ``"fact"`` | ``"preference"`` |
-    ``"observation"``.
-    """
-    text_lower = text.lower()
-
-    obs_keywords = [
-        "observe",
-        "observed",
-        "noticed",
-        "happened",
-        "occurred",
-        "事件",
-        "观察",
-        "发生",
-        "记录",
-    ]
-    if any(k in text_lower for k in obs_keywords):
-        return "observation"
-
-    pref_keywords = [
-        "prefer",
-        "like",
-        "dislike",
-        "want",
-        "always",
-        "never",
-        "喜欢",
-        "偏好",
-        "讨厌",
-        "倾向",
-        "总是",
-        "从不",
-    ]
-    if any(k in text_lower for k in pref_keywords):
-        return "preference"
-
-    fact_keywords = [
-        "is",
-        "are",
-        "means",
-        "defined as",
-        "refers to",
-        "是",
-        "意味着",
-        "定义为",
-        "指的是",
-        "事实",
-    ]
-    if any(k in text_lower for k in fact_keywords):
-        return "fact"
-
-    return "function"
-
-
-def _normalize_name(name: str) -> str:
-    """Generate name_normalized from a display name.
-
-    Rules (per spec SS1.3):
-    1. lowercase
-    2. strip whitespace
-    3. collapse consecutive whitespace to single space
-    4. remove punctuation (keep letters, digits, CJK, spaces, underscores, hyphens)
-    """
-    normalized = name.lower().strip()
-    normalized = re.sub(r"\s+", " ", normalized)
-    normalized = re.sub(r"[^a-z0-9一-鿿 _-]", "", normalized)
-    return normalized
+# ``_detect_memory_type`` previously lived here but had zero callers; the
+# live classifier is ``memplex.intent.detect_memory_type``.
+# ``_normalize_name`` and ``_build_functions_from_paragraphs`` are now
+# imported from ``memplex.processing.function_builder`` (see imports above)
+# and re-bound here under underscored names so existing callers
+# (``tests/test_core_engine.py`` imports ``_normalize_name``) keep working.
 
 
 # ── CoreEngine ───────────────────────────────────────────────────────
@@ -230,7 +168,7 @@ class CoreEngine:
                     pass
 
         # Step 4: Paragraphs -> Functions
-        functions = self._paragraphs_to_functions(paragraphs, source)
+        functions = _build_functions_from_paragraphs(paragraphs, source)
 
         # Merge vision/image functions
         functions.extend(vision_functions)
@@ -431,106 +369,6 @@ class CoreEngine:
         # All text goes through MarkdownExtractor (handles plain text too)
         return self.markdown_extractor.extract(text, source=source_hint)
 
-    def _paragraphs_to_functions(
-        self,
-        paragraphs: ParagraphCollection,
-        source: SourceDocument,
-    ) -> List[Function]:
-        """Convert L1 Paragraphs to L2 Functions with multi-value fields."""
-        functions: List[Function] = []
-        source_id = source.type
-
-        for para in paragraphs.paragraphs:
-            if not para.raw_text or not para.raw_text.strip():
-                continue
-
-            # Generate stable ID from content hash
-            content_hash = hashlib.sha256(para.raw_text.encode()).hexdigest()[:16]
-            func_id = f"func_{content_hash}"
-
-            name = para.section if para.section else para.raw_text[:50]
-            name_normalized = _normalize_name(
-                para.section if para.section else para.raw_text[:50]
-            )
-
-            # Classify FieldValues from sentences
-            triggers: List[FieldValue] = []
-            conditions: List[FieldValue] = []
-            actions: List[FieldValue] = []
-            benefits: List[FieldValue] = []
-
-            for sent in para.sentences:
-                fv = FieldValue(
-                    desc=sent.text,
-                    sources=[f"{source_id}:{para.id}"],
-                    source_method="rule_based",
-                    weight=0.7,
-                )
-                if sent.role == "trigger":
-                    triggers.append(fv)
-                elif sent.role == "condition":
-                    conditions.append(fv)
-                elif sent.role in ("action",):
-                    actions.append(fv)
-                elif sent.role == "result":
-                    benefits.append(fv)
-                else:
-                    # "statement" -> put as action by default
-                    if not actions:
-                        actions.append(fv)
-                    else:
-                        actions.append(fv)
-
-            # If no structured sentences, use raw text as trigger/action
-            if not triggers and not actions and para.raw_text:
-                sentences_text = [
-                    s.strip()
-                    for s in re.split(r"[。.!?！？]", para.raw_text)
-                    if s.strip()
-                ]
-                if sentences_text:
-                    triggers.append(
-                        FieldValue(
-                            desc=sentences_text[0],
-                            sources=[f"{source_id}:{para.id}"],
-                            source_method="rule_based",
-                            weight=0.7,
-                        )
-                    )
-                    for s in sentences_text[1:]:
-                        actions.append(
-                            FieldValue(
-                                desc=s,
-                                sources=[f"{source_id}:{para.id}"],
-                                source_method="rule_based",
-                                weight=0.7,
-                            )
-                        )
-                else:
-                    triggers.append(
-                        FieldValue(
-                            desc=para.raw_text,
-                            sources=[f"{source_id}:{para.id}"],
-                            source_method="rule_based",
-                            weight=0.7,
-                        )
-                    )
-
-            func = Function(
-                id=func_id,
-                name=name,
-                name_normalized=name_normalized,
-                trigger=triggers,
-                condition=conditions,
-                action=actions,
-                benefit=benefits,
-                source_paragraphs=[para.id],
-                source_type=source.source_type,
-                content_hash=hashlib.sha256(para.raw_text.encode()).hexdigest(),
-            )
-            functions.append(func)
-
-        return functions
 
     def _deduplicate_functions(self, functions: List[Function]) -> List[Function]:
         """Use EntityAligner to merge duplicate Functions."""
@@ -632,69 +470,9 @@ class CoreEngine:
                 edges = builder.build_from_batch(functions)
             except Exception as exc:
                 logger.warning("GraphBuilder failed: %s", exc)
-                edges = self._build_edges_rule_based(functions)
+                edges = build_edges_rule_based(functions)
         else:
             # Stateless: use rule-based edge detection
-            edges = self._build_edges_rule_based(functions)
+            edges = build_edges_rule_based(functions)
 
         return GraphData(nodes=functions, edges=edges)
-
-    def _build_edges_rule_based(self, functions: List[Function]) -> list:
-        """Simple rule-based edge detection when no store is available."""
-        from memplex.models import GraphEdge
-
-        edges: List[GraphEdge] = []
-        seen: set = set()
-
-        for func in functions:
-            # REFERENCES from cross-references
-            for ref in func.cross_references:
-                target = ref.get("target", "")
-                if not target:
-                    continue
-                # Find matching function by name
-                for other in functions:
-                    if other.id == func.id:
-                        continue
-                    if (
-                        target.lower() in other.name.lower()
-                        or target.lower() in other.name_normalized
-                    ):
-                        key = (func.id, other.id, "REFERENCES")
-                        if key not in seen:
-                            seen.add(key)
-                            edges.append(
-                                GraphEdge(
-                                    source=func.id,
-                                    target=other.id,
-                                    edge_type="REFERENCES",
-                                    weight=1.0,
-                                    evidence=[
-                                        f"cross-reference: {func.name} -> {other.name}"
-                                    ],
-                                    created_at=datetime.now(),
-                                )
-                            )
-
-            # ASSOCIATED_WITH: shared domain
-            if func.domain:
-                for other in functions:
-                    if other.id == func.id:
-                        continue
-                    if other.domain == func.domain:
-                        key = (func.id, other.id, "ASSOCIATED_WITH")
-                        rev_key = (other.id, func.id, "ASSOCIATED_WITH")
-                        if key not in seen and rev_key not in seen:
-                            seen.add(key)
-                            edges.append(
-                                GraphEdge(
-                                    source=func.id,
-                                    target=other.id,
-                                    edge_type="ASSOCIATED_WITH",
-                                    weight=0.5,
-                                    evidence=[f"shared domain: {func.domain}"],
-                                    created_at=datetime.now(),
-                                )
-                            )
-
-        return edges

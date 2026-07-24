@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from memplex.adapters._shared import get_plugin_source_dir as _get_plugin_source_dir
 from memplex.adapters._shared import marketplace_json as _marketplace_json
@@ -30,6 +30,20 @@ class AgentInstallResult:
     files: list[str]
     message: str
     next_steps: list[str]
+
+
+@dataclass
+class AgentInstallerSpec:
+    """Registry entry describing how to install/uninstall one agent host.
+
+    install / uninstall are the per-agent functions. needs_identity marks
+    whether the installer takes ``(target_dir, user_id, project_path, ...)``
+    (openclaw, hermes) or just ``(target_dir, ...)`` (codex, claude-code).
+    """
+
+    install: Callable[..., AgentInstallResult]
+    uninstall: Callable[..., AgentInstallResult]
+    needs_identity: bool = False
 
 
 def install_agent(
@@ -119,15 +133,12 @@ def _install_one(
     project_path: str | Path | None,
     dry_run: bool,
 ) -> AgentInstallResult:
-    if agent == "codex":
-        return _install_codex(target_dir, dry_run=dry_run)
-    if agent == "claude-code":
-        return _install_claude_code(target_dir, dry_run=dry_run)
-    if agent == "openclaw":
-        return _install_openclaw(target_dir, user_id, project_path, dry_run=dry_run)
-    if agent == "hermes":
-        return _install_hermes(target_dir, user_id, project_path, dry_run=dry_run)
-    raise ValueError(f"Unsupported agent: {agent}")
+    spec = _INSTALLERS.get(agent)
+    if spec is None:
+        raise ValueError(f"Unsupported agent: {agent}")
+    if spec.needs_identity:
+        return spec.install(target_dir, user_id, project_path, dry_run=dry_run)
+    return spec.install(target_dir, dry_run=dry_run)
 
 
 def _uninstall_one(
@@ -136,15 +147,10 @@ def _uninstall_one(
     target_dir: str | Path | None,
     dry_run: bool,
 ) -> AgentInstallResult:
-    if agent == "codex":
-        return _uninstall_codex(target_dir, dry_run=dry_run)
-    if agent == "claude-code":
-        return _uninstall_claude_code(target_dir, dry_run=dry_run)
-    if agent == "openclaw":
-        return _uninstall_openclaw(target_dir, dry_run=dry_run)
-    if agent == "hermes":
-        return _uninstall_hermes(target_dir, dry_run=dry_run)
-    raise ValueError(f"Unsupported agent: {agent}")
+    spec = _INSTALLERS.get(agent)
+    if spec is None:
+        raise ValueError(f"Unsupported agent: {agent}")
+    return spec.uninstall(target_dir, dry_run=dry_run)
 
 
 def _rollback_installs(installed: list[str], target_dir: str | Path | None) -> list[str]:
@@ -923,3 +929,32 @@ def _package_version() -> str:
         return pkg_version("memplex")
     except Exception:
         return "3.2.7"
+
+
+# ── Agent installer registry ─────────────────────────────────────────
+# Populated at module load (after every per-agent installer/uninstaller
+# function is defined above). Replaces the previous 4-way if/elif chain
+# in ``_install_one`` / ``_uninstall_one``; adding a new agent host is
+# now one entry here instead of editing two dispatch functions.
+_INSTALLERS: dict[str, AgentInstallerSpec] = {
+    "codex": AgentInstallerSpec(
+        install=_install_codex,
+        uninstall=_uninstall_codex,
+        needs_identity=False,
+    ),
+    "claude-code": AgentInstallerSpec(
+        install=_install_claude_code,
+        uninstall=_uninstall_claude_code,
+        needs_identity=False,
+    ),
+    "openclaw": AgentInstallerSpec(
+        install=_install_openclaw,
+        uninstall=_uninstall_openclaw,
+        needs_identity=True,
+    ),
+    "hermes": AgentInstallerSpec(
+        install=_install_hermes,
+        uninstall=_uninstall_hermes,
+        needs_identity=True,
+    ),
+}

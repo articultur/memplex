@@ -591,7 +591,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
-    # -- query --
+    _add_query_parsers(sub)
+    _add_write_parsers(sub)
+    _add_review_diag_parsers(sub)
+    _add_product_parsers(sub)
+    _add_agent_parsers(sub)
+    _add_setup_parsers(sub)
+
+    return parser
+
+
+# ── Parser builders (split by domain from build_parser) ──────────────
+# Each helper registers one cluster of subcommands on the shared ``sub``
+# subparsers object. build_parser() just calls them in order. Adding a
+# new command means extending the relevant helper (or adding a new one)
+# instead of editing a 230-line function.
+
+
+def _add_query_parsers(sub) -> None:
+    """query + recall (the two recall-style commands)."""
     p_query = sub.add_parser("query", help="Query memory")
     p_query.add_argument("text", help="Query text")
     p_query.add_argument("--top-k", type=int, default=10, help="Max results")
@@ -608,21 +626,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_recall.add_argument("--max-tokens", type=int, default=4000, help="Token budget")
     p_recall.add_argument("--explain", action="store_true", help="Explain retrieval stages")
 
-    # -- write --
+
+def _add_write_parsers(sub) -> None:
+    """write / get / delete / feedback (memory mutation commands)."""
     p_write = sub.add_parser("write", help="Write content to memory")
     p_write.add_argument("--text", help="Raw text to write")
     p_write.add_argument("--file", help="File path to read and write")
     p_write.add_argument("--url", help="URL to write")
 
-    # -- get --
     p_get = sub.add_parser("get", help="Get memory by ID")
     p_get.add_argument("memory_id", help="Memory ID")
 
-    # -- delete --
     p_del = sub.add_parser("delete", help="Delete memory by ID")
     p_del.add_argument("memory_id", help="Memory ID")
 
-    # -- feedback --
     p_fb = sub.add_parser("feedback", help="Submit feedback on a memory field")
     p_fb.add_argument("memory_id", help="Memory ID")
     p_fb.add_argument("--role", required=True, help="Field role (trigger|action|condition|benefit)")
@@ -634,10 +651,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verdict",
     )
 
-    # -- pending --
+
+def _add_review_diag_parsers(sub) -> None:
+    """pending / compact / health / stats / doctor (review + diagnostics)."""
     sub.add_parser("pending", help="List pending reviews")
 
-    # -- compact --
     p_compact = sub.add_parser("compact", help="Run compaction pipeline")
     p_compact.add_argument(
         "--scope",
@@ -646,19 +664,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compaction scope (default: project)",
     )
 
-    # -- health --
     sub.add_parser("health", help="Health check")
-
-    # -- stats --
     sub.add_parser("stats", help="Show statistics")
 
-    # -- doctor --
     p_doctor = sub.add_parser("doctor", help="Check Memplex product readiness")
     p_doctor.add_argument("--agent", default="codex")
     p_doctor.add_argument("--profile", choices=["local", "privacy", "max-recall", "team"])
     p_doctor.add_argument("--smoke", action="store_true", help="Run capture/recall smoke")
     p_doctor.add_argument("--fix", action="store_true", help="Run safe local smoke checks")
 
+
+def _add_product_parsers(sub) -> None:
+    """scope / policy / inbox / corpus / report (operator workflow commands)."""
     # -- scope --
     p_scope = sub.add_parser("scope", help="Explain visibility scopes")
     scope_sub = p_scope.add_subparsers(dest="scope_command", help="Scope command")
@@ -712,7 +729,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser("report", help="Generate an operator report")
     p_report.add_argument("--agent", default="codex")
 
-    # -- agent --
+
+def _add_agent_parsers(sub) -> None:
+    """agent (nested: list / manifest / install / uninstall / recall / capture)."""
     p_agent = sub.add_parser("agent", help="Portable agent integration commands")
     agent_sub = p_agent.add_subparsers(dest="agent_command", help="Agent integration command")
     agent_sub.add_parser("list", help="List supported agent profiles")
@@ -776,51 +795,50 @@ def build_parser() -> argparse.ArgumentParser:
     p_agent_capture.add_argument("--assistant-message", required=True)
     p_agent_capture.add_argument("--next-prompt-hint", default=None)
 
-    # -- setup / install / uninstall --
-    def add_setup_parser(name: str, *, uninstall: bool = False):
-        help_text = (
-            "Uninstall Memplex from local agent hosts"
-            if uninstall
-            else "Set up Memplex in detected local agent hosts"
-        )
-        p_setup = sub.add_parser(name, help=help_text)
-        p_setup.add_argument(
-            "--agent",
-            default="auto",
-            help="Agent id: auto | codex | claude-code | openclaw | hermes | all",
-        )
-        p_setup.add_argument(
-            "--target-dir",
-            default=None,
-            help="Override the selected agent config root directory",
-        )
-        p_setup.add_argument("--user-id", default=None)
-        p_setup.add_argument("--project-path", default=None)
-        if not uninstall:
-            p_setup.add_argument(
-                "--profile",
-                choices=["local", "privacy", "max-recall", "team"],
-                default=None,
-                help="Transparent setup profile",
-            )
-        p_setup.add_argument(
-            "--dry-run", action="store_true", help="Show planned files without writing"
-        )
-        if not uninstall:
-            p_setup.add_argument(
-                "--uninstall", action="store_true", help="Uninstall instead of install"
-            )
-        return p_setup
 
-    add_setup_parser("setup")
-    add_setup_parser("install")
-    add_setup_parser("stepup")
-    add_setup_parser("uninstall", uninstall=True)
+def _add_setup_parsers(sub) -> None:
+    """setup / install / stepup / uninstall / unsetup (top-level install aliases)."""
+    for name in ("setup", "install", "stepup"):
+        _add_one_setup_parser(sub, name, uninstall=False)
+    _add_one_setup_parser(sub, "uninstall", uninstall=True)
 
-    # -- unsetup --
     sub.add_parser("unsetup", help="Uninstall Memplex Claude Code plugin")
 
-    return parser
+
+def _add_one_setup_parser(sub, name: str, *, uninstall: bool = False):
+    help_text = (
+        "Uninstall Memplex from local agent hosts"
+        if uninstall
+        else "Set up Memplex in detected local agent hosts"
+    )
+    p_setup = sub.add_parser(name, help=help_text)
+    p_setup.add_argument(
+        "--agent",
+        default="auto",
+        help="Agent id: auto | codex | claude-code | openclaw | hermes | all",
+    )
+    p_setup.add_argument(
+        "--target-dir",
+        default=None,
+        help="Override the selected agent config root directory",
+    )
+    p_setup.add_argument("--user-id", default=None)
+    p_setup.add_argument("--project-path", default=None)
+    if not uninstall:
+        p_setup.add_argument(
+            "--profile",
+            choices=["local", "privacy", "max-recall", "team"],
+            default=None,
+            help="Transparent setup profile",
+        )
+    p_setup.add_argument(
+        "--dry-run", action="store_true", help="Show planned files without writing"
+    )
+    if not uninstall:
+        p_setup.add_argument(
+            "--uninstall", action="store_true", help="Uninstall instead of install"
+        )
+    return p_setup
 
 
 # ── Entry point ─────────────────────────────────────────────────────
