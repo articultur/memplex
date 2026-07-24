@@ -257,3 +257,44 @@ def test_llm_wiki_generator_constructs_with_none_enhancer():
     """Must be constructible without a live LLM enhancer for graceful degrade."""
     gen = LLMWikiGenerator(llm_enhancer=None)
     assert gen is not None
+
+
+# ── WikiCompiler index/log/write operations ──────────────────────────
+
+
+def test_compile_index_lists_compiled_pages(tmp_path):
+    funcs = [_func(fid="f1", name="alpha"), _func(fid="f2", name="beta")]
+    compiler = WikiCompiler(store=_StubStore(funcs=funcs), wiki_dir=tmp_path)
+    index = compiler.compile_index()
+    assert isinstance(index, WikiPage)
+    assert "alpha" in index.content or "f1" in index.content
+    assert "beta" in index.content or "f2" in index.content
+
+
+def test_write_index_creates_index_md(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    idx = WikiPage(page_id="index", content="# Index\n\n- [[func_1]]", metadata={})
+    written = compiler.write_index(idx)
+    assert Path(written).exists()
+    assert Path(written).name == "index.md"
+
+
+def test_append_log_creates_and_appends(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    p1 = compiler.append_log("first entry")
+    assert Path(p1).exists()
+    compiler.append_log("second entry")
+    content = Path(p1).read_text(encoding="utf-8")
+    assert "first entry" in content
+    assert "second entry" in content
+
+
+def test_rotate_log_archives_existing_log(tmp_path):
+    """_rotate_log moves the current log to log.archive.1.md."""
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    log_path = tmp_path / "log.md"
+    log_path.write_text("old content\n", encoding="utf-8")
+    compiler._rotate_log(log_path)
+    archive = tmp_path / "log.archive.1.md"
+    assert archive.exists()
+    assert "old content" in archive.read_text(encoding="utf-8")

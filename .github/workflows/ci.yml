@@ -32,15 +32,15 @@ jobs:
       run: ruff check memplex tests
 
     - name: Run tests with coverage
-      # Coverage gate tracks the measured baseline (59% after wiki/hooks/
-      # installer coverage was added). Floor sits below baseline to catch
-      # large regressions without blocking incremental work on the still-
-      # low-coverage modules (cli.py, extractors, storage/vector).
+      # Coverage gate tracks the measured baseline (70% after the cli/
+      # dedup/vector/handlers/extractors/embedding/feedback/enhancer/wiki
+      # coverage push). Floor sits below baseline to catch regressions
+      # without blocking incremental work on the remaining modules.
       run: |
         python -m pytest tests/ -v \
           --cov=memplex \
           --cov-report=term-missing \
-          --cov-fail-under=55
+          --cov-fail-under=68
 
   security:
     runs-on: ubuntu-latest

@@ -327,3 +327,68 @@ def test_cmd_stats_table_mode(service, capsys):
     assert rc == 0
     out = _out(capsys)
     assert "storage_backend" in out
+
+
+# ── build_parser exercises every subcommand registration ─────────────
+
+
+def test_build_parser_registers_all_subcommands():
+    """Calling build_parser() executes every _add_*_parsers helper, covering
+    the parser-construction code that handlers never reach. Asserts the full
+    command surface exists so a broken/missing subparser is caught."""
+    parser = cli.build_parser()
+    # Parse '--help'-style introspection: collect registered subcommands.
+    help_text = parser.format_help()
+    expected_commands = [
+        "query",
+        "recall",
+        "write",
+        "get",
+        "delete",
+        "feedback",
+        "pending",
+        "compact",
+        "health",
+        "stats",
+        "doctor",
+        "scope",
+        "policy",
+        "inbox",
+        "corpus",
+        "report",
+        "agent",
+        "setup",
+        "install",
+        "stepup",
+        "uninstall",
+        "unsetup",
+    ]
+    for cmd in expected_commands:
+        assert cmd in help_text, f"subcommand {cmd!r} missing from parser help"
+
+
+def test_build_parser_global_options_present():
+    parser = cli.build_parser()
+    help_text = parser.format_help()
+    assert "--config" in help_text
+    assert "--output" in help_text
+
+
+def test_build_parser_query_accepts_explain_flag():
+    """The query subparser must wire --explain (regression for the explain
+    surface that several other tests depend on)."""
+    args = cli.build_parser().parse_args(["query", "x", "--explain", "--top-k", "3"])
+    assert args.explain is True
+    assert args.top_k == 3
+    assert args.text == "x"
+
+
+def test_build_parser_corpus_subcommands():
+    args = cli.build_parser().parse_args(["corpus", "preview", "--manifest", "m.toml"])
+    assert args.corpus_command == "preview"
+    assert args.manifest == "m.toml"
+
+
+def test_build_parser_agent_subcommands():
+    args = cli.build_parser().parse_args(["agent", "list"])
+    assert args.agent_command == "list"
