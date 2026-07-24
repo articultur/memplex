@@ -90,11 +90,10 @@ def build_functions_from_paragraphs(
             elif sent.role == "result":
                 benefits.append(fv)
             else:
-                # "statement" -> put as action by default
-                if not actions:
-                    actions.append(fv)
-                else:
-                    actions.append(fv)
+                # "statement" (or any unknown role) -> put as action by default.
+                # Previously this branch had an if/else whose two arms were
+                # identical (always append to actions); collapsed to one call.
+                actions.append(fv)
 
         # If no structured sentences, use raw text as trigger/action
         if not triggers and not actions and para.raw_text:
