@@ -679,3 +679,112 @@ class TestChangelogStore:
         changelog2 = ChangelogStore(path=tmp_path / "changelog.json")
         timeline = changelog2.get_timeline("func_cp")
         assert len(timeline) == 1
+
+
+# ── increment_access_batch: single persistence pass ─────────────────
+
+
+def test_increment_access_batch_updates_all_matching(tmp_path):
+    """Batch increments access_count for every supplied func id that exists."""
+    from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    funcs = []
+    for i in range(5):
+        f = Function(
+            id=f"batch-{i}",
+            name=f"n{i}",
+            name_normalized=f"n{i}",
+            trigger=[FieldValue(desc=f"t{i}", sources=["s"], source_method="manual", weight=1.0)],
+        )
+        store.add(f, SourceDocument(type="text", source_type=SourceType.WIKI))
+        funcs.append(f)
+    # one missing id should be skipped, not crash
+    store.increment_access_batch(["batch-0", "batch-1", "batch-2", "missing-id"])
+    assert store.get("batch-0").access_count == 1
+    assert store.get("batch-1").access_count == 1
+    assert store.get("batch-2").access_count == 1
+    # untouched funcs keep access_count 0
+    assert store.get("batch-3").access_count == 0
+
+
+def test_increment_access_batch_empty_or_all_missing_skips_save(tmp_path):
+    """When nothing matches, _save must not fire (no-op)."""
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    save_calls = []
+    original_save = store._save
+    store._save = lambda: save_calls.append(1) or original_save()
+    store.increment_access_batch([])
+    assert save_calls == []
+    store.increment_access_batch(["totally-missing"])
+    assert save_calls == []  # nothing to persist
+
+
+def test_increment_access_batch_persists_once_not_n_times(tmp_path):
+    """THE performance fix: N func ids -> exactly 1 _save call, not N.
+
+    Previously service.query called increment_access per result, each
+    triggering a full JSON rewrite. This test pins the batch contract so
+    the O(results x store_size) regression cannot silently return.
+    """
+    from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    for i in range(10):
+        store.add(
+            Function(
+                id=f"perf-{i}",
+                name=f"n{i}",
+                name_normalized=f"n{i}",
+                trigger=[
+                    FieldValue(desc=f"t{i}", sources=["s"], source_method="manual", weight=1.0)
+                ],
+            ),
+            SourceDocument(type="text", source_type=SourceType.WIKI),
+        )
+    save_calls = []
+    original_save = store._save
+    store._save = lambda: save_calls.append(1) or original_save()
+    # 10 valid ids in one batch call
+    store.increment_access_batch([f"perf-{i}" for i in range(10)])
+    assert len(save_calls) == 1, (
+        f"batch must persist once, got {len(save_calls)} _save calls for 10 ids"
+    )
+
+
+def test_service_query_uses_single_batched_increment(tmp_path):
+    """End-to-end: a service.query that returns K results must not trigger
+    K full-store rewrites for access counting."""
+    from memplex.config import MemplexConfig
+    from memplex.service import MemplexService
+
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(tmp_path)
+    cfg.llm.semantic_extraction = False
+    cfg.llm.query_enhancement = False
+    cfg.llm.conflict_resolution = False
+    cfg.llm.summarization = False
+    cfg.llm.reranking = False
+    svc = MemplexService(config=cfg)
+    try:
+        # Seed several memories that match a common token.
+        for i in range(4):
+            svc.write_text(f"perf-batch-canary: variant {i} for recall.")
+        # Spy on the lite store's _save.
+        save_calls = []
+        original = svc.store._save
+        svc.store._save = lambda: save_calls.append(1) or original()
+        result = svc.query("perf-batch-canary", top_k=10)
+        # Count _save calls made DURING the access-increment phase only.
+        # (query may call _save elsewhere? -- the access phase is the only
+        # write in query, so any _save calls here are from it.)
+        pre_count = len(save_calls)
+        # The increment happened inside query; assert it was batched (<=1).
+        # Allow 0 (empty results) or 1 (batched), never N.
+        assert pre_count <= 1, (
+            f"query triggered {pre_count} _save calls for {len(result.results)} results; "
+            "access counting must be batched into a single persistence pass"
+        )
+    finally:
+        svc.stop()

@@ -401,16 +401,17 @@ class MemplexService:
             )
 
         # Update access_count (must persist for Reranker frequency dimension).
-        # Best-effort: a store hiccup here must not fail the query, but we
-        # log at debug so the lost frequency signal is diagnosable rather
-        # than silently swallowed.
-        for r in results:
+        # Batched: a single persistence pass for all results instead of one
+        # full-store rewrite per result. Best-effort -- a store hiccup here
+        # must not fail the query, but we log at debug so a lost frequency
+        # signal is diagnosable rather than silently swallowed.
+        if results:
             try:
-                self.store.increment_access(r.func_id)
+                self.store.increment_access_batch([r.func_id for r in results])
             except Exception as exc:
                 logger.debug(
-                    "increment_access failed for %s (frequency signal lost): %s",
-                    r.func_id,
+                    "increment_access_batch failed (frequency signal lost for %d results): %s",
+                    len(results),
                     exc,
                 )
 

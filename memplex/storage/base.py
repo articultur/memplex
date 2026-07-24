@@ -58,6 +58,20 @@ class MemoryStore(ABC):
         avoid read-modify-write races.
         """
 
+    def increment_access_batch(self, func_ids) -> None:
+        """Increment access_count for many funcs in a single persistence pass.
+
+        Default implementation loops the single-func primitive so every
+        backend gets correct behaviour for free. Backends whose
+        ``increment_access`` pays a full-store persistence cost (e.g. the
+        lite JSON store) MUST override this to persist once for the whole
+        batch -- calling the single-func version N times would trigger N
+        full-store rewrites, which is the pathological amplifier that
+        makes query cost O(results x store_size).
+        """
+        for func_id in func_ids:
+            self.increment_access(func_id)
+
     # ── Retrieval ───────────────────────────────────────────────────
 
     @abstractmethod

@@ -1,9 +1,18 @@
 # Memplex
 
-Memplex is a shared long-term memory layer for AI agents. It gives Codex,
-Claude Code, OpenClaw, Hermes, and similar local agents the same closed loop:
-recall useful memory before a turn, capture what happened after the turn, and
-compact old context in the background.
+Memplex is a **single-machine, multi-agent** long-term memory layer for local
+AI agents. It gives Codex, Claude Code, OpenClaw, Hermes, and similar local
+agents on **the same host** the same closed loop: recall useful memory before
+a turn, capture what happened after the turn, and compact old context.
+
+> **Scope note (read before relying on this).** Memory is stored locally in
+> `~/.memplex/memory.json` (or a project-local path). Memplex does **not**
+> sync across machines, networks, or remote users out of the box -- "shared"
+> here means *shared between the agents on one machine*, not multi-device or
+> multi-site replication. Remote/shared backends are on the roadmap (see
+> [Scope & Roadmap](#scope--roadmap) below). Background compaction is
+> automatic for the Claude Code hook loop and manual (`memplex compact`)
+> elsewhere.
 
 ## Install
 
@@ -176,11 +185,42 @@ memplex health
 
 ## Storage And Privacy
 
-The default local backend is a JSON-backed LiteMemoryStore at
-`.memplex/memory.json`. Memplex can also use vector and feedback backends when
-configured.
+The default and currently implemented memory backend is a JSON-backed
+`LiteMemoryStore` at `~/.memplex/memory.json` (override with
+`MEMPLEX_STORAGE_PATH` or `config.yaml`). All data is held in memory and
+flushed to JSON on every write. The feedback store has an optional
+asyncpg/Postgres backend; the main memory store does not yet have a
+remote backend (see Scope & Roadmap).
 
-Content wrapped in `<private>...</private>` is not stored.
+Content wrapped in `<private>...</private>` is stripped before storage on
+every write path (CLI/HTTP/MCP/corpus).
+
+## Scope & Roadmap
+
+What Memplex **is today** (single-machine, multi-agent, local):
+
+- Local recall-before-turn / capture-after-turn loop for Codex, Claude
+  Code, OpenClaw, and Hermes on one host.
+- Local-first retrieval: SQLite FTS5/BM25 + trigram, pure-Python fallback,
+  optional local ONNX/HF embeddings (never required).
+- Automatic closed loop for Claude Code (via hooks); MCP tools for Codex
+  and others (agent-driven).
+- `<private>` redaction and indirect-injection scanning on every write
+  path (`write`, `write_text`, `update_memory`).
+
+What Memplex **is not yet** (tracked as roadmap, not currently shipped):
+
+- **Cross-machine / multi-site sharing.** No sync, replication, or remote
+  memory backend for the main store. Multiple machines cannot share one
+  memory. A remote/shared backend is the largest roadmap item.
+- **Remote/enterprise memory backends.** `standard` and `enterprise`
+  backends are reserved names; only `lite` is implemented.
+- **Scheduled background compaction.** `memplex compact` is manual.
+  Claude Code's `Stop` hook triggers compaction automatically; all other
+  surfaces require the user/agent to run it.
+- **Incremental FTS5 indexing.** The FTS5 sidecar rebuilds fully on the
+  first query after any write (cached afterwards). Fine up to ~10k
+  memories; incremental upsert is roadmap for larger corpora.
 
 ## License
 

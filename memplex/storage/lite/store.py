@@ -345,6 +345,26 @@ class LiteMemoryStore:
         func.last_accessed_at = datetime.now(timezone.utc).isoformat()
         self._save()
 
+    def increment_access_batch(self, func_ids) -> None:
+        """Update access_count for many funcs with a SINGLE persistence pass.
+
+        Overrides the base default (which would call increment_access N
+        times -> N full JSON rewrites). Critical for query latency: a
+        query returning K results used to trigger K full-store writes;
+        now it triggers one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        touched = False
+        for func_id in func_ids:
+            func = self._functions.get(func_id)
+            if func is None:
+                continue
+            func.access_count += 1
+            func.last_accessed_at = now
+            touched = True
+        if touched:
+            self._save()
+
     # ── Public: Retrieval ───────────────────────────────────────────
 
     def vector_search(self, text: str, top_k: int = 5) -> List[SearchResult]:
