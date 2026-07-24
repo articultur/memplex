@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from memplex.benchmarks.base import (
+from benchmarks.base import (
     BenchmarkResult,
     BenchmarkRunner,
     BenchmarkRunnerFactory,

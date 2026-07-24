@@ -11,9 +11,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from memplex.benchmarks.base import BenchmarkResult
-from memplex.benchmarks.evaluator import BenchmarkEvaluator
-from memplex.benchmarks.loader import download_dataset, list_available_datasets
+from benchmarks.base import BenchmarkResult
+from benchmarks.evaluator import BenchmarkEvaluator
+from benchmarks.loader import download_dataset, list_available_datasets
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def run_benchmark_command(
         ``all``.
     path:
         Explicit dataset file path. If not provided, auto-downloads using
-        :func:`~memplex.benchmarks.loader.download_dataset`.
+        :func:`~benchmarks.loader.download_dataset`.
     output:
         Output JSONL file path.
     warm:

@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from memplex.adapters._shared import get_plugin_source_dir as _get_plugin_source_dir
+from memplex.adapters._shared import marketplace_json as _marketplace_json
 from memplex.adapters.agent_runtime import get_agent_manifest
 
 MANAGED_BEGIN = "# >>> memplex managed agent integration >>>"
@@ -900,41 +902,6 @@ def _is_managed_json_file(path: Path) -> bool:
 
 def _ignore_patterns(_dir: str, files: Iterable[str]) -> list[str]:
     return [name for name in files if name == "__pycache__" or name.endswith(".pyc")]
-
-
-def _get_plugin_source_dir() -> Path:
-    package_dir = Path(__file__).resolve().parent.parent
-    bundled = package_dir / "_plugin"
-    if bundled.exists() and (bundled / "hooks").exists():
-        return bundled
-    dev_plugin = package_dir.parent / "plugin"
-    if dev_plugin.exists() and (dev_plugin / "hooks").exists():
-        return dev_plugin
-    raise FileNotFoundError("Cannot find plugin directory in memplex package")
-
-
-def _marketplace_json() -> str:
-    return """{
-  "name": "memplex",
-  "interface": {
-    "displayName": "Memplex (local)"
-  },
-  "plugins": [
-    {
-      "name": "memplex",
-      "source": {
-        "source": "local",
-        "path": "./plugin"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-"""
 
 
 def _package_version() -> str:

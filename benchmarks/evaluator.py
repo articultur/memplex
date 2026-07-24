@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-from memplex.benchmarks.base import (
+from benchmarks.base import (
     BenchmarkResult,
     BenchmarkRunnerFactory,
     BenchmarkSample,
@@ -225,7 +225,7 @@ class BenchmarkEvaluator:
             runner = BenchmarkRunnerFactory.create_runner(dataset_name)
         except KeyError:
             # Fallback: try LocomoDataset/LocomoRunner directly
-            from memplex.benchmarks.locomo import LocomoDataset, LocomoRunner
+            from benchmarks.locomo import LocomoDataset, LocomoRunner
 
             dataset = LocomoDataset()
             runner = LocomoRunner(dataset)

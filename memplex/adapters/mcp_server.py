@@ -26,24 +26,11 @@ import json
 import logging
 import sys
 import traceback
-from dataclasses import asdict
 from typing import Any, Dict, Optional
 
+from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
+
 logger = logging.getLogger(__name__)
-
-
-# ── Helpers ─────────────────────────────────────────────────────────
-
-
-def _dataclass_to_dict(obj) -> Any:
-    """Recursively convert dataclasses to plain dicts."""
-    if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
-    if isinstance(obj, list):
-        return [_dataclass_to_dict(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: _dataclass_to_dict(v) for k, v in obj.items()}
-    return obj
 
 
 # ── Tool definitions ────────────────────────────────────────────────

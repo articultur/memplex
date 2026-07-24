@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional
 
-from memplex.benchmarks.base import BenchmarkSample
+from benchmarks.base import BenchmarkSample
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)

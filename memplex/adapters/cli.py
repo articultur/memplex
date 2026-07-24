@@ -37,6 +37,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Sequence
 
+from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -99,17 +101,6 @@ def _result_to_dict(result) -> dict:
     if isinstance(result, dict):
         return result
     return {"value": str(result)}
-
-
-def _dataclass_to_dict(obj):
-    """Recursively convert dataclasses to dicts."""
-    if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
-    if isinstance(obj, list):
-        return [_dataclass_to_dict(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: _dataclass_to_dict(v) for k, v in obj.items()}
-    return obj
 
 
 # ── Command implementations ────────────────────────────────────────
@@ -528,41 +519,6 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
 _PLUGIN_AUTHOR = "articultur"
 _PLUGIN_NAME = "memplex"
-_MARKETPLACE_JSON = """{
-  "name": "memplex",
-  "interface": {
-    "displayName": "Memplex (local)"
-  },
-  "plugins": [
-    {
-      "name": "memplex",
-      "source": {
-        "source": "local",
-        "path": "./plugin"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-"""
-
-
-def _get_plugin_source_dir() -> Path:
-    """Find the plugin directory within the memplex package."""
-    # Installed via pip: use bundled memplex/_plugin/
-    package_dir = Path(__file__).resolve().parent.parent
-    bundled = package_dir / "_plugin"
-    if bundled.exists() and (bundled / "hooks").exists():
-        return bundled
-    # Development mode: use project root plugin/
-    dev_plugin = package_dir / "plugin"
-    if dev_plugin.exists() and (dev_plugin / "hooks").exists():
-        return dev_plugin
-    raise FileNotFoundError("Cannot find plugin directory in memplex package")
 
 
 def _get_marketplace_dir() -> Path:

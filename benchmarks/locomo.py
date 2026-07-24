@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from memplex.benchmarks.base import (
+from benchmarks.base import (
     BenchmarkResult,
     BenchmarkRunner,
     BenchmarkSample,
@@ -357,7 +357,7 @@ class LocomoRunner(BenchmarkRunner):
             3. Check if ground-truth memory IDs appear in top_k results
             4. Compute recall@K, precision@K, MRR
         """
-        from memplex.benchmarks.metrics import mrr, precision_at_k, recall_at_k
+        from benchmarks.metrics import mrr, precision_at_k, recall_at_k
 
         results: List[BenchmarkResult] = []
         timestamp = datetime.utcnow().isoformat()
@@ -445,7 +445,7 @@ class LocomoRunner(BenchmarkRunner):
         captures the ground-truth events. For QA samples, evaluates exact
         match and BLEU against expected answer.
         """
-        from memplex.benchmarks.metrics import bleu, exact_match, rouge_l
+        from benchmarks.metrics import bleu, exact_match, rouge_l
 
         results: List[BenchmarkResult] = []
         timestamp = datetime.utcnow().isoformat()
@@ -668,7 +668,7 @@ class LocomoRunner(BenchmarkRunner):
 
 # ── Factory registration ─────────────────────────────────────────────────────────
 
-from memplex.benchmarks.base import BenchmarkRunnerFactory
+from benchmarks.base import BenchmarkRunnerFactory
 
 BenchmarkRunnerFactory.register_benchmark(
     name="locomo",

@@ -20,7 +20,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from memplex.benchmarks.base import (
+from benchmarks.base import (
     BenchmarkResult,
     BenchmarkRunner,
     BenchmarkRunnerFactory,
