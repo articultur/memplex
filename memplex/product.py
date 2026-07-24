@@ -293,7 +293,9 @@ def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[st
 
     preview = corpus_preview(path, limit=100000)
     if dry_run:
-        return {"status": "dry_run", **preview}
+        # status must come AFTER **preview so it is not overwritten by
+        # preview's own "status": "ok" field.
+        return {**preview, "status": "dry_run"}
 
     manifest = load_corpus_manifest(path)
     root: Path = manifest["root"]
