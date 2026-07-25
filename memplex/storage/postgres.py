@@ -635,6 +635,28 @@ class PostgresMemoryStore:
         cur.close()
         return funcs
 
+    def list_changes_since(self, since: Optional[str] = None, limit: int = 100000) -> List[Function]:
+        """Incremental query: push the updated_at filter into Postgres.
+
+        Overrides the base default (which loads all then filters in Python)
+        so /sync/changes does not scan the entire table on every pull.
+        """
+        if since is None:
+            return self.list_functions(limit=limit)
+        cur = self._execute(
+            "SELECT data FROM memplex_functions "
+            "WHERE data->>'updated_at' > %s "
+            "ORDER BY data->>'updated_at' ASC LIMIT %s",
+            (since, limit),
+            commit=False,
+        )
+        funcs = []
+        for row in cur.fetchall():
+            data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            funcs.append(_func_from_json(data))
+        cur.close()
+        return funcs
+
     # ── Delete / merge / clear ──────────────────────────────────────
 
     def delete(self, func_id: str) -> None:

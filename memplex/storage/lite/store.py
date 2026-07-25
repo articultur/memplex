@@ -442,6 +442,18 @@ class LiteMemoryStore:
             funcs = [f for f in funcs if f.owner == owner]
         return funcs[offset : offset + limit]
 
+    def list_changes_since(self, since: Optional[str] = None, limit: int = 100000) -> List[Function]:
+        """Incremental sync query: filter by updated_at at the dict level.
+
+        Avoids serializing all Functions when only a few changed since the
+        last pull. Overrides the base default for the lite in-memory store.
+        """
+        if since is None:
+            return list(self._functions.values())[:limit]
+        return [
+            f for f in self._functions.values() if (f.updated_at or "") > since
+        ][:limit]
+
     # ── Public: Delete / Merge / Clear ──────────────────────────────
 
     def delete(self, func_id: str) -> None:

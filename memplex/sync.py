@@ -54,6 +54,11 @@ class RemoteSyncConfig:
         import os
 
         self.url = (os.environ.get("MEMPLEX_REMOTE_URL") or "").rstrip("/") or None
+        # Read-replica URL (plan D): pull reads from here when set, push
+        # still goes to the primary url (write authority). Enables read
+        # scaling via Postgres streaming replication or multiple read-only
+        # server instances. MEMPLEX_READ_URL=http://replica:8900
+        self.read_url = (os.environ.get("MEMPLEX_READ_URL") or "").rstrip("/") or None
         self.api_key = os.environ.get("MEMPLEX_REMOTE_API_KEY") or os.environ.get("MEMPLEX_API_KEY")
         self.bearer = os.environ.get("MEMPLEX_REMOTE_BEARER_TOKEN") or os.environ.get(
             "MEMPLEX_BEARER_TOKEN"
@@ -312,12 +317,17 @@ class SyncableStore:
         from memplex.models import SourceDocument, SourceType
 
         cutoff = since or self._last_pull_at
-        # Pull from every configured target (primary + P2P peers) and merge
-        # the change sets. In a mesh this fetches from all known nodes.
+        # Pull targets: prefer read-replica (MEMPLEX_READ_URL) when set
+        # (plan D: read scaling); otherwise fall back to all push targets
+        # (primary + P2P peers). The write authority stays at the primary.
+        if self._config.read_url:
+            pull_targets = [self._config.read_url]
+        else:
+            pull_targets = self._config.all_targets()
         changes = []
         tombstones = []
         server_time = None
-        for target in self._config.all_targets():
+        for target in pull_targets:
             try:
                 resp = self._requests().get(
                     f"{target}/sync/changes",

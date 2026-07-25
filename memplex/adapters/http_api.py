@@ -148,23 +148,94 @@ def _read_tombstones(since: Optional[str] = None) -> list:
 # In-process pub/sub for /sync/events. Each connected client gets its own
 # asyncio.Queue; write/delete routes publish events to all subscribers so
 # clients know to pull immediately instead of polling.
+#
+# Redis pub/sub (plan C): when MEMPLEX_REDIS_URL is set, _broadcast_event
+# publishes to a Redis channel so events propagate across uvicorn workers.
+# A background thread subscribes to the channel and fans out to local
+# SSE subscribers. Without Redis, falls back to the in-process set.
 
 _SSE_SUBSCRIBERS: set = set()
+_SSE_REDIS_CHANNEL = "memplex:events"
+_redis_client: Any = None
+_redis_pubsub_thread: Any = None
 
 
-def _broadcast_event(event: dict) -> None:
-    """Non-blocking fan-out of an event dict to all SSE subscribers."""
-    import asyncio as _aio
+def _get_redis():
+    """Lazily connect to Redis, or return None if not configured."""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client if _redis_client is not False else None
+    redis_url = os.environ.get("MEMPLEX_REDIS_URL")
+    if not redis_url:
+        _redis_client = False  # sentinel: not configured
+        return None
+    try:
+        import redis  # type: ignore
 
+        _redis_client = redis.from_url(redis_url)
+        _redis_client.ping()  # verify connectivity
+        logger.info("SSE Redis pub/sub connected: %s", redis_url)
+        return _redis_client
+    except Exception as exc:
+        logger.warning("SSE Redis unavailable, using in-process broadcast: %s", exc)
+        _redis_client = False
+        return None
+
+
+def _start_redis_subscriber() -> None:
+    """Start a daemon thread that subscribes to the Redis channel and
+    fans out received events to local SSE subscribers."""
+    global _redis_pubsub_thread
+    if _redis_pubsub_thread is not None:
+        return
+    r = _get_redis()
+    if r is None:
+        return
+
+    import threading
+
+    def _sub_loop():
+        try:
+            pubsub = r.pubsub()
+            pubsub.subscribe(_SSE_REDIS_CHANNEL)
+            for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        event = json.loads(message["data"])
+                        _fanout_local(event)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("Redis subscriber thread stopped: %s", exc)
+
+    _redis_pubsub_thread = threading.Thread(
+        target=_sub_loop, name="memplex-sse-redis-sub", daemon=True
+    )
+    _redis_pubsub_thread.start()
+
+
+def _fanout_local(event: dict) -> None:
+    """Push an event to all in-process SSE subscriber queues."""
     dead = set()
     for queue in _SSE_SUBSCRIBERS:
         try:
             queue.put_nowait(event)
         except Exception:
-            # Queue full or closed -- drop this subscriber.
             dead.add(queue)
     if dead:
         _SSE_SUBSCRIBERS.difference_update(dead)
+
+
+def _broadcast_event(event: dict) -> None:
+    """Fan out an event: Redis pub/sub (cross-worker) or in-process set."""
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.publish(_SSE_REDIS_CHANNEL, json.dumps(event))
+            return
+        except Exception as exc:
+            logger.debug("Redis publish failed, falling back to local: %s", exc)
+    _fanout_local(event)
 
 
 # ── Security helpers ────────────────────────────────────────────────
@@ -524,12 +595,11 @@ def create_app(config=None) -> "FastAPI":
         client side; this endpoint just ships current state.
         """
         svc = _get_service(request)
-        funcs = svc.store.list_functions(limit=100000)
-        changed = [
-            _dataclass_to_dict(f)
-            for f in funcs
-            if since is None or (f.updated_at or "") > since
-        ]
+        # Incremental query: use list_changes_since so the backend pushes
+        # the updated_at filter into the database (Postgres WHERE) or dict
+        # filter (lite), instead of loading 100k functions every pull.
+        funcs = svc.store.list_changes_since(since=since, limit=100000)
+        changed = [_dataclass_to_dict(f) for f in funcs]
         tombstones = _read_tombstones(since=since)
         # The server's "now" gives clients a high-water mark for the next
         # pull, so they do not re-process the same window.
@@ -590,6 +660,9 @@ def create_app(config=None) -> "FastAPI":
         """
         import asyncio as _aio
 
+        # Ensure the Redis subscriber thread is running (cross-worker
+        # broadcast). No-op when Redis is not configured.
+        _start_redis_subscriber()
         queue: _aio.Queue = _aio.Queue(maxsize=64)
         _SSE_SUBSCRIBERS.add(queue)
 

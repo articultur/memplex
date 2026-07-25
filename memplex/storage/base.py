@@ -129,6 +129,19 @@ class MemoryStore(ABC):
     ) -> List[Function]:
         """Paginated listing, optionally filtered by *owner*."""
 
+    def list_changes_since(self, since: Optional[str] = None, limit: int = 100000) -> List[Function]:
+        """Return Functions with updated_at > *since* (incremental sync query).
+
+        Default implementation falls back to list_functions + Python filter.
+        Backends with query capabilities (e.g. Postgres) override this to
+        push the filter into the database (WHERE updated_at > ?) so the
+        server does not load the entire store on every /sync/changes call.
+        """
+        funcs = self.list_functions(limit=limit)
+        if since is None:
+            return funcs
+        return [f for f in funcs if (f.updated_at or "") > since]
+
     # ── Delete / merge / clear ──────────────────────────────────────
 
     @abstractmethod
