@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -72,6 +73,15 @@ class RemoteSyncConfig:
             self.auto_pull_interval = int(os.environ.get("MEMPLEX_SYNC_PULL_INTERVAL", "0"))
         except ValueError:
             self.auto_pull_interval = 0
+        # SSE push notifications: when active, the client connects to the
+        # server's /sync/events stream and pulls immediately on each event.
+        # MEMPLEX_SSE_ENABLED=0 disables (fall back to polling/manual pull).
+        self.sse_enabled = os.environ.get("MEMPLEX_SSE_ENABLED", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
     def all_targets(self) -> list:
         """Return every remote URL to sync with (primary + peers), deduped."""
@@ -118,9 +128,23 @@ class SyncableStore:
         # lazily imported so sync stays optional). Tests replace this with
         # a stub to exercise push/pull without a live server.
         self._http: Any = None
+        # Async push: writes return immediately; the actual HTTP POST to
+        # each target happens on this daemon pool. Previously push was
+        # synchronous inside add(), blocking writes up to 10s per target.
+        self._push_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="memplex-sync-push"
+        )
+        # Futures for in-flight push tasks, drained by flush_push. With
+        # max_workers > 1 a sentinel is NOT sufficient to prove all earlier
+        # tasks are done (they may run in parallel), so we track futures
+        # explicitly and wait on them.
+        self._push_futures: list = []
         # Auto-pull worker state (started by start_auto_pull).
         self._auto_pull_thread: Optional[threading.Thread] = None
         self._auto_pull_stop = threading.Event()
+        # SSE push-notification listener state.
+        self._sse_thread: Optional[threading.Thread] = None
+        self._sse_stop = threading.Event()
 
     def _requests(self):
         if self._http is None:
@@ -186,10 +210,11 @@ class SyncableStore:
         return headers
 
     def _push_functions(self, funcs) -> None:
-        """Best-effort push of Functions to every configured target's /sync/push.
+        """Schedule an async push of Functions to every target.
 
-        In a P2P mesh (MEMPLEX_PEERS set), this fans out to all peers.
-        Each target is independent; one failure does not block the others.
+        Returns immediately; the actual HTTP POST runs on the daemon
+        push pool. Previously this blocked the caller (add/merge) for up
+        to 10s per target when a server was slow or unreachable.
         """
         if not self._config.active or not funcs:
             return
@@ -201,39 +226,64 @@ class SyncableStore:
             logger.debug("sync push serialisation failed: %s", exc)
             return
         for target in self._config.all_targets():
-            try:
-                resp = self._requests().post(
-                    f"{target}/sync/push",
-                    json=payload,
-                    headers=self._auth_headers(),
-                    timeout=10,
+            fut = self._push_executor.submit(self._do_push_functions, target, payload)
+            self._push_futures.append(fut)
+
+    def _do_push_functions(self, target: str, payload: dict) -> None:
+        """Worker: POST functions to one target (runs on push pool)."""
+        try:
+            resp = self._requests().post(
+                f"{target}/sync/push",
+                json=payload,
+                headers=self._auth_headers(),
+                timeout=10,
+            )
+            if resp.status_code >= 400:
+                logger.debug(
+                    "sync push to %s rejected (HTTP %s)",
+                    target,
+                    resp.status_code,
                 )
-                if resp.status_code >= 400:
-                    logger.debug(
-                        "sync push to %s rejected (HTTP %s) for %d functions",
-                        target,
-                        resp.status_code,
-                        len(funcs),
-                    )
-                    self._push_failures += 1
-            except Exception as exc:
-                # Offline / unreachable target -- local write already succeeded.
-                logger.debug("sync push to %s failed (offline?): %s", target, exc)
                 self._push_failures += 1
+        except Exception as exc:
+            logger.debug("sync push to %s failed (offline?): %s", target, exc)
+            self._push_failures += 1
 
     def _push_delete(self, func_id: str) -> None:
-        """Best-effort: delete on every target so tombstones propagate."""
+        """Schedule an async delete push to every target."""
         if not self._config.active:
             return
         for target in self._config.all_targets():
-            try:
-                self._requests().delete(
-                    f"{target}/memories/{func_id}",
-                    headers=self._auth_headers(),
-                    timeout=10,
-                )
-            except Exception as exc:
-                logger.debug("sync delete push to %s failed (offline?): %s", target, exc)
+            fut = self._push_executor.submit(self._do_push_delete, target, func_id)
+            self._push_futures.append(fut)
+
+    def _do_push_delete(self, target: str, func_id: str) -> None:
+        """Worker: DELETE on one target (runs on push pool)."""
+        try:
+            self._requests().delete(
+                f"{target}/memories/{func_id}",
+                headers=self._auth_headers(),
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.debug("sync delete push to %s failed (offline?): %s", target, exc)
+
+    def flush_push(self, timeout: float = 5.0) -> None:
+        """Wait for queued push tasks to finish (best-effort).
+
+        Useful in tests and on shutdown to avoid asserting before the
+        async push has reached the server. Waits on the actual push
+        futures (not a sentinel) so it is correct even with
+        max_workers > 1.
+        """
+        import concurrent.futures as cf
+
+        futures = list(self._push_futures)
+        if not futures:
+            return
+        done, _not_done = cf.wait(futures, timeout=timeout)
+        # Drain completed futures from the tracked list.
+        self._push_futures = [f for f in self._push_futures if not f.done()]
 
     # ── Pull ───────────────────────────────────────────────────────
 
@@ -309,11 +359,24 @@ class SyncableStore:
                 logger.debug("sync pull: skip unparseable change %s: %s", func_id, exc)
 
         deleted = 0
+        tombstones_skipped_edit = 0
         for t in tombstones:
             fid = t.get("func_id")
-            if fid and self._local.get(fid) is not None:
-                self._local.delete(fid)
-                deleted += 1
+            if not fid:
+                continue
+            local = self._local.get(fid)
+            if local is None:
+                continue  # already absent, nothing to delete
+            # Delete-vs-edit fix: if the tombstone carries a deleted_version
+            # and the local copy is NEWER, the edit happened after the
+            # delete -- keep the edit, skip the tombstone.
+            tomb_deleted_version = t.get("deleted_version", "")
+            local_updated = getattr(local, "updated_at", None) or ""
+            if tomb_deleted_version and local_updated > tomb_deleted_version:
+                tombstones_skipped_edit += 1
+                continue
+            self._local.delete(fid)
+            deleted += 1
 
         if server_time:
             self._last_pull_at = server_time
@@ -323,6 +386,7 @@ class SyncableStore:
             "applied": applied,
             "rejected_older": rejected_older,
             "deleted": deleted,
+            "tombstones_skipped_edit": tombstones_skipped_edit,
             "server_time": server_time,
         }
 
@@ -370,6 +434,77 @@ class SyncableStore:
         self._auto_pull_stop.set()
         self._auto_pull_thread.join(timeout=5.0)
         self._auto_pull_thread = None
+
+    # ── SSE push-notification listener (near-real-time sync) ───────
+
+    def start_sse_listener(self) -> None:
+        """Connect to the primary target's /sync/events SSE stream.
+
+        On each received event (write/delete), immediately calls
+        pull_incremental so the local store reflects the remote change
+        within seconds instead of waiting for the next manual/auto pull.
+
+        Reconnects with exponential backoff (1s, 2s, 4s, ... up to 60s)
+        on disconnect or error. No-op when SSE is disabled or no target.
+        """
+        if not self._config.active or not self._config.sse_enabled:
+            return
+        if self._sse_thread is not None and self._sse_thread.is_alive():
+            return
+        self._sse_stop.clear()
+
+        def _sse_loop():
+            import time
+
+            backoff = 1
+            while not self._sse_stop.is_set():
+                target = self._config.url or (self._config.peers[0] if self._config.peers else None)
+                if not target:
+                    break
+                try:
+                    resp = self._requests().get(
+                        f"{target}/sync/events",
+                        headers={**self._auth_headers(), "Accept": "text/event-stream"},
+                        stream=True,
+                        timeout=(10, None),  # connect timeout, no read timeout
+                    )
+                    if resp.status_code != 200:
+                        resp.close()
+                        raise RuntimeError(f"SSE HTTP {resp.status_code}")
+                    backoff = 1  # reset on successful connect
+                    for line in resp.iter_lines(decode_unicode=True):
+                        if self._sse_stop.is_set():
+                            break
+                        if line and line.startswith("data:"):
+                            payload = line[len("data:"):].strip()
+                            if payload and payload != '{"type":"hello"}':
+                                logger.debug("SSE event received, triggering pull: %s", payload)
+                                try:
+                                    self.pull_incremental()
+                                except Exception as exc:
+                                    logger.debug("SSE-triggered pull failed: %s", exc)
+                except Exception as exc:
+                    if not self._sse_stop.is_set():
+                        logger.debug("SSE listener disconnected, reconnecting in %ss: %s", backoff, exc)
+                    # Exponential backoff with cap.
+                    for _ in range(backoff):
+                        if self._sse_stop.wait(1.0):
+                            break
+                    backoff = min(backoff * 2, 60)
+
+        self._sse_thread = threading.Thread(
+            target=_sse_loop, name="memplex-sse-listener", daemon=True
+        )
+        self._sse_thread.start()
+        logger.debug("SSE listener started")
+
+    def stop_sse_listener(self) -> None:
+        """Signal the SSE listener to stop and wait briefly."""
+        if self._sse_thread is None:
+            return
+        self._sse_stop.set()
+        self._sse_thread.join(timeout=3.0)
+        self._sse_thread = None
 
 
 # ── Factory helper ───────────────────────────────────────────────────

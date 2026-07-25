@@ -18,6 +18,7 @@ Requires optional dependencies: ``fastapi``, ``uvicorn``.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 # the adapter package remains importable without it.
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
 
     _FASTAPI_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -90,22 +91,34 @@ def _tombstone_path() -> Path:
     return Path(os.environ.get("MEMPLEX_STORAGE_PATH", "~/.memplex")).expanduser() / "tombstones.json"
 
 
-def _record_tombstone(func_id: str) -> None:
-    """Append a deletion tombstone for *func_id*."""
+def _record_tombstone(func_id: str, deleted_version: str = "") -> None:
+    """Record a deletion tombstone with the deleted record's updated_at.
+
+    The *deleted_version* lets pulling clients detect delete-vs-edit
+    conflicts: if the client's local copy has a newer updated_at than the
+    tombstone, the edit happened after the delete and must be kept.
+    """
     try:
         path = _tombstone_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tombstones: dict = {}
         if path.exists():
             tombstones = json.loads(path.read_text(encoding="utf-8"))
-        tombstones[func_id] = datetime.now(timezone.utc).isoformat()
+        tombstones[func_id] = {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_version": deleted_version,
+        }
         path.write_text(json.dumps(tombstones, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         logger.debug("failed to record tombstone for %s", func_id)
 
 
 def _read_tombstones(since: Optional[str] = None) -> list:
-    """Return tombstones optionally filtered by *since* (iso8601)."""
+    """Return tombstones optionally filtered by *since* (iso8601).
+
+    Handles both the new format (``{deleted_at, deleted_version}``) and
+    the legacy format (bare iso8601 string) for backward compatibility.
+    """
     try:
         path = _tombstone_path()
         if not path.exists():
@@ -113,10 +126,45 @@ def _read_tombstones(since: Optional[str] = None) -> list:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
-    items = [{"func_id": fid, "deleted_at": ts} for fid, ts in raw.items()]
+    items = []
+    for fid, val in raw.items():
+        if isinstance(val, dict):
+            # New format.
+            deleted_at = val.get("deleted_at", "")
+            deleted_version = val.get("deleted_version", "")
+        else:
+            # Legacy format: bare iso8601 string (no version).
+            deleted_at = str(val)
+            deleted_version = ""
+        items.append(
+            {"func_id": fid, "deleted_at": deleted_at, "deleted_version": deleted_version}
+        )
     if since:
         items = [i for i in items if i["deleted_at"] > since]
     return items
+
+
+# ── SSE broadcast helpers (server -> client push notifications) ───────
+# In-process pub/sub for /sync/events. Each connected client gets its own
+# asyncio.Queue; write/delete routes publish events to all subscribers so
+# clients know to pull immediately instead of polling.
+
+_SSE_SUBSCRIBERS: set = set()
+
+
+def _broadcast_event(event: dict) -> None:
+    """Non-blocking fan-out of an event dict to all SSE subscribers."""
+    import asyncio as _aio
+
+    dead = set()
+    for queue in _SSE_SUBSCRIBERS:
+        try:
+            queue.put_nowait(event)
+        except Exception:
+            # Queue full or closed -- drop this subscriber.
+            dead.add(queue)
+    if dead:
+        _SSE_SUBSCRIBERS.difference_update(dead)
 
 
 # ── Security helpers ────────────────────────────────────────────────
@@ -315,6 +363,9 @@ def create_app(config=None) -> "FastAPI":
             source_type=source_type_enum,
         )
         result = svc.write(source)
+        # Notify SSE subscribers that new memories are available.
+        func_ids = [f.id for f in getattr(result, "functions", [])]
+        _broadcast_event({"type": "write", "func_ids": func_ids})
         return JSONResponse(_dataclass_to_dict(result))
 
     @app.get("/memories", summary="Query memories")
@@ -355,8 +406,15 @@ def create_app(config=None) -> "FastAPI":
     async def delete_memory(request: Request, memory_id: str) -> JSONResponse:
         """Soft-delete a memory and record a sync tombstone."""
         svc = _get_service(request)
+        # Snapshot updated_at BEFORE deleting so the tombstone carries the
+        # version it deleted. Pull clients use this to decide: if their
+        # local copy is NEWER than the tombstone, the edit happened after
+        # the delete and must be kept (fixes the delete-vs-edit bug).
+        existing = svc.get(memory_id)
+        deleted_version = (getattr(existing, "updated_at", None) or "") if existing else ""
         svc.delete(memory_id)
-        _record_tombstone(memory_id)
+        _record_tombstone(memory_id, deleted_version)
+        _broadcast_event({"type": "delete", "func_id": memory_id})
         return JSONResponse({"status": "deleted", "id": memory_id})
 
     @app.post("/memories/{memory_id}/feedback", summary="Submit feedback")
@@ -520,6 +578,41 @@ def create_app(config=None) -> "FastAPI":
             )
             accepted += 1
         return JSONResponse({"accepted": accepted, "rejected_older": rejected_older})
+
+    @app.get("/sync/events", summary="SSE stream of sync events")
+    async def sync_events(request: Request):
+        """Server-Sent Events stream: notifies clients of writes/deletes.
+
+        Clients connect here and receive ``data: {"type":"write",...}\\n\\n``
+        events. On receiving an event, a client should immediately
+        ``pull_incremental()`` to fetch the new state. A ``: ping`` comment
+        is sent every 30s to keep the connection alive.
+        """
+        import asyncio as _aio
+
+        queue: _aio.Queue = _aio.Queue(maxsize=64)
+        _SSE_SUBSCRIBERS.add(queue)
+
+        async def _event_stream():
+            try:
+                # Send an initial hello so the client knows it's connected.
+                yield 'data: {"type":"hello"}\n\n'
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield f"data: {json.dumps(event)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"  # keepalive
+            finally:
+                _SSE_SUBSCRIBERS.discard(queue)
+
+        return StreamingResponse(
+            _event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return app
 

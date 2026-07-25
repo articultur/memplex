@@ -1099,21 +1099,23 @@ class MemplexService:
         return result
 
     def start(self) -> None:
-        """Start the background worker thread (+ auto-pull if configured)."""
+        """Start the background worker thread (+ auto-pull/SSE if configured)."""
         self._worker.start()
-        # If the store is sync-enabled and a positive auto-pull interval is
-        # configured, start the periodic pull thread so this node stays
-        # current with the central server without manual 'sync pull'.
+        # If the store is sync-enabled, start the periodic pull thread and
+        # the SSE push-notification listener so this node stays current with
+        # the central server without manual 'sync sync pull'.
         from memplex.sync import SyncableStore
 
         if isinstance(self.store, SyncableStore):
             self.store.start_auto_pull()
+            self.store.start_sse_listener()
 
     def stop(self) -> None:
-        """Stop the background worker thread (+ auto-pull if running)."""
+        """Stop the background worker thread (+ auto-pull/SSE if running)."""
         from memplex.sync import SyncableStore
 
         if isinstance(self.store, SyncableStore):
+            self.store.stop_sse_listener()
             self.store.stop_auto_pull()
         self._worker.stop()
 
