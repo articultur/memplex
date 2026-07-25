@@ -680,7 +680,40 @@ class MemplexService:
             # build is traceable.
             logger.debug("background task submission failed: %s", exc)
 
+        # 4. Threshold-triggered background compaction.
+        # Previously compaction was manual-only (or Claude Code's Stop hook).
+        # Now when the corpus crosses warn_threshold, schedule a compaction
+        # in the background worker so the store does not grow unbounded on
+        # the non-Claude paths (CLI/HTTP/MCP/Codex). Hard limit forces it
+        # even if a previous run is still pending.
+        self._maybe_schedule_compaction()
+
         return extracted
+
+    def _maybe_schedule_compaction(self) -> None:
+        """Submit a background compaction when the corpus crosses thresholds.
+
+        Reads ``compaction.warn_threshold`` (soft trigger) and
+        ``compaction.hard_limit`` (force trigger) from config. Best-effort:
+        a full worker queue or a counting failure never blocks the write.
+        """
+        try:
+            total = len(self.store.list_functions(limit=100000))
+            warn = self._config.compaction.warn_threshold
+            hard = self._config.compaction.hard_limit
+            if total >= hard or (total >= warn and self._worker.queue_depth == 0):
+                self._worker.submit(
+                    BackgroundTask.COMPACTION,
+                    {"scope": "project", "triggered_by": "threshold", "total": total},
+                )
+                logger.debug(
+                    "scheduled background compaction (total=%d, warn=%d, hard=%d)",
+                    total,
+                    warn,
+                    hard,
+                )
+        except Exception as exc:
+            logger.debug("compaction scheduling check failed: %s", exc)
 
     def write_text(
         self,
@@ -1066,11 +1099,22 @@ class MemplexService:
         return result
 
     def start(self) -> None:
-        """Start the background worker thread."""
+        """Start the background worker thread (+ auto-pull if configured)."""
         self._worker.start()
+        # If the store is sync-enabled and a positive auto-pull interval is
+        # configured, start the periodic pull thread so this node stays
+        # current with the central server without manual 'sync pull'.
+        from memplex.sync import SyncableStore
+
+        if isinstance(self.store, SyncableStore):
+            self.store.start_auto_pull()
 
     def stop(self) -> None:
-        """Stop the background worker thread."""
+        """Stop the background worker thread (+ auto-pull if running)."""
+        from memplex.sync import SyncableStore
+
+        if isinstance(self.store, SyncableStore):
+            self.store.stop_auto_pull()
         self._worker.stop()
 
     # ── Memory type detection ─────────────────────────────────────

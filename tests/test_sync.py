@@ -345,3 +345,59 @@ def test_e2e_two_nodes_share_one_memory(server_client, tmp_path, monkeypatch):
     summary = node_b.pull_incremental()
     assert summary["applied"] >= 1
     assert node_b.get("shared-1") is not None  # arrived via pull
+
+
+# ── R4: auto-pull worker (periodic background sync) ──────────────────
+
+
+def test_auto_pull_disabled_when_interval_zero(tmp_path, monkeypatch):
+    """auto_pull_interval=0 (default) -> start_auto_pull is a no-op."""
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    store = SyncableStore(LiteMemoryStore(path=tmp_path / "ap.json"), config=_active_config())
+    store._config.auto_pull_interval = 0
+    store.start_auto_pull()
+    assert store._auto_pull_thread is None  # no thread started
+
+
+def test_auto_pull_starts_thread_when_interval_positive(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    store = SyncableStore(LiteMemoryStore(path=tmp_path / "ap2.json"), config=_active_config())
+    # Stub http so pull_incremental returns a no-op quickly.
+    store._http = _StubHttp([], [])
+    store.start_auto_pull(interval=0.05)  # 50ms cadence
+    try:
+        assert store._auto_pull_thread is not None
+        assert store._auto_pull_thread.is_alive()
+    finally:
+        store.stop_auto_pull()
+    assert store._auto_pull_thread is None
+
+
+def test_auto_pull_thread_stops_cleanly(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    store = SyncableStore(LiteMemoryStore(path=tmp_path / "ap3.json"), config=_active_config())
+    store._http = _StubHttp([], [])
+    store.start_auto_pull(interval=0.05)
+    store.stop_auto_pull()
+    # After stop, the thread reference is cleared and the event is set.
+    assert store._auto_pull_thread is None
+    assert store._auto_pull_stop.is_set()
+
+
+def test_auto_pull_does_not_crash_on_pull_failure(tmp_path, monkeypatch):
+    """A failing pull must not kill the auto-pull thread."""
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    store = SyncableStore(LiteMemoryStore(path=tmp_path / "ap4.json"), config=_active_config())
+
+    class _BoomHttp:
+        def get(self, *a, **kw):
+            raise RuntimeError("simulated network failure")
+
+    store._http = _BoomHttp()
+    store.start_auto_pull(interval=0.02)
+    import time
+
+    time.sleep(0.1)  # let a couple of ticks fire + fail
+    assert store._auto_pull_thread is not None
+    assert store._auto_pull_thread.is_alive()  # still running despite failures
+    store.stop_auto_pull()

@@ -21,6 +21,7 @@ latest remote state call ``pull_incremental`` explicitly before reading.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -59,6 +60,13 @@ class RemoteSyncConfig:
         self.enabled = self.url is not None and (
             os.environ.get("MEMPLEX_SYNC_ENABLED", "1").lower() not in ("0", "false", "no", "off")
         )
+        # Auto-pull interval in seconds. 0 (default) = disabled; pull stays
+        # on-demand (memplex sync pull). A positive value starts a daemon
+        # thread that calls pull_incremental on that cadence.
+        try:
+            self.auto_pull_interval = int(os.environ.get("MEMPLEX_SYNC_PULL_INTERVAL", "0"))
+        except ValueError:
+            self.auto_pull_interval = 0
 
     @property
     def active(self) -> bool:
@@ -92,6 +100,9 @@ class SyncableStore:
         # lazily imported so sync stays optional). Tests replace this with
         # a stub to exercise push/pull without a live server.
         self._http: Any = None
+        # Auto-pull worker state (started by start_auto_pull).
+        self._auto_pull_thread: Optional[threading.Thread] = None
+        self._auto_pull_stop = threading.Event()
 
     def _requests(self):
         if self._http is None:
@@ -275,6 +286,51 @@ class SyncableStore:
             "deleted": deleted,
             "server_time": server_time,
         }
+
+    # ── Auto-pull worker (periodic background sync) ────────────────
+
+    def start_auto_pull(self, interval: Optional[int] = None) -> None:
+        """Start a daemon thread that pulls from the remote on a cadence.
+
+        Parameters
+        ----------
+        interval:
+            Seconds between pulls. When ``None``, reads
+            ``config.auto_pull_interval``; when that is ``<= 0`` this is a
+            no-op (auto-pull stays disabled, pull remains on-demand).
+
+        The thread stops on :meth:`stop_auto_pull` or process exit. Pull
+        failures are logged at debug and never crash the thread -- the
+        next tick retries.
+        """
+        if interval is None:
+            interval = self._config.auto_pull_interval
+        if interval <= 0 or not self._config.active:
+            return
+        if self._auto_pull_thread is not None and self._auto_pull_thread.is_alive():
+            return  # already running
+        self._auto_pull_stop.clear()
+
+        def _loop():
+            while not self._auto_pull_stop.wait(interval):
+                try:
+                    self.pull_incremental()
+                except Exception as exc:
+                    logger.debug("auto-pull tick failed (will retry): %s", exc)
+
+        self._auto_pull_thread = threading.Thread(
+            target=_loop, name="memplex-auto-pull", daemon=True
+        )
+        self._auto_pull_thread.start()
+        logger.debug("auto-pull worker started (interval=%ss)", interval)
+
+    def stop_auto_pull(self) -> None:
+        """Signal the auto-pull thread to stop and wait briefly."""
+        if self._auto_pull_thread is None:
+            return
+        self._auto_pull_stop.set()
+        self._auto_pull_thread.join(timeout=5.0)
+        self._auto_pull_thread = None
 
 
 # ── Factory helper ───────────────────────────────────────────────────

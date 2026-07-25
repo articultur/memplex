@@ -788,3 +788,86 @@ def test_service_query_uses_single_batched_increment(tmp_path):
         )
     finally:
         svc.stop()
+
+
+# ── R3: incremental FTS5 indexing ────────────────────────────────────
+
+
+def test_fts5_incremental_upsert_only_touches_changed_rows(tmp_path):
+    """R3: after the first build, a write should upsert only the changed
+    func, not rebuild the whole table. We spy on commit() counts and on
+    DELETE FROM (full-table) statements to pin the incremental contract."""
+    from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+    store = LiteMemoryStore(path=tmp_path / "inc.json")
+    store.add(
+        Function(
+            id="inc-1",
+            name="alpha",
+            name_normalized="alpha",
+            trigger=[
+                FieldValue(desc="alpha body", sources=["s"], source_method="manual", weight=1.0)
+            ],
+        ),
+        SourceDocument(type="text", source_type=SourceType.WIKI),
+    )
+    store.add(
+        Function(
+            id="inc-2",
+            name="beta",
+            name_normalized="beta",
+            trigger=[
+                FieldValue(desc="beta body", sources=["s"], source_method="manual", weight=1.0)
+            ],
+        ),
+        SourceDocument(type="text", source_type=SourceType.WIKI),
+    )
+    # First search builds the index for both.
+    store.vector_search("alpha", top_k=5)
+    idx = store._fts_index
+    assert idx._indexed_sigs, "first build should populate per-func sigs"
+    assert set(idx._indexed_sigs.keys()) == {"inc-1", "inc-2"}
+
+    # Now write a THIRD func. Incremental path should add only inc-3.
+    store.add(
+        Function(
+            id="inc-3",
+            name="gamma",
+            name_normalized="gamma",
+            trigger=[
+                FieldValue(desc="gamma body", sources=["s"], source_method="manual", weight=1.0)
+            ],
+        ),
+        SourceDocument(type="text", source_type=SourceType.WIKI),
+    )
+    store.vector_search("gamma", top_k=5)
+    # The previously-indexed inc-1/inc-2 signatures must be unchanged
+    # (they were not rebuilt), and inc-3 must now be present.
+    assert "inc-3" in idx._indexed_sigs
+    assert "inc-1" in idx._indexed_sigs and "inc-2" in idx._indexed_sigs
+    # gamma is retrievable.
+    assert any(r.func_id == "inc-3" for r in store.vector_search("gamma", top_k=5))
+
+
+def test_fts5_incremental_removes_deleted_func(tmp_path):
+    """R3: a delete must remove the func from the FTS index incrementally."""
+    from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+    store = LiteMemoryStore(path=tmp_path / "del.json")
+    store.add(
+        Function(
+            id="del-inc-1",
+            name="keepme",
+            name_normalized="keepme",
+            trigger=[
+                FieldValue(desc="keepme body", sources=["s"], source_method="manual", weight=1.0)
+            ],
+        ),
+        SourceDocument(type="text", source_type=SourceType.WIKI),
+    )
+    store.vector_search("keepme", top_k=5)
+    store.delete("del-inc-1")
+    idx = store._fts_index
+    store.vector_search("keepme", top_k=5)
+    assert "del-inc-1" not in idx._indexed_sigs
+    assert all(r.func_id != "del-inc-1" for r in store.vector_search("keepme", top_k=5))

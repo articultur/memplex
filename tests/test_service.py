@@ -11,6 +11,7 @@ import pytest
 
 from memplex.config import MemplexConfig
 from memplex.models import (
+    BackgroundTask,
     QueryResult,
     QueryScope,
 )
@@ -269,3 +270,67 @@ class TestServiceLifecycle:
         service.start()
         service.stop()
         # Should not raise
+
+
+# ── R2: threshold-triggered background compaction ────────────────────
+
+
+def test_write_schedules_compaction_when_warn_threshold_crossed(tmp_path):
+    """R2: when functions_total >= warn_threshold, write() submits a
+    COMPACTION task to the background worker."""
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(tmp_path)
+    cfg.llm.semantic_extraction = False
+    cfg.llm.query_enhancement = False
+    cfg.llm.conflict_resolution = False
+    cfg.llm.summarization = False
+    cfg.llm.reranking = False
+    # Set the warn threshold very low so a single write crosses it.
+    cfg.compaction.warn_threshold = 1
+    cfg.compaction.hard_limit = 1000
+    svc = MemplexService(config=cfg)
+    try:
+        submitted_types: list = []
+        original_submit = svc._worker.submit
+
+        def spy_submit(task_type, payload=None):
+            submitted_types.append(task_type)
+            return original_submit(task_type, payload or {})
+
+        svc._worker.submit = spy_submit
+        svc.write_text("compaction-trigger-canary: a single memory")
+        # BUILD_INDEX for the new func + COMPACTION from the threshold check.
+        assert any(t == BackgroundTask.COMPACTION for t in submitted_types), (
+            f"expected COMPACTION in submitted tasks, got {submitted_types}"
+        )
+    finally:
+        svc.stop()
+
+
+def test_write_does_not_schedule_compaction_below_threshold(tmp_path):
+    """Below warn_threshold, write() must NOT submit COMPACTION."""
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(tmp_path)
+    cfg.llm.semantic_extraction = False
+    cfg.llm.query_enhancement = False
+    cfg.llm.conflict_resolution = False
+    cfg.llm.summarization = False
+    cfg.llm.reranking = False
+    cfg.compaction.warn_threshold = 10000  # far above what we write
+    cfg.compaction.hard_limit = 100000
+    svc = MemplexService(config=cfg)
+    try:
+        submitted_types: list = []
+        original_submit = svc._worker.submit
+
+        def spy_submit(task_type, payload=None):
+            submitted_types.append(task_type)
+            return original_submit(task_type, payload or {})
+
+        svc._worker.submit = spy_submit
+        svc.write_text("no-compaction-canary: below threshold")
+        assert BackgroundTask.COMPACTION not in submitted_types
+    finally:
+        svc.stop()

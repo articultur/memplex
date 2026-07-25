@@ -77,6 +77,10 @@ class SQLiteFTSIndex:
         self._functions = functions
         self._text_factory = text_factory
         self._signature: tuple | None = None
+        # Per-func signatures from the last index build. Empty until the
+        # first build; used by _ensure_index to upsert/delete only changed
+        # rows instead of rebuilding the whole FTS5 table on every write.
+        self._indexed_sigs: dict = {}
         self._disabled = False
 
     def search(self, text: str, top_k: int) -> List[tuple[str, float]]:
@@ -182,25 +186,41 @@ class SQLiteFTSIndex:
                 """
             )
             if self._signature != signature:
-                conn.execute("DELETE FROM memplex_fts")
-                conn.execute("DELETE FROM memplex_trigram")
-                for func in self._functions.values():
+                # Incremental diff against the last indexed per-func state.
+                # First build (_indexed_sigs empty) upserts every func; later
+                # builds only touch funcs whose signature changed or that
+                # were added/removed -- O(changes) instead of O(N) per write.
+                current_sigs = self._per_func_signatures()
+                indexed = self._indexed_sigs
+                to_upsert = [fid for fid, sig in current_sigs.items() if indexed.get(fid) != sig]
+                to_remove = [fid for fid in indexed if fid not in current_sigs]
+                for fid in to_upsert:
+                    func = self._functions.get(fid)
+                    if func is None:
+                        continue
                     func_text = self._text_factory(func)
+                    conn.execute("DELETE FROM memplex_fts WHERE func_id = ?", (fid,))
+                    conn.execute("DELETE FROM memplex_trigram WHERE func_id = ?", (fid,))
                     conn.execute(
                         """
                         INSERT INTO memplex_fts(func_id, name, domain, body)
                         VALUES (?, ?, ?, ?)
                         """,
-                        (func.id, func.name, func.domain or "", func_text),
+                        (fid, func.name, func.domain or "", func_text),
                     )
                     conn.execute(
                         """
                         INSERT INTO memplex_trigram(func_id, trigrams)
                         VALUES (?, ?)
                         """,
-                        (func.id, " ".join(_encoded_trigram_tokens(func_text))),
+                        (fid, " ".join(_encoded_trigram_tokens(func_text))),
                     )
-                conn.commit()
+                for fid in to_remove:
+                    conn.execute("DELETE FROM memplex_fts WHERE func_id = ?", (fid,))
+                    conn.execute("DELETE FROM memplex_trigram WHERE func_id = ?", (fid,))
+                if to_upsert or to_remove:
+                    conn.commit()
+                self._indexed_sigs = current_sigs
                 self._signature = signature
                 self._disabled = False
             return conn
@@ -209,21 +229,25 @@ class SQLiteFTSIndex:
             self._disabled = True
             raise
 
-    def _search_signature(self) -> tuple:
-        """Return a compact signature of searchable in-memory content."""
-        items = []
+    def _per_func_signatures(self) -> dict:
+        """Per-func signature map: {func_id: (version, updated_at, hash)}.
+
+        Used by _ensure_index for incremental upsert/delete diffing.
+        """
+        sigs: dict = {}
         for func in self._functions.values():
             search_text = self._text_factory(func)
-            items.append(
-                (
-                    func.id,
-                    func.version,
-                    func.updated_at or "",
-                    func.content_hash or "",
-                    sha1(search_text.encode("utf-8")).hexdigest(),
-                )
+            sigs[func.id] = (
+                func.version,
+                func.updated_at or "",
+                func.content_hash or "",
+                sha1(search_text.encode("utf-8")).hexdigest(),
             )
-        return tuple(sorted(items))
+        return sigs
+
+    def _search_signature(self) -> tuple:
+        """Return a compact whole-store signature for fast no-change short-circuit."""
+        return tuple(sorted(self._per_func_signatures().items()))
 
 
 def local_bm25_search(

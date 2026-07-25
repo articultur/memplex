@@ -524,7 +524,7 @@ def create_app(config=None) -> "FastAPI":
     return app
 
 
-def _function_from_dict(data: dict) -> "Function":
+def _function_from_dict(data: dict) -> Any:
     """Reconstruct a Function from its serialized dict (sync_push payload).
 
     Only the fields needed for storage + LWW are restored; rich FieldValue
