@@ -57,7 +57,12 @@ class RemoteSyncConfig:
         self.bearer = os.environ.get("MEMPLEX_REMOTE_BEARER_TOKEN") or os.environ.get(
             "MEMPLEX_BEARER_TOKEN"
         )
-        self.enabled = self.url is not None and (
+        # P2P peers: comma-separated list of additional node URLs. Each is
+        # treated the same as the primary url for pull/push. Enables mesh
+        # sync without a single central server. MEMPLEX_PEERS=url1,url2,...
+        peers_raw = os.environ.get("MEMPLEX_PEERS", "")
+        self.peers: list = [u.strip().rstrip("/") for u in peers_raw.split(",") if u.strip()]
+        self.enabled = (self.url is not None or self.peers) and (
             os.environ.get("MEMPLEX_SYNC_ENABLED", "1").lower() not in ("0", "false", "no", "off")
         )
         # Auto-pull interval in seconds. 0 (default) = disabled; pull stays
@@ -68,10 +73,23 @@ class RemoteSyncConfig:
         except ValueError:
             self.auto_pull_interval = 0
 
+    def all_targets(self) -> list:
+        """Return every remote URL to sync with (primary + peers), deduped."""
+        seen, out = set(), []
+        for u in [self.url] + self.peers if self.url else self.peers:
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
     @property
     def active(self) -> bool:
-        """True when sync is configured and enabled."""
-        return bool(self.enabled and self.url)
+        """True when sync is configured and enabled.
+
+        Active when there is at least one sync target (primary url OR any
+        P2P peer) and the master switch is on.
+        """
+        return bool(self.enabled and (self.url or self.peers))
 
 
 # ── SyncableStore wrapper ────────────────────────────────────────────
@@ -168,43 +186,54 @@ class SyncableStore:
         return headers
 
     def _push_functions(self, funcs) -> None:
-        """Best-effort push of Functions to the central server's /sync/push."""
+        """Best-effort push of Functions to every configured target's /sync/push.
+
+        In a P2P mesh (MEMPLEX_PEERS set), this fans out to all peers.
+        Each target is independent; one failure does not block the others.
+        """
         if not self._config.active or not funcs:
             return
         try:
             from memplex.adapters.http_api import _dataclass_to_dict
 
             payload = {"functions": [_dataclass_to_dict(f) for f in funcs]}
-            resp = self._requests().post(
-                f"{self._config.url}/sync/push",
-                json=payload,
-                headers=self._auth_headers(),
-                timeout=10,
-            )
-            if resp.status_code >= 400:
-                logger.debug(
-                    "sync push rejected (HTTP %s) for %d functions",
-                    resp.status_code,
-                    len(funcs),
-                )
-                self._push_failures += 1
         except Exception as exc:
-            # Offline / unreachable remote -- local write already succeeded.
-            logger.debug("sync push failed (offline?): %s", exc)
-            self._push_failures += 1
+            logger.debug("sync push serialisation failed: %s", exc)
+            return
+        for target in self._config.all_targets():
+            try:
+                resp = self._requests().post(
+                    f"{target}/sync/push",
+                    json=payload,
+                    headers=self._auth_headers(),
+                    timeout=10,
+                )
+                if resp.status_code >= 400:
+                    logger.debug(
+                        "sync push to %s rejected (HTTP %s) for %d functions",
+                        target,
+                        resp.status_code,
+                        len(funcs),
+                    )
+                    self._push_failures += 1
+            except Exception as exc:
+                # Offline / unreachable target -- local write already succeeded.
+                logger.debug("sync push to %s failed (offline?): %s", target, exc)
+                self._push_failures += 1
 
     def _push_delete(self, func_id: str) -> None:
-        """Best-effort: delete on the server so the tombstone propagates."""
+        """Best-effort: delete on every target so tombstones propagate."""
         if not self._config.active:
             return
-        try:
-            self._requests().delete(
-                f"{self._config.url}/memories/{func_id}",
-                headers=self._auth_headers(),
-                timeout=10,
-            )
-        except Exception as exc:
-            logger.debug("sync delete push failed (offline?): %s", exc)
+        for target in self._config.all_targets():
+            try:
+                self._requests().delete(
+                    f"{target}/memories/{func_id}",
+                    headers=self._auth_headers(),
+                    timeout=10,
+                )
+            except Exception as exc:
+                logger.debug("sync delete push to %s failed (offline?): %s", target, exc)
 
     # ── Pull ───────────────────────────────────────────────────────
 
@@ -233,17 +262,27 @@ class SyncableStore:
         from memplex.models import SourceDocument, SourceType
 
         cutoff = since or self._last_pull_at
-        resp = self._requests().get(
-            f"{self._config.url}/sync/changes",
-            params={"since": cutoff} if cutoff else {},
-            headers=self._auth_headers(),
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        changes = data.get("changes", [])
-        tombstones = data.get("tombstones", [])
-        server_time = data.get("server_time")
+        # Pull from every configured target (primary + P2P peers) and merge
+        # the change sets. In a mesh this fetches from all known nodes.
+        changes = []
+        tombstones = []
+        server_time = None
+        for target in self._config.all_targets():
+            try:
+                resp = self._requests().get(
+                    f"{target}/sync/changes",
+                    params={"since": cutoff} if cutoff else {},
+                    headers=self._auth_headers(),
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                changes.extend(data.get("changes", []))
+                tombstones.extend(data.get("tombstones", []))
+                if data.get("server_time"):
+                    server_time = data["server_time"]
+            except Exception as exc:
+                logger.debug("sync pull from %s failed: %s", target, exc)
 
         applied = 0
         rejected_older = 0

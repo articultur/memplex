@@ -262,3 +262,97 @@ def test_postgres_store_constructs_without_psycopg2():
     store = PostgresMemoryStore(dsn="dbname=fake")
     assert store._dsn == "dbname=fake"
     assert store._conn is None  # no connection attempted yet
+
+
+# ── pgvector hybrid search ───────────────────────────────────────────
+
+
+class _StubEmbedder:
+    """Fixed-dimension embedder for pgvector tests."""
+
+    def __init__(self, dim=4):
+        self.dim = dim
+
+    def embed(self, text):
+        # Deterministic vector derived from text length so identical texts collide.
+        base = [0.0] * self.dim
+        for i, ch in enumerate(text[: self.dim]):
+            base[i] = float(ord(ch) % 10) / 10.0
+        return base
+
+
+def test_pgvector_add_writes_embedding_when_enabled(monkeypatch):
+    store = PostgresMemoryStore(dsn="dbname=fake", vector_dim=4, embedder=_StubEmbedder(4))
+    mock_conn = _MockConn()
+    monkeypatch.setattr(store, "_connect", lambda: mock_conn)
+    monkeypatch.setattr(store, "_ensure_schema", lambda: None)
+    store._conn = mock_conn
+    store.add(_sample_func(), SourceDocument(type="text", source_type=SourceType.WIKI))
+    # The INSERT should reference the embedding column.
+    sql = mock_conn._cursor.executed[-1][0]
+    assert "embedding" in sql
+    params = mock_conn._cursor.executed[-1][1]
+    assert params[3] is not None  # the embedding literal
+
+
+def test_pgvector_add_skips_embedding_when_no_embedder(monkeypatch):
+    store = PostgresMemoryStore(dsn="dbname=fake", vector_dim=4, embedder=None)
+    mock_conn = _MockConn()
+    monkeypatch.setattr(store, "_connect", lambda: mock_conn)
+    monkeypatch.setattr(store, "_ensure_schema", lambda: None)
+    store._conn = mock_conn
+    store.add(_sample_func(), SourceDocument(type="text", source_type=SourceType.WIKI))
+    sql = mock_conn._cursor.executed[-1][0]
+    assert "embedding" not in sql  # plain INSERT, no vector column
+
+
+def test_pgvector_vector_dim_zero_disables_vector_search(monkeypatch):
+    """vector_dim=0 -> vector_search is tsvector-only (no pgvector leg)."""
+    store = PostgresMemoryStore(dsn="dbname=fake", vector_dim=0)
+    mock_conn = _MockConn()
+    monkeypatch.setattr(store, "_connect", lambda: mock_conn)
+    monkeypatch.setattr(store, "_ensure_schema", lambda: None)
+    store._conn = mock_conn
+    f = _sample_func()
+    mock_conn._cursor._result = [("pg-1", json.dumps(_func_to_json(f)), 0.9)]
+    results = store.vector_search("login", top_k=5)
+    assert len(results) == 1
+    # Only one SQL executed (the tsv leg) -- no vector leg.
+    assert len(mock_conn._cursor.executed) == 1
+
+
+def test_rrf_merge_fuses_both_legs():
+    """RRF gives a doc found in both legs a higher fused score."""
+    row_a = ("a", json.dumps({"name": "a", "trigger_text": "x"}), 0.9)
+    row_b = ("b", json.dumps({"name": "b", "trigger_text": "y"}), 0.8)
+    vec_a = ("a", json.dumps({"name": "a", "trigger_text": "x"}), 0.7)
+    merged = PostgresMemoryStore._rrf_merge([row_a, row_b], [vec_a], top_k=5)
+    # 'a' appears in both legs -> higher RRF score -> ranked first.
+    assert merged[0].func_id == "a"
+    assert merged[0].relevance_score > merged[1].relevance_score
+
+
+def test_rrf_merge_empty_legs_returns_empty():
+    assert PostgresMemoryStore._rrf_merge([], [], top_k=5) == []
+
+
+def test_rrf_merge_single_leg_works():
+    row = ("x", json.dumps({"name": "x", "trigger_text": "t"}), 0.5)
+    merged = PostgresMemoryStore._rrf_merge([row], [], top_k=5)
+    assert len(merged) == 1
+    assert merged[0].func_id == "x"
+
+
+def test_pgvector_dim_from_env(monkeypatch):
+    """MEMPLEX_PGVECTOR_DIM env overrides the constructor default."""
+    monkeypatch.setenv("MEMPLEX_PGVECTOR_DIM", "8")
+    store = PostgresMemoryStore(dsn="dbname=fake")
+    assert store._vector_dim == 8
+
+
+def test_pgvector_embed_text_returns_literal_string(monkeypatch):
+    store = PostgresMemoryStore(dsn="dbname=fake", vector_dim=4, embedder=_StubEmbedder(4))
+    vec_str = store._embed_text(_sample_func())
+    assert vec_str is not None
+    assert vec_str.startswith("[") and vec_str.endswith("]")
+    assert len(json.loads(vec_str)) == 4

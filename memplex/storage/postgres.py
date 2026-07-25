@@ -155,16 +155,29 @@ def _func_from_json(d: dict) -> Function:
 
 
 class PostgresMemoryStore:
-    """PostgreSQL-backed MemoryStore (JSONB + tsvector).
+    """PostgreSQL-backed MemoryStore (JSONB + tsvector + optional pgvector).
 
     Construction is lazy: the connection is opened on first use so the
     module imports cleanly without a database. Requires the optional
     ``postgres`` dependency (psycopg2).
+
+    Optional semantic search: when ``vector_dim`` > 0 (set via
+    ``MEMPLEX_PGVECTOR_DIM`` env or constructor arg), the store enables
+    the pgvector extension, adds an ``embedding`` column of that
+    dimension, and ``vector_search`` runs a hybrid (tsv + vector cosine)
+    merge. An optional ``embedder`` (any object with ``.embed(text) ->
+    list[float]``) supplies the vectors written on ``add``; without it,
+    pgvector columns stay NULL and search degrades to tsvector-only.
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, vector_dim: int = 0, embedder: Any = None) -> None:
+        import os
+
         self._dsn = dsn
         self._conn: Any = None
+        # pgvector dimension. 0 disables vector search (tsvector-only).
+        self._vector_dim: int = int(os.environ.get("MEMPLEX_PGVECTOR_DIM", vector_dim) or 0)
+        self._embedder = embedder  # optional: object with .embed(text) -> list[float]
 
     # ── Connection + schema ─────────────────────────────────────────
 
@@ -242,6 +255,26 @@ class PostgresMemoryStore:
                 )
                 """
             )
+            # Optional pgvector semantic search. When enabled, create the
+            # extension + an embedding column of the configured dimension.
+            # Idempotent: re-runs are no-ops once the column exists.
+            if self._vector_dim > 0:
+                try:
+                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    cur.execute(
+                        f"ALTER TABLE memplex_functions "
+                        f"ADD COLUMN IF NOT EXISTS embedding vector({self._vector_dim})"
+                    )
+                    # IVFFlat index for approximate nearest-neighbour search.
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS fts_functions_vec_idx "
+                        "ON memplex_functions USING ivfflat (embedding vector_cosine_ops) "
+                        "WITH (lists = 100)"
+                    )
+                except Exception as exc:
+                    # pgvector not installed -> degrade gracefully to tsvector-only.
+                    logger.warning("pgvector unavailable, falling back to tsvector search: %s", exc)
+                    self._vector_dim = 0
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -263,18 +296,51 @@ class PostgresMemoryStore:
 
     # ── Write operations ────────────────────────────────────────────
 
+    def _embed_text(self, func: Function) -> Optional[str]:
+        """Return a pgvector-literal string for *func* or None when disabled.
+
+        pgvector accepts the text form ``[1.0, 2.0, ...]``; we pass it as
+        a string parameter to avoid adapter complexity.
+        """
+        if self._vector_dim <= 0 or self._embedder is None:
+            return None
+        try:
+            text = f"{func.name} {func.domain or ''} " + " ".join(
+                fv.desc for fv in (func.trigger + func.action)
+            )
+            vec = self._embedder.embed(text)
+            if vec and len(vec) == self._vector_dim:
+                return str(list(vec))
+        except Exception as exc:
+            logger.debug("pgvector embed failed for %s, storing NULL: %s", func.id, exc)
+        return None
+
     def add(self, func: Function, source: SourceDocument) -> None:
         data = _func_to_json(func)
-        self._execute(
-            """
-            INSERT INTO memplex_functions (id, data, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                data = EXCLUDED.data,
-                updated_at = EXCLUDED.updated_at
-            """,
-            (func.id, json.dumps(data), _iso(func.updated_at) or datetime.now(timezone.utc)),
-        )
+        embedding = self._embed_text(func)
+        if embedding is not None:
+            self._execute(
+                """
+                INSERT INTO memplex_functions (id, data, updated_at, embedding)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    updated_at = EXCLUDED.updated_at,
+                    embedding = EXCLUDED.embedding
+                """,
+                (func.id, json.dumps(data), _iso(func.updated_at) or datetime.now(timezone.utc), embedding),
+            )
+        else:
+            self._execute(
+                """
+                INSERT INTO memplex_functions (id, data, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (func.id, json.dumps(data), _iso(func.updated_at) or datetime.now(timezone.utc)),
+            )
 
     def add_batch(self, funcs, source: SourceDocument) -> None:
         conn = self._connect()
@@ -358,7 +424,13 @@ class PostgresMemoryStore:
     # ── Retrieval ───────────────────────────────────────────────────
 
     def vector_search(self, text: str, top_k: int = 5) -> List[SearchResult]:
-        # Native PostgreSQL FTS via the generated tsvector column.
+        """Hybrid search: tsvector full-text + optional pgvector cosine.
+
+        When pgvector is enabled and an embedder is configured, runs both a
+        tsvector and a vector-cosine query and merges them with Reciprocal
+        Rank Fusion (RRF). Otherwise degrades to tsvector-only.
+        """
+        # --- tsvector leg (always runs) ---
         cur = self._execute(
             """
             SELECT id, data, ts_rank(search_tsv, plainto_tsquery('simple', %s)) AS score
@@ -367,22 +439,65 @@ class PostgresMemoryStore:
             ORDER BY score DESC
             LIMIT %s
             """,
-            (text, text, top_k),
+            (text, text, top_k * 2),
             commit=False,
         )
+        tsv_rows = cur.fetchall()
+        cur.close()
+
+        # --- pgvector leg (only when enabled + embedder available) ---
+        vec_rows = []
+        if self._vector_dim > 0 and self._embedder is not None:
+            try:
+                qvec = self._embedder.embed(text)
+                if qvec and len(qvec) == self._vector_dim:
+                    cur = self._execute(
+                        """
+                        SELECT id, data, 1 - (embedding <=> %s::vector) AS score
+                        FROM memplex_functions
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (str(list(qvec)), str(list(qvec)), top_k * 2),
+                        commit=False,
+                    )
+                    vec_rows = cur.fetchall()
+                    cur.close()
+            except Exception as exc:
+                logger.debug("pgvector search leg failed, using tsv only: %s", exc)
+
+        # --- RRF merge ---
+        return self._rrf_merge(tsv_rows, vec_rows, top_k)
+
+    @staticmethod
+    def _rrf_merge(tsv_rows, vec_rows, top_k, k: int = 60) -> List[SearchResult]:
+        """Reciprocal Rank Fusion of the two result legs."""
+        scores: dict = {}
+        meta: dict = {}
+        for rank, row in enumerate(tsv_rows):
+            fid = row[0]
+            scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
+            meta[fid] = row[1]
+        for rank, row in enumerate(vec_rows):
+            fid = row[0]
+            scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
+            if fid not in meta:
+                meta[fid] = row[1]
+        ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
         results = []
-        for row in cur.fetchall():
-            data = row[1] if isinstance(row[1], dict) else json.loads(row[1])
+        for fid, score in ordered:
+            data = meta[fid]
+            data = data if isinstance(data, dict) else json.loads(data)
             results.append(
                 SearchResult(
-                    func_id=row[0],
+                    func_id=fid,
                     name=data.get("name", ""),
                     domain=data.get("domain", ""),
-                    relevance_score=float(row[2]) if row[2] else 0.0,
+                    relevance_score=score,
                     summary=data.get("trigger_text", "") or data.get("name", ""),
                 )
             )
-        cur.close()
         return results
 
     def fts_search(self, text: str, top_k: int = 10) -> List[SearchResult]:

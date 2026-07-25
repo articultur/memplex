@@ -248,10 +248,13 @@ What Memplex **is today**:
 - Automatic closed loop for Claude Code (via hooks); MCP tools for Codex
   and others (agent-driven).
 - **Multi-machine sharing** via central server + local cache
-  (`MEMPLEX_REMOTE_URL`, opt-in, LWW sync). Optional background auto-pull
+  (`MEMPLEX_REMOTE_URL`, opt-in, LWW sync), **or P2P mesh** between peer
+  nodes (`MEMPLEX_PEERS=url1,url2,...`). Optional background auto-pull
   via `MEMPLEX_SYNC_PULL_INTERVAL`.
 - **Multiple storage backends**: `lite` (JSON, default) and `postgres`
   (JSONB + native tsvector full-text search, requires `memplex[postgres]`).
+  The Postgres backend optionally supports **pgvector semantic search**
+  (hybrid tsv + vector cosine via RRF) when `MEMPLEX_PGVECTOR_DIM` is set.
 - **Scheduled background compaction**: writes trigger compaction when the
   corpus crosses `warn_threshold` (configurable); no longer manual-only.
 - **Incremental FTS5 indexing**: the SQLite sidecar upserts/deletes only
@@ -259,12 +262,9 @@ What Memplex **is today**:
 - `<private>` redaction and indirect-injection scanning on every write
   path (`write`, `write_text`, `update_memory`).
 
-What Memplex **is not yet** (future roadmap, not currently shipped):
-
-- **P2P / CRDT sync.** Sharing is central-server + local-cache (LWW).
-  Peer-to-peer without a central server is future work.
-- **Vector-similarity search on Postgres.** The Postgres backend uses
-  tsvector full-text search; pgvector-based semantic search is future work.
+The original roadmap (native Postgres, scheduled compaction, incremental
+FTS5, auto-pull, pgvector, P2P mesh) is now fully shipped. There is no
+outstanding roadmap -- future work will be tracked in GitHub issues.
 
 ## License
 

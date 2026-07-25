@@ -401,3 +401,123 @@ def test_auto_pull_does_not_crash_on_pull_failure(tmp_path, monkeypatch):
     assert store._auto_pull_thread is not None
     assert store._auto_pull_thread.is_alive()  # still running despite failures
     store.stop_auto_pull()
+
+
+# ── P2P mesh: MEMPLEX_PEERS multi-target sync ────────────────────────
+
+
+def test_remote_config_peers_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("MEMPLEX_PEERS", "http://a:8900, http://b:8900 ,http://c:8900")
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    cfg = RemoteSyncConfig()
+    assert cfg.peers == ["http://a:8900", "http://b:8900", "http://c:8900"]
+    assert cfg.active  # peers alone enable sync
+
+
+def test_remote_config_all_targets_combines_url_and_peers(monkeypatch):
+    monkeypatch.setenv("MEMPLEX_REMOTE_URL", "http://primary:8900")
+    monkeypatch.setenv("MEMPLEX_PEERS", "http://p1:8900,http://p2:8900")
+    cfg = RemoteSyncConfig()
+    assert cfg.all_targets() == ["http://primary:8900", "http://p1:8900", "http://p2:8900"]
+
+
+def test_remote_config_all_targets_dedupes(monkeypatch):
+    monkeypatch.setenv("MEMPLEX_REMOTE_URL", "http://x:8900")
+    monkeypatch.setenv("MEMPLEX_PEERS", "http://x:8900,http://y:8900")
+    cfg = RemoteSyncConfig()
+    # x appears in both url and peers -> deduped to one entry.
+    assert cfg.all_targets().count("http://x:8900") == 1
+
+
+def test_p2p_push_fans_out_to_all_peers(tmp_path, monkeypatch):
+    """A write must push to every configured peer, not just the primary."""
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    monkeypatch.setenv("MEMPLEX_PEERS", "http://peer-a,http://peer-b")
+    local = LiteMemoryStore(path=tmp_path / "p2p.json")
+    store = SyncableStore(local, config=RemoteSyncConfig())
+    pushed_to: list = []
+
+    class _MeshHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            pushed_to.append(url)
+            import types
+
+            return types.SimpleNamespace(status_code=200)
+
+        def get(self, *a, **kw):
+            import types
+
+            r = types.SimpleNamespace(status_code=200)
+            r.raise_for_status = lambda: None
+            r.json = lambda: {"changes": [], "tombstones": [], "server_time": None}
+            return r
+
+        def delete(self, *a, **kw):
+            import types
+
+            return types.SimpleNamespace(status_code=200)
+
+    store._http = _MeshHttp()
+    store.add(
+        _func(fid="mesh-1", updated_at="2026-09-01T00:00:00+00:00"),
+        SourceDocument(type="text", source_type=SourceType.WIKI),
+    )
+    assert "http://peer-a/sync/push" in pushed_to
+    assert "http://peer-b/sync/push" in pushed_to
+
+
+def test_p2p_pull_merges_from_all_peers(tmp_path, monkeypatch):
+    """pull_incremental must fetch from every peer and merge results."""
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    monkeypatch.setenv("MEMPLEX_PEERS", "http://peer-a,http://peer-b")
+    local = LiteMemoryStore(path=tmp_path / "p2p-pull.json")
+    store = SyncableStore(local, config=RemoteSyncConfig())
+    fetched_from: list = []
+
+    class _MeshHttp:
+        def __init__(self):
+            self._peer_data = {
+                "http://peer-a": {
+                    "changes": [
+                        {"id": "from-a", "name": "a", "updated_at": "2026-09-01T00:00:00+00:00"}
+                    ],
+                    "tombstones": [],
+                    "server_time": "2026-09-01T00:00:00+00:00",
+                },
+                "http://peer-b": {
+                    "changes": [
+                        {"id": "from-b", "name": "b", "updated_at": "2026-09-01T00:00:00+00:00"}
+                    ],
+                    "tombstones": [],
+                    "server_time": "2026-09-01T00:00:00+00:00",
+                },
+            }
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            for peer, data in self._peer_data.items():
+                if url.startswith(peer):
+                    fetched_from.append(peer)
+                    import types
+
+                    r = types.SimpleNamespace(status_code=200)
+                    r.raise_for_status = lambda: None
+                    r.json = lambda d=data: d
+                    return r
+            raise RuntimeError("unknown peer")
+
+        def post(self, *a, **kw):
+            import types
+
+            return types.SimpleNamespace(status_code=200)
+
+        def delete(self, *a, **kw):
+            import types
+
+            return types.SimpleNamespace(status_code=200)
+
+    store._http = _MeshHttp()
+    summary = store.pull_incremental()
+    assert set(fetched_from) == {"http://peer-a", "http://peer-b"}
+    assert summary["applied"] == 2  # one from each peer
+    assert local.get("from-a") is not None
+    assert local.get("from-b") is not None
