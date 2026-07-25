@@ -452,6 +452,63 @@ def cmd_report(args: argparse.Namespace) -> int:
         svc.stop()
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Multi-node memory sync (pull from / status of remote).
+
+    Requires ``MEMPLEX_REMOTE_URL`` to point at a central Memplex HTTP
+    server. ``sync pull`` fetches incremental changes (LWW + tombstones)
+    into the local store; ``sync status`` reports the remote config and
+    last-pull timestamp without touching the network.
+    """
+    from memplex.sync import SyncableStore
+
+    action = getattr(args, "sync_command", None)
+    svc = _make_service(getattr(args, "config", None))
+    try:
+        store = svc.store
+        if not isinstance(store, SyncableStore):
+            print(
+                _fmt(
+                    {
+                        "status": "disabled",
+                        "reason": (
+                            "MEMPLEX_REMOTE_URL is not set; the local store is not "
+                            "sync-enabled. Set MEMPLEX_REMOTE_URL (and optionally "
+                            "MEMPLEX_API_KEY) to enable multi-node sharing."
+                        ),
+                    },
+                    args.output,
+                )
+            )
+            return 0
+
+        if action == "status":
+            cfg = store._config
+            print(
+                _fmt(
+                    {
+                        "status": "active" if cfg.active else "inactive",
+                        "remote_url": cfg.url,
+                        "auth": "api_key" if cfg.api_key else ("bearer" if cfg.bearer else "none"),
+                        "last_pull_at": store.last_pull_at,
+                        "push_failures": store._push_failures,
+                    },
+                    args.output,
+                )
+            )
+            return 0
+
+        if action == "pull":
+            summary = store.pull_incremental()
+            print(_fmt(summary, args.output))
+            return 0
+
+        print(_fmt({"error": f"unknown sync command: {action!r}"}, args.output))
+        return 1
+    finally:
+        svc.stop()
+
+
 def cmd_agent(args: argparse.Namespace) -> int:
     """Portable agent integration commands."""
     from memplex.adapters.agent_installer import install_agent, uninstall_agent
@@ -599,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_product_parsers(sub)
     _add_agent_parsers(sub)
     _add_setup_parsers(sub)
+    _add_sync_parsers(sub)
 
     return parser
 
@@ -843,6 +901,14 @@ def _add_one_setup_parser(sub, name: str, *, uninstall: bool = False):
     return p_setup
 
 
+def _add_sync_parsers(sub) -> None:
+    """sync (nested: pull / status) -- multi-node memory sharing."""
+    p_sync = sub.add_parser("sync", help="Multi-node memory sync (pull/status)")
+    sync_sub = p_sync.add_subparsers(dest="sync_command", help="Sync command")
+    sync_sub.add_parser("pull", help="Pull incremental changes from the remote")
+    sync_sub.add_parser("status", help="Show sync config and last-pull timestamp")
+
+
 # ── Entry point ─────────────────────────────────────────────────────
 
 
@@ -883,6 +949,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "corpus": cmd_corpus,
         "report": cmd_report,
         "agent": cmd_agent,
+        "sync": cmd_sync,
         "setup": cmd_setup,
         "install": cmd_setup,
         "stepup": cmd_setup,

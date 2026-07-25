@@ -41,9 +41,16 @@ def create_store(
 
         path = Path(storage_path).expanduser() / "memory.json" if storage_path else None
         try:
-            return LiteMemoryStore(path=path)
+            store = LiteMemoryStore(path=path)
         except Exception:
-            return LiteMemoryStore()
+            store = LiteMemoryStore()
+        # Multi-node sharing: when MEMPLEX_REMOTE_URL is set, wrap the local
+        # store so writes push to and reads can pull from a central server.
+        # When the env var is unset, maybe_wrap_sync returns the store
+        # unchanged -- zero behaviour change for single-machine users.
+        from memplex.sync import maybe_wrap_sync
+
+        return maybe_wrap_sync(store)
     raise ValueError(f"Unknown storage backend: {backend!r}. Supported: 'lite'.")
 
 

@@ -362,6 +362,7 @@ def test_build_parser_registers_all_subcommands():
         "stepup",
         "uninstall",
         "unsetup",
+        "sync",
     ]
     for cmd in expected_commands:
         assert cmd in help_text, f"subcommand {cmd!r} missing from parser help"
@@ -392,3 +393,26 @@ def test_build_parser_corpus_subcommands():
 def test_build_parser_agent_subcommands():
     args = cli.build_parser().parse_args(["agent", "list"])
     assert args.agent_command == "list"
+
+
+def test_build_parser_sync_subcommands():
+    args = cli.build_parser().parse_args(["sync", "pull"])
+    assert args.sync_command == "pull"
+    args = cli.build_parser().parse_args(["sync", "status"])
+    assert args.sync_command == "status"
+
+
+def test_cmd_sync_status_reports_disabled_without_remote(service, capsys):
+    """Without MEMPLEX_REMOTE_URL, sync status clearly says disabled."""
+    rc = cli.cmd_sync(_ns(sync_command="status"))
+    assert rc == 0
+    payload = json.loads(_out(capsys))
+    assert payload["status"] == "disabled"
+    assert "MEMPLEX_REMOTE_URL" in payload["reason"]
+
+
+def test_cmd_sync_pull_reports_disabled_without_remote(service, capsys):
+    rc = cli.cmd_sync(_ns(sync_command="pull"))
+    assert rc == 0
+    payload = json.loads(_out(capsys))
+    assert payload["status"] == "disabled"

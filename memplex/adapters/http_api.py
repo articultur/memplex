@@ -19,9 +19,12 @@ Requires optional dependencies: ``fastapi``, ``uvicorn``.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -75,6 +78,45 @@ def _dataclass_to_dict(obj) -> Any:
 def _get_service(request) -> "MemplexService":
     """Retrieve the shared MemplexService from app state."""
     return request.app.state.memplex_service
+
+
+# ── Sync tombstone helpers ───────────────────────────────────────────
+# Server-side record of deleted func_ids so other nodes can replicate
+# deletions. Kept as a small JSON sidecar (not in the main store) so the
+# sync layer does not need to change the MemoryStore contract.
+
+
+def _tombstone_path() -> Path:
+    return Path(os.environ.get("MEMPLEX_STORAGE_PATH", "~/.memplex")).expanduser() / "tombstones.json"
+
+
+def _record_tombstone(func_id: str) -> None:
+    """Append a deletion tombstone for *func_id*."""
+    try:
+        path = _tombstone_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tombstones: dict = {}
+        if path.exists():
+            tombstones = json.loads(path.read_text(encoding="utf-8"))
+        tombstones[func_id] = datetime.now(timezone.utc).isoformat()
+        path.write_text(json.dumps(tombstones, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logger.debug("failed to record tombstone for %s", func_id)
+
+
+def _read_tombstones(since: Optional[str] = None) -> list:
+    """Return tombstones optionally filtered by *since* (iso8601)."""
+    try:
+        path = _tombstone_path()
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = [{"func_id": fid, "deleted_at": ts} for fid, ts in raw.items()]
+    if since:
+        items = [i for i in items if i["deleted_at"] > since]
+    return items
 
 
 # ── Security helpers ────────────────────────────────────────────────
@@ -311,9 +353,10 @@ def create_app(config=None) -> "FastAPI":
 
     @app.delete("/memories/{memory_id}", summary="Delete memory")
     async def delete_memory(request: Request, memory_id: str) -> JSONResponse:
-        """Soft-delete a memory."""
+        """Soft-delete a memory and record a sync tombstone."""
         svc = _get_service(request)
         svc.delete(memory_id)
+        _record_tombstone(memory_id)
         return JSONResponse({"status": "deleted", "id": memory_id})
 
     @app.post("/memories/{memory_id}/feedback", summary="Submit feedback")
@@ -407,4 +450,128 @@ def create_app(config=None) -> "FastAPI":
         result = svc.compact(scope=scope)
         return JSONResponse(_dataclass_to_dict(result))
 
+    # ════════════════════════════════════════════════════════════════
+    #  Sync endpoints (multi-node sharing)
+    # ════════════════════════════════════════════════════════════════
+
+    @app.get("/sync/changes", summary="Pull incremental changes since a timestamp")
+    async def sync_changes(
+        request: Request,
+        since: Optional[str] = Query(None, description="ISO-8601 cutoff; omit for all"),
+    ) -> JSONResponse:
+        """Return Functions with updated_at > since, plus deletion tombstones.
+
+        Clients call this to pull incremental updates from the central
+        node. Tombstones let clients replicate deletions. Uses LWW on the
+        client side; this endpoint just ships current state.
+        """
+        svc = _get_service(request)
+        funcs = svc.store.list_functions(limit=100000)
+        changed = [
+            _dataclass_to_dict(f)
+            for f in funcs
+            if since is None or (f.updated_at or "") > since
+        ]
+        tombstones = _read_tombstones(since=since)
+        # The server's "now" gives clients a high-water mark for the next
+        # pull, so they do not re-process the same window.
+        server_now = datetime.now(timezone.utc).isoformat()
+        return JSONResponse(
+            {
+                "changes": changed,
+                "tombstones": tombstones,
+                "server_time": server_now,
+            }
+        )
+
+    @app.post("/sync/push", summary="Push local changes to the central node")
+    async def sync_push(request: Request, body: dict) -> JSONResponse:
+        """Receive a batch of Functions and merge them with LWW by updated_at.
+
+        Request body::
+
+            {"functions": [<serialized Function>, ...]}
+
+        Each function is accepted only if it is newer than the server's
+        current copy (or the server has no copy). Older pushes are counted
+        as rejected (not errors) so the client can see LWW in action.
+        """
+        svc = _get_service(request)
+        from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+        pushed = body.get("functions", [])
+        accepted = 0
+        rejected_older = 0
+        for raw in pushed:
+            try:
+                incoming = _function_from_dict(raw)
+            except Exception as exc:
+                logger.debug("sync_push: skip unparseable function: %s", exc)
+                continue
+            existing = svc.store.get(incoming.id)
+            if existing is not None:
+                # LWW: reject if incoming is older or equal.
+                if (incoming.updated_at or "") <= (existing.updated_at or ""):
+                    rejected_older += 1
+                    continue
+            svc.store.add(
+                incoming,
+                SourceDocument(type="sync_push", source_type=SourceType.WIKI),
+            )
+            accepted += 1
+        return JSONResponse({"accepted": accepted, "rejected_older": rejected_older})
+
     return app
+
+
+def _function_from_dict(data: dict) -> "Function":
+    """Reconstruct a Function from its serialized dict (sync_push payload).
+
+    Only the fields needed for storage + LWW are restored; rich FieldValue
+    sub-objects are rebuilt minimally. This is intentionally permissive --
+    malformed payloads are caught by the caller and skipped.
+    """
+    from memplex.models import FieldValue, Function, SourceType
+
+    def _fvs(role):
+        return [
+            FieldValue(
+                desc=fv.get("desc", ""),
+                sources=fv.get("sources", []),
+                source_method=fv.get("source_method", "manual"),
+                weight=fv.get("weight", 1.0),
+            )
+            for fv in data.get(role, [])
+        ]
+
+    source_type_raw = data.get("source_type", "wiki")
+    try:
+        source_type = SourceType(source_type_raw) if isinstance(source_type_raw, str) else source_type_raw
+    except ValueError:
+        source_type = SourceType.WIKI
+
+    return Function(
+        id=data["id"],
+        name=data.get("name", ""),
+        name_normalized=data.get("name_normalized", data.get("name", "").lower()),
+        domain=data.get("domain", ""),
+        memory_type=data.get("memory_type", "function"),
+        confidence=data.get("confidence", 0.5),
+        source_type=source_type,
+        owner=data.get("owner"),
+        version=data.get("version", 1),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
+        origin_session=data.get("origin_session"),
+        access_count=data.get("access_count", 0),
+        last_accessed_at=data.get("last_accessed_at"),
+        source_paragraphs=data.get("source_paragraphs", []),
+        needs_review=data.get("needs_review", False),
+        content_hash=data.get("content_hash"),
+        trigger=_fvs("trigger"),
+        condition=_fvs("condition"),
+        action=_fvs("action"),
+        benefit=_fvs("benefit"),
+        attributes=data.get("attributes", {}),
+        cross_references=data.get("cross_references", []),
+    )

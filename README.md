@@ -1,18 +1,18 @@
 # Memplex
 
-Memplex is a **single-machine, multi-agent** long-term memory layer for local
-AI agents. It gives Codex, Claude Code, OpenClaw, Hermes, and similar local
-agents on **the same host** the same closed loop: recall useful memory before
-a turn, capture what happened after the turn, and compact old context.
+Memplex is a **multi-agent** long-term memory layer for AI agents. It gives
+Codex, Claude Code, OpenClaw, Hermes, and similar agents the same closed
+loop: recall useful memory before a turn, capture what happened after the
+turn, and compact old context.
 
-> **Scope note (read before relying on this).** Memory is stored locally in
-> `~/.memplex/memory.json` (or a project-local path). Memplex does **not**
-> sync across machines, networks, or remote users out of the box -- "shared"
-> here means *shared between the agents on one machine*, not multi-device or
-> multi-site replication. Remote/shared backends are on the roadmap (see
-> [Scope & Roadmap](#scope--roadmap) below). Background compaction is
-> automatic for the Claude Code hook loop and manual (`memplex compact`)
-> elsewhere.
+By default Memplex runs **single-machine** (memory in `~/.memplex/memory.json`).
+Multi-machine sharing is **opt-in**: point one or more nodes at a central
+Memplex HTTP server with `MEMPLEX_REMOTE_URL`, and memories sync
+(write-push + on-demand pull) across machines. See
+[Multi-Node Sharing](#multi-node-sharing) below.
+
+Background compaction is automatic for the Claude Code hook loop and manual
+(`memplex compact`) elsewhere.
 
 ## Install
 
@@ -195,32 +195,77 @@ remote backend (see Scope & Roadmap).
 Content wrapped in `<private>...</private>` is stripped before storage on
 every write path (CLI/HTTP/MCP/corpus).
 
+## Multi-Node Sharing
+
+Memplex can share one memory pool across multiple machines. The model is
+**central server + local cache**: one host runs the Memplex HTTP API as
+the source of truth; every other node keeps a local cache and pushes
+writes / pulls updates on demand.
+
+Quick start:
+
+```bash
+# On the central host (the server):
+MEMPLEX_API_KEY=shared-secret \
+  uvicorn 'memplex.adapters.http_api:app' --host 0.0.0.0 --port 8900
+
+# On each node (the clients):
+export MEMPLEX_REMOTE_URL=http://central.host:8900
+export MEMPLEX_REMOTE_API_KEY=shared-secret
+memplex sync pull      # fetch the latest from the server
+memplex write --text "note from this machine"   # auto-pushes to server
+memplex sync status    # show remote config + last-pull timestamp
+```
+
+How it works:
+
+- **Writes are local-first.** `write` / `write_text` / `update_memory`
+  commit to the local cache, then best-effort push to the server's
+  `/sync/push`. If the server is unreachable the local write still
+  succeeds (offline-capable); the push is retried implicitly on the next
+  write.
+- **Reads stay local** (fast, offline). To see the latest from other
+  nodes, run `memplex sync pull` (or call `store.pull_incremental()`)
+  before querying. Pull applies **last-write-wins** by `updated_at` and
+  replicates deletions via tombstones.
+- **No real-time subscription.** Sync is pull-on-demand by design --
+  exactly the "fetch when needed" shape. Background auto-pull is roadmap.
+- **Auth** reuses the existing `MEMPLEX_API_KEY` / `MEMPLEX_BEARER_TOKEN`
+  (constant-time compared on the server).
+
+Conflict policy: last-write-wins by `updated_at`. For memory-style data
+(append-mostly, rare concurrent edits of the same record) this is
+sufficient; richer CRDT-style merge is roadmap.
+
 ## Scope & Roadmap
 
-What Memplex **is today** (single-machine, multi-agent, local):
+What Memplex **is today**:
 
 - Local recall-before-turn / capture-after-turn loop for Codex, Claude
-  Code, OpenClaw, and Hermes on one host.
+  Code, OpenClaw, and Hermes.
 - Local-first retrieval: SQLite FTS5/BM25 + trigram, pure-Python fallback,
   optional local ONNX/HF embeddings (never required).
 - Automatic closed loop for Claude Code (via hooks); MCP tools for Codex
   and others (agent-driven).
+- **Multi-machine sharing** via central server + local cache
+  (`MEMPLEX_REMOTE_URL`, opt-in, LWW sync).
 - `<private>` redaction and indirect-injection scanning on every write
   path (`write`, `write_text`, `update_memory`).
 
 What Memplex **is not yet** (tracked as roadmap, not currently shipped):
 
-- **Cross-machine / multi-site sharing.** No sync, replication, or remote
-  memory backend for the main store. Multiple machines cannot share one
-  memory. A remote/shared backend is the largest roadmap item.
 - **Remote/enterprise memory backends.** `standard` and `enterprise`
-  backends are reserved names; only `lite` is implemented.
+  backends are reserved names; only `lite` is implemented (with the
+  `SyncableStore` remote-cache layer on top). A native Postgres store is
+  roadmap.
 - **Scheduled background compaction.** `memplex compact` is manual.
   Claude Code's `Stop` hook triggers compaction automatically; all other
   surfaces require the user/agent to run it.
 - **Incremental FTS5 indexing.** The FTS5 sidecar rebuilds fully on the
   first query after any write (cached afterwards). Fine up to ~10k
   memories; incremental upsert is roadmap for larger corpora.
+- **Background auto-pull.** Sync pull is on-demand (`memplex sync pull`);
+  a periodic background pull worker is roadmap.
 
 ## License
 
