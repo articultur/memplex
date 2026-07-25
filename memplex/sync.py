@@ -486,7 +486,7 @@ class SyncableStore:
                         if self._sse_stop.is_set():
                             break
                         if line and line.startswith("data:"):
-                            payload = line[len("data:"):].strip()
+                            payload = line[len("data:") :].strip()
                             if payload and payload != '{"type":"hello"}':
                                 logger.debug("SSE event received, triggering pull: %s", payload)
                                 try:
@@ -495,7 +495,9 @@ class SyncableStore:
                                     logger.debug("SSE-triggered pull failed: %s", exc)
                 except Exception as exc:
                     if not self._sse_stop.is_set():
-                        logger.debug("SSE listener disconnected, reconnecting in %ss: %s", backoff, exc)
+                        logger.debug(
+                            "SSE listener disconnected, reconnecting in %ss: %s", backoff, exc
+                        )
                     # Exponential backoff with cap.
                     for _ in range(backoff):
                         if self._sse_stop.wait(1.0):

@@ -129,7 +129,9 @@ class MemoryStore(ABC):
     ) -> List[Function]:
         """Paginated listing, optionally filtered by *owner*."""
 
-    def list_changes_since(self, since: Optional[str] = None, limit: int = 100000) -> List[Function]:
+    def list_changes_since(
+        self, since: Optional[str] = None, limit: int = 100000
+    ) -> List[Function]:
         """Return Functions with updated_at > *since* (incremental sync query).
 
         Default implementation falls back to list_functions + Python filter.

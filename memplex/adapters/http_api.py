@@ -88,7 +88,9 @@ def _get_service(request) -> "MemplexService":
 
 
 def _tombstone_path() -> Path:
-    return Path(os.environ.get("MEMPLEX_STORAGE_PATH", "~/.memplex")).expanduser() / "tombstones.json"
+    return (
+        Path(os.environ.get("MEMPLEX_STORAGE_PATH", "~/.memplex")).expanduser() / "tombstones.json"
+    )
 
 
 def _record_tombstone(func_id: str, deleted_version: str = "") -> None:
@@ -136,9 +138,7 @@ def _read_tombstones(since: Optional[str] = None) -> list:
             # Legacy format: bare iso8601 string (no version).
             deleted_at = str(val)
             deleted_version = ""
-        items.append(
-            {"func_id": fid, "deleted_at": deleted_at, "deleted_version": deleted_version}
-        )
+        items.append({"func_id": fid, "deleted_at": deleted_at, "deleted_version": deleted_version})
     if since:
         items = [i for i in items if i["deleted_at"] > since]
     return items
@@ -712,7 +712,9 @@ def _function_from_dict(data: dict) -> Any:
 
     source_type_raw = data.get("source_type", "wiki")
     try:
-        source_type = SourceType(source_type_raw) if isinstance(source_type_raw, str) else source_type_raw
+        source_type = (
+            SourceType(source_type_raw) if isinstance(source_type_raw, str) else source_type_raw
+        )
     except ValueError:
         source_type = SourceType.WIKI
 

@@ -328,7 +328,12 @@ class PostgresMemoryStore:
                     updated_at = EXCLUDED.updated_at,
                     embedding = EXCLUDED.embedding
                 """,
-                (func.id, json.dumps(data), _iso(func.updated_at) or datetime.now(timezone.utc), embedding),
+                (
+                    func.id,
+                    json.dumps(data),
+                    _iso(func.updated_at) or datetime.now(timezone.utc),
+                    embedding,
+                ),
             )
         else:
             self._execute(
@@ -635,7 +640,9 @@ class PostgresMemoryStore:
         cur.close()
         return funcs
 
-    def list_changes_since(self, since: Optional[str] = None, limit: int = 100000) -> List[Function]:
+    def list_changes_since(
+        self, since: Optional[str] = None, limit: int = 100000
+    ) -> List[Function]:
         """Incremental query: push the updated_at filter into Postgres.
 
         Overrides the base default (which loads all then filters in Python)
