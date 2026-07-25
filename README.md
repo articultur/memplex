@@ -243,29 +243,28 @@ What Memplex **is today**:
 
 - Local recall-before-turn / capture-after-turn loop for Codex, Claude
   Code, OpenClaw, and Hermes.
-- Local-first retrieval: SQLite FTS5/BM25 + trigram, pure-Python fallback,
-  optional local ONNX/HF embeddings (never required).
+- Local-first retrieval: SQLite FTS5/BM25 + trigram (incremental upsert),
+  pure-Python fallback, optional local ONNX/HF embeddings (never required).
 - Automatic closed loop for Claude Code (via hooks); MCP tools for Codex
   and others (agent-driven).
 - **Multi-machine sharing** via central server + local cache
-  (`MEMPLEX_REMOTE_URL`, opt-in, LWW sync).
+  (`MEMPLEX_REMOTE_URL`, opt-in, LWW sync). Optional background auto-pull
+  via `MEMPLEX_SYNC_PULL_INTERVAL`.
+- **Multiple storage backends**: `lite` (JSON, default) and `postgres`
+  (JSONB + native tsvector full-text search, requires `memplex[postgres]`).
+- **Scheduled background compaction**: writes trigger compaction when the
+  corpus crosses `warn_threshold` (configurable); no longer manual-only.
+- **Incremental FTS5 indexing**: the SQLite sidecar upserts/deletes only
+  changed rows after the first build (O(changes) per write, not O(N)).
 - `<private>` redaction and indirect-injection scanning on every write
   path (`write`, `write_text`, `update_memory`).
 
-What Memplex **is not yet** (tracked as roadmap, not currently shipped):
+What Memplex **is not yet** (future roadmap, not currently shipped):
 
-- **Remote/enterprise memory backends.** `standard` and `enterprise`
-  backends are reserved names; only `lite` is implemented (with the
-  `SyncableStore` remote-cache layer on top). A native Postgres store is
-  roadmap.
-- **Scheduled background compaction.** `memplex compact` is manual.
-  Claude Code's `Stop` hook triggers compaction automatically; all other
-  surfaces require the user/agent to run it.
-- **Incremental FTS5 indexing.** The FTS5 sidecar rebuilds fully on the
-  first query after any write (cached afterwards). Fine up to ~10k
-  memories; incremental upsert is roadmap for larger corpora.
-- **Background auto-pull.** Sync pull is on-demand (`memplex sync pull`);
-  a periodic background pull worker is roadmap.
+- **P2P / CRDT sync.** Sharing is central-server + local-cache (LWW).
+  Peer-to-peer without a central server is future work.
+- **Vector-similarity search on Postgres.** The Postgres backend uses
+  tsvector full-text search; pgvector-based semantic search is future work.
 
 ## License
 

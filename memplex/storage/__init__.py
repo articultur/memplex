@@ -36,6 +36,16 @@ def create_store(
         backend = config if isinstance(config, str) else kwargs.get("backend", "lite")
         storage_path = kwargs.get("path")
 
+    if backend == "postgres":
+        # Postgres DSN comes via storage.path (or MEMPLEX_STORAGE_PATH).
+        if not storage_path:
+            raise ValueError("Postgres backend requires a DSN in storage.path")
+        from memplex.storage.postgres import PostgresMemoryStore
+
+        store = PostgresMemoryStore(dsn=str(storage_path))
+        from memplex.sync import maybe_wrap_sync
+
+        return maybe_wrap_sync(store)
     if backend in ("lite", "standard", "enterprise"):
         from pathlib import Path
 
@@ -51,7 +61,7 @@ def create_store(
         from memplex.sync import maybe_wrap_sync
 
         return maybe_wrap_sync(store)
-    raise ValueError(f"Unknown storage backend: {backend!r}. Supported: 'lite'.")
+    raise ValueError(f"Unknown storage backend: {backend!r}. Supported: 'lite', 'postgres'.")
 
 
 __all__ = [
