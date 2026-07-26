@@ -155,19 +155,36 @@ def _read_tombstones(since: Optional[str] = None) -> list:
 # SSE subscribers. Without Redis, falls back to the in-process set.
 
 _SSE_SUBSCRIBERS: set = set()
+_SSE_MAX_SUBSCRIBERS = 500  # per-worker SSE connection cap for congestion control
 _SSE_REDIS_CHANNEL = "memplex:events"
 _redis_client: Any = None
 _redis_pubsub_thread: Any = None
 
 
 def _get_redis():
-    """Lazily connect to Redis, or return None if not configured."""
+    """Lazily connect to Redis for cross-worker SSE broadcast.
+
+    Resolution order (first wins):
+    1. MEMPLEX_REDIS_URL env var (explicit user config).
+    2. Auto-probe localhost:6379 (if a Redis is already running locally,
+       use it without requiring the user to set any env var).
+    3. Give up -> return None (in-process broadcast, single-worker only).
+
+    MEMPLEX_REDIS_URL=disable forces auto-probe off.
+    """
     global _redis_client
     if _redis_client is not None:
         return _redis_client if _redis_client is not False else None
+    # 1. Explicit env var.
     redis_url = os.environ.get("MEMPLEX_REDIS_URL")
+    # 2. Auto-probe localhost (unless explicitly disabled).
+    if not redis_url or redis_url == "disable":
+        if redis_url == "disable":
+            _redis_client = False
+            return None
+        redis_url = _auto_probe_redis()
     if not redis_url:
-        _redis_client = False  # sentinel: not configured
+        _redis_client = False
         return None
     try:
         import redis  # type: ignore
@@ -177,9 +194,30 @@ def _get_redis():
         logger.info("SSE Redis pub/sub connected: %s", redis_url)
         return _redis_client
     except Exception as exc:
-        logger.warning("SSE Redis unavailable, using in-process broadcast: %s", exc)
+        logger.debug("SSE Redis unavailable, using in-process broadcast: %s", exc)
         _redis_client = False
         return None
+
+
+def _auto_probe_redis(host: str = "localhost", port: int = 6379) -> Optional[str]:
+    """Probe localhost:6379; return the URL if a Redis is reachable.
+
+    This lets a single-machine deployment with a Redis already running
+    automatically use it for SSE broadcast without any env configuration.
+    """
+    try:
+        import socket
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        if result == 0:
+            logger.debug("Auto-probe: Redis detected at %s:%s", host, port)
+            return f"redis://{host}:{port}/0"
+    except Exception:
+        pass
+    return None
 
 
 def _start_redis_subscriber() -> None:
@@ -657,7 +695,22 @@ def create_app(config=None) -> "FastAPI":
         events. On receiving an event, a client should immediately
         ``pull_incremental()`` to fetch the new state. A ``: ping`` comment
         is sent every 30s to keep the connection alive.
+
+        When the subscriber count exceeds ``_SSE_MAX_SUBSCRIBERS``, new
+        connections get HTTP 503 with a hint to fall back to polling
+        (``MEMPLEX_SYNC_PULL_INTERVAL``). This prevents connection-exhaustion
+        under load and keeps existing connections healthy.
         """
+        # Congestion guard: refuse new SSE connections past the limit.
+        if len(_SSE_SUBSCRIBERS) >= _SSE_MAX_SUBSCRIBERS:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "SSE connection limit reached. Use MEMPLEX_SYNC_PULL_INTERVAL "
+                    "for polling-based sync, or deploy a Redis-backed multi-worker "
+                    "setup (MEMPLEX_REDIS_URL) to scale SSE."
+                ),
+            )
         import asyncio as _aio
 
         # Ensure the Redis subscriber thread is running (cross-worker

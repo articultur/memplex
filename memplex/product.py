@@ -463,6 +463,42 @@ def run_doctor(
             }
         )
 
+    # Congestion / scalability check: examine sync health indicators and
+    # advise when the system is approaching scaling limits.
+    sync_info = health.get("sync", {})
+    if sync_info.get("enabled"):
+        sse_subs = sync_info.get("sse_subscribers", 0)
+        push_fails = sync_info.get("push_failures", 0)
+        pending = sync_info.get("pending_push_futures", 0)
+        advice: list = []
+        if sse_subs > 400:
+            advice.append(
+                "SSE connections near limit (" + str(sse_subs) + "/500). "
+                "Deploy Redis (MEMPLEX_REDIS_URL) for multi-worker SSE scaling."
+            )
+        if push_fails > 10:
+            advice.append(
+                "High push failure count (" + str(push_fails) + "). "
+                "Check server connectivity or increase MEMPLEX_SYNC_PULL_INTERVAL."
+            )
+        if pending > 20:
+            advice.append(
+                "Push queue backlog (" + str(pending) + " pending). "
+                "Consider a read-replica (MEMPLEX_READ_URL) to reduce write contention."
+            )
+        checks.append(
+            {
+                "name": "congestion_check",
+                "status": "warning" if advice else "pass",
+                "details": {
+                    "sse_subscribers": sse_subs,
+                    "push_failures": push_fails,
+                    "pending_push_futures": pending,
+                    "advice": advice,
+                },
+            }
+        )
+
     failed = [check for check in checks if check["status"] == "fail"]
     status = "pass" if not failed else "fail"
     return {

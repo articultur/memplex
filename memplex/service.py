@@ -997,7 +997,42 @@ class MemplexService:
             "injection_scans_detected_24h": injection_scans_detected_24h,
             "dead_letters_pending": dead_letters_pending,
             "version": version,
+            # Scalability/load indicators (for auto-adaptive decisions
+            # and operator visibility into congestion).
+            "sync": self._sync_health(),
         }
+
+    def _sync_health(self) -> dict:
+        """Return sync-layer congestion indicators.
+
+        Operators and adaptive logic read these to decide whether to scale
+        (add read-replicas, enable Redis, increase pull interval) or
+        degrade (drop SSE connections to polling).
+        """
+        from memplex.sync import SyncableStore
+
+        info: dict = {"enabled": False}
+        if not isinstance(self.store, SyncableStore):
+            return info
+        store = self.store
+        cfg = store._config
+        info["enabled"] = cfg.active
+        info["sse_enabled"] = cfg.sse_enabled
+        info["sse_active"] = store._sse_thread is not None and store._sse_thread.is_alive()
+        info["auto_pull_active"] = (
+            store._auto_pull_thread is not None and store._auto_pull_thread.is_alive()
+        )
+        info["push_failures"] = store._push_failures
+        info["pending_push_futures"] = len(store._push_futures)
+        info["last_pull_at"] = store.last_pull_at
+        # SSE subscriber count (server-side only; client reports 0).
+        try:
+            from memplex.adapters.http_api import _SSE_SUBSCRIBERS
+
+            info["sse_subscribers"] = len(_SSE_SUBSCRIBERS)
+        except Exception:
+            info["sse_subscribers"] = 0
+        return info
 
     def stats(self) -> dict:
         """Return storage and usage statistics."""
