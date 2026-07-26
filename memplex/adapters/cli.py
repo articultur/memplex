@@ -139,6 +139,11 @@ def cmd_query(args: argparse.Namespace) -> int:
         }
         if getattr(args, "explain", False):
             payload["explanation"] = result.explanation
+        if not out:
+            payload["hint"] = (
+                "No memories found. Try 'memplex write --text \"...\"' to add "
+                "a memory, or 'memplex stats' to see the total count."
+            )
         print(_fmt(payload, args.output))
         return 0
     finally:

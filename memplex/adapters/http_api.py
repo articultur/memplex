@@ -52,28 +52,7 @@ except ImportError:  # pragma: no cover
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
-
-def _dataclass_to_dict(obj) -> Any:
-    """Recursively convert dataclasses to plain JSON-serializable values.
-
-    ``dataclasses.asdict`` does not convert ``Enum`` or ``datetime`` leaves, so
-    HTTP responses (which carry ``SourceType`` / ``QueryScope`` / timestamps)
-    must be walked explicitly.
-    """
-    from datetime import datetime
-    from enum import Enum
-
-    if isinstance(obj, Enum):
-        return obj.value
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if hasattr(obj, "__dataclass_fields__"):
-        return {f: _dataclass_to_dict(getattr(obj, f)) for f in obj.__dataclass_fields__}
-    if isinstance(obj, (list, tuple)):
-        return [_dataclass_to_dict(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: _dataclass_to_dict(v) for k, v in obj.items()}
-    return obj
+from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
 
 
 def _get_service(request) -> "MemplexService":
@@ -353,6 +332,50 @@ if _FASTAPI_AVAILABLE:
         )
 
 
+# ── Rate limiting (simple in-memory token bucket per client IP) ──────
+
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX = 120  # requests per window per IP
+_rate_buckets: dict = {}
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    """Return True if the request is allowed, False if rate-limited."""
+    import time
+
+    now = time.time()
+    bucket = _rate_buckets.get(client_ip)
+    if bucket is None:
+        _rate_buckets[client_ip] = {"count": 1, "reset_at": now + _RATE_LIMIT_WINDOW}
+        return True
+    if now > bucket["reset_at"]:
+        bucket["count"] = 1
+        bucket["reset_at"] = now + _RATE_LIMIT_WINDOW
+        return True
+    if bucket["count"] >= _RATE_LIMIT_MAX:
+        return False
+    bucket["count"] += 1
+    return True
+
+
+if _FASTAPI_AVAILABLE:
+
+    def _rate_limit_dependency(request: Request) -> None:
+        """Permissive rate limiter: only enforces when auth is configured
+        (i.e. a public-facing deployment). Local dev (no auth) is exempt."""
+        api_key = os.environ.get("MEMPLEX_API_KEY")
+        bearer = os.environ.get("MEMPLEX_BEARER_TOKEN")
+        if not api_key and not bearer:
+            return  # local dev: no limit
+        client_ip = request.client.host if request.client else "unknown"
+        if not _check_rate_limit(client_ip):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded ({_RATE_LIMIT_MAX} req/{_RATE_LIMIT_WINDOW}s). "
+                "Retry shortly.",
+            )
+
+
 # ── App factory ─────────────────────────────────────────────────────
 
 
@@ -408,7 +431,7 @@ def create_app(config=None) -> "FastAPI":
         title="Memplex API",
         version="0.1.0",
         description="Multi-agent memory system REST API",
-        dependencies=[Depends(_require_auth)],
+        dependencies=[Depends(_require_auth), Depends(_rate_limit_dependency)],
         lifespan=_lifespan,
     )
 
@@ -739,6 +762,46 @@ def create_app(config=None) -> "FastAPI":
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/metrics", summary="Prometheus-format metrics")
+    async def metrics(request: Request) -> JSONResponse:
+        """Return basic metrics in Prometheus text exposition format.
+
+        Exposes function count, edge count, queue depth, SSE subscribers,
+        and sync push failures. Suitable for scraping by Prometheus or
+        compatible monitoring systems.
+        """
+        svc = _get_service(request)
+        h = svc.health()
+        lines = [
+            "# HELP memplex_functions_total Total stored functions",
+            "# TYPE memplex_functions_total gauge",
+            f"memplex_functions_total {h.get('functions_total', 0)}",
+            "# HELP memplex_edges_total Total graph edges",
+            "# TYPE memplex_edges_total gauge",
+            f"memplex_edges_total {h.get('edges_total', 0)}",
+            "# HELP memplex_queue_depth Background task queue depth",
+            "# TYPE memplex_queue_depth gauge",
+            f"memplex_queue_depth {h.get('queue_depth', 0)}",
+            "# HELP memplex_sse_subscribers Active SSE connections",
+            "# TYPE memplex_sse_subscribers gauge",
+            f"memplex_sse_subscribers {len(_SSE_SUBSCRIBERS)}",
+            "# HELP memplex_dead_letters Pending failed tasks",
+            "# TYPE memplex_dead_letters gauge",
+            f"memplex_dead_letters {h.get('dead_letters_pending', 0)}",
+        ]
+        sync = h.get("sync", {})
+        if sync.get("enabled"):
+            lines.extend(
+                [
+                    "# HELP memplex_push_failures Sync push failure count",
+                    "# TYPE memplex_push_failures gauge",
+                    f"memplex_push_failures {sync.get('push_failures', 0)}",
+                ]
+            )
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse("\n".join(lines) + "\n")
 
     return app
 

@@ -518,8 +518,16 @@ class LiteMemoryStore:
     # ── Persistence ─────────────────────────────────────────────────
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Cannot write to storage path {self._path.parent}. "
+                f"Set MEMPLEX_STORAGE_PATH to a writable directory. "
+                f"Original error: {exc}"
+            ) from exc
         data = {
+            "schema_version": 1,
             "functions": [_serialize_function(f) for f in self._functions.values()],
             "edges": [_serialize_edge(e) for e in self._edges],
             "observations": [_serialize_observation(o) for o in self._observations],
@@ -528,6 +536,15 @@ class LiteMemoryStore:
         try:
             with open(tmp_fd, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, default=_json_serializer, ensure_ascii=False, indent=2)
+            # Backup the previous good file before replacing (data safety).
+            bak_path = self._path.with_suffix(".json.bak")
+            if self._path.exists():
+                try:
+                    import shutil
+
+                    shutil.copy2(str(self._path), str(bak_path))
+                except Exception:
+                    pass  # best-effort backup; do not block the write
             Path(tmp_path).replace(self._path)
         except Exception:
             Path(tmp_path).unlink(missing_ok=True)
@@ -536,11 +553,21 @@ class LiteMemoryStore:
     def _load(self) -> None:
         if not self._path.exists():
             return
+        raw = None
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception:
-            logger.warning("Failed to load memory from %s", self._path)
-            return
+            logger.warning("Failed to load memory from %s, trying .bak", self._path)
+            # Try the backup file if the primary is corrupted.
+            bak = self._path.with_suffix(".json.bak")
+            if bak.exists():
+                try:
+                    raw = json.loads(bak.read_text(encoding="utf-8"))
+                    logger.info("Recovered memory from backup %s", bak)
+                except Exception:
+                    pass
+            if raw is None:
+                return
 
         for fd in raw.get("functions", []):
             func = _deserialize_function(fd)

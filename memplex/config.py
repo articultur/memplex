@@ -282,14 +282,27 @@ def _parse_yaml(path: Path) -> Optional[Dict[str, Any]]:
     try:
         import yaml  # optional dependency
     except ImportError:
-        logger.debug("PyYAML not installed, skipping config file: %s", path)
+        logger.warning(
+            "PyYAML is not installed; config file %s will be ignored. "
+            "Install it with: pip install pyyaml",
+            path,
+        )
         return None
 
     if not path.exists():
         return None
 
-    with open(path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        logger.error(
+            "Failed to parse config file %s: %s. Check YAML syntax "
+            "(indentation, quotes, colons). Using defaults.",
+            path,
+            exc,
+        )
+        return None
 
     return data if isinstance(data, dict) else None
 

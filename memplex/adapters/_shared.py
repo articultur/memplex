@@ -24,14 +24,23 @@ from pathlib import Path
 
 
 def dataclass_to_dict(obj):
-    """Recursively convert dataclasses to plain dicts.
+    """Recursively convert dataclasses to plain JSON-serializable values.
 
-    Walks ``__dataclass_fields__``, ``list``, and ``dict`` containers;
-    any other leaf is returned unchanged.
+    Handles ``Enum`` (-> .value), ``datetime`` (-> isoformat), ``list``,
+    ``dict``, and ``__dataclass_fields__`` containers. Any other leaf is
+    returned unchanged. This is the canonical serializer shared by all
+    adapters (CLI/MCP/HTTP) so Enum/datetime leaves are never a surprise.
     """
+    from datetime import datetime
+    from enum import Enum
+
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, datetime):
+        return obj.isoformat()
     if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
-    if isinstance(obj, list):
+        return {f: dataclass_to_dict(getattr(obj, f)) for f in obj.__dataclass_fields__}
+    if isinstance(obj, (list, tuple)):
         return [dataclass_to_dict(item) for item in obj]
     if isinstance(obj, dict):
         return {k: dataclass_to_dict(v) for k, v in obj.items()}

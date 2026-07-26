@@ -237,6 +237,32 @@ Conflict policy: last-write-wins by `updated_at`. For memory-style data
 (append-mostly, rare concurrent edits of the same record) this is
 sufficient; richer CRDT-style merge is roadmap.
 
+## Agent Loop Automation
+
+The recall/capture/compact loop runs with different levels of automation
+depending on the agent:
+
+| Agent | Automation | How |
+|---|---|---|
+| **Claude Code** | Fully automatic | Hooks fire on UserPromptSubmit (recall), Stop (capture+compact), PostToolUse (observation). Zero user action needed after `setup`. |
+| **Codex** | Agent-driven | MCP server registered with `memory_turn_begin` / `memory_turn_end` tools. The agent calls them per turn; they are NOT auto-fired by Codex. |
+| **OpenClaw** | Hook-dependent | Extension hook files installed; auto-fires if OpenClaw invokes its hook contract. |
+| **Hermes** | Provider-driven | `sync_turn` / `prefetch` in the memory provider plugin; auto-fires if Hermes calls them. |
+
+For Codex/OpenClaw/Hermes, the agent runtime must cooperate by calling the
+provided hooks/tools. If your agent does not call them automatically,
+consider setting `MEMPLEX_SYNC_PULL_INTERVAL` for periodic background sync.
+
+## Embedding Dimension Notes
+
+The default embedding model (`MEMPLEX_EMBEDDING_MODEL=default`) uses a
+local TF-IDF embedder whose vector dimension tracks the vocabulary size,
+capped at the configured `dimension` (default 384). For most use cases
+this is sufficient. If you switch to a sentence-transformers model
+(`minilm`, `bge-m3`, `hf:...`), the dimension must match the model's
+output size (e.g. `minilm` = 384, `bge-m3` = 1024). Set
+`MEMPLEX_EMBEDDING_DIMENSION` to match.
+
 ## Scope & Roadmap
 
 What Memplex **is today**:

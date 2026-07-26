@@ -990,6 +990,7 @@ class MemplexService:
         return {
             "status": status,
             "backend": self._config.storage.backend,
+            "storage_path": str(self._resolve_store_path()),
             "functions_total": functions_total,
             "edges_total": edges_total,
             "queue_depth": queue_depth,
@@ -1001,6 +1002,24 @@ class MemplexService:
             # and operator visibility into congestion).
             "sync": self._sync_health(),
         }
+
+    def _resolve_store_path(self) -> str:
+        """Safely resolve the underlying storage path for display.
+
+        Handles both bare stores (LiteMemoryStore) and wrapped stores
+        (SyncableStore wrapping a local store) without raising.
+        """
+        # Try the store directly first.
+        p = getattr(self.store, "_path", None)
+        if p is not None:
+            return str(p)
+        # SyncableStore wraps a local store -- access it safely.
+        local = getattr(self.store, "local", None)
+        if local is not None:
+            p = getattr(local, "_path", None)
+            if p is not None:
+                return str(p)
+        return "unknown"
 
     def _sync_health(self) -> dict:
         """Return sync-layer congestion indicators.
@@ -1050,6 +1069,7 @@ class MemplexService:
             "total_functions": total,
             "total_edges": total_edges,
             "storage_backend": self._config.storage.backend,
+            "storage_path": str(self._resolve_store_path()),
             "embedding_model": self._config.embedding.model,
         }
 

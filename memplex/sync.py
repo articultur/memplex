@@ -163,7 +163,13 @@ class SyncableStore:
     def __getattr__(self, name: str) -> Any:
         # Only called when the attribute is not found on SyncableStore
         # itself -> delegate every read/query/get/list to the local store.
-        return getattr(self._local, name)
+        try:
+            return getattr(self._local, name)
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__!s}(wrapping {type(self._local).__name__!s}) "
+                f"has no attribute {name!r}"
+            ) from None
 
     @property
     def local(self) -> Any:
