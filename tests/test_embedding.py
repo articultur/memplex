@@ -185,3 +185,67 @@ def test_explicit_local_onnx_missing_model_raises(tmp_path):
         assert "Failed to load explicit local ONNX embedding model" in str(exc)
     else:
         raise AssertionError("explicit local-onnx misconfiguration must surface")
+
+
+# ── TF-IDF query pollution (regression) ────────────────────────────────
+
+
+def test_tfidf_encode_query_does_not_update_corpus_statistics():
+    """Regression: query-time encoding must not mutate vocab/idf/doc_count,
+    otherwise stored document vectors drift with query history."""
+    embedder = embedding._SimpleTFIDFEmbedder(dimension=8)
+
+    embedder.encode("apple banana")  # document path: stats updated
+    vocab_after_fit = dict(embedder._vocab)
+    idf_after_fit = dict(embedder._idf)
+    doc_count_after_fit = embedder._doc_count
+    doc_vector_before = embedder.encode_query("apple banana")
+
+    embedder.encode_query("apple cherry")  # query path: unseen word included
+
+    assert embedder._vocab == vocab_after_fit
+    assert embedder._idf == idf_after_fit
+    assert embedder._doc_count == doc_count_after_fit
+    # Transform-only document vectors are stable across query history.
+    assert embedder.encode_query("apple banana") == doc_vector_before
+
+
+def test_tfidf_encode_query_returns_vector_for_unseen_words():
+    embedder = embedding._SimpleTFIDFEmbedder(dimension=8)
+    vector = embedder.encode_query("totally unseen words")
+    assert len(vector) == 8
+    assert embedder.encode_query("") == [0.0] * 8
+
+
+def test_embedding_service_embed_query_uses_non_mutating_path():
+    service = EmbeddingService(model="tfidf", dimension=8)
+    service.embed("apple banana")  # fit on a document
+    stats_before = (
+        dict(service._embedder._vocab),
+        dict(service._embedder._idf),
+        service._embedder._doc_count,
+    )
+    vector = service.embed_query("apple cherry")
+    assert len(vector) == 8
+    stats_after = (
+        dict(service._embedder._vocab),
+        dict(service._embedder._idf),
+        service._embedder._doc_count,
+    )
+    assert stats_before == stats_after
+
+
+def test_embedding_service_embed_query_falls_back_to_encode(monkeypatch):
+    class _NoQueryEmbedder:
+        def __init__(self):
+            self.encoded = []
+
+        def encode(self, text):
+            self.encoded.append(text)
+            return [1.0]
+
+    service = EmbeddingService(model="tfidf", dimension=1)
+    stub = _NoQueryEmbedder()
+    service._embedder = stub
+    assert service.embed_query("q") == [1.0]
+    assert stub.encoded == ["q"]

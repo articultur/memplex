@@ -1,7 +1,13 @@
 """CLI interface for running benchmarks.
 
-Provides ``run_benchmark_command()`` which is called by the CLI's
-``memplex benchmark run`` subcommand.
+Provides ``run_benchmark_command()``, the entry point invoked by the
+``memplex benchmark run`` subcommand (see ``memplex/adapters/cli.py``)::
+
+    memplex benchmark list
+    memplex benchmark run --dataset locomo --synthetic --top-k 10
+
+The ``benchmarks`` package is not shipped in the distribution, so the
+subcommand only works from a source checkout.
 """
 
 from __future__ import annotations
@@ -26,11 +32,21 @@ _DATASET_ALIASES: Dict[str, List[str]] = {
     "popqa_hotpot": ["popqa", "hotpotqa"],
 }
 
+# Datasets whose EvaluationDataset generates samples in code; their
+# ``load(path)`` ignores the path, so no file download/resolution is needed
+# (previously the CLI tried to download "memory_benchmark" and failed with
+# "Unknown dataset").
+_SELF_GENERATED_DATASETS = frozenset({"memory_benchmark"})
+
 
 def _resolve_datasets(dataset: str) -> List[str]:
     """Resolve 'all' or composite names to individual dataset names."""
     if dataset == "all":
-        return list_available_datasets()
+        # Every runnable benchmark: file-backed datasets plus self-generated
+        # ones (memory_benchmark needs no file). Composite aliases
+        # (nq_trivia, popqa_hotpot) are excluded — their members are listed
+        # individually already.
+        return sorted(set(list_available_datasets()) | _SELF_GENERATED_DATASETS)
     if dataset in _DATASET_ALIASES:
         return _DATASET_ALIASES[dataset]
     return [dataset]
@@ -40,13 +56,22 @@ def _resolve_path(
     dataset: str,
     explicit_path: Optional[str],
     auto_download: bool,
+    force_synthetic: bool = False,
 ) -> str:
-    """Resolve dataset path: explicit path → cached file → download."""
+    """Resolve dataset path: explicit path → cached file → download.
+
+    Self-generated datasets (``memory_benchmark``) need no file: their
+    ``EvaluationDataset.load`` builds samples in code and ignores the
+    path, so an empty placeholder is returned.
+    """
     if explicit_path:
         p = Path(explicit_path)
         if p.exists():
             return explicit_path
         raise FileNotFoundError(f"Dataset path not found: {explicit_path}")
+
+    if dataset in _SELF_GENERATED_DATASETS:
+        return ""
 
     if not auto_download:
         raise ValueError(
@@ -56,7 +81,7 @@ def _resolve_path(
 
     # Auto-download
     print(f"[download] Fetching {dataset} dataset...", file=sys.stderr)
-    path = download_dataset(dataset)
+    path = download_dataset(dataset, force_synthetic=force_synthetic)
     print(f"[download] Saved to: {path}", file=sys.stderr)
     return str(path)
 
@@ -72,6 +97,7 @@ def run_benchmark_command(
     retrieval_k: int = 10,
     parallel: bool = False,
     auto_download: bool = True,
+    force_synthetic: bool = False,
 ) -> Dict[str, List[BenchmarkResult]]:
     """Run one or more benchmarks from the CLI.
 
@@ -94,6 +120,9 @@ def run_benchmark_command(
     auto_download:
         If True, download datasets from HuggingFace (or generate synthetic)
         when ``path`` is not provided.
+    force_synthetic:
+        If True, skip HuggingFace downloads and generate synthetic data
+        directly (forwarded to :func:`~benchmarks.loader.download_dataset`).
 
     Returns
     -------
@@ -107,6 +136,7 @@ def run_benchmark_command(
         evaluator = BenchmarkEvaluator(
             svc,
             output_dir=str(Path(output).parent),
+            output_file=Path(output).name,
         )
 
         # Resolve datasets
@@ -118,7 +148,9 @@ def run_benchmark_command(
             resolved_paths = {dataset_names[0]: path}
         elif len(dataset_names) == 1:
             resolved_paths = {
-                dataset_names[0]: _resolve_path(dataset_names[0], path, auto_download)
+                dataset_names[0]: _resolve_path(
+                    dataset_names[0], path, auto_download, force_synthetic
+                )
             }
         else:
             # Multiple datasets — path must be a directory or auto-download each
@@ -131,20 +163,26 @@ def run_benchmark_command(
                     )
                 resolved_paths = {}
                 for name in dataset_names:
+                    if name in _SELF_GENERATED_DATASETS:
+                        resolved_paths[name] = ""
+                        continue
                     p = base / f"{name}.json"
                     if p.exists():
                         resolved_paths[name] = str(p)
                     elif auto_download:
                         print(f"[download] Fetching {name}...", file=sys.stderr)
-                        resolved_paths[name] = str(download_dataset(name))
+                        resolved_paths[name] = str(
+                            download_dataset(name, force_synthetic=force_synthetic)
+                        )
                     else:
                         raise FileNotFoundError(f"Dataset not found: {p}")
             else:
-                # Auto-download each
+                # Auto-download each (self-generated datasets resolve to "")
                 resolved_paths = {}
                 for name in dataset_names:
-                    print(f"[download] Fetching {name}...", file=sys.stderr)
-                    resolved_paths[name] = str(download_dataset(name))
+                    resolved_paths[name] = _resolve_path(
+                        name, None, auto_download, force_synthetic
+                    )
 
         # Print run plan
         print("\n=== Memplex Benchmark Run ===", file=sys.stderr)
@@ -158,6 +196,9 @@ def run_benchmark_command(
             # Quick count for display
             import json
 
+            if not p:
+                print(f"    - {name}: generated in code (no dataset file)", file=sys.stderr)
+                continue
             try:
                 with open(p) as f:
                     raw = json.load(f)

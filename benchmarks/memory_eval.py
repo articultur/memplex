@@ -25,6 +25,7 @@ from benchmarks.base import (
     BenchmarkRunner,
     BenchmarkRunnerFactory,
     BenchmarkSample,
+    BenchmarkSourceDocument,
     EvaluationDataset,
 )
 from memplex.models.memory import Fact, Function, Observation, Preference
@@ -171,39 +172,6 @@ def _recency_ndcg(
     return dcg / idcg
 
 
-def _graph_connectivity_score(
-    service: MemplexService,
-    source_id: str,
-    target_id: str,
-    max_hops: int = 2,
-) -> float:
-    """Can we traverse from source to target through the graph?"""
-    if source_id == target_id:
-        return 1.0
-
-    visited = {source_id}
-    frontier = {source_id}
-
-    for _ in range(max_hops):
-        next_frontier = set()
-        for fid in frontier:
-            try:
-                neighbors = service.store.get_neighbors(fid, max_hops=1)
-                for neighbor in neighbors:
-                    if neighbor.id == target_id:
-                        return 1.0
-                    if neighbor.id not in visited:
-                        visited.add(neighbor.id)
-                        next_frontier.add(neighbor.id)
-            except Exception:
-                pass
-        frontier = next_frontier
-        if not frontier:
-            break
-
-    return 0.0
-
-
 # ── Memory Evaluation Dataset ───────────────────────────────────────────────────
 
 
@@ -334,7 +302,7 @@ class MemoryBenchmarkDataset(EvaluationDataset):
         returns a SourceDocument wrapper that signals the runner to
         extract and store the memory directly.
         """
-        return SourceDocument(
+        return BenchmarkSourceDocument(
             type="memory_benchmark",
             content=sample.metadata.get("content", sample.query),
             source_type=SourceType.WIKI,
@@ -428,29 +396,23 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                     source_doc = self.dataset.to_memories(sample)
                     service.write(source_doc)
             except Exception as exc:
-                logger.debug("Failed to seed sample %s: %s", sample.id, exc)
+                logger.warning("Failed to seed sample %s: %s", sample.id, exc)
 
     def _seed_fact(self, service: MemplexService, fact: Fact) -> None:
-        """Seed a Fact memory by converting it to a Function and storing."""
-        # Convert Fact to Function for storage
+        """Seed a Fact as a searchable Function record."""
         func = Function(
             id=fact.id,
             name=fact.name,
             name_normalized=fact.name.lower().strip().replace(" ", "_"),
             domain=None,
-            memory_type="fact",
+            memory_type="function",
             source_type=fact.source_type,
             created_at=fact.created_at,
             updated_at=fact.updated_at,
-            trigger=[],
-            condition=[],
-            action=[],
-            benefit=[],
         )
-        # Use a simple source document
         source = SourceDocument(
             type="memory_benchmark",
-            content=fact.content or fact.name,
+            content=f"{fact.subject} {fact.predicate} {fact.object_}".strip() or fact.name,
             source_type=SourceType.WIKI,
         )
         service.store.add(func, source)
@@ -462,14 +424,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
             name=pref.name,
             name_normalized=pref.name.lower().strip().replace(" ", "_"),
             domain=None,
-            memory_type="preference",
+            memory_type="function",
             source_type=pref.source_type,
             created_at=pref.created_at,
             updated_at=pref.updated_at,
-            trigger=[],
-            condition=[],
-            action=[],
-            benefit=[],
         )
         source = SourceDocument(
             type="memory_benchmark",
@@ -485,14 +443,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
             name=obs.name,
             name_normalized=obs.name.lower().strip().replace(" ", "_"),
             domain=None,
-            memory_type="observation",
+            memory_type="function",
             source_type=obs.source_type,
             created_at=obs.created_at,
             updated_at=obs.updated_at,
-            trigger=[],
-            condition=[],
-            action=[],
-            benefit=[],
         )
         source = SourceDocument(
             type="memory_benchmark",

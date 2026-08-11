@@ -3,16 +3,19 @@
 import json
 import logging
 
+from memplex.llm.providers._common import (
+    classify_intent_prompt,
+    intent_from_result,
+    parse_json_response,
+)
 from memplex.models import IntentType
 
 logger = logging.getLogger(__name__)
 
 try:
     from openai import AsyncOpenAI
-except ImportError:
-    raise ImportError(
-        "The 'openai' package is required for LocalProvider. Install it with: pip install openai"
-    )
+except ImportError:  # pragma: no cover - exercised through constructor contract
+    AsyncOpenAI = None
 
 
 class LocalProvider:
@@ -36,8 +39,17 @@ class LocalProvider:
         endpoint: str = "http://localhost:11434/v1",
         model: str = "qwen2.5",
         max_tokens: int = 1024,
+        *,
+        client=None,
     ) -> None:
-        self._client = AsyncOpenAI(base_url=endpoint, api_key="not-needed")
+        if client is None:
+            if AsyncOpenAI is None:
+                raise ImportError(
+                    "The 'openai' package is required for LocalProvider. "
+                    "Install it with: pip install openai"
+                )
+            client = AsyncOpenAI(base_url=endpoint, api_key="not-needed")
+        self._client = client
         self._model = model
         self._max_tokens = max_tokens
 
@@ -60,45 +72,14 @@ class LocalProvider:
     @staticmethod
     def _parse_json(text: str) -> dict:
         """Best-effort JSON extraction from LLM output."""
-        text = text.strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        import re
-
-        m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-        logger.warning("Failed to parse JSON from local LLM response, returning empty dict")
-        return {}
+        return parse_json_response(text)
 
     # -- LLMProvider interface ------------------------------------------
 
     async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify user query intent using local LLM."""
-        result = await self.complete_json(
-            f"Classify the intent of the following query. "
-            f'Respond with a JSON object: {{"intent": "search|understand|compare|relation"}}\n\nQuery: {query}'
-        )
-        intent_str = result.get("intent", "search")
-        mapping = {
-            "search": IntentType.IMMEDIATE,
-            "understand": IntentType.SYNTHESIS,
-            "compare": IntentType.RELATION,
-            "relation": IntentType.RELATION,
-        }
-        return mapping.get(intent_str, IntentType.IMMEDIATE)
+        result = await self.complete_json(classify_intent_prompt(query))
+        return intent_from_result(result)
 
     async def summarize(self, content: str, max_tokens: int = 256) -> str:
         """Summarize content using local LLM."""

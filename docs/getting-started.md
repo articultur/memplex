@@ -55,30 +55,30 @@ Supported agent ids are:
 If npm is unavailable, install the Python package directly:
 
 ```bash
-uv tool install memplex==3.2.7
+uv tool install memplex==3.3.0
 memplex setup --agent all --project-path "$PWD"
 ```
 
 If you are already inside a Python environment:
 
 ```bash
-python -m pip install --upgrade memplex==3.2.7
+python -m pip install --upgrade memplex==3.3.0
 python -m memplex setup --agent all --project-path "$PWD"
 ```
 
-## Raw Script Fallback
+## Version-bound installer
 
-For shell-only environments:
+通过 npm 使用与发布版本绑定的包内安装器：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/articultur/memplex/main/scripts/install-agent.sh | bash
+npx memplex@3.3.0 setup --agent all --project-path "$PWD"
 ```
 
-Pass options after `bash -s --`:
+也可以先安装 Python 工具，再执行相同的 setup 命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/articultur/memplex/main/scripts/install-agent.sh | \
-  bash -s -- --agent codex --project-path "$PWD"
+uv tool install memplex==3.3.0
+memplex setup --agent codex --project-path "$PWD"
 ```
 
 ## What The Installer Writes
@@ -88,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/articultur/memplex/main/scripts/ins
 | Codex | `~/.codex/config.toml` or `$CODEX_HOME/config.toml` |
 | Claude Code | plugin files under the Claude config marketplace |
 | OpenClaw | `openclaw.json` plus `extensions/memplex` |
-| Hermes | `memory-providers/memplex.json` plus `plugins/memory/memplex` |
+| Hermes | `config.yaml`, `memplex.json`, and `plugins/memplex` |
 
 The npm installer keeps the Python runtime at
 `~/.local/share/memplex/agent-venv` unless `MEMPLEX_VENV_DIR` is set.
@@ -164,6 +164,20 @@ memplex --output json scope explain --agent codex --project-path "$PWD"
 memplex --output json scope preview --agent codex --project-path "$PWD"
 ```
 
+检查四个宿主的安装、身份与共享工作区，不写入或修复配置：
+
+```bash
+memplex --output json agent status --agent all
+memplex --output json doctor --agent codex --target-dir "$CODEX_HOME"
+```
+
+`agent status` 会区分 `healthy`、`not_installed`、`unmanaged`、`drifted`，
+并返回 `reinstall_needed` 与具体 `drift_reasons`。未安装本身不会让
+`doctor` 失败；它会作为 warning 显示，便于在 CI 或新机器上先检查再安装。
+`--agent all` 时请不要同时传单个 `--target-dir`；四个宿主应分别使用各自
+默认目录（或 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENCLAW_CONFIG_DIR`、
+`HERMES_CONFIG_DIR`）。
+
 Review pending corrections through the inbox vocabulary:
 
 ```bash
@@ -178,6 +192,15 @@ Show recall/capture budgets and safety boundaries:
 
 ```bash
 memplex --output json policy show --agent codex
+```
+
+List captured observation events with structured categories and token
+estimates (the MCP `memory_observations` tool exposes the same surface to
+agents):
+
+```bash
+memplex observations
+memplex --output json observations --category bugfix --limit 20
 ```
 
 Generate a local operator report:
@@ -287,6 +310,44 @@ memplex uninstall --agent all
 The uninstaller removes only entries marked as managed by Memplex. Existing
 unmanaged `memplex` entries are left alone.
 
+## 一键安装 / 卸载示例（当前可复用）
+
+```bash
+memplex agent install --agent all --user-id alice --project-path "$PWD"
+memplex agent install --agent codex --user-id alice --project-path "$PWD"
+memplex agent install --agent claude-code --user-id alice --project-path "$PWD"
+memplex agent install --agent openclaw --user-id alice --project-path "$PWD"
+memplex agent install --agent hermes --user-id alice --project-path "$PWD"
+
+memplex agent uninstall --agent all
+memplex agent uninstall --agent hermes
+```
+
+## 集成核验（含回滚边界）
+
+```bash
+# Codex（按版本，某些 CLI 使用 plugin 而非 plugins）
+codex plugin list --json
+
+# OpenClaw：隔离检视
+OPENCLAW_HOME=/tmp/openclaw-home \
+OPENCLAW_CONFIG_PATH=$OPENCLAW_HOME/openclaw.json \
+openclaw plugins inspect memplex --runtime --json
+
+# Hermes：确认 provider 与内存状态
+hermes memory status
+
+# 若本机未安装 hermes 命令，可忽略该项
+```
+
+### 宿主与版本限制（当前机器）
+
+- `hermes memory status` 需要 Hermes CLI 可用；本机若无 Hermes，跳过该条验证。
+- `codex plugin list`/`codex plugins list` 为版本差异，实际可执行子命令以当前
+  `codex --help` 输出为准。
+- 当 OpenClaw 或 Hermes 配置已有未托管的同名条目时，安装会阻断；避免覆盖用户手工配置。
+- OpenClaw/Hermes 的卸载在配置发生外部改动时是“可回退”而非“逐字回滚”。
+
 ## Troubleshooting
 
 ### `npx` Uses An Old Package
@@ -308,14 +369,14 @@ npx --yes --cache /tmp/memplex-npm-cache memplex@latest setup
 Install with `uv` directly:
 
 ```bash
-uv tool install --force memplex==3.2.7
+uv tool install --force memplex==3.3.0
 ```
 
 Or use a project-local venv:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade memplex==3.2.7
+.venv/bin/python -m pip install --upgrade memplex==3.3.0
 .venv/bin/python -m memplex setup --agent codex --project-path "$PWD"
 ```
 

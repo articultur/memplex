@@ -6,6 +6,20 @@ from enum import Enum
 from typing import List, Optional
 
 
+def domain_node_id(domain: str) -> str:
+    """Return GraphBuilder's stable virtual-domain node identifier.
+
+    This is intentionally a mechanical legacy mapping: callers decide
+    whether a domain is present, then spaces (and only ASCII spaces) become
+    underscores and the complete string lowercases.  Do not strip/collapse
+    whitespace here because existing persisted graph edges depend on those
+    exact identifiers.
+    """
+    if type(domain) is not str:
+        raise ValueError("Function domain 必须是字符串")
+    return "domain_" + domain.replace(" ", "_").lower()
+
+
 class EdgeType(Enum):
     REFERENCES = "REFERENCES"
     ASSOCIATED_WITH = "ASSOCIATED_WITH"

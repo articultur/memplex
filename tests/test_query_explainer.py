@@ -172,6 +172,37 @@ def test_token_budget_stage_updates_budget_and_selection():
     assert out["selection"]["after_token_budget"] == 5
 
 
+def test_token_budget_stage_max_tokens_overrides_top_level():
+    """The stage records the effective budget cap; it must win over the
+    top-level trace value when present."""
+    trace = {
+        "max_tokens": 4000,
+        "stages": [
+            {
+                "stage": "token_budget",
+                "max_tokens": 1500,
+                "tokens_used": 900,
+                "truncated": True,
+                "after": 3,
+            },
+        ],
+    }
+    out = build_query_explanation(trace)
+    assert out["budget"]["max_tokens"] == 1500
+    assert out["budget"]["tokens_used"] == 900
+
+
+def test_token_budget_stage_without_max_tokens_keeps_top_level():
+    trace = {
+        "max_tokens": 4000,
+        "stages": [
+            {"stage": "token_budget", "tokens_used": 100, "truncated": False, "after": 1},
+        ],
+    }
+    out = build_query_explanation(trace)
+    assert out["budget"]["max_tokens"] == 4000
+
+
 def test_unknown_stage_name_is_silently_ignored():
     """Forward-compat: unknown stages must not crash the translator."""
     trace = {"stages": [{"stage": "future_stage", "any": "thing"}]}

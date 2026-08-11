@@ -3,15 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
-from memplex.models import (
-    EnhancedQuery,
-    FieldValue,
-    Function,
-    Summary,
-)
+from memplex.models import EnhancedQuery
 
 if TYPE_CHECKING:
     from memplex.config import LLMConfig
@@ -23,7 +17,7 @@ logger = logging.getLogger(__name__)
 class LLMEnhancer:
     """Unified LLM enhancement manager.
 
-    Orchestrates all LLM-augmented pipeline nodes with per-feature
+    Orchestrates the LLM-augmented query pipeline nodes with per-feature
     configuration switches.  When a feature is disabled, a rule-based
     fallback is used instead.
 
@@ -38,34 +32,6 @@ class LLMEnhancer:
     def __init__(self, llm_provider: LLMProvider, config: LLMConfig) -> None:
         self.llm = llm_provider
         self.config = config
-
-    # -- LLM Enhancement 1: Semantic Extraction -------------------------
-
-    async def semantic_extract_trigger(self, paragraph: str) -> List[FieldValue]:
-        """Use LLM to semantically extract trigger conditions from a paragraph."""
-        from memplex.llm.sanitizer import LLMPromptSanitizer
-
-        if not self.config.semantic_extraction:
-            return self._rule_based_extract(paragraph, "trigger")
-
-        prompt = LLMPromptSanitizer.build_structured_prompt(
-            instruction="Extract trigger conditions from the following paragraph, "
-            "focusing on user intent rather than simple keyword matching",
-            user_input=paragraph,
-            output_schema={"triggers": [{"desc": "str", "confidence": "float(0-1)"}]},
-        )
-        result = await self.llm.complete_json(prompt)
-        return [
-            FieldValue(
-                desc=r["desc"],
-                sources=["llm_semantic"],
-                source_method="llm_semantic",
-                weight=r.get("weight", 0.8),
-                observation=r.get("confidence", 1.0),
-                created_at=datetime.now(timezone.utc),
-            )
-            for r in result.get("triggers", [])
-        ]
 
     # -- LLM Enhancement 2: Query Enhancement ---------------------------
 
@@ -85,6 +51,7 @@ class LLMEnhancer:
                 "expanded_queries": ["str"],
                 "related_concepts": ["str"],
             },
+            max_length=self.config.max_input_length,
         )
         result = await self.llm.complete_json(prompt)
         return EnhancedQuery(
@@ -98,7 +65,7 @@ class LLMEnhancer:
     async def enhance_query_hyde_text(self, query: str) -> str:
         """Generate a hypothetical answer text for HyDE embedding.
 
-        On failure, silently returns the original query so the main
+        On failure, returns the original query so the main
         pipeline is never blocked.
         """
         from memplex.llm.sanitizer import LLMPromptSanitizer
@@ -111,109 +78,68 @@ class LLMEnhancer:
             "Describe the core content of that memory in 2-3 sentences",
             user_input=query,
             output_schema={"hypothetical_memory": "str"},
+            max_length=self.config.max_input_length,
         )
         try:
             result = await self.llm.complete_json(prompt)
             return result.get("hypothetical_memory", query)
-        except Exception:
+        except Exception as exc:
+            logger.debug("HyDE enhancement failed, returning original query: %s", exc)
             return query
 
-    # -- LLM Enhancement 3: Conflict Resolution -------------------------
+    # -- LLM Enhancement 4: Observation compression ----------------------
 
-    async def resolve_conflict(self, func1: Function, func2: Function) -> dict:
-        """Use LLM to analyze two conflicting Function versions and propose a merge."""
-        from memplex.llm.sanitizer import LLMPromptSanitizer
+    async def compress_observation(self, content: str, max_length: int = 500) -> str:
+        """Compress a captured observation into a compact summary.
 
-        if not self.config.conflict_resolution:
-            return self._authority_based_resolve(func1, func2)
+        Consumer: the agent-runtime capture path calls this before storing
+        long tool output / conversation text, claude-mem style.
 
-        conflict_data = {
-            "v1": {
-                "trigger": [fv.desc for fv in func1.trigger],
-                "condition": [fv.desc for fv in func1.condition],
-            },
-            "v2": {
-                "trigger": [fv.desc for fv in func2.trigger],
-                "condition": [fv.desc for fv in func2.condition],
-            },
-        }
-        prompt = LLMPromptSanitizer.build_structured_prompt(
-            instruction="Analyze two conflicting function versions and decide how to merge",
-            user_input=__import__("json").dumps(conflict_data, ensure_ascii=False),
-            output_schema={
-                "decision": "keep_v1|keep_v2|merge",
-                "reasoning": "str",
-                "merged_function": {},
-            },
+        With a real LLM provider, *content* is compressed to at most
+        *max_length* characters, preserving the key facts (what was done,
+        which files/decisions are involved, and the outcome).  Without an
+        LLM (rule-based provider), when the feature is disabled, or when
+        the LLM call fails, a rule-based head/tail truncation is used so
+        the capture path is never blocked.
+        """
+        if len(content) <= max_length:
+            return content
+
+        from memplex.llm.providers.rule_based import RuleBasedProvider
+
+        llm_available = (
+            self.config.observation_compression and not isinstance(self.llm, RuleBasedProvider)
         )
-        result = await self.llm.complete_json(prompt)
-        return self._parse_resolution(result)
+        if llm_available:
+            try:
+                from memplex.llm.sanitizer import LLMPromptSanitizer
 
-    # -- LLM Enhancement 4: Summarization --------------------------------
+                prompt = LLMPromptSanitizer.build_structured_prompt(
+                    instruction="Compress this captured observation into a compact summary "
+                    f"of at most {max_length} characters. Preserve the key facts: what was "
+                    "done, which files or decisions are involved, and the outcome",
+                    user_input=content,
+                    output_schema={"compressed": "str"},
+                    max_length=self.config.max_input_length,
+                )
+                result = await self.llm.complete_json(prompt)
+                compressed = result.get("compressed", "")
+                if compressed:
+                    return compressed[:max_length]
+                logger.debug("Observation compression returned empty, using rule truncation")
+            except Exception as exc:
+                logger.debug(
+                    "Observation compression failed, using rule-based truncation: %s", exc
+                )
 
-    async def summarize(self, memories: list) -> Summary:
-        """Generate a summary from a list of MemoryNode objects."""
-        from memplex.llm.sanitizer import LLMPromptSanitizer
-
-        if not self.config.summarization:
-            return Summary(
-                key_points=[m.name for m in memories],
-                patterns=[],
-                changes=[],
-            )
-
-        # Only send structured fields, not raw free text (reduces injection risk)
-        summaries = [
-            f"{m.name}: {', '.join(fv.desc for fv in getattr(m, 'action', []))}" for m in memories
-        ]
-        prompt = LLMPromptSanitizer.build_structured_prompt(
-            instruction="Extract key information from the following memories "
-            "and generate a concise summary",
-            user_input="\n".join(summaries),
-            output_schema={
-                "key_points": ["str"],
-                "patterns": ["str"],
-                "changes": ["str"],
-            },
-        )
-        result = await self.llm.complete_json(prompt)
-        return Summary(
-            key_points=result.get("key_points", []),
-            patterns=result.get("patterns", []),
-            changes=result.get("changes", []),
-        )
-
-    # -- Private helpers -------------------------------------------------
+        return self._rule_truncate(content, max_length)
 
     @staticmethod
-    def _rule_based_extract(paragraph: str, role: str) -> List[FieldValue]:
-        """Trivial rule-based extraction when LLM is disabled."""
-        sentences = [s.strip() for s in paragraph.split(".") if s.strip()]
-        return [
-            FieldValue(
-                desc=s,
-                sources=["rule_based"],
-                source_method="rule_based",
-                weight=0.5,
-            )
-            for s in sentences[:5]
-        ]
-
-    @staticmethod
-    def _authority_based_resolve(func1: Function, func2: Function) -> dict:
-        """Fallback conflict resolution based on source authority."""
-        priority = {"requirement": 4, "meeting": 3, "code": 2, "wiki": 1}
-        p1 = priority.get(func1.source_type.value if func1.source_type else "wiki", 1)
-        p2 = priority.get(func2.source_type.value if func2.source_type else "wiki", 1)
-        if p1 >= p2:
-            return {"decision": "keep_v1", "reasoning": "higher source authority"}
-        return {"decision": "keep_v2", "reasoning": "higher source authority"}
-
-    @staticmethod
-    def _parse_resolution(result: dict) -> dict:
-        """Normalize the LLM conflict resolution response."""
-        return {
-            "decision": result.get("decision", "keep_v1"),
-            "reasoning": result.get("reasoning", ""),
-            "merged_function": result.get("merged_function", {}),
-        }
+    def _rule_truncate(content: str, max_length: int) -> str:
+        """Rule-based fallback: keep head and tail halves with an omission marker."""
+        marker = "\n...\n"
+        if max_length <= len(marker):
+            return content[:max_length]
+        head = (max_length - len(marker)) // 2
+        tail = max_length - len(marker) - head
+        return content[:head] + marker + content[len(content) - tail :]

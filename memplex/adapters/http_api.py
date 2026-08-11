@@ -19,12 +19,16 @@ Requires optional dependencies: ``fastapi``, ``uvicorn``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
 import os
+import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -37,7 +41,7 @@ logger = logging.getLogger(__name__)
 # the adapter package remains importable without it.
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     _FASTAPI_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -53,11 +57,172 @@ except ImportError:  # pragma: no cover
 # ── Helpers ─────────────────────────────────────────────────────────
 
 from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
+from memplex.auth import (
+    AuthorizationContext,
+    IdentityClaimError,
+    MemoryNotFoundError,
+    PrincipalRegistry,
+    PrincipalRegistryError,
+    bind_node_identity,
+    local_development_context,
+)
+from memplex.operations import (
+    OperationsMetrics,
+    RequestAdmission,
+    create_operations_evidence,
+    load_operations_signing_key,
+    utc_timestamp_now,
+    write_operations_report_atomic,
+)
+
+_OPERATIONS_CONTROL_PATHS = frozenset({"/health/live", "/health/ready", "/metrics"})
 
 
 def _get_service(request) -> "MemplexService":
     """Retrieve the shared MemplexService from app state."""
     return request.app.state.memplex_service
+
+
+def _exception_sqlstate(exc: BaseException) -> str | None:
+    """Read psycopg2/psycopg3 SQLSTATE without formatting driver details."""
+    for candidate in (exc, getattr(exc, "__cause__", None)):
+        if candidate is None:
+            continue
+        for attribute in ("sqlstate", "pgcode"):
+            value = getattr(candidate, attribute, None)
+            if type(value) is str and value:
+                return value
+    return None
+
+
+def _authorization(request) -> AuthorizationContext:
+    """Return the adapter-established request identity.
+
+    The global auth dependency sets this before every route handler.  Route
+    code must never derive it from request JSON, query parameters, or a
+    caller-supplied owner field.
+    """
+    context = getattr(request.state, "authorization", None)
+    if not isinstance(context, AuthorizationContext):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return context
+
+
+def _typed_changes_since(
+    store,
+    list_method: str,
+    since: Optional[str],
+    *,
+    is_visible=None,
+) -> list:
+    """Serialize Fact/Preference/Observation nodes with updated_at > *since*.
+
+    Duck-typed: backends without the list API (or where it raises) simply
+    contribute no changes, so the sync endpoints stay functional on stores
+    that only persist Functions. Serialization uses the models-standard
+    ``to_dict`` (canonical shape shared with the sync client); Fact's
+    ``object_`` field is emitted under the external key ``"object"``.
+    """
+    lister = getattr(store, list_method, None)
+    if not callable(lister):
+        return []
+    try:
+        nodes = list(lister(limit=100000))
+    except Exception as exc:
+        logger.debug("sync changes: %s unavailable: %s", list_method, exc)
+        return []
+    if since:
+        nodes = [n for n in nodes if (n.updated_at or "") > since]
+    if is_visible is not None:
+        nodes = [node for node in nodes if is_visible(node)]
+    return [n.to_dict() for n in nodes]
+
+
+def _typed_node_from_scoped_store(store, node_id: str):
+    """Resolve a Function, Fact, or Preference through one scoped facade.
+
+    HTTP sync must not use ``service._typed_lookup`` because it wraps the
+    service's shared store.  In production that skips the request-bound
+    PostgreSQL facade entirely.  This small duplicate of the lookup order
+    keeps every read on the exact facade selected for the current request.
+    """
+    node = store.get(node_id)
+    if node is not None:
+        return node
+    for getter_name in ("get_fact", "get_preference"):
+        getter = getattr(store, getter_name, None)
+        if not callable(getter):
+            continue
+        node = getter(node_id)
+        if node is not None:
+            return node
+    return None
+
+
+def _merge_typed_push(
+    store,
+    raw_nodes: list,
+    *,
+    cls,
+    adder_name: str,
+    getter_name: Optional[str] = None,
+    lister_name: Optional[str] = None,
+) -> tuple:
+    """Merge pushed typed nodes into *store* with LWW by updated_at.
+
+    Mirrors the Function LWW in ``/sync/push`` for Fact/Preference/
+    Observation. Returns ``(accepted, rejected_older)``. Backends without
+    the typed add API contribute nothing (not errors). For Observations
+    there is no ``get_observation`` API, so existing state is indexed once
+    via *lister_name*.
+    """
+    accepted = 0
+    rejected_older = 0
+    if not raw_nodes:
+        return accepted, rejected_older
+    adder = getattr(store, adder_name, None)
+    if not callable(adder):
+        return accepted, rejected_older
+    getter = getattr(store, getter_name, None) if getter_name else None
+    index: Optional[dict] = None
+    if not callable(getter) and lister_name:
+        lister = getattr(store, lister_name, None)
+        if callable(lister):
+            try:
+                index = {n.id: n for n in lister(limit=100000)}
+            except Exception as exc:
+                logger.debug("sync_push: %s listing failed: %s", lister_name, exc)
+                index = {}
+    for raw in raw_nodes:
+        try:
+            incoming = cls.from_dict(raw)
+        except Exception as exc:
+            logger.debug("sync_push: skip unparseable %s: %s", cls.__name__, exc)
+            continue
+        existing = None
+        try:
+            if callable(getter):
+                existing = getter(incoming.id)
+            elif index is not None:
+                existing = index.get(incoming.id)
+        except Exception:
+            existing = None
+        # LWW: reject if incoming is older than or equal to the stored copy.
+        if existing is not None and (incoming.updated_at or "") <= (
+            getattr(existing, "updated_at", None) or ""
+        ):
+            rejected_older += 1
+            continue
+        try:
+            adder(incoming)
+        except NotImplementedError:
+            logger.debug("sync_push: backend has no %s storage; skipping rest", cls.__name__)
+            break
+        except Exception as exc:
+            logger.debug("sync_push: failed to store %s %s: %s", cls.__name__, incoming.id, exc)
+            continue
+        accepted += 1
+    return accepted, rejected_older
 
 
 # ── Sync tombstone helpers ───────────────────────────────────────────
@@ -66,13 +231,36 @@ def _get_service(request) -> "MemplexService":
 # sync layer does not need to change the MemoryStore contract.
 
 
-def _tombstone_path() -> Path:
-    return (
-        Path(os.environ.get("MEMPLEX_STORAGE_PATH", "~/.memplex")).expanduser() / "tombstones.json"
-    )
+def _tombstone_path(config) -> Path:
+    """Return the legacy Lite-only tombstone sidecar path.
+
+    PostgreSQL ``storage.path`` is a credential-bearing DSN, not a filesystem
+    root.  Treating it as a path can both create a bogus ``postgresql:/`` tree
+    and disclose credentials through filesystem or logging diagnostics.
+    """
+    if config.storage.backend != "lite":
+        raise RuntimeError("legacy tombstone sidecar requires Lite storage")
+    return Path(config.storage.path).expanduser() / "tombstones.json"
 
 
-def _record_tombstone(func_id: str, deleted_version: str = "") -> None:
+def _tombstone_storage_key(tenant_id: str, func_id: str) -> str:
+    """Return a collision-free v2 sidecar key for a tenant-local memory ID.
+
+    Function IDs are tenant-local in PostgreSQL, so the historic flat
+    ``{func_id: tombstone}`` sidecar format loses one deletion when two
+    tenants use the same ID. The original ID remains in the value for wire
+    compatibility; callers never need to parse this storage-only key.
+    """
+    return "v2:" + json.dumps([tenant_id, func_id], ensure_ascii=False, separators=(",", ":"))
+
+
+def _record_tombstone(
+    config,
+    func_id: str,
+    deleted_version: str = "",
+    *,
+    tenant_id: str = "",
+) -> None:
     """Record a deletion tombstone with the deleted record's updated_at.
 
     The *deleted_version* lets pulling clients detect delete-vs-edit
@@ -80,44 +268,73 @@ def _record_tombstone(func_id: str, deleted_version: str = "") -> None:
     tombstone, the edit happened after the delete and must be kept.
     """
     try:
-        path = _tombstone_path()
+        path = _tombstone_path(config)
         path.parent.mkdir(parents=True, exist_ok=True)
         tombstones: dict = {}
         if path.exists():
             tombstones = json.loads(path.read_text(encoding="utf-8"))
-        tombstones[func_id] = {
+        tombstone = {
             "deleted_at": datetime.now(timezone.utc).isoformat(),
             "deleted_version": deleted_version,
         }
+        if tenant_id:
+            tombstone["tenant_id"] = tenant_id
+            tombstone["func_id"] = func_id
+            storage_key = _tombstone_storage_key(tenant_id, func_id)
+        else:
+            # Keep direct legacy helper callers compatible. Every real HTTP
+            # deletion passes an authenticated tenant and therefore writes v2.
+            storage_key = func_id
+        tombstones[storage_key] = tombstone
         path.write_text(json.dumps(tombstones, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        logger.debug("failed to record tombstone for %s", func_id)
+        logger.warning("failed to record tombstone for %s", func_id, exc_info=True)
 
 
-def _read_tombstones(since: Optional[str] = None) -> list:
+def _read_tombstones(
+    config,
+    since: Optional[str] = None,
+    *,
+    tenant_id: Optional[str] = None,
+) -> list:
     """Return tombstones optionally filtered by *since* (iso8601).
 
     Handles both the new format (``{deleted_at, deleted_version}``) and
     the legacy format (bare iso8601 string) for backward compatibility.
     """
     try:
-        path = _tombstone_path()
+        path = _tombstone_path(config)
         if not path.exists():
             return []
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("failed to read tombstones", exc_info=True)
         return []
     items = []
-    for fid, val in raw.items():
+    for stored_key, val in raw.items():
         if isinstance(val, dict):
             # New format.
             deleted_at = val.get("deleted_at", "")
             deleted_version = val.get("deleted_version", "")
+            func_id = val.get("func_id", stored_key)
         else:
             # Legacy format: bare iso8601 string (no version).
             deleted_at = str(val)
             deleted_version = ""
-        items.append({"func_id": fid, "deleted_at": deleted_at, "deleted_version": deleted_version})
+            func_id = stored_key
+        item_tenant = val.get("tenant_id", "") if isinstance(val, dict) else ""
+        # A tenant-scoped request must not learn about legacy or foreign
+        # tombstones.  Legacy callers without an established tenant retain
+        # the historical aggregate view for compatibility.
+        if tenant_id is not None and item_tenant != tenant_id:
+            continue
+        items.append(
+            {
+                "func_id": func_id,
+                "deleted_at": deleted_at,
+                "deleted_version": deleted_version,
+            }
+        )
     if since:
         items = [i for i in items if i["deleted_at"] > since]
     return items
@@ -133,6 +350,9 @@ def _read_tombstones(since: Optional[str] = None) -> list:
 # A background thread subscribes to the channel and fans out to local
 # SSE subscribers. Without Redis, falls back to the in-process set.
 
+# A subscriber is normally ``(queue, tenant_id)``.  The bare-queue fallback
+# remains for older in-process callers/tests, while HTTP-created subscribers
+# are always tenant-bound.
 _SSE_SUBSCRIBERS: set = set()
 _SSE_MAX_SUBSCRIBERS = 500  # per-worker SSE connection cap for congestion control
 _SSE_REDIS_CHANNEL = "memplex:events"
@@ -232,13 +452,24 @@ def _start_redis_subscriber() -> None:
 
 
 def _fanout_local(event: dict) -> None:
-    """Push an event to all in-process SSE subscriber queues."""
+    """Push an event only to subscribers in the event's tenant scope."""
     dead = set()
-    for queue in _SSE_SUBSCRIBERS:
+    event_tenant = event.get("tenant_id")
+    for subscriber in _SSE_SUBSCRIBERS:
+        if isinstance(subscriber, tuple) and len(subscriber) == 2:
+            queue, subscriber_tenant = subscriber
+            # HTTP-created subscriptions are fail-closed: an event without
+            # an established tenant is not deliverable to any tenant stream.
+            if subscriber_tenant != event_tenant:
+                continue
+        else:
+            # Compatibility for direct in-process consumers that predate
+            # tenant-aware SSE. HTTP endpoints never create this form.
+            queue = subscriber
         try:
             queue.put_nowait(event)
         except Exception:
-            dead.add(queue)
+            dead.add(subscriber)
     if dead:
         _SSE_SUBSCRIBERS.difference_update(dead)
 
@@ -279,11 +510,12 @@ def _check_bind_security(app: FastAPI) -> None:
 
     api_key = os.environ.get("MEMPLEX_API_KEY")
     bearer_token = os.environ.get("MEMPLEX_BEARER_TOKEN")
+    principal_registry = os.environ.get("MEMPLEX_PRINCIPALS_JSON")
 
-    if non_local and not api_key and not bearer_token:
+    if non_local and not api_key and not bearer_token and principal_registry is None:
         raise RuntimeError(
             f"Refusing to bind to non-local host {host!r} without "
-            "authentication. Set MEMPLEX_API_KEY or MEMPLEX_BEARER_TOKEN "
+            "authentication. Set MEMPLEX_PRINCIPALS_JSON, MEMPLEX_API_KEY, or MEMPLEX_BEARER_TOKEN "
             "to enable auth, or bind to 127.0.0.1/localhost/::1."
         )
 
@@ -291,9 +523,10 @@ def _check_bind_security(app: FastAPI) -> None:
 if _FASTAPI_AVAILABLE:
 
     def _require_auth(
+        request: Request,
         x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
         authorization: Optional[str] = Header(None),
-    ) -> None:
+    ) -> AuthorizationContext:
         """Authorize a request against configured credentials.
 
         Backward compatible: when neither ``MEMPLEX_API_KEY`` nor
@@ -306,24 +539,61 @@ if _FASTAPI_AVAILABLE:
         Credentials are compared with :func:`hmac.compare_digest` to
         avoid timing oracles.
         """
+        if request.url.path in {"/health/live", "/health/ready"}:
+            context = local_development_context()
+            request.state.authorization = context
+            return context
+        registry = getattr(request.app.state, "principal_registry", None)
+        request_id = request.headers.get("X-Request-ID", "")
+        session_id = request.headers.get("X-Memplex-Session-ID", "")
+
+        if registry is not None:
+            # A configured registry is authoritative: neither absent nor
+            # unknown credentials fall back to the legacy shared secret.
+            token = x_api_key
+            if token is None and authorization is not None:
+                scheme, _, candidate = authorization.partition(" ")
+                if scheme.lower() == "bearer" and candidate.strip():
+                    token = candidate.strip()
+            context = registry.authenticate(
+                token or "",
+                request_id=request_id,
+                session_id=session_id,
+                provenance={"transport": "http"},
+            )
+            if context is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Valid X-API-Key or Authorization: Bearer token required",
+                    headers={"WWW-Authenticate": 'Bearer realm="memplex"'},
+                )
+            request.state.authorization = context
+            return context
+
         api_key = os.environ.get("MEMPLEX_API_KEY")
         bearer_token = os.environ.get("MEMPLEX_BEARER_TOKEN")
 
         # No credentials configured → open access (local scenario).
         if not api_key and not bearer_token:
-            return
+            context = local_development_context()
+            request.state.authorization = context
+            return context
 
         # Validate the X-API-Key header against a configured API key.
         if api_key is not None and x_api_key is not None:
             if hmac.compare_digest(x_api_key.encode("utf-8"), api_key.encode("utf-8")):
-                return
+                context = local_development_context()
+                request.state.authorization = context
+                return context
 
         # Validate the Authorization: Bearer header against a configured token.
         if bearer_token is not None and authorization is not None:
             scheme, _, token = authorization.partition(" ")
             if scheme.lower() == "bearer" and token.strip():
                 if hmac.compare_digest(token.strip().encode("utf-8"), bearer_token.encode("utf-8")):
-                    return
+                    context = local_development_context()
+                    request.state.authorization = context
+                    return context
 
         raise HTTPException(
             status_code=401,
@@ -336,26 +606,42 @@ if _FASTAPI_AVAILABLE:
 
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = 120  # requests per window per IP
-_rate_buckets: dict = {}
+_RATE_BUCKET_CAPACITY = 4096
+_rate_bucket_lock = threading.RLock()
+_rate_buckets: dict[str, dict[str, int | float]] = {}
 
 
 def _check_rate_limit(client_ip: str) -> bool:
     """Return True if the request is allowed, False if rate-limited."""
-    import time
+    now = time.monotonic()
+    with _rate_bucket_lock:
+        bucket = _rate_buckets.get(client_ip)
+        if bucket is not None:
+            if now >= float(bucket["reset_at"]):
+                bucket["count"] = 1
+                bucket["reset_at"] = now + _RATE_LIMIT_WINDOW
+                return True
+            if int(bucket["count"]) >= _RATE_LIMIT_MAX:
+                return False
+            bucket["count"] = int(bucket["count"]) + 1
+            return True
 
-    now = time.time()
-    bucket = _rate_buckets.get(client_ip)
-    if bucket is None:
-        _rate_buckets[client_ip] = {"count": 1, "reset_at": now + _RATE_LIMIT_WINDOW}
+        if len(_rate_buckets) >= _RATE_BUCKET_CAPACITY:
+            expired = [
+                key
+                for key, candidate in _rate_buckets.items()
+                if now >= float(candidate["reset_at"])
+            ]
+            for key in expired:
+                _rate_buckets.pop(key, None)
+            if len(_rate_buckets) >= _RATE_BUCKET_CAPACITY:
+                return False
+
+        _rate_buckets[client_ip] = {
+            "count": 1,
+            "reset_at": now + _RATE_LIMIT_WINDOW,
+        }
         return True
-    if now > bucket["reset_at"]:
-        bucket["count"] = 1
-        bucket["reset_at"] = now + _RATE_LIMIT_WINDOW
-        return True
-    if bucket["count"] >= _RATE_LIMIT_MAX:
-        return False
-    bucket["count"] += 1
-    return True
 
 
 if _FASTAPI_AVAILABLE:
@@ -363,9 +649,12 @@ if _FASTAPI_AVAILABLE:
     def _rate_limit_dependency(request: Request) -> None:
         """Permissive rate limiter: only enforces when auth is configured
         (i.e. a public-facing deployment). Local dev (no auth) is exempt."""
+        if request.url.path in {"/health/live", "/health/ready"}:
+            return
         api_key = os.environ.get("MEMPLEX_API_KEY")
         bearer = os.environ.get("MEMPLEX_BEARER_TOKEN")
-        if not api_key and not bearer:
+        registry = getattr(request.app.state, "principal_registry", None)
+        if not api_key and not bearer and registry is None:
             return  # local dev: no limit
         client_ip = request.client.host if request.client else "unknown"
         if not _check_rate_limit(client_ip):
@@ -399,7 +688,7 @@ def create_app(config=None) -> "FastAPI":
         )
 
     from memplex.config import load_config
-    from memplex.logging_config import configure_logging
+    from memplex.logging_config import configure_logging, install_sensitive_data_filters
     from memplex.service import MemplexService
 
     # Configure logging once at app construction (the HTTP API is a
@@ -410,6 +699,21 @@ def create_app(config=None) -> "FastAPI":
     if config is None:
         config = load_config()
 
+    operations_admission = RequestAdmission()
+    operations_metrics = OperationsMetrics()
+
+    try:
+        principal_registry = PrincipalRegistry.from_environment()
+    except PrincipalRegistryError as exc:
+        raise RuntimeError(f"Invalid principal registry: {exc}") from exc
+    deployment = getattr(config, "deployment", None)
+    profile = str(getattr(deployment, "profile", "development")).strip().lower()
+    if profile == "production" and principal_registry is None:
+        raise RuntimeError(
+            "production HTTP deployments require a principal registry "
+            "(MEMPLEX_PRINCIPALS_JSON); shared secrets are development-only"
+        )
+
     # ── Lifecycle (lifespan replaces deprecated on_event) ──────
     # Startup creates the MemplexService and starts its background
     # worker; shutdown stops it. Keeping this as a closure over
@@ -417,6 +721,8 @@ def create_app(config=None) -> "FastAPI":
 
     @asynccontextmanager
     async def _lifespan(app: "FastAPI"):
+        install_sensitive_data_filters()
+        operations_window_started_at = utc_timestamp_now()
         svc = MemplexService(config=config)
         svc.start()
         app.state.memplex_service = svc
@@ -424,7 +730,48 @@ def create_app(config=None) -> "FastAPI":
         try:
             yield
         finally:
-            svc.stop()
+            operations_admission.start_draining()
+            svc.begin_draining()
+            request_drained = operations_admission.wait_for_zero(
+                config.operations.request_drain_timeout_seconds
+            )
+            service_shutdown = svc.stop()
+            sync_shutdown = service_shutdown.get("sync")
+            worker_shutdown = service_shutdown.get("worker")
+            fully_drained = (
+                request_drained
+                and (sync_shutdown is None or bool(sync_shutdown.get("drained")))
+                and (worker_shutdown is None or bool(worker_shutdown.get("drained")))
+            )
+            deadline_exceeded = (
+                not fully_drained
+                or bool(sync_shutdown and sync_shutdown.get("deadline_exceeded"))
+                or bool(worker_shutdown and worker_shutdown.get("deadline_exceeded"))
+            )
+            if deadline_exceeded:
+                operations_metrics.record_shutdown_deadline_exceeded()
+            app.state.operations_shutdown = {
+                "request_drained": request_drained,
+                "deadline_exceeded": deadline_exceeded,
+            }
+            report_output = os.environ.get("MEMPLEX_G006_REPORT_OUTPUT")
+            if report_output is not None:
+                try:
+                    report = create_operations_evidence(
+                        metrics_snapshot=operations_metrics.snapshot(),
+                        shutdown_result={
+                            "request_drained": fully_drained,
+                            "deadline_exceeded": deadline_exceeded,
+                        },
+                        config=config,
+                        report_id=str(uuid.uuid4()),
+                        window_started_at=operations_window_started_at,
+                        window_ended_at=utc_timestamp_now(),
+                        signing_key=load_operations_signing_key(),
+                    )
+                    write_operations_report_atomic(Path(report_output), report)
+                except Exception:
+                    logger.warning("operations_report_write_failed")
             logger.info("Memplex HTTP API stopped")
 
     app = FastAPI(
@@ -434,6 +781,35 @@ def create_app(config=None) -> "FastAPI":
         dependencies=[Depends(_require_auth), Depends(_rate_limit_dependency)],
         lifespan=_lifespan,
     )
+    app.state.principal_registry = principal_registry
+    app.state.operations_admission = operations_admission
+    app.state.operations_metrics = operations_metrics
+
+    @app.middleware("http")
+    async def _operations_admission_middleware(request: Request, call_next):
+        if request.url.path in _OPERATIONS_CONTROL_PATHS:
+            return await call_next(request)
+        if not operations_admission.begin():
+            return JSONResponse(
+                {"schema_version": 1, "status": "draining"},
+                status_code=503,
+            )
+        operations_metrics.begin_request()
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            try:
+                operations_metrics.finish_request(
+                    request.method,
+                    status_code,
+                    max(0.0, time.perf_counter() - started),
+                )
+            finally:
+                operations_admission.end()
 
     # Refuse insecure binds (non-local host without auth) at construction
     # time. Reads MEMPLEX_HOST / credentials from env; the ``app`` argument
@@ -494,10 +870,17 @@ def create_app(config=None) -> "FastAPI":
             content=content,
             source_type=source_type_enum,
         )
-        result = svc.write(source)
+        context = _authorization(request)
+        result = svc.write(source, authorization=context)
         # Notify SSE subscribers that new memories are available.
         func_ids = [f.id for f in getattr(result, "functions", [])]
-        _broadcast_event({"type": "write", "func_ids": func_ids})
+        _broadcast_event(
+            {
+                "type": "write",
+                "func_ids": func_ids,
+                "tenant_id": context.principal.tenant_id,
+            }
+        )
         return JSONResponse(_dataclass_to_dict(result))
 
     @app.get("/memories", summary="Query memories")
@@ -510,43 +893,116 @@ def create_app(config=None) -> "FastAPI":
     ) -> JSONResponse:
         """Search memories with natural language."""
         svc = _get_service(request)
+        context = _authorization(request)
         result = await svc.query_async(
             text=q,
             top_k=top_k,
-            owner=owner,
+            # Query-string owner is caller-controlled metadata; it may not
+            # select or widen an ACL scope. Service authorization supplies
+            # the tenant/workspace boundary independently.
+            owner=None,
             max_tokens=max_tokens,
+            authorization=context,
         )
-        return JSONResponse(_dataclass_to_dict(result))
+        payload = _dataclass_to_dict(result)
+        # SearchResult historically exposed ``func_id`` while every other
+        # memory route uses ``id``. Keep the canonical field and add the
+        # stable route-level alias so callers can follow an authorized result
+        # directly without guessing its identifier shape.
+        for item in payload.get("results", []):
+            if isinstance(item, dict) and "id" not in item and "func_id" in item:
+                item["id"] = item["func_id"]
+        return JSONResponse(payload)
+
+    # Concrete paths MUST be registered before the parameterized
+    # ``/memories/{memory_id}`` route: FastAPI matches in registration
+    # order, so ``/memories/pending_reviews`` placed after it would be
+    # shadowed and resolved as memory_id="pending_reviews" (404).
+    @app.get("/memories/pending_reviews", summary="List pending reviews")
+    async def pending_reviews(
+        request: Request,
+        owner: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> JSONResponse:
+        """Retrieve pending feedback reviews."""
+        svc = _get_service(request)
+        reviews = svc.get_pending_reviews(
+            owner=None,
+            limit=limit,
+            authorization=_authorization(request),
+        )
+        return JSONResponse(
+            {
+                "total": len(reviews),
+                "reviews": _dataclass_to_dict(reviews),
+            }
+        )
 
     @app.get("/memories/{memory_id}", summary="Get memory detail")
     async def get_memory(request: Request, memory_id: str) -> JSONResponse:
         """Retrieve a single memory by ID."""
         svc = _get_service(request)
-        func = svc.get(memory_id)
+        func = svc.get(memory_id, authorization=_authorization(request))
         if func is None:
             raise HTTPException(status_code=404, detail="Memory not found")
         return JSONResponse(_dataclass_to_dict(func))
+
+    @app.patch("/memories/{memory_id}", summary="Update a memory field")
+    async def update_memory(request: Request, memory_id: str, body: dict) -> JSONResponse:
+        """Update a visible Function field without exposing foreign IDs."""
+        svc = _get_service(request)
+        try:
+            result = svc.update_memory(
+                memory_id,
+                body["role"],
+                body["new_value"],
+                authorization=_authorization(request),
+            )
+        except (KeyError, MemoryNotFoundError):
+            raise HTTPException(status_code=404, detail="Memory not found") from None
+        return JSONResponse(_dataclass_to_dict(result))
 
     @app.get("/memories/{memory_id}/timeline", summary="Get memory timeline")
     async def get_timeline(request: Request, memory_id: str) -> JSONResponse:
         """Get the changelog timeline for a memory."""
         svc = _get_service(request)
-        events = svc.store.get_timeline(memory_id)
+        context = _authorization(request)
+        if svc.get(memory_id, authorization=context) is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        events = svc.get_timeline(memory_id, authorization=context)
         return JSONResponse(_dataclass_to_dict(events))
 
     @app.delete("/memories/{memory_id}", summary="Delete memory")
     async def delete_memory(request: Request, memory_id: str) -> JSONResponse:
         """Soft-delete a memory and record a sync tombstone."""
         svc = _get_service(request)
+        context = _authorization(request)
         # Snapshot updated_at BEFORE deleting so the tombstone carries the
         # version it deleted. Pull clients use this to decide: if their
         # local copy is NEWER than the tombstone, the edit happened after
         # the delete and must be kept (fixes the delete-vs-edit bug).
-        existing = svc.get(memory_id)
-        deleted_version = (getattr(existing, "updated_at", None) or "") if existing else ""
-        svc.delete(memory_id)
-        _record_tombstone(memory_id, deleted_version)
-        _broadcast_event({"type": "delete", "func_id": memory_id})
+        existing = svc.get(memory_id, authorization=context)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        deleted_version = getattr(existing, "updated_at", None) or ""
+        try:
+            svc.delete(memory_id, authorization=context)
+        except MemoryNotFoundError:
+            raise HTTPException(status_code=404, detail="Memory not found") from None
+        if profile != "production" and not config.sync.enabled:
+            _record_tombstone(
+                config,
+                memory_id,
+                deleted_version,
+                tenant_id=context.principal.tenant_id,
+            )
+        _broadcast_event(
+            {
+                "type": "delete",
+                "func_id": memory_id,
+                "tenant_id": context.principal.tenant_id,
+            }
+        )
         return JSONResponse({"status": "deleted", "id": memory_id})
 
     @app.post("/memories/{memory_id}/feedback", summary="Submit feedback")
@@ -563,30 +1019,18 @@ def create_app(config=None) -> "FastAPI":
             }
         """
         svc = _get_service(request)
-        svc.submit_feedback(
-            memory_id=memory_id,
-            field_role=body["role"],
-            value_index=body["index"],
-            verdict=body["verdict"],
-            reason=body.get("reason"),
-        )
+        try:
+            svc.submit_feedback(
+                memory_id=memory_id,
+                field_role=body["role"],
+                value_index=body["index"],
+                verdict=body["verdict"],
+                reason=body.get("reason"),
+                authorization=_authorization(request),
+            )
+        except (KeyError, MemoryNotFoundError):
+            raise HTTPException(status_code=404, detail="Memory not found") from None
         return JSONResponse({"status": "recorded"})
-
-    @app.get("/memories/pending_reviews", summary="List pending reviews")
-    async def pending_reviews(
-        request: Request,
-        owner: Optional[str] = Query(None),
-        limit: int = Query(100, ge=1, le=1000),
-    ) -> JSONResponse:
-        """Retrieve pending feedback reviews."""
-        svc = _get_service(request)
-        reviews = svc.get_pending_reviews(owner=owner, limit=limit)
-        return JSONResponse(
-            {
-                "total": len(reviews),
-                "reviews": _dataclass_to_dict(reviews),
-            }
-        )
 
     @app.post("/memories/{memory_id}/resolve", summary="Resolve a review")
     async def resolve_review(request: Request, memory_id: str, body: dict) -> JSONResponse:
@@ -601,12 +1045,16 @@ def create_app(config=None) -> "FastAPI":
             }
         """
         svc = _get_service(request)
-        result = svc.apply_resolution(
-            memory_id=memory_id,
-            field_role=body["field_role"],
-            action=body["action"],
-            new_value=body.get("new_value"),
-        )
+        try:
+            result = svc.apply_resolution(
+                memory_id=memory_id,
+                field_role=body["field_role"],
+                action=body["action"],
+                new_value=body.get("new_value"),
+                authorization=_authorization(request),
+            )
+        except (KeyError, MemoryNotFoundError):
+            raise HTTPException(status_code=404, detail="Memory not found") from None
         return JSONResponse(result)
 
     @app.get("/health", summary="Health check")
@@ -616,6 +1064,15 @@ def create_app(config=None) -> "FastAPI":
         """Return service health status."""
         svc = _get_service(request)
         return JSONResponse(svc.health())
+
+    @app.get("/health/live", summary="Liveness probe")
+    async def health_live() -> JSONResponse:
+        return JSONResponse({"schema_version": 1, "status": "live"})
+
+    @app.get("/health/ready", summary="Readiness probe")
+    async def health_ready(request: Request) -> JSONResponse:
+        status = _get_service(request).readiness_status()
+        return JSONResponse(status, status_code=200 if status["status"] == "ready" else 503)
 
     @app.get("/stats", summary="Statistics")
     async def stats(
@@ -644,30 +1101,570 @@ def create_app(config=None) -> "FastAPI":
     #  Sync endpoints (multi-node sharing)
     # ════════════════════════════════════════════════════════════════
 
+    def _sync_bindings(context: AuthorizationContext) -> tuple[str, str, str]:
+        tenant_id = context.principal.tenant_id
+        remote_id = context.agent_id or context.principal.subject_id
+        consumer_id = (
+            context.principal.authentication_id or context.principal.subject_id
+        )
+        return tenant_id, remote_id, consumer_id
+
+    def _sync_cursor_codec():
+        from memplex.sync_protocol import SyncCursorCodec
+
+        return SyncCursorCodec(
+            config.sync.cursor_signing_key_id,
+            config.sync.cursor_signing_secret,
+            config.sync.cursor_previous_signing_keys,
+        )
+
+    def _encode_stream_cursor(
+        *,
+        tenant_id: str,
+        remote_id: str,
+        consumer_id: str,
+        after_seq: int,
+        snapshot_seq: int,
+    ) -> str:
+        from memplex.sync_protocol import SyncCursorClaims
+
+        now = datetime.now(timezone.utc)
+        claims = SyncCursorClaims(
+            1,
+            config.sync.cursor_signing_key_id,
+            tenant_id,
+            remote_id,
+            consumer_id,
+            after_seq,
+            snapshot_seq,
+            None,
+            None,
+            now,
+            now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+        )
+        return _sync_cursor_codec().encode(claims)
+
+    def _encode_snapshot_cursor(
+        *,
+        tenant_id: str,
+        remote_id: str,
+        consumer_id: str,
+        snapshot_id: str,
+        snapshot_seq: int,
+        snapshot_after,
+    ) -> str:
+        from memplex.sync_protocol import SyncCursorClaims
+
+        now = datetime.now(timezone.utc)
+        claims = SyncCursorClaims(
+            1,
+            config.sync.cursor_signing_key_id,
+            tenant_id,
+            remote_id,
+            consumer_id,
+            0,
+            snapshot_seq,
+            snapshot_id,
+            snapshot_after,
+            now,
+            now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+        )
+        return _sync_cursor_codec().encode(claims)
+
+    def _legacy_sync_v1_changes(
+        request: Request,
+        context: AuthorizationContext,
+    ) -> JSONResponse:
+        """Serve the development-only legacy shape from the durable stream.
+
+        The timestamp query parameter is intentionally no longer authoritative:
+        repository consumer progress is sequence based, so concurrent commits
+        cannot fall between a response and a wall-clock cursor.
+        """
+        from memplex.sync_protocol import (
+            SyncCursorClaims,
+            SyncNodeType,
+            SyncOperation,
+            SyncVersion,
+        )
+
+        tenant_id, remote_id, consumer_id = _sync_bindings(context)
+        store = _get_service(request)._store_for(context)
+        page = store.sync_page(
+            remote_id,
+            consumer_id,
+            None,
+            config.sync.max_page_size,
+        )
+        if page.has_more:
+            raise HTTPException(
+                status_code=426,
+                detail="sync_v1_upgrade_required",
+                headers={"Upgrade": "memplex-sync-v1"},
+            )
+
+        changes: dict[SyncNodeType, list[dict[str, object]]] = {
+            SyncNodeType.FUNCTION: [],
+            SyncNodeType.FACT: [],
+            SyncNodeType.PREFERENCE: [],
+            SyncNodeType.OBSERVATION: [],
+        }
+        tombstones: list[dict[str, str]] = []
+        for item in page.items:
+            event = item.event
+            if event.operation is SyncOperation.UPSERT:
+                if event.node_type in changes and event.payload is not None:
+                    changes[event.node_type].append(event.to_dict()["payload"])
+                continue
+            if (
+                event.node_type is SyncNodeType.FUNCTION
+                and event.entity_key.node_id is not None
+            ):
+                tombstones.append(
+                    {
+                        "func_id": event.entity_key.node_id,
+                        "deleted_at": SyncVersion.parse(event.version)
+                        .occurred_at.astimezone(timezone.utc)
+                        .isoformat(),
+                        "deleted_version": "",
+                    }
+                )
+
+        # Confirm exactly the page just returned. A completed cursor opens a
+        # fresh snapshot, but never confirms events committed after this page.
+        now = datetime.now(timezone.utc)
+        store.sync_page(
+            remote_id,
+            consumer_id,
+            SyncCursorClaims(
+                1,
+                config.sync.cursor_signing_key_id,
+                tenant_id,
+                remote_id,
+                consumer_id,
+                page.next_after_seq,
+                page.snapshot_seq,
+                None,
+                None,
+                now,
+                now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+            ),
+            1,
+        )
+        return JSONResponse(
+            {
+                "changes": changes[SyncNodeType.FUNCTION],
+                "fact_changes": changes[SyncNodeType.FACT],
+                "preference_changes": changes[SyncNodeType.PREFERENCE],
+                "observation_changes": changes[SyncNodeType.OBSERVATION],
+                "tombstones": tombstones,
+                "server_time": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def _legacy_sync_v1_push(
+        request: Request,
+        context: AuthorizationContext,
+        body: dict,
+    ) -> JSONResponse:
+        """Translate one bounded legacy development push to one atomic batch."""
+        import uuid
+
+        from memplex.models import Fact, Function, Observation, Preference
+        from memplex.sync_protocol import (
+            SyncBatch,
+            SyncEntityKey,
+            SyncEvent,
+            SyncNodeType,
+            SyncOperation,
+            SyncScope,
+            SyncVersion,
+        )
+        from memplex.sync_repository import SyncBackpressureError, SyncBatchRejected
+
+        if type(body) is not dict:
+            raise HTTPException(status_code=422, detail="Invalid memory payload")
+        node_specs = (
+            ("functions", Function, SyncNodeType.FUNCTION),
+            ("facts", Fact, SyncNodeType.FACT),
+            ("preferences", Preference, SyncNodeType.PREFERENCE),
+            ("observations", Observation, SyncNodeType.OBSERVATION),
+        )
+        if set(body) - {item[0] for item in node_specs}:
+            raise HTTPException(status_code=422, detail="Invalid memory payload")
+        if len(json.dumps(body, separators=(",", ":")).encode("utf-8")) > config.sync.max_batch_bytes:
+            raise HTTPException(status_code=413, detail="sync_batch_too_large")
+        total = sum(
+            len(body.get(key, []))
+            for key, _, _ in node_specs
+            if isinstance(body.get(key, []), list)
+        )
+        if total > config.sync.max_batch_events:
+            raise HTTPException(status_code=422, detail="invalid_sync_batch")
+
+        store = _get_service(request)._store_for(context)
+        _, remote_id, _ = _sync_bindings(context)
+        parsed: list[tuple[str, SyncNodeType, object]] = []
+        by_type = {
+            key: {"accepted": 0, "rejected_older": 0}
+            for key, _, _ in node_specs
+        }
+        try:
+            for key, cls, node_type in node_specs:
+                raw_nodes = body.get(key, [])
+                if type(raw_nodes) is not list:
+                    raise ValueError("sync node collection must be a list")
+                for raw in raw_nodes:
+                    if type(raw) is not dict:
+                        raise ValueError("sync node must be an object")
+                    node = cls.from_dict(raw)
+                    bind_node_identity(node, context, reject_conflicts=True)
+                    parsed.append((key, node_type, node))
+        except (IdentityClaimError, KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid memory payload") from None
+
+        observations = {
+            item.id: item
+            for item in getattr(store, "list_observations", lambda **_: [])(
+                limit=100000
+            )
+        }
+        events = []
+        try:
+            for key, node_type, node in parsed:
+                if node_type is SyncNodeType.FUNCTION:
+                    existing = store.get(node.id)
+                elif node_type is SyncNodeType.FACT:
+                    existing = store.get_fact(node.id)
+                elif node_type is SyncNodeType.PREFERENCE:
+                    existing = store.get_preference(node.id)
+                else:
+                    existing = observations.get(node.id)
+                if existing is not None and (node.updated_at or "") <= (
+                    getattr(existing, "updated_at", None) or ""
+                ):
+                    by_type[key]["rejected_older"] += 1
+                    continue
+                occurred_at = datetime.fromisoformat(
+                    (node.updated_at or datetime.now(timezone.utc).isoformat()).replace(
+                        "Z", "+00:00"
+                    )
+                )
+                if occurred_at.tzinfo is None:
+                    raise ValueError("updated_at must include a timezone")
+                event_id = str(uuid.uuid4())
+                scope = SyncScope(
+                    node.tenant_id,
+                    node.owner_subject_id,
+                    node.workspace_id,
+                    node.visibility,
+                    context.agent_id or None,
+                    context.session_id or None,
+                )
+                events.append(
+                    (
+                        key,
+                        SyncEvent(
+                            1,
+                            event_id,
+                            remote_id,
+                            node_type,
+                            SyncEntityKey.node(node.id),
+                            SyncOperation.UPSERT,
+                            str(SyncVersion.create(occurred_at, remote_id, event_id)),
+                            scope,
+                            node.to_dict(),
+                        ),
+                    )
+                )
+            if events:
+                batch = SyncBatch(
+                    1,
+                    str(uuid.uuid4()),
+                    remote_id,
+                    tuple(event for _, event in events),
+                )
+                result = store.sync_apply_batch(batch)
+                for (key, _), receipt in zip(events, result.receipts, strict=True):
+                    outcome = (
+                        "accepted"
+                        if receipt.outcome in {"accepted", "duplicate"}
+                        else "rejected_older"
+                    )
+                    by_type[key][outcome] += 1
+        except SyncBackpressureError:
+            raise HTTPException(status_code=429, detail="sync_backpressure") from None
+        except (SyncBatchRejected, KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid memory payload") from None
+
+        accepted = sum(item["accepted"] for item in by_type.values())
+        rejected = sum(item["rejected_older"] for item in by_type.values())
+        return JSONResponse(
+            {
+                "accepted": accepted,
+                "rejected_older": rejected,
+                "by_type": by_type,
+            }
+        )
+
+    @app.post("/sync/v1/batches", summary="Apply one canonical atomic sync batch")
+    async def sync_v1_batches(request: Request) -> JSONResponse:
+        from memplex.sync_ingress import validate_ingress_batch
+        from memplex.sync_repository import SyncBackpressureError, SyncBatchRejected
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="invalid_content_length"
+                ) from None
+            if declared_size > config.sync.max_batch_bytes:
+                raise HTTPException(
+                    status_code=413, detail="sync_batch_too_large"
+                )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > config.sync.max_batch_bytes:
+                raise HTTPException(status_code=413, detail="sync_batch_too_large")
+            body.extend(chunk)
+        raw = bytes(body)
+        try:
+            envelope = validate_ingress_batch(raw, hashlib.sha256(raw).hexdigest())
+            if len(envelope.batch.events) > config.sync.max_batch_events:
+                raise SyncBatchRejected("batch exceeds configured event limit")
+            context = _authorization(request)
+            tenant_id, remote_id, _ = _sync_bindings(context)
+            if envelope.batch.origin_node_id != remote_id or any(
+                event.scope.tenant_id != tenant_id for event in envelope.batch.events
+            ):
+                raise SyncBatchRejected("invalid ingress identity")
+            store = _get_service(request)._store_for(context)
+            result = store.sync_apply_batch(envelope.batch)
+        except SyncBackpressureError:
+            raise HTTPException(status_code=429, detail="sync_backpressure") from None
+        except SyncBatchRejected:
+            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+        except (KeyError, TypeError, ValueError) as exc:
+            if str(exc) == "batch digest conflict":
+                raise HTTPException(status_code=409, detail="batch_conflict") from None
+            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+        except RuntimeError:
+            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
+        except Exception as exc:
+            sqlstate = _exception_sqlstate(exc)
+            if sqlstate == "23505":
+                raise HTTPException(status_code=409, detail="batch_conflict") from None
+            if sqlstate == "54000":
+                raise HTTPException(status_code=429, detail="sync_backpressure") from None
+            if sqlstate in {"22023", "23503", "23514", "42501"}:
+                raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
+        return JSONResponse(result.to_dict())
+
+    @app.get("/sync/v1/changes", summary="Read a snapshot-stable sync event page")
+    async def sync_v1_changes(
+        request: Request,
+        cursor: Optional[str] = Query(None),
+        limit: int = Query(500),
+    ) -> JSONResponse:
+        from memplex.sync_repository import SyncCursorExpired
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
+            raise HTTPException(status_code=422, detail="invalid_sync_limit")
+        context = _authorization(request)
+        tenant_id, remote_id, consumer_id = _sync_bindings(context)
+        claims = None
+        if cursor is not None:
+            try:
+                claims = _sync_cursor_codec().decode(
+                    cursor,
+                    tenant_binding=tenant_id,
+                    remote_binding=remote_id,
+                    consumer_binding=consumer_id,
+                )
+                if claims.snapshot_id is not None:
+                    raise SyncCursorExpired("invalid_cursor")
+            except (TypeError, ValueError, SyncCursorExpired):
+                raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        store = _get_service(request)._store_for(context)
+        try:
+            page = store.sync_page(remote_id, consumer_id, claims, limit)
+        except SyncCursorExpired as exc:
+            if str(exc) == "cursor_expired":
+                raise HTTPException(status_code=409, detail="cursor_expired") from None
+            raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        except Exception:
+            raise HTTPException(status_code=503, detail="sync_read_unavailable") from None
+        next_cursor = _encode_stream_cursor(
+            tenant_id=tenant_id,
+            remote_id=remote_id,
+            consumer_id=consumer_id,
+            after_seq=page.next_after_seq,
+            snapshot_seq=page.snapshot_seq,
+        )
+        return JSONResponse(
+            {
+                "items": [
+                    {
+                        "stream_seq": item.stream_seq,
+                        "event": item.event.to_dict(),
+                    }
+                    for item in page.items
+                ],
+                "snapshot_seq": page.snapshot_seq,
+                "next_cursor": next_cursor,
+                "has_more": page.has_more,
+            }
+        )
+
+    @app.get("/sync/v1/snapshot", summary="Read an immutable sync snapshot")
+    async def sync_v1_snapshot(
+        request: Request,
+        request_id: Optional[str] = Query(None),
+        cursor: Optional[str] = Query(None),
+        limit: int = Query(500),
+    ) -> JSONResponse:
+        from memplex.sync_repository import SyncBackpressureError, SyncCursorExpired
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
+            raise HTTPException(status_code=422, detail="invalid_sync_limit")
+        if (request_id is None) == (cursor is None):
+            raise HTTPException(status_code=422, detail="invalid_snapshot_request")
+        context = _authorization(request)
+        tenant_id, remote_id, consumer_id = _sync_bindings(context)
+        store = _get_service(request)._store_for(context)
+        try:
+            if cursor is None:
+                if type(request_id) is not str or not request_id:
+                    raise ValueError("request_id must be non-empty")
+                page = store.sync_create_snapshot(
+                    remote_id, consumer_id, request_id, limit
+                )
+            else:
+                claims = _sync_cursor_codec().decode(
+                    cursor,
+                    tenant_binding=tenant_id,
+                    remote_binding=remote_id,
+                    consumer_binding=consumer_id,
+                )
+                if claims.snapshot_id is None:
+                    raise SyncCursorExpired("invalid_cursor")
+                page = store.sync_snapshot_page(
+                    remote_id, consumer_id, claims, limit
+                )
+        except SyncBackpressureError as exc:
+            code = str(exc)
+            status = 413 if code == "snapshot_too_large" else 409
+            raise HTTPException(status_code=status, detail=code) from None
+        except SyncCursorExpired as exc:
+            if str(exc) == "snapshot_expired":
+                raise HTTPException(
+                    status_code=409, detail="snapshot_expired"
+                ) from None
+            raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="invalid_snapshot_request") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="sync_snapshot_unavailable"
+            ) from None
+
+        next_cursor = None
+        resume_cursor = None
+        if page.has_more:
+            next_cursor = _encode_snapshot_cursor(
+                tenant_id=tenant_id,
+                remote_id=remote_id,
+                consumer_id=consumer_id,
+                snapshot_id=page.snapshot_id,
+                snapshot_seq=page.resume_seq,
+                snapshot_after=page.next_anchor,
+            )
+        else:
+            resume_cursor = _encode_stream_cursor(
+                tenant_id=tenant_id,
+                remote_id=remote_id,
+                consumer_id=consumer_id,
+                after_seq=page.resume_seq,
+                snapshot_seq=page.resume_seq,
+            )
+        return JSONResponse(
+            {
+                "events": [event.to_dict() for event in page.events],
+                "snapshot_id": page.snapshot_id,
+                "next_cursor": next_cursor,
+                "resume_cursor": resume_cursor,
+                "has_more": page.has_more,
+            }
+        )
+
     @app.get("/sync/changes", summary="Pull incremental changes since a timestamp")
     async def sync_changes(
         request: Request,
         since: Optional[str] = Query(None, description="ISO-8601 cutoff; omit for all"),
     ) -> JSONResponse:
-        """Return Functions with updated_at > since, plus deletion tombstones.
+        """Return nodes with updated_at > since, plus deletion tombstones.
 
-        Clients call this to pull incremental updates from the central
-        node. Tombstones let clients replicate deletions. Uses LWW on the
-        client side; this endpoint just ships current state.
+        Covers all four memory node types: Functions under ``changes``,
+        Facts under ``fact_changes``, Preferences under
+        ``preference_changes``, Observations under ``observation_changes``
+        (older clients ignore the keys they do not know). Clients call
+        this to pull incremental updates from the central node.
+        Tombstones let clients replicate deletions -- they currently cover
+        Functions only; Fact/Preference deletions stay local (documented
+        limitation). Uses LWW on the client side; this endpoint just
+        ships current state.
         """
+        if profile == "production":
+            raise HTTPException(
+                status_code=426,
+                detail="sync_v1_upgrade_required",
+                headers={"Upgrade": "memplex-sync-v1"},
+            )
+        if config.sync.enabled:
+            return _legacy_sync_v1_changes(request, _authorization(request))
         svc = _get_service(request)
+        context = _authorization(request)
+        store = svc._store_for(context)
+
+        def visible(node) -> bool:
+            return svc._is_node_visible(node, context)
+
         # Incremental query: use list_changes_since so the backend pushes
         # the updated_at filter into the database (Postgres WHERE) or dict
         # filter (lite), instead of loading 100k functions every pull.
-        funcs = svc.store.list_changes_since(since=since, limit=100000)
-        changed = [_dataclass_to_dict(f) for f in funcs]
-        tombstones = _read_tombstones(since=since)
+        funcs = store.list_changes_since(since=since, limit=100000)
+        # Models-standard serialization (Function.to_dict): the canonical
+        # shape shared with the sync client, covering every field.
+        changed = [function.to_dict() for function in funcs if visible(function)]
+        tombstones = _read_tombstones(
+            config,
+            since=since,
+            tenant_id=context.principal.tenant_id,
+        )
         # The server's "now" gives clients a high-water mark for the next
         # pull, so they do not re-process the same window.
         server_now = datetime.now(timezone.utc).isoformat()
         return JSONResponse(
             {
                 "changes": changed,
+                "fact_changes": _typed_changes_since(
+                    store, "list_facts", since, is_visible=visible
+                ),
+                "preference_changes": _typed_changes_since(
+                    store, "list_preferences", since, is_visible=visible
+                ),
+                "observation_changes": _typed_changes_since(
+                    store, "list_observations", since, is_visible=visible
+                ),
                 "tombstones": tombstones,
                 "server_time": server_now,
             }
@@ -675,40 +1672,141 @@ def create_app(config=None) -> "FastAPI":
 
     @app.post("/sync/push", summary="Push local changes to the central node")
     async def sync_push(request: Request, body: dict) -> JSONResponse:
-        """Receive a batch of Functions and merge them with LWW by updated_at.
+        """Receive a batch of nodes and merge them with LWW by updated_at.
 
-        Request body::
+        Request body (every key optional)::
 
-            {"functions": [<serialized Function>, ...]}
+            {
+                "functions": [<serialized Function>, ...],
+                "facts": [<serialized Fact>, ...],
+                "preferences": [<serialized Preference>, ...],
+                "observations": [<serialized Observation>, ...]
+            }
 
-        Each function is accepted only if it is newer than the server's
+        Each node is accepted only if it is newer than the server's
         current copy (or the server has no copy). Older pushes are counted
         as rejected (not errors) so the client can see LWW in action.
+        ``accepted`` / ``rejected_older`` are totals across all four
+        types; ``by_type`` carries the per-type breakdown.
         """
+        if profile == "production":
+            raise HTTPException(
+                status_code=426,
+                detail="sync_v1_upgrade_required",
+                headers={"Upgrade": "memplex-sync-v1"},
+            )
+        if config.sync.enabled:
+            return _legacy_sync_v1_push(request, _authorization(request), body)
         svc = _get_service(request)
-        from memplex.models import FieldValue, Function, SourceDocument, SourceType
+        context = _authorization(request)
+        store = svc._store_for(context)
+        from memplex.models import (
+            Fact,
+            Function,
+            Observation,
+            Preference,
+            SourceDocument,
+            SourceType,
+        )
 
-        pushed = body.get("functions", [])
+        node_specs = (
+            ("functions", Function),
+            ("facts", Fact),
+            ("preferences", Preference),
+            ("observations", Observation),
+        )
+        parsed: dict[str, list] = {}
+        try:
+            for key, cls in node_specs:
+                raw_nodes = body.get(key, [])
+                if not isinstance(raw_nodes, list):
+                    raise ValueError("sync node collection must be a list")
+                bound_nodes = []
+                for raw in raw_nodes:
+                    if not isinstance(raw, dict):
+                        raise ValueError("sync node must be an object")
+                    node = cls.from_dict(raw)
+                    # Validate every supplied claim before any backend write.
+                    # bind_node_identity itself performs all conflict checks
+                    # prior to mutating the parsed object.
+                    bind_node_identity(node, context, reject_conflicts=True)
+                    bound_nodes.append(node)
+                parsed[key] = bound_nodes
+        except (IdentityClaimError, TypeError, ValueError, KeyError):
+            # Do not disclose which item, identity field, or tenant failed.
+            raise HTTPException(status_code=422, detail="Invalid memory payload") from None
+
+        def existing_node(node):
+            if getattr(node, "memory_type", "") != "observation":
+                return _typed_node_from_scoped_store(store, node.id)
+            lister = getattr(store, "list_observations", None)
+            if not callable(lister):
+                return None
+            try:
+                return next((item for item in lister(limit=100000) if item.id == node.id), None)
+            except Exception:
+                return None
+
+        def is_current_tenant_lww_candidate(node) -> tuple[bool, object | None]:
+            """Return whether this ID may be written and its visible prior copy.
+
+            Storage migration to a composite tenant key happens in the next
+            story. Until then a foreign row with the same ID is treated as an
+            opaque collision: it cannot be replaced or inspected through this
+            tenant's sync push.
+            """
+            existing = existing_node(node)
+            if existing is None:
+                return True, None
+            if not svc._is_node_visible(existing, context):
+                return False, None
+            return True, existing
+
         accepted = 0
         rejected_older = 0
-        for raw in pushed:
-            try:
-                incoming = _function_from_dict(raw)
-            except Exception as exc:
-                logger.debug("sync_push: skip unparseable function: %s", exc)
+        by_type: dict = {}
+
+        f_accepted = 0
+        f_rejected = 0
+        for incoming in parsed["functions"]:
+            writable, existing = is_current_tenant_lww_candidate(incoming)
+            if not writable or (
+                existing is not None
+                and (incoming.updated_at or "") <= (getattr(existing, "updated_at", None) or "")
+            ):
+                f_rejected += 1
                 continue
-            existing = svc.store.get(incoming.id)
-            if existing is not None:
-                # LWW: reject if incoming is older or equal.
-                if (incoming.updated_at or "") <= (existing.updated_at or ""):
-                    rejected_older += 1
+            store.add(incoming, SourceDocument(type="sync_push", source_type=SourceType.WIKI))
+            f_accepted += 1
+        by_type["functions"] = {"accepted": f_accepted, "rejected_older": f_rejected}
+        accepted += f_accepted
+        rejected_older += f_rejected
+
+        for key, adder_name in (
+            ("facts", "add_fact"),
+            ("preferences", "add_preference"),
+            ("observations", "add_observation"),
+        ):
+            type_accepted = 0
+            type_rejected = 0
+            adder = getattr(store, adder_name, None)
+            for incoming in parsed[key]:
+                writable, existing = is_current_tenant_lww_candidate(incoming)
+                if not writable or (
+                    existing is not None
+                    and (incoming.updated_at or "") <= (getattr(existing, "updated_at", None) or "")
+                ):
+                    type_rejected += 1
                     continue
-            svc.store.add(
-                incoming,
-                SourceDocument(type="sync_push", source_type=SourceType.WIKI),
-            )
-            accepted += 1
-        return JSONResponse({"accepted": accepted, "rejected_older": rejected_older})
+                if callable(adder):
+                    adder(incoming)
+                    type_accepted += 1
+            by_type[key] = {"accepted": type_accepted, "rejected_older": type_rejected}
+            accepted += type_accepted
+            rejected_older += type_rejected
+        return JSONResponse(
+            {"accepted": accepted, "rejected_older": rejected_older, "by_type": by_type}
+        )
 
     @app.get("/sync/events", summary="SSE stream of sync events")
     async def sync_events(request: Request):
@@ -724,6 +1822,7 @@ def create_app(config=None) -> "FastAPI":
         (``MEMPLEX_SYNC_PULL_INTERVAL``). This prevents connection-exhaustion
         under load and keeps existing connections healthy.
         """
+        context = _authorization(request)
         # Congestion guard: refuse new SSE connections past the limit.
         if len(_SSE_SUBSCRIBERS) >= _SSE_MAX_SUBSCRIBERS:
             raise HTTPException(
@@ -740,7 +1839,8 @@ def create_app(config=None) -> "FastAPI":
         # broadcast). No-op when Redis is not configured.
         _start_redis_subscriber()
         queue: _aio.Queue = _aio.Queue(maxsize=64)
-        _SSE_SUBSCRIBERS.add(queue)
+        subscriber = (queue, context.principal.tenant_id)
+        _SSE_SUBSCRIBERS.add(subscriber)
 
         async def _event_stream():
             try:
@@ -755,7 +1855,7 @@ def create_app(config=None) -> "FastAPI":
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"  # keepalive
             finally:
-                _SSE_SUBSCRIBERS.discard(queue)
+                _SSE_SUBSCRIBERS.discard(subscriber)
 
         return StreamingResponse(
             _event_stream(),
@@ -764,44 +1864,14 @@ def create_app(config=None) -> "FastAPI":
         )
 
     @app.get("/metrics", summary="Prometheus-format metrics")
-    async def metrics(request: Request) -> JSONResponse:
-        """Return basic metrics in Prometheus text exposition format.
-
-        Exposes function count, edge count, queue depth, SSE subscribers,
-        and sync push failures. Suitable for scraping by Prometheus or
-        compatible monitoring systems.
-        """
+    async def metrics(request: Request) -> PlainTextResponse:
+        """Return bounded low-cardinality Prometheus text metrics."""
         svc = _get_service(request)
-        h = svc.health()
-        lines = [
-            "# HELP memplex_functions_total Total stored functions",
-            "# TYPE memplex_functions_total gauge",
-            f"memplex_functions_total {h.get('functions_total', 0)}",
-            "# HELP memplex_edges_total Total graph edges",
-            "# TYPE memplex_edges_total gauge",
-            f"memplex_edges_total {h.get('edges_total', 0)}",
-            "# HELP memplex_queue_depth Background task queue depth",
-            "# TYPE memplex_queue_depth gauge",
-            f"memplex_queue_depth {h.get('queue_depth', 0)}",
-            "# HELP memplex_sse_subscribers Active SSE connections",
-            "# TYPE memplex_sse_subscribers gauge",
-            f"memplex_sse_subscribers {len(_SSE_SUBSCRIBERS)}",
-            "# HELP memplex_dead_letters Pending failed tasks",
-            "# TYPE memplex_dead_letters gauge",
-            f"memplex_dead_letters {h.get('dead_letters_pending', 0)}",
-        ]
-        sync = h.get("sync", {})
-        if sync.get("enabled"):
-            lines.extend(
-                [
-                    "# HELP memplex_push_failures Sync push failure count",
-                    "# TYPE memplex_push_failures gauge",
-                    f"memplex_push_failures {sync.get('push_failures', 0)}",
-                ]
-            )
-        from fastapi.responses import PlainTextResponse
-
-        return PlainTextResponse("\n".join(lines) + "\n")
+        runtime = svc.operations_metrics_status()
+        runtime["shutdown_deadline_exceeded_total"] = (
+            operations_metrics.shutdown_deadline_exceeded_total
+        )
+        return PlainTextResponse(operations_metrics.render_prometheus(runtime))
 
     return app
 
@@ -809,53 +1879,14 @@ def create_app(config=None) -> "FastAPI":
 def _function_from_dict(data: dict) -> Any:
     """Reconstruct a Function from its serialized dict (sync_push payload).
 
-    Only the fields needed for storage + LWW are restored; rich FieldValue
-    sub-objects are rebuilt minimally. This is intentionally permissive --
-    malformed payloads are caught by the caller and skipped.
+    Backward-compatible alias for the models-standard
+    :meth:`Function.from_dict` (Wave 2a): the hand-rolled reconstruction
+    this function used to do dropped ``needs_review_until`` /
+    ``priority_from_source`` / ``source_authority`` and FieldValue
+    sub-fields (``observation`` / ``created_at`` / ``status``). Kept under
+    its old name for existing importers; malformed payloads are caught by
+    the caller and skipped.
     """
-    from memplex.models import FieldValue, Function, SourceType
+    from memplex.models import Function
 
-    def _fvs(role):
-        return [
-            FieldValue(
-                desc=fv.get("desc", ""),
-                sources=fv.get("sources", []),
-                source_method=fv.get("source_method", "manual"),
-                weight=fv.get("weight", 1.0),
-            )
-            for fv in data.get(role, [])
-        ]
-
-    source_type_raw = data.get("source_type", "wiki")
-    try:
-        source_type = (
-            SourceType(source_type_raw) if isinstance(source_type_raw, str) else source_type_raw
-        )
-    except ValueError:
-        source_type = SourceType.WIKI
-
-    return Function(
-        id=data["id"],
-        name=data.get("name", ""),
-        name_normalized=data.get("name_normalized", data.get("name", "").lower()),
-        domain=data.get("domain", ""),
-        memory_type=data.get("memory_type", "function"),
-        confidence=data.get("confidence", 0.5),
-        source_type=source_type,
-        owner=data.get("owner"),
-        version=data.get("version", 1),
-        created_at=data.get("created_at"),
-        updated_at=data.get("updated_at"),
-        origin_session=data.get("origin_session"),
-        access_count=data.get("access_count", 0),
-        last_accessed_at=data.get("last_accessed_at"),
-        source_paragraphs=data.get("source_paragraphs", []),
-        needs_review=data.get("needs_review", False),
-        content_hash=data.get("content_hash"),
-        trigger=_fvs("trigger"),
-        condition=_fvs("condition"),
-        action=_fvs("action"),
-        benefit=_fvs("benefit"),
-        attributes=data.get("attributes", {}),
-        cross_references=data.get("cross_references", []),
-    )
+    return Function.from_dict(data)

@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -63,6 +64,79 @@ _STDLOG_ATTRS = frozenset(
         "taskName",
     }
 )
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEY = re.compile(
+    r"(?:authorization|api[_-]?key|bearer|cursor|dsn|password|secret|token)",
+    re.IGNORECASE,
+)
+_QUERY_SECRET = re.compile(
+    r"([?&](?:authorization|api[_-]?key|cursor|password|secret|token)=)[^&\s]+",
+    re.IGNORECASE,
+)
+_BEARER_SECRET = re.compile(r"(\bBearer\s+)[^\s,;]+", re.IGNORECASE)
+_AUTH_HEADER_SECRET = re.compile(
+    r"(\bAuthorization\s*:\s*)(?!Bearer\s)[^\s,;]+", re.IGNORECASE
+)
+_URI_CREDENTIALS = re.compile(
+    r"(\b[a-z][a-z0-9+.-]*://)[^/@\s]+(?::[^@\s]*)?@",
+    re.IGNORECASE,
+)
+
+
+def _redact_text(value: str) -> str:
+    value = _QUERY_SECRET.sub(rf"\1{_REDACTED}", value)
+    value = _BEARER_SECRET.sub(rf"\1{_REDACTED}", value)
+    value = _AUTH_HEADER_SECRET.sub(rf"\1{_REDACTED}", value)
+    return _URI_CREDENTIALS.sub(rf"\1{_REDACTED}@", value)
+
+
+def _redact_value(value, *, key: str = ""):
+    if key and _SENSITIVE_KEY.search(key):
+        return _REDACTED
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_value(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
+
+class _SensitiveDataFilter(logging.Filter):
+    """Redact common credentials/cursors before any formatter sees them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _redact_text(record.msg)
+        if isinstance(record.args, dict):
+            record.args = _redact_value(record.args)
+        elif isinstance(record.args, tuple):
+            record.args = tuple(_redact_value(item) for item in record.args)
+        for key in tuple(record.__dict__):
+            if key.startswith("_") or key in _STDLOG_ATTRS:
+                continue
+            record.__dict__[key] = _redact_value(record.__dict__[key], key=key)
+        return True
+
+
+def install_sensitive_data_filters() -> None:
+    """Attach redaction to already-configured daemon/access handlers.
+
+    Uvicorn installs its access handlers independently of the root logger.
+    Calling this from the application lifespan covers those handlers after
+    Uvicorn's logging configuration has run, including cursor-bearing query
+    strings in access-log argument tuples.
+    """
+    loggers = (logging.getLogger(), logging.getLogger("uvicorn.access"))
+    for target in loggers:
+        for handler in target.handlers:
+            if not any(isinstance(item, _SensitiveDataFilter) for item in handler.filters):
+                handler.addFilter(_SensitiveDataFilter())
 
 
 class JsonFormatter(logging.Formatter):
@@ -75,7 +149,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": timestamp,
             "level": record.levelname,
             "name": record.name,
-            "message": record.getMessage(),
+            "message": _redact_text(record.getMessage()),
         }
         # Carry non-standard record attributes as extra fields (structured
         # logging via logger.info("...", extra={"k": v})). Skip private and
@@ -83,13 +157,16 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key.startswith("_") or key in _STDLOG_ATTRS:
                 continue
+            value = _redact_value(value, key=key)
             try:
                 json.dumps(value)
             except TypeError:
                 value = repr(value)
             payload[key] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = _redact_text(
+                self.formatException(record.exc_info)
+            )
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -124,9 +201,11 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
         root.removeHandler(handler)
 
     handler = logging.StreamHandler()
+    handler.addFilter(_SensitiveDataFilter())
     if json_mode:
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
     root.setLevel(level)
+    install_sensitive_data_filters()

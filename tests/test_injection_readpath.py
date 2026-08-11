@@ -13,8 +13,6 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from pathlib import Path  # noqa: E402
-
 import pytest  # noqa: E402
 
 from memplex.config import MemplexConfig  # noqa: E402
@@ -27,11 +25,7 @@ def service(tmp_path):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path)
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
     svc = MemplexService(config=cfg)
     yield svc
     svc.stop()
@@ -99,9 +93,14 @@ def test_mix_of_flagged_and_clean_only_returns_clean(service):
 def test_injection_filter_stage_recorded_in_explanation(service):
     """When a flagged memory IS recalled and then dropped, the trace
     records an injection_filter stage. We use a longer body that FTS5
-    reliably recalls, and verify it would have been recalled when clean."""
+    reliably recalls, and verify it would have been recalled when clean.
+
+    The body deliberately avoids fact-intent keywords ("is"/"are"/...) so
+    the paragraph extracts as a Function; fact-intent paragraphs land in
+    ExtractedData.facts and Fact nodes carry no ``attributes`` map for the
+    write-time flag to live on."""
     body = (
-        "explain-canary-token-flagged: this is a longer body of memory "
+        "explain-canary-token-flagged: a longer body of memory "
         "content about the explain-canary-token-flagged topic so that "
         "full-text search reliably recalls it for the trace test."
     )

@@ -5,14 +5,26 @@ Codex, Claude Code, OpenClaw, Hermes, and similar agents the same closed
 loop: recall useful memory before a turn, capture what happened after the
 turn, and compact old context.
 
-By default Memplex runs **single-machine** (memory in `~/.memplex/memory.json`).
+By default Memplex runs **single-machine** (`~/.memplex/memory.json`)；默认本地配置仍是
+**single-machine Beta / Developer Preview**，不等同 HA 或工业级生产部署。Memplex 已具备
+证据门控的工业部署能力：只有生产 PostgreSQL 拓扑逐项提交并通过全部当前机器门禁时，
+`readiness --strict` 才会报告 `ready / industrial`。生产支持合同和逐项机器门禁见
+[`docs/production-readiness.md`](docs/production-readiness.md)，可运行
+`memplex --output json readiness --strict` 检查；未为当前部署提交完整、有效证据时仍为
+`not_ready`，不得把仓库测试通过等同于部署已就绪。
+生产租户隔离以统一 `principal` 为边界：server registry 只保存 `token_sha256`，客户端
+原始 secret 仅使用 `MEMPLEX_PRINCIPAL_TOKEN`；详见
+[`docs/production-readiness.md`](docs/production-readiness.md)。迁移、可靠 outbox、灾备、
+SLO、供应链、四宿主 E2E 与容量故障注入均有独立证据门，任一缺失都会保持 fail-closed。
 Multi-machine sharing is **opt-in**: point one or more nodes at a central
 Memplex HTTP server with `MEMPLEX_REMOTE_URL`, and memories sync
 (write-push + on-demand pull) across machines. See
 [Multi-Node Sharing](#multi-node-sharing) below.
 
-Background compaction is automatic for the Claude Code hook loop and manual
-(`memplex compact`) elsewhere.
+Background compaction is automatic: the Claude Code hook loop compacts on
+Stop, and writes on any path trigger compaction once the corpus crosses the
+configured warn threshold. `memplex compact` remains available for manual
+runs.
 
 ## Install
 
@@ -44,36 +56,50 @@ npx memplex uninstall --agent all
 ```
 
 The npm wrapper creates a persistent Python environment at
-`~/.local/share/memplex/agent-venv`, installs `memplex==3.2.7`, detects local
+`~/.local/share/memplex/agent-venv`, installs `memplex==3.3.0`, detects local
 agent config directories, and registers Memplex into the selected hosts. It uses
 `uv` when available and falls back to `python -m venv` plus `pip`.
+
+OpenClaw 入口对宿主有 `peerDependencies` 兼容约束：`openclaw >= 2026.5.17`。
 
 Python-first users can skip npm:
 
 ```bash
-uv tool install memplex==3.2.7
+uv tool install memplex==3.3.0
 memplex setup --agent all --project-path "$PWD"
 ```
 
-Shell-only fallback:
+版本绑定的 npm 安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/articultur/memplex/main/scripts/install-agent.sh | bash
+npx memplex@3.3.0 setup --agent all --project-path "$PWD"
 ```
 
 ## What Gets Installed
 
 | Agent | Integration | Installed shape |
 | --- | --- | --- |
-| Codex | MCP server | marker-bounded `mcp_servers.memplex` config |
-| Claude Code | plugin + lifecycle hooks + MCP | packaged plugin and hook runner |
-| OpenClaw | memory plugin slot | `plugins.slots.memory = "memplex"` plus extension files |
-| Hermes | memory provider plugin | provider descriptor and `plugins/memory/memplex` |
+| Codex / Claude Code | MCP / host-native wrapper | Codex: managed marketplace + plugin cache; Claude Code: registered and enabled local marketplace + lifecycle hooks |
+| OpenClaw | JS plugin + bundled Python bridge | `extensions/memplex` JS 插件 + `python -m memplex.adapters.openclaw_plugin` + `plugins.slots.memory = "memplex"` |
+| Hermes | official MemoryProvider wrapper | provider descriptor and `plugins/memplex`（使用固定官方源码与真实 CLI 验证） |
 
 All installers are reversible and refuse to overwrite unmanaged existing
 Memplex entries.
 
+The root `marketplace.json` is the **publishing** descriptor. For Claude
+Code, setup creates a host-native local marketplace at
+`plugins/marketplaces/articultur/.claude-plugin/marketplace.json`, copies
+the versioned plugin into Claude's cache, and updates `settings.json`,
+`known_marketplaces.json`, and `installed_plugins.json`. Uninstall restores
+the exact prior files when unchanged; if the user edited them afterwards,
+it removes only the Memplex-owned keys.
+
 ## Verify
+
+任何主机/宿主升级（含插件、包、配置漂移）后需重新执行 host matrix 与健康检查：
+
+- `memplex --output json doctor --agent <agent>`
+- `memplex --output json agent status --agent all`
 
 List supported profiles:
 
@@ -148,12 +174,32 @@ the default local retrieval and embedding path for agent reliability.
 - **Automatic agent loop**: pre-turn recall, post-turn capture, background
   consolidation.
 - **4 memory types**: Function, Fact, Preference, Observation.
+- **Structured observation categories**: captured turns are classified as
+  `bugfix` / `decision` / `change` / `discovery` / `note` and browsable via
+  `memplex observations` and the MCP `memory_observations` tool.
+- **Visible token costs**: search results, full reads, and agent recall
+  annotate `est_tokens` / `tokens_used` / `max_tokens` so agents can budget
+  context progressively.
+- **Optional LLM observation compression**: long captured turns are
+  compressed before storage (rule-based fallback otherwise; disable with
+  `MEMPLEX_LLM_OBSERVATION_COMPRESSION=false`).
 - **3-layer retrieval**: SQLite FTS5/BM25+trigram search, timeline, get.
 - **5-dim reranking**: raw relevance, semantic similarity, recency, source
   authority, frequency.
 - **5-stage compaction**: extract, dedup, summarize, prune, archive.
 - **Wiki layer**: full-text/vector retrieval plus graph-aware synthesis.
 - **Namespacing**: user, session, project path, and storage path isolation.
+
+### Benchmarks
+
+An evaluation harness (source checkout only) runs Memplex against LoCoMo,
+NQ, TriviaQA, PopQA, HotpotQA, and a memory-specific suite. Offline
+synthetic baseline (lite backend, TF-IDF embeddings, no LLM): 100% fact /
+preference / observation retention on the memory suite, recall@10 = 1.0 on
+synthetic LoCoMo and PopQA. These are synthetic offline numbers — not
+real-distribution performance. See
+[Benchmarks](docs/benchmarks.md) for methodology, full metric tables, and
+reproduction commands.
 
 ## Docs
 
@@ -163,8 +209,10 @@ the default local retrieval and embedding path for agent reliability.
 - [Explainer](docs/explainer.md): what Memplex is and how the memory loop works.
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
-- [Release Automation](docs/release-automation.md): npm token handling and
-  automated npm publishing.
+- [Benchmarks](docs/benchmarks.md): evaluation methodology, metric
+  definitions, offline synthetic baselines, and reproduction commands.
+- [Release Automation](docs/release-automation.md): 可复现构建、OIDC trusted
+  publishing、attestation 与不可变摘要门禁。
 
 ## From Source
 
@@ -185,12 +233,14 @@ memplex health
 
 ## Storage And Privacy
 
-The default and currently implemented memory backend is a JSON-backed
-`LiteMemoryStore` at `~/.memplex/memory.json` (override with
-`MEMPLEX_STORAGE_PATH` or `config.yaml`). All data is held in memory and
-flushed to JSON on every write. The feedback store has an optional
-asyncpg/Postgres backend; the main memory store does not yet have a
-remote backend (see Scope & Roadmap).
+The default memory backend is a JSON-backed `LiteMemoryStore` at
+`~/.memplex/memory.json` (override with `MEMPLEX_STORAGE_PATH` or
+`config.yaml`). All data is held in memory and flushed to JSON on every
+write. A native **PostgreSQL backend** is also implemented: install
+`memplex[postgres]` and set `MEMPLEX_STORAGE_BACKEND=postgres` to store
+memory in JSONB columns with native tsvector full-text search; setting
+`MEMPLEX_PGVECTOR_DIM` additionally enables pgvector semantic search
+(hybrid tsv + vector cosine via RRF).
 
 Content wrapped in `<private>...</private>` is stripped before storage on
 every write path (CLI/HTTP/MCP/corpus).
@@ -228,8 +278,9 @@ How it works:
   nodes, run `memplex sync pull` (or call `store.pull_incremental()`)
   before querying. Pull applies **last-write-wins** by `updated_at` and
   replicates deletions via tombstones.
-- **No real-time subscription.** Sync is pull-on-demand by design --
-  exactly the "fetch when needed" shape. Background auto-pull is roadmap.
+- **Pull-on-demand by default**, with two opt-in accelerators: background
+  auto-pull via `MEMPLEX_SYNC_PULL_INTERVAL` and SSE push notifications
+  (`/sync/events`) for near-real-time updates.
 - **Auth** reuses the existing `MEMPLEX_API_KEY` / `MEMPLEX_BEARER_TOKEN`
   (constant-time compared on the server).
 
@@ -289,8 +340,100 @@ What Memplex **is today**:
   path (`write`, `write_text`, `update_memory`).
 
 The original roadmap (native Postgres, scheduled compaction, incremental
-FTS5, auto-pull, pgvector, P2P mesh) is now fully shipped. There is no
-outstanding roadmap -- future work will be tracked in GitHub issues.
+FTS5, auto-pull, pgvector, P2P mesh) is shipped, and the Wiki layer and
+the Fact/Preference memory types are wired into the default
+capture/retrieval paths. Further plans are tracked in GitHub issues.
+
+## 代理互通与内存共享（Claude Code / Codex / OpenClaw / Hermes）
+
+已落地的主机绑定关系：
+
+- **Claude Code**：原生 Claude Code 插件（`plugins/marketplaces/articultur`）。
+- **Codex**：原生插件 + MCP + hooks + skills（`plugins/marketplaces/memplex`）。
+- **OpenClaw**：宿主原生 JS 入口（`extensions/memplex`），运行时通过
+  `python -m memplex.adapters.openclaw_plugin` 桥接到 Python，绑定
+  `plugins.slots.memory = "memplex"`；这是 bridge-backed 集成，不是无版本边界的
+  OpenClaw 内部 ABI。
+- **Hermes**：官方 `MemoryProvider` ABI 的 provider wrapper
+  （`plugins/memory/memplex`），内部桥接 Memplex runtime，并通过
+  `~/.hermes/config.yaml` 的 `memory.provider: memplex` 激活；这同样属于
+  bridge-backed 集成。
+
+### 一键安装 / 卸载
+
+```bash
+memplex agent install --agent all --user-id alice --project-path "$PWD"
+memplex agent uninstall --agent openclaw
+```
+
+只读核对当前选中的宿主、安装路径、托管状态、身份、规范化工作区和可见性：
+
+```bash
+memplex --output json agent status --agent all
+memplex --output json doctor --agent codex --target-dir "$CODEX_HOME"
+memplex --output json scope explain --agent codex --user-id alice --project-path "$PWD"
+```
+
+### 共享身份/工作区/可见性语义
+
+核心字段为 `user_id`、`session_id`、`project_path`。
+
+- `session`：同一 `user_id` + `session_id` + `agent`。
+- `workspace`：同一 `project_path`。
+- `user`：同一 `user_id`。
+
+查询顺序为 `session -> workspace -> user -> legacy`。
+
+Legacy typed 记录首次通过 `owner + origin_session` 兼容命中时，会立即迁移并绑定
+当前 workspace；迁移失败则拒绝返回，公共 explain 也会在运行时授权后重建结果投影，
+不会残留被拒绝记录的 ID/名称/评分。迁移后不会继续跨 workspace 走 legacy 分支。
+模型可控的检索/诊断也有运行时硬上限：搜索最多返回 100 项，所有激活检索路径
+共享最多 500 项候选总预算，token budget 最多 32,000；observation/待审项最多
+返回或扫描 1,000 项，scope preview 最多扫描 1,000 项，且不伪装成全库总数。
+Graph 路径把自己的份额继续拆成 seed 与一跳邻居额度：Lite 使用维护中的邻接索引，
+PostgreSQL 使用双向索引查询并在 Function join 前 `LIMIT`，不会先读取整张稠密图再切片。
+这里的 candidate 指进入 graph traversal 的 Function 候选，不宣称约束底层 FTS
+posting 或向量距离计算的内部工作单元。
+
+Hermes ABI smoke 固定到 `v2026.8.3`（tag commit
+`7de39e700d2c329e15d32eb0b96e2f7cdd9fbdb2`）中最后由
+`3c27eb6234bf91b8ceee9e9071591b31e9b148cb` 修订的
+[`agent/memory_provider.py`](https://github.com/NousResearch/hermes-agent/blob/3c27eb6234bf91b8ceee9e9071591b31e9b148cb/agent/memory_provider.py)，
+上游文件 SHA-256 为
+`678c9150852f2018182e08622ae25b495360fd5099747f823c35e00cce08d8dd`。
+这些字段也随 `agent manifest --agent hermes` 输出，便于机器审计；它仍不是本机
+Hermes CLI installed-host proof。
+
+原生插件启动 MCP 时会把受管身份写入 `MEMPLEX_*` 环境变量；MCP 身份完全来自
+进程/受管配置，模型工具参数不能选择或覆盖 `agent/user/session/project`。手工启动
+且没有受管环境时，使用 OS 用户、MCP 进程会话和当前工作目录。检索、写入、
+按 ID 修改/删除、反馈、待审项与 observation
+列表统一执行同一用户/工作区可见性校验。Codex turn state 也按
+`user_id + project_path + session_id` 联合隔离。
+
+### 可恢复安装行为
+
+- **Codex**：仅移除由 Memplex 标记管理的 TOML 区块，保留用户无关内容。
+- **OpenClaw**：有安装状态哈希时，支持精确回滚；若配置被外部修改，优先保留用户改动并仅做最小回退（移除 `memplex` 入口/钩子绑定）。
+- **Hermes**：有安装状态哈希时，支持精确回滚；若配置被外部修改，恢复或移除 `memory.provider` 其余内容保留。
+- **单宿主事务**：Codex、Claude Code、OpenClaw、Hermes 任一安装步骤失败，
+  都会恢复该宿主的安装前内容与权限，并移除本次新建的托管文件。
+- **跨宿主事务**：`memplex agent install --agent all` 会在首个写入前快照四宿主的
+  明确托管路径；任一后续宿主失败时精确恢复整次调用前的文件、目录、符号链接与
+  完整权限位，
+  包括原本已安装的宿主，而不是将其普通卸载。
+
+### 核验命令
+
+```bash
+codex plugin list --json  # 某些版本可能是 `codex plugins list`
+OPENCLAW_HOME=/tmp/openclaw-home OPENCLAW_CONFIG_PATH=$OPENCLAW_HOME/openclaw.json openclaw plugins inspect memplex --runtime --json
+hermes memory status
+```
+
+若当前机器未安装 `hermes` 命令，最后一条会报错，请使用 `which hermes`
+确认环境；这不阻塞官方 ABI/source smoke，但会阻塞 Hermes installed-host proof，
+因此不能据此宣称 Hermes 本机运行链路已通过或达到工业级部署条件。
 
 ## License
 

@@ -43,7 +43,7 @@ class IndirectInjectionGuard:
         # --- Direct override (Chinese) ---
         r"忽略(之前|前面|上面|此前|以上)的?(所有|全部|一切)?(指令|指示|规则|内容|上下文)",
         r"忽略系统提示",
-        r" disregard 上一条",  # bilingual mix
+        r"disregard\s+上一条",  # bilingual mix
         r"你现在是",
         r"新的系统提示",
         r"请(忽略|无视)(以上|之前|前面|上述)",

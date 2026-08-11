@@ -109,16 +109,62 @@ _HOOK_SH_TEMPLATE = textwrap.dedent("""\
     #
     # Register in plugin/hooks/hooks.json.
     #
-    # Environment variables provided by Claude Code:
-    #   MEMPLEX_TOOL_NAME    - name of the tool that was called
-    #   MEMPLEX_SESSION_ID   - current session identifier
+    # Contract (Claude Code PostToolUse hook): a JSON payload on stdin:
+    #   {"tool_name": "...", "tool_input": {...}, "session_id": "..."}
+    # The hook is non-blocking: it never fails the tool call and always
+    # exits 0.
 
-    set -euo pipefail
+    set -uo pipefail
+
+    STDIN_JSON="$(cat || true)"
+
+    # Parse the stdin payload into shell variables (empty on malformed input).
+    # <private>...</private> spans are stripped before anything is stored.
+    eval "$(STDIN_JSON="$STDIN_JSON" python3 - 2>/dev/null <<'PY' || true
+    import json, os, re, shlex
+
+    try:
+        data = json.loads(os.environ.get("STDIN_JSON", "") or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    summary = ""
+    for key in ("file_path", "command", "url", "query"):
+        value = tool_input.get(key)
+        if value:
+            summary = str(value)
+            break
+    if not summary and tool_input:
+        summary = json.dumps(tool_input, ensure_ascii=False)
+    summary = re.sub(r"<private>.*?</private>", "", summary, flags=re.DOTALL).strip()
+
+    print("TOOL_NAME=" + shlex.quote(str(data.get("tool_name") or "unknown")))
+    print("SESSION_ID=" + shlex.quote(str(data.get("session_id") or "default")))
+    print("TOOL_SUMMARY=" + shlex.quote(summary[:500]))
+    PY
+    )"
+
+    TOOL_NAME="${TOOL_NAME:-unknown}"
+    SESSION_ID="${SESSION_ID:-default}"
+    TOOL_SUMMARY="${TOOL_SUMMARY:-}"
+
+    # Nothing worth persisting
+    if [ -z "$TOOL_SUMMARY" ]; then
+        exit 0
+    fi
 
     # Rate limit: skip if last observation was less than 30 seconds ago
-    RATE_FILE="/tmp/.memplex_last_obs_${MEMPLEX_SESSION_ID:-default}"
+    RATE_FILE="${MEMPLEX_OBS_RATE_FILE:-${TMPDIR:-/tmp}/.memplex_last_obs_${SESSION_ID}}"
     if [ -f "$RATE_FILE" ]; then
         LAST=$(cat "$RATE_FILE" 2>/dev/null || echo 0)
+        case "$LAST" in
+            ''|*[!0-9]*) LAST=0 ;;
+        esac
         NOW=$(date +%s)
         DIFF=$((NOW - LAST))
         if [ "$DIFF" -lt 30 ]; then
@@ -126,16 +172,7 @@ _HOOK_SH_TEMPLATE = textwrap.dedent("""\
         fi
     fi
 
-    TOOL_NAME="${MEMPLEX_TOOL_NAME:-unknown}"
-    TOOL_INPUT="${MEMPLEX_TOOL_INPUT:-}"
-
-    # Skip low-value tools
-    case "$TOOL_NAME" in
-        Read|read) exit 0 ;;
-    esac
-
-    # Build observation text from tool input
-    OBS_TEXT="[$TOOL_NAME] $TOOL_INPUT"
+    OBS_TEXT="[$TOOL_NAME] $TOOL_SUMMARY"
 
     # Truncate to reasonable length
     if [ ${#OBS_TEXT} -gt 500 ]; then
@@ -144,11 +181,12 @@ _HOOK_SH_TEMPLATE = textwrap.dedent("""\
 
     # Store observation via CLI
     if command -v memplex &>/dev/null; then
-        memplex write --text "$OBS_TEXT" --output json 2>/dev/null || true
+        memplex write --text "$OBS_TEXT" --output json >/dev/null 2>&1 || true
     fi
 
     # Update rate limit timestamp
-    date +%s > "$RATE_FILE"
+    date +%s > "$RATE_FILE" 2>/dev/null || true
+    exit 0
 """)
 
 

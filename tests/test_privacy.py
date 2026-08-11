@@ -75,11 +75,7 @@ def service(tmp_path):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path)
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
     svc = MemplexService(config=cfg)
     yield svc
     svc.stop()

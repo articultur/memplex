@@ -22,15 +22,33 @@ Or as a module::
 
 from __future__ import annotations
 
+import getpass
+import inspect
 import json
 import logging
+import os
 import sys
 import traceback
 from typing import Any, Dict, Optional
 
-from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
+from memplex.adapters._shared import (
+    MAX_MODEL_COLLECTION_RESULTS,
+    MAX_MODEL_SCAN_ITEMS,
+    MAX_MODEL_SEARCH_RESULTS,
+    MAX_MODEL_TOKEN_BUDGET,
+)
+from memplex.adapters._shared import (
+    dataclass_to_dict as _dataclass_to_dict,
+)
+from memplex.auth import MemoryNotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token), same formula as the service
+    budget truncation fallback (``len(summary) // 4 + 1``)."""
+    return len(text) // 4 + 1
 
 
 # ── Tool definitions ────────────────────────────────────────────────
@@ -38,7 +56,7 @@ logger = logging.getLogger(__name__)
 _TOOL_DEFINITIONS = [
     {
         "name": "memory_search",
-        "description": "Search Memplex knowledge graph. Returns index with IDs, names, relevance scores. ALWAYS use this before memory_get to filter results (10x token savings).",
+        "description": "Search Memplex knowledge graph. Returns an index with IDs, names, relevance scores, and an est_tokens annotation per result (~50-100 tokens each); the payload also reports tokens_used / max_tokens / truncated. ALWAYS use this before memory_get to filter results (10x token savings).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -50,6 +68,15 @@ _TOOL_DEFINITIONS = [
                     "type": "integer",
                     "description": "Max results (default 10, max 100)",
                     "default": 10,
+                    "minimum": 1,
+                    "maximum": MAX_MODEL_SEARCH_RESULTS,
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Result token budget (default 4000, max 32000)",
+                    "default": 4000,
+                    "minimum": 1,
+                    "maximum": MAX_MODEL_TOKEN_BUDGET,
                 },
                 "explain": {
                     "type": "boolean",
@@ -72,13 +99,19 @@ _TOOL_DEFINITIONS = [
                     "description": "Source type: text | file | url (default: text)",
                     "default": "text",
                 },
+                "visibility": {
+                    "type": "string",
+                    "enum": ["session", "workspace", "user"],
+                    "description": "Memory visibility (default: workspace)",
+                    "default": "workspace",
+                },
             },
             "required": ["content"],
         },
     },
     {
         "name": "memory_get",
-        "description": "Retrieve full details for a specific memory. Use AFTER memory_search to get details only for filtered IDs (~500-1000 tokens each).",
+        "description": "Retrieve full details for a specific memory (~500-1000 tokens; response includes an est_tokens field). Use AFTER memory_search to get details only for filtered IDs.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -149,12 +182,14 @@ _TOOL_DEFINITIONS = [
             "properties": {
                 "owner": {
                     "type": "string",
-                    "description": "Filter by owner (optional)",
+                    "description": "Deprecated compatibility input; the trusted MCP identity is always enforced.",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max results (default 100)",
+                    "description": "Max results (default 100, max 1000)",
                     "default": 100,
+                    "minimum": 0,
+                    "maximum": MAX_MODEL_COLLECTION_RESULTS,
                 },
             },
         },
@@ -191,6 +226,30 @@ _TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "memory_observations",
+        "description": "List captured observation events (agent turns, tool uses) with structured categories and a per-item est_tokens annotation. Filter by category (bugfix | decision | change | discovery | note) or by a substring query over the event/context text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional substring filter over event/context text",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category: bugfix | decision | change | discovery | note",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 100, max 1000)",
+                    "default": 100,
+                    "minimum": 0,
+                    "maximum": MAX_MODEL_COLLECTION_RESULTS,
+                },
+            },
+        },
+    },
+    {
         "name": "memory_doctor",
         "description": "Run productized readiness checks for Memplex and an agent integration.",
         "inputSchema": {
@@ -215,10 +274,6 @@ _TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "agent": {"type": "string", "default": "codex"},
-                "user_id": {"type": "string", "default": "default"},
-                "session_id": {"type": "string", "default": "default"},
-                "project_path": {"type": "string"},
                 "preview": {"type": "boolean", "default": False},
             },
         },
@@ -253,16 +308,19 @@ _TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "agent": {"type": "string", "default": "codex"},
                 "prompt": {"type": "string", "description": "Current user prompt"},
-                "user_id": {"type": "string", "default": "default"},
-                "session_id": {"type": "string", "default": "default"},
-                "project_path": {
-                    "type": "string",
-                    "description": "Project path used for memory isolation",
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "minimum": 1,
+                    "maximum": MAX_MODEL_SEARCH_RESULTS,
                 },
-                "top_k": {"type": "integer", "default": 5},
-                "token_budget": {"type": "integer", "default": 1500},
+                "token_budget": {
+                    "type": "integer",
+                    "default": 1500,
+                    "minimum": 1,
+                    "maximum": MAX_MODEL_TOKEN_BUDGET,
+                },
             },
             "required": ["prompt"],
         },
@@ -273,16 +331,9 @@ _TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "agent": {"type": "string", "default": "codex"},
                 "user_message": {"type": "string"},
                 "assistant_message": {"type": "string"},
                 "next_prompt_hint": {"type": "string"},
-                "user_id": {"type": "string", "default": "default"},
-                "session_id": {"type": "string", "default": "default"},
-                "project_path": {
-                    "type": "string",
-                    "description": "Project path used for memory isolation",
-                },
                 "metadata": {"type": "object"},
             },
             "required": ["user_message", "assistant_message"],
@@ -292,6 +343,10 @@ _TOOL_DEFINITIONS = [
 
 
 # ── MCPServer ───────────────────────────────────────────────────────
+
+
+class _UnknownToolError(ValueError):
+    """Raised when ``tools/call`` names a tool that is not registered."""
 
 
 class MCPServer:
@@ -325,18 +380,25 @@ class MCPServer:
     # ── JSON-RPC I/O ─────────────────────────────────────────────
 
     def _read_request(self) -> Optional[dict]:
-        """Read a single JSON-RPC request from stdin."""
-        line = sys.stdin.readline()
-        if not line:
-            return None
-        line = line.strip()
-        if not line:
-            return None
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError as exc:
-            logger.warning("Invalid JSON from stdin: %s", exc)
-            return None
+        """Read a single JSON-RPC request from stdin.
+
+        Returns ``None`` only on EOF. Blank lines are skipped, and a
+        malformed line is answered with a JSON-RPC ``-32700`` (Parse
+        error) response with a null id -- the server keeps reading
+        instead of treating the bad line as EOF and dying.
+        """
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                return None  # EOF
+            line = line.strip()
+            if not line:
+                continue  # skip blank lines
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Invalid JSON from stdin: %s", exc)
+                self._write_response(self._make_error(-32700, f"Parse error: {exc}", None))
 
     def _write_response(self, response: dict) -> None:
         """Write a JSON-RPC response to stdout."""
@@ -359,6 +421,8 @@ class MCPServer:
 
     def _handle_initialize(self, params: dict) -> dict:
         """Handle ``initialize`` request."""
+        from memplex.adapters.agent_installer import _package_version
+
         return {
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -366,7 +430,7 @@ class MCPServer:
             },
             "serverInfo": {
                 "name": "memplex",
-                "version": "3.2.7",
+                "version": _package_version(),
             },
         }
 
@@ -381,7 +445,7 @@ class MCPServer:
 
         handler = self._tool_handlers.get(tool_name)
         if handler is None:
-            raise ValueError(f"Unknown tool: {tool_name!r}")
+            raise _UnknownToolError(f"Unknown tool: {tool_name!r}")
 
         result = handler(self, arguments)
         return {
@@ -399,8 +463,9 @@ class MCPServer:
         params = request.get("params", {})
         req_id = request.get("id")
 
-        # Notifications (no id) do not expect a response
-        if req_id is None and method.endswith("/notification"):
+        # Notifications (no id) do not expect a response. Real MCP
+        # notification methods look like "notifications/initialized".
+        if req_id is None and method.startswith("notifications/"):
             return None
 
         try:
@@ -418,6 +483,10 @@ class MCPServer:
 
             return self._make_result(result, req_id)
 
+        except _UnknownToolError as exc:
+            # Unknown tool name -> Invalid params (JSON-RPC -32602).
+            logger.error("Error handling %s: %s", method, exc)
+            return self._make_error(-32602, str(exc), req_id)
         except Exception as exc:
             logger.error("Error handling %s: %s", method, exc)
             traceback.print_exc(file=sys.stderr)
@@ -427,15 +496,19 @@ class MCPServer:
 
     def _tool_memory_search(self, args: dict) -> dict:
         """Search memories."""
-        result = self._service.query(
-            text=args["query"],
+        result = self._agent_runtime(args).search_memories(
+            args["query"],
             top_k=args.get("top_k", 10),
+            max_tokens=args.get("max_tokens", 4000),
             explain=args.get("explain", False),
         )
         payload = {
             "total": len(result.results),
             "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
             "latency_ms": result.latency_ms,
+            "tokens_used": result.tokens_used,
+            "max_tokens": result.max_tokens,
+            "truncated": result.truncated,
             "results": [
                 {
                     "id": r.func_id,
@@ -443,6 +516,9 @@ class MCPServer:
                     "relevance": round(r.relevance_score, 4),
                     "summary": r.summary,
                     "domain": r.domain,
+                    # Backfilled per-result by the service when max_tokens > 0;
+                    # otherwise fall back to the same summary-length formula.
+                    "est_tokens": r.token_estimate or _estimate_tokens(r.summary),
                 }
                 for r in result.results
             ],
@@ -455,7 +531,11 @@ class MCPServer:
         """Add a new memory."""
         content = args["content"]
         source_type = args.get("source_type", "text")
-        result = self._service.write_text(text=content, source_type=source_type)
+        result = self._agent_runtime(args).write_text(
+            content,
+            source_type=source_type,
+            visibility=args.get("visibility", "workspace"),
+        )
         return {
             "functions_extracted": len(result.functions),
             "edges": len(result.graph.edges),
@@ -464,42 +544,80 @@ class MCPServer:
 
     def _tool_memory_get(self, args: dict) -> dict:
         """Get a memory by ID."""
-        func = self._service.get(args["memory_id"])
+        func = self._agent_runtime(args).get_accessible_memory(args["memory_id"])
         if func is None:
             return {"error": "Memory not found", "memory_id": args["memory_id"]}
-        return _dataclass_to_dict(func)
+        payload = _dataclass_to_dict(func)
+        # Full-detail reads are the expensive layer (~500-1000 tokens);
+        # annotate the cost so callers can budget progressively.
+        payload["est_tokens"] = _estimate_tokens(
+            json.dumps(payload, default=str, ensure_ascii=False)
+        )
+        return payload
 
     def _tool_memory_update(self, args: dict) -> dict:
         """Update a memory field."""
-        result = self._service.update_memory(
-            memory_id=args["memory_id"],
-            role=args["role"],
-            new_value=args["new_value"],
-        )
+        runtime = self._agent_runtime(args)
+        try:
+            result = self._service.update_memory(
+                memory_id=args["memory_id"],
+                role=args["role"],
+                new_value=args["new_value"],
+                authorization=runtime.authorization_context,
+            )
+        except MemoryNotFoundError as exc:
+            raise PermissionError("Memory not found or inaccessible") from exc
         return _dataclass_to_dict(result)
 
     def _tool_memory_delete(self, args: dict) -> dict:
         """Delete a memory."""
-        self._service.delete(args["memory_id"])
+        runtime = self._agent_runtime(args)
+        try:
+            self._service.delete(
+                args["memory_id"], authorization=runtime.authorization_context
+            )
+        except MemoryNotFoundError as exc:
+            raise PermissionError("Memory not found or inaccessible") from exc
         return {"status": "deleted", "id": args["memory_id"]}
 
     def _tool_memory_feedback(self, args: dict) -> dict:
         """Submit feedback."""
-        self._service.submit_feedback(
-            memory_id=args["memory_id"],
-            field_role=args["role"],
-            value_index=args["index"],
-            verdict=args["verdict"],
-            reason=args.get("reason"),
-        )
+        runtime = self._agent_runtime(args)
+        try:
+            self._service.submit_feedback(
+                memory_id=args["memory_id"],
+                field_role=args["role"],
+                value_index=args["index"],
+                verdict=args["verdict"],
+                reason=args.get("reason"),
+                authorization=runtime.authorization_context,
+            )
+        except MemoryNotFoundError as exc:
+            raise PermissionError("Memory not found or inaccessible") from exc
         return {"status": "recorded"}
 
     def _tool_memory_pending_reviews(self, args: dict) -> dict:
         """List pending reviews."""
-        reviews = self._service.get_pending_reviews(
-            owner=args.get("owner"),
-            limit=args.get("limit", 100),
-        )
+        runtime = self._agent_runtime(args)
+        limit = min(MAX_MODEL_COLLECTION_RESULTS, max(0, int(args.get("limit", 100))))
+        if limit == 0:
+            return {"total": 0, "reviews": []}
+        get_pending_reviews = self._service.get_pending_reviews
+        if "authorization" in inspect.signature(get_pending_reviews).parameters:
+            reviews = get_pending_reviews(
+                limit=MAX_MODEL_SCAN_ITEMS,
+                authorization=runtime.authorization_context,
+            )
+        else:
+            # Narrow compatibility for test doubles and third-party service
+            # facades predating the authorization keyword. The production
+            # service path above is always authorization-bound.
+            reviews = get_pending_reviews(limit=MAX_MODEL_SCAN_ITEMS)
+        reviews = [
+            review
+            for review in reviews
+            if runtime.get_accessible_memory(review.memory_id) is not None
+        ][:limit]
         return {
             "total": len(reviews),
             "reviews": _dataclass_to_dict(reviews),
@@ -507,17 +625,98 @@ class MCPServer:
 
     def _tool_memory_resolve(self, args: dict) -> dict:
         """Resolve a pending review."""
-        return self._service.apply_resolution(
-            memory_id=args["memory_id"],
-            field_role=args["field_role"],
-            action=args["action"],
-            new_value=args.get("new_value"),
-        )
+        runtime = self._agent_runtime(args)
+        try:
+            return self._service.apply_resolution(
+                memory_id=args["memory_id"],
+                field_role=args["field_role"],
+                action=args["action"],
+                new_value=args.get("new_value"),
+                authorization=runtime.authorization_context,
+            )
+        except MemoryNotFoundError as exc:
+            raise PermissionError("Memory not found or inaccessible") from exc
 
     def _tool_memory_health(self, args: dict) -> dict:
         """Health check."""
         self._ensure_service()
         return self._service.health()
+
+    def _tool_memory_observations(self, args: dict) -> dict:
+        """List captured observation events with token estimates."""
+        self._ensure_service()
+        runtime = self._agent_runtime(args)
+        limit = min(MAX_MODEL_COLLECTION_RESULTS, max(0, int(args.get("limit", 100))))
+        observations = self._list_observations_filtered(
+            category=args.get("category"),
+            query=str(args.get("query") or "").strip().lower(),
+            limit=limit,
+            runtime=runtime,
+        )
+        items = []
+        for obs in observations:
+            summary = obs.context or obs.event or ""
+            items.append(
+                {
+                    "id": obs.id,
+                    "category": obs.category,
+                    "event": obs.event,
+                    "actor": obs.actor,
+                    "observed_at": obs.observed_at,
+                    # Same ~4 chars/token estimate as memory_search results.
+                    "est_tokens": _estimate_tokens(summary),
+                    "summary": summary[:200],
+                }
+            )
+        return {"total": len(items), "observations": items}
+
+    def _list_observations_filtered(self, *, category, query, limit, runtime):
+        """List observations with the substring filter applied BEFORE *limit*.
+
+        The store applies its own limit first, so when a *query* is present
+        we paginate through the store in pages, collect matches, and only
+        then truncate -- otherwise matches beyond the first ``limit`` rows
+        would be silently dropped.
+        """
+        # PostgreSQL production stores reject every unscoped operation.  Bind
+        # this bounded scan to the same trusted runtime context used by the
+        # rest of the MCP tool surface; the final runtime check below retains
+        # the host visibility contract for non-PG backends as well.
+        scoped_store = self._service._store_for(runtime.authorization_context)
+        store_list = getattr(scoped_store, "list_observations", None)
+        if not callable(store_list):
+            return []
+        if limit <= 0:
+            return []
+        matched = []
+        offset = 0
+        scanned = 0
+        page_size = min(MAX_MODEL_SCAN_ITEMS, max(limit, 100))
+        while len(matched) < limit and scanned < MAX_MODEL_SCAN_ITEMS:
+            request_size = min(page_size, MAX_MODEL_SCAN_ITEMS - scanned)
+            batch = list(
+                store_list(
+                    offset=offset,
+                    limit=request_size,
+                    category=category,
+                    owner=runtime.user_id,
+                )
+            )[:request_size]
+            if not batch:
+                break
+            scanned += len(batch)
+            for obs in batch:
+                if not runtime.can_access_node(obs):
+                    continue
+                summary = obs.context or obs.event or ""
+                if not query or query in f"{obs.event}\n{summary}".lower():
+                    matched.append(obs)
+                    if len(matched) >= limit:
+                        break
+            if len(batch) < request_size:
+                break
+            offset += len(batch)
+        return matched
 
     def _tool_memory_doctor(self, args: dict) -> dict:
         """Run productized readiness checks."""
@@ -536,15 +735,21 @@ class MCPServer:
         from memplex.product import scope_explain, scope_preview
 
         self._ensure_service()
+        runtime = self._agent_runtime(args)
         explained = scope_explain(
-            agent=args.get("agent", "codex"),
-            user_id=args.get("user_id"),
-            session_id=args.get("session_id", "default"),
-            project_path=args.get("project_path"),
+            agent=runtime.agent,
+            user_id=runtime.user_id,
+            session_id=runtime.session_id,
+            project_path=runtime.project_path,
             storage_namespace=self._service.storage_namespace(),
         )
         if args.get("preview", False):
-            explained["preview"] = scope_preview(self._service, explained["namespace_filter"])
+            preview = scope_preview(
+                self._service,
+                runtime.read_namespace_filters(),
+                scan_limit=MAX_MODEL_SCAN_ITEMS,
+            )
+            explained["preview"] = preview
         return explained
 
     def _tool_memory_policy_show(self, args: dict) -> dict:
@@ -562,15 +767,35 @@ class MCPServer:
         """Build an AgentMemoryRuntime bound to this MCP service."""
         from memplex.adapters.agent_runtime import AgentMemoryRuntime
 
+        self._ensure_service()
         return AgentMemoryRuntime(
             service=self._service,
-            agent=args.get("agent", "codex"),
-            user_id=args.get("user_id"),
-            session_id=args.get("session_id", "default"),
-            project_path=args.get("project_path"),
+            agent=self._trusted_identity("MEMPLEX_AGENT_ID", "codex"),
+            user_id=self._trusted_identity("MEMPLEX_USER_ID", getpass.getuser()),
+            session_id=self._trusted_identity(
+                "MEMPLEX_SESSION_ID",
+                f"mcp-{os.getpid()}",
+            ),
+            project_path=self._trusted_identity("MEMPLEX_PROJECT_ROOT", os.getcwd()),
             top_k=args.get("top_k", 5),
             token_budget=args.get("token_budget", 1500),
         )
+
+    @staticmethod
+    def _trusted_identity(env_name: str, default):
+        """Resolve identity from process state, never model-controlled arguments."""
+
+        installed_value = os.environ.get(env_name)
+        if installed_value:
+            return installed_value
+        return default
+
+    def _require_memory_access(self, memory_id: str, args: dict):
+        runtime = self._agent_runtime(args)
+        memory = runtime.get_accessible_memory(memory_id)
+        if memory is None:
+            raise PermissionError("Memory not found or inaccessible")
+        return memory
 
     def _tool_memory_turn_begin(self, args: dict) -> dict:
         """Recall memories before an agent turn."""
@@ -600,6 +825,7 @@ class MCPServer:
         "memory_pending_reviews": _tool_memory_pending_reviews,
         "memory_resolve": _tool_memory_resolve,
         "memory_health": _tool_memory_health,
+        "memory_observations": _tool_memory_observations,
         "memory_doctor": _tool_memory_doctor,
         "memory_scope_explain": _tool_memory_scope_explain,
         "memory_policy_show": _tool_memory_policy_show,

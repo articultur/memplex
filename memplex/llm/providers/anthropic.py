@@ -3,17 +3,19 @@
 import json
 import logging
 
+from memplex.llm.providers._common import (
+    classify_intent_prompt,
+    intent_from_result,
+    parse_json_response,
+)
 from memplex.models import IntentType
 
 logger = logging.getLogger(__name__)
 
 try:
     import anthropic
-except ImportError:
-    raise ImportError(
-        "The 'anthropic' package is required for AnthropicProvider. "
-        "Install it with: pip install anthropic"
-    )
+except ImportError:  # pragma: no cover - exercised through constructor contract
+    anthropic = None
 
 
 class AnthropicProvider:
@@ -34,8 +36,17 @@ class AnthropicProvider:
         api_key: str,
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 1024,
+        *,
+        client=None,
     ) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        if client is None:
+            if anthropic is None:
+                raise ImportError(
+                    "The 'anthropic' package is required for AnthropicProvider. "
+                    "Install it with: pip install anthropic"
+                )
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = client
         self._model = model
         self._max_tokens = max_tokens
 
@@ -58,48 +69,14 @@ class AnthropicProvider:
     @staticmethod
     def _parse_json(text: str) -> dict:
         """Best-effort JSON extraction from LLM output."""
-        text = text.strip()
-        # Try direct parse
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        # Try to extract JSON block from markdown code fence
-        import re
-
-        m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-        # Try to find first { ... } block
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-        logger.warning("Failed to parse JSON from LLM response, returning empty dict")
-        return {}
+        return parse_json_response(text)
 
     # -- LLMProvider interface ------------------------------------------
 
     async def classify_intent(self, query: str, context: dict | None = None) -> IntentType:
         """Classify user query intent using Claude."""
-        result = await self.complete_json(
-            f"Classify the intent of the following query. "
-            f'Respond with a JSON object: {{"intent": "search|understand|compare|relation"}}\n\nQuery: {query}'
-        )
-        intent_str = result.get("intent", "search")
-        mapping = {
-            "search": IntentType.IMMEDIATE,
-            "understand": IntentType.SYNTHESIS,
-            "compare": IntentType.RELATION,
-            "relation": IntentType.RELATION,
-        }
-        return mapping.get(intent_str, IntentType.IMMEDIATE)
+        result = await self.complete_json(classify_intent_prompt(query))
+        return intent_from_result(result)
 
     async def summarize(self, content: str, max_tokens: int = 256) -> str:
         """Summarize content using Claude."""

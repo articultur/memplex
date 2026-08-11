@@ -6,6 +6,8 @@ clear round-trips, persistence across instances, and the factory.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
@@ -14,6 +16,7 @@ import pytest  # noqa: E402
 from memplex.models import FeedbackVerdict, MemoryFeedback  # noqa: E402
 from memplex.storage.feedback import (  # noqa: E402
     LiteFeedbackStore,
+    SQLiteFeedbackStore,
     create_feedback_store,
 )
 
@@ -25,6 +28,15 @@ def _fb(memory_id="m1", field_role="trigger", verdict=FeedbackVerdict.WRONG, rea
         value_index=0,
         verdict=verdict,
         reason=reason,
+    )
+
+
+def _authorization(*, tenant: str, subject: str):
+    from memplex.auth import AuthorizationContext, Principal
+
+    return AuthorizationContext(
+        principal=Principal(tenant_id=tenant, subject_id=subject),
+        workspace_id=f"workspace-{tenant}",
     )
 
 
@@ -117,6 +129,31 @@ def test_records_persist_to_disk_and_reload(tmp_path):
     history = reloaded.get_history("m1")
     assert len(history) == 1
     assert history[0].reason == "persist-me"
+
+
+def test_sqlite_authorized_facades_are_thread_safe(tmp_path):
+    """One scoped SQLite store may serve concurrent request threads."""
+    store = SQLiteFeedbackStore(
+        db_path=str(tmp_path / "feedback.db"),
+        require_authorization=True,
+    )
+    # Establish the shared connection on the creating thread.  A default
+    # sqlite3 connection then deterministically rejects the worker threads.
+    store.authorized(_authorization(tenant="setup", subject="setup")).clear()
+    start = Barrier(3)
+
+    def record_and_read(tenant: str) -> list[str]:
+        scoped = store.authorized(_authorization(tenant=tenant, subject=tenant))
+        start.wait(timeout=5)
+        scoped.record(_fb(memory_id="shared", reason=tenant))
+        return [item.reason or "" for item in scoped.get_history("shared")]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        alice = executor.submit(record_and_read, "alice")
+        bob = executor.submit(record_and_read, "bob")
+        start.wait(timeout=5)
+        assert alice.result(timeout=5) == ["alice"]
+        assert bob.result(timeout=5) == ["bob"]
 
 
 # ── create_feedback_store factory ────────────────────────────────────

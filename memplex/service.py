@@ -23,13 +23,23 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Condition, RLock
 from typing import Any, Dict, Iterable, List, Optional
 
+from memplex.auth import (
+    AuthorizationContext,
+    MemoryNotFoundError,
+    PrincipalRegistry,
+    bind_node_identity,
+    local_development_context,
+    resolve_environment_authorization,
+)
 from memplex.compaction import CompactionPipeline
-from memplex.config import MemplexConfig, load_config
+from memplex.config import MemplexConfig, load_config, validate_deployment_contract
 from memplex.core import CoreEngine
 from memplex.intent import detect_memory_type as _detect_memory_type
 from memplex.intent import detect_scope_by_keywords
@@ -43,6 +53,7 @@ from memplex.models import (
     FeedbackVerdict,
     Function,
     MemoryFeedback,
+    Observation,
     QueryResult,
     QueryScope,
     SearchResult,
@@ -57,6 +68,12 @@ from memplex.retrieval.multi_path import MultiPathRetriever
 from memplex.retrieval.reranker import CrossEncoderReranker, Reranker
 from memplex.storage import MemoryStore, create_store
 from memplex.storage.feedback import FeedbackStore, create_feedback_store
+from memplex.storage.migrations.runner import VectorCapabilityRequest
+from memplex.storage.pool import (
+    PostgresStorageResources,
+    PostgresSyncStorageResources,
+)
+from memplex.sync_repository import SyncCapturePolicy
 from memplex.worker import BackgroundTask, BackgroundWorker
 
 logger = logging.getLogger(__name__)
@@ -90,6 +107,42 @@ def _package_version() -> str:
 # bottom of this file) forwards to the same implementation.
 
 
+class _TypedNodeLookup:
+    """Store facade whose ``get`` also resolves Fact/Preference nodes.
+
+    ``MemoryStore.get`` only covers Functions; Fact/Preference nodes live
+    behind the optional typed APIs (``get_fact`` / ``get_preference``).
+    The injection guard (``filter_and_wrap`` / ``wrap_for_context``) takes
+    a store-like object with ``get`` -- wrapping the real store in this
+    facade keeps typed memories recallable into LLM context instead of
+    being silently dropped as unresolvable. Every other attribute is
+    delegated unchanged.
+    """
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def get(self, node_id: str) -> Any:
+        node = self._store.get(node_id)
+        if node is not None:
+            return node
+        for getter_name in ("get_fact", "get_preference", "get_observation"):
+            getter = getattr(self._store, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                node = getter(node_id)
+            except Exception as exc:
+                logger.debug("typed-node lookup via %s failed for %s: %s", getter_name, node_id, exc)
+                node = None
+            if node is not None:
+                return node
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+
 # ── MemplexService ──────────────────────────────────────────────────────
 
 
@@ -111,11 +164,23 @@ class MemplexService:
     """
 
     def __init__(self, config: Optional[MemplexConfig] = None) -> None:
+        from memplex.operations import RuntimeLifecycle
+
         self._config = config or load_config()
         cfg = self._config
+        validate_deployment_contract(cfg)
+        self._lifecycle_condition = Condition(RLock())
+        self._postgres_resource_close_state = "open"
+        self._postgres_resource_close_error: BaseException | None = None
+        self._service_stop_state = "open"
+        self._service_stop_error: BaseException | None = None
+        self._service_stop_result: dict[str, object] | None = None
+        self._sync_dispatcher: Any | None = None
+        self._runtime_lifecycle = RuntimeLifecycle()
 
-        # ── Resolve backend (only "lite" is currently implemented) ──
-        _implemented_backends = {"lite"}
+        # ── Resolve backend ("lite" and "postgres" are implemented;
+        #    "standard"/"enterprise" map to lite inside create_store) ──
+        _implemented_backends = {"lite", "postgres"}
         backend = cfg.storage.backend
         if backend not in _implemented_backends:
             logger.warning(
@@ -125,17 +190,140 @@ class MemplexService:
             backend = "lite"
 
         # ── Storage ─────────────────────────────────────────────
+        self._postgres_resources: (
+            PostgresStorageResources | PostgresSyncStorageResources | None
+        ) = None
+        storage_kwargs: dict[str, Any] = {}
+        if backend == "postgres":
+            vector_dim = int(os.environ.get("MEMPLEX_PGVECTOR_DIM", "0") or 0)
+            vector_policy = (
+                "disabled" if vector_dim == 0 else
+                ("required" if self._is_production_profile() else "best_effort")
+            )
+            storage_path = str(cfg.storage.path)
+            if cfg.sync.enabled:
+                migration_dsn = cfg.storage.migration_dsn
+                inbound_dsn = cfg.storage.inbound_dsn
+                if type(migration_dsn) is not str or not migration_dsn.strip():
+                    raise ValueError("sync-enabled storage requires a non-empty migration DSN")
+                if type(inbound_dsn) is not str or not inbound_dsn.strip():
+                    raise ValueError("sync-enabled inbound DSN is required")
+                self._postgres_resources = PostgresSyncStorageResources(
+                    app_dsn=storage_path,
+                    migration_dsn=migration_dsn,
+                    inbound_dsn=inbound_dsn,
+                )
+            else:
+                self._postgres_resources = PostgresStorageResources(
+                    dsn=storage_path,
+                    migration_dsn=cfg.storage.migration_dsn,
+                )
+            self._postgres_resources.ensure_ready(
+                request=VectorCapabilityRequest(dim=vector_dim, policy=vector_policy),
+                deployment_profile=str(cfg.deployment.profile),
+            )
+            storage_kwargs["ready_pool"] = self._postgres_resources.ready_pool
+            if cfg.sync.enabled:
+                storage_kwargs["inbound_executor"] = self._postgres_resources.executor
+                storage_kwargs["sync_capture_policy"] = SyncCapturePolicy(
+                    "required",
+                    local_node_id=cfg.sync.node_id,
+                )
+                storage_kwargs["sync_max_attempts"] = cfg.sync.max_attempts
+                storage_kwargs["sync_snapshot_ttl_seconds"] = (
+                    cfg.sync.cursor_ttl_seconds
+                )
+                storage_kwargs["sync_max_snapshot_items"] = (
+                    cfg.sync.max_snapshot_items
+                )
+                storage_kwargs["sync_max_active_snapshots_per_tenant"] = (
+                    cfg.sync.max_active_snapshots_per_tenant
+                )
+                storage_kwargs["sync_max_active_snapshots_per_remote"] = (
+                    cfg.sync.max_active_snapshots_per_remote
+                )
+                storage_kwargs["sync_snapshot_create_timeout_seconds"] = (
+                    cfg.sync.snapshot_create_timeout_seconds
+                )
+                storage_kwargs["sync_consumer_ttl_seconds"] = (
+                    cfg.sync.consumer_ttl_seconds
+                )
+                storage_kwargs["sync_retention_min_seconds"] = (
+                    cfg.sync.retention_min_seconds
+                )
+        elif cfg.sync.enabled:
+            storage_kwargs["sync_capture_policy"] = SyncCapturePolicy(
+                "required",
+                local_node_id=cfg.sync.node_id,
+            )
+            storage_kwargs["sync_max_pending_events"] = cfg.sync.max_pending_events
+            storage_kwargs["sync_max_attempts"] = cfg.sync.max_attempts
+            storage_kwargs["sync_snapshot_ttl_seconds"] = cfg.sync.cursor_ttl_seconds
+            storage_kwargs["sync_max_snapshot_items"] = cfg.sync.max_snapshot_items
+            storage_kwargs["sync_max_active_snapshots_per_tenant"] = (
+                cfg.sync.max_active_snapshots_per_tenant
+            )
+            storage_kwargs["sync_max_active_snapshots_per_remote"] = (
+                cfg.sync.max_active_snapshots_per_remote
+            )
+            storage_kwargs["sync_consumer_ttl_seconds"] = (
+                cfg.sync.consumer_ttl_seconds
+            )
+            storage_kwargs["sync_retention_min_seconds"] = (
+                cfg.sync.retention_min_seconds
+            )
+        try:
+            self._initialize_runtime(cfg, backend, storage_kwargs)
+        except BaseException:
+            try:
+                self._close_postgres_resources_once()
+            except BaseException:
+                # Construction failure is the caller-visible cause.  Resource
+                # shutdown is still attempted exactly once and its state is
+                # retained for diagnostic inspection.
+                pass
+            raise
+
+    def _initialize_runtime(
+        self,
+        cfg: MemplexConfig,
+        backend: str,
+        storage_kwargs: dict[str, Any],
+    ) -> None:
+        """Construct all runtime collaborators after storage readiness."""
         self.store: MemoryStore = create_store(
             backend=backend,
             path=cfg.storage.path,
+            require_authorization=self._is_production_profile(),
+            deployment_profile=str(cfg.deployment.profile),
+            **storage_kwargs,
         )
+
+        if cfg.sync.enabled and cfg.sync.targets:
+            self._initialize_sync_dispatcher(cfg)
+
+        # ── Typed-node lookup facade (Function + Fact/Preference) ──
+        self._typed_lookup = _TypedNodeLookup(self.store)
 
         # ── Embedding ───────────────────────────────────────────
         self._embedding_service = EmbeddingService(
             model=cfg.embedding.model,
             dimension=cfg.embedding.dimension,
             storage=self.store,
+            batch_size=cfg.embedding.batch_size,
+            contextual_retrieval=cfg.embedding.contextual_retrieval,
         )
+
+        # ── pgvector embedder injection ─────────────────────────
+        # The postgres backend's hybrid search (tsv + vector RRF) needs
+        # an embedder to light up its vector leg; create_store stays
+        # embedder-free (the embedding service did not exist yet), so the
+        # shared service is injected here. Duck-typed: lite stores and
+        # sync-wrapped stores without a setter are unaffected.
+        _pg_store = getattr(self.store, "local", self.store)
+        _set_embedder = getattr(_pg_store, "set_embedder", None)
+        if callable(_set_embedder):
+            _set_embedder(self._embedding_service)
 
         # ── Reranker ────────────────────────────────────────────
         self._reranker = Reranker(
@@ -155,11 +343,24 @@ class MemplexService:
         self._init_llm(cfg)
 
         # ── Feedback store ──────────────────────────────────────
-        feedback_path = Path(cfg.storage.path).expanduser() / "feedback.json"
-        self._feedback_store: FeedbackStore = create_feedback_store(
-            backend=backend,
-            path=feedback_path,
-        )
+        if backend == "postgres":
+            # Postgres feedback is synchronous (psycopg2); it receives the
+            # same service-owned ready pool as the main store.
+            self._feedback_store: FeedbackStore = create_feedback_store(
+                backend=backend,
+                dsn=str(cfg.storage.path),
+                require_authorization=self._is_production_profile(),
+                ready_pool=self._postgres_resources.ready_pool,
+            )
+        else:
+            feedback_path = Path(cfg.storage.path).expanduser() / "feedback.json"
+            self._feedback_store = create_feedback_store(
+                backend=backend,
+                path=feedback_path,
+            )
+
+        # ── Core engine (extraction pipeline) ──────────────────
+        self._engine = CoreEngine(store=self.store)
 
         # ── Compaction pipeline ─────────────────────────────────
         self._compaction = CompactionPipeline(
@@ -169,22 +370,303 @@ class MemplexService:
         )
 
         # ── Background worker ───────────────────────────────────
-        self._worker = BackgroundWorker(compaction_pipeline=self._compaction)
+        # Share the live collaborators so task handlers (index build,
+        # wiki compile, vector refresh) operate on the same store /
+        # engine / embedding service instead of lazily building private
+        # default instances whose results would not be shared.
+        worker_storage_path = (
+            Path(cfg.storage.path).expanduser() / "tasks.json"
+            if backend == "lite"
+            else Path("~/.memplex/tasks.json").expanduser()
+        )
+        self._worker = BackgroundWorker(
+            storage_path=worker_storage_path,
+            compaction_pipeline=self._compaction,
+            store=self.store,
+            engine=self._engine,
+            embedding_service=self._embedding_service,
+            config=cfg,
+        )
 
         # ── Graph builder ───────────────────────────────────────
         self._graph_builder = GraphBuilder(
             store=self.store,
             config=cfg,
+            embedding_service=self._embedding_service,
         )
 
-        # ── Core engine (extraction pipeline) ──────────────────
-        self._engine = CoreEngine(store=self.store)
-
         # ── Multi-path retrieval ───────────────────────────────
-        self._retriever = MultiPathRetriever(self.store)
+        self._retriever = MultiPathRetriever(
+            self.store,
+            embedding_service=self._embedding_service,
+            wiki_searcher=self._build_wiki_searcher(cfg),
+        )
 
         # ── Injection scan tracking ─────────────────────────────
         self._injection_scans_24h: Dict[str, int] = {}  # keyed by date string "YYYY-MM-DD"
+
+    def _initialize_sync_dispatcher(self, cfg: MemplexConfig) -> None:
+        """Bind configured peer identities to the durable repository."""
+        from memplex.sync_dispatcher import SyncDispatcher
+
+        repository: Any = self.store
+        if self._is_production_profile():
+            context = resolve_environment_authorization(
+                agent_id=None,
+                provenance={"transport": "sync-dispatcher"},
+                require_registry=True,
+            )
+            if context is None:  # pragma: no cover - require_registry guard
+                raise PermissionError("sync dispatcher principal is unavailable")
+            if context.agent_id != cfg.sync.node_id:
+                raise PermissionError(
+                    "sync dispatcher principal does not match local node identity"
+                )
+            registry = PrincipalRegistry.from_environment()
+            if registry is None:  # pragma: no cover - require_registry guard
+                raise PermissionError("sync dispatcher principal registry is unavailable")
+            tenant_ids = {item.tenant_id for item in registry.credentials}
+            if tenant_ids != {context.principal.tenant_id}:
+                raise PermissionError(
+                    "sync-enabled production requires a single-tenant principal registry"
+                )
+            authorize = getattr(repository, "authorized", None)
+            if not callable(authorize):
+                raise TypeError("sync-enabled production store must be authorizable")
+            repository = authorize(context)
+
+        targets = {
+            target_id: cfg.sync.validate_remote_url(
+                url, profile=str(cfg.deployment.profile)
+            )
+            for target_id, url in cfg.sync.targets.items()
+        }
+        for target_id in targets:
+            repository.sync_register_target(target_id, bootstrap="future")
+
+        headers: dict[str, str] = {}
+        principal_token = os.environ.get("MEMPLEX_PRINCIPAL_TOKEN")
+        if principal_token:
+            headers["X-API-Key"] = principal_token
+        self._sync_dispatcher = SyncDispatcher(
+            repository,
+            targets=targets,
+            local_node_id=cfg.sync.node_id,
+            headers=headers,
+            claim_size=cfg.sync.claim_size,
+            max_in_flight=cfg.sync.max_in_flight,
+            per_target_in_flight=cfg.sync.per_target_in_flight,
+            lease_seconds=cfg.sync.lease_seconds,
+            max_response_bytes=cfg.sync.max_batch_bytes,
+        )
+
+    def _close_postgres_resources_once(self) -> None:
+        """Close the owned resource at most once; concurrent callers agree."""
+        resources = self._postgres_resources
+        if resources is None:
+            return
+        with self._lifecycle_condition:
+            if self._postgres_resource_close_state == "closed":
+                return
+            if self._postgres_resource_close_state == "faulted":
+                assert self._postgres_resource_close_error is not None
+                raise self._postgres_resource_close_error
+            if self._postgres_resource_close_state == "closing":
+                while self._postgres_resource_close_state == "closing":
+                    self._lifecycle_condition.wait()
+                if self._postgres_resource_close_state == "faulted":
+                    assert self._postgres_resource_close_error is not None
+                    raise self._postgres_resource_close_error
+                return
+            self._postgres_resource_close_state = "closing"
+        try:
+            resources.close(wait=True)
+        except BaseException as exc:
+            with self._lifecycle_condition:
+                self._postgres_resource_close_error = exc
+                self._postgres_resource_close_state = "faulted"
+                self._lifecycle_condition.notify_all()
+            raise
+        with self._lifecycle_condition:
+            self._postgres_resource_close_state = "closed"
+            self._lifecycle_condition.notify_all()
+
+    def _require_authorization(
+        self, context: Optional[AuthorizationContext]
+    ) -> AuthorizationContext:
+        """Require adapter-bound identity outside the local development profile."""
+        if context is not None:
+            if not isinstance(context, AuthorizationContext):
+                raise TypeError("authorization context must be an AuthorizationContext")
+            return context
+        profile = str(getattr(self._config.deployment, "profile", "development")).strip().lower()
+        if profile == "production":
+            raise PermissionError("authorization context is required in production")
+        return local_development_context()
+
+    def _is_production_profile(self) -> bool:
+        """Whether this service is running under the production contract."""
+        return (
+            str(getattr(self._config.deployment, "profile", "development"))
+            .strip()
+            .lower()
+            == "production"
+        )
+
+    def _store_for(self, context: AuthorizationContext) -> Any:
+        """Return an immutable request-scoped storage facade when supported.
+
+        PostgreSQL stores enforce tenant predicates and RLS settings through
+        ``authorized(context)``.  The facade is intentionally allocated per
+        service call: keeping the current principal on ``self.store`` would
+        let concurrent requests overwrite one another.  Lite stores retain
+        their development-compatible API because they expose no such facade.
+        """
+        authorize = getattr(self.store, "authorized", None)
+        return authorize(context) if callable(authorize) else self.store
+
+    def _feedback_store_for(self, context: AuthorizationContext) -> FeedbackStore:
+        """Return the request-scoped feedback facade for production calls.
+
+        Historic Lite feedback files may contain records without tenant
+        columns.  Development preserves their read compatibility and relies
+        on the related memory's ACL check; production always uses the facade
+        and its tenant-first backend predicates.
+        """
+        if not self._is_production_profile():
+            return self._feedback_store
+        authorize = getattr(self._feedback_store, "authorized", None)
+        return authorize(context) if callable(authorize) else self._feedback_store
+
+    def _typed_lookup_for(self, context: AuthorizationContext) -> _TypedNodeLookup:
+        """Build a typed lookup over the same request-scoped storage facade."""
+        return _TypedNodeLookup(self._store_for(context))
+
+    @staticmethod
+    def _identity_value(node: Any, field_name: str, namespace_key: str) -> Optional[str]:
+        """Resolve a node identity field, accepting the stable namespace copy.
+
+        Identity is persisted both on ``MemoryNode`` and in its namespace so
+        existing serializer paths can retain it.  The typed field wins; the
+        namespace is only a compatibility projection.
+        """
+        value = getattr(node, field_name, None)
+        if value is None or not str(value).strip():
+            namespace = getattr(node, "namespace", {}) or {}
+            if isinstance(namespace, dict):
+                value = namespace.get(namespace_key)
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    @staticmethod
+    def _is_local_development_context(context: AuthorizationContext) -> bool:
+        """Whether *context* is the explicit compatibility trust boundary."""
+        principal = context.principal
+        return (
+            principal.tenant_id == "local"
+            and principal.subject_id == "local-development"
+            and "local-development" in principal.roles
+            and context.workspace_id == "local-development"
+            and context.provenance.get("trust_boundary") == "local-development"
+        )
+
+    def _is_node_visible(self, node: Any, context: AuthorizationContext) -> bool:
+        """Return whether *node* is in the authenticated caller's ACL scope.
+
+        An identity-less historic node is visible only through the explicit
+        local-development compatibility context.  Every explicit tenant
+        context is fail-closed before applying workspace, user, or session
+        visibility.
+        """
+        tenant_id = self._identity_value(node, "tenant_id", "memplex_tenant_id")
+        if tenant_id is None:
+            return self._is_local_development_context(context)
+        if tenant_id != context.principal.tenant_id:
+            return False
+
+        namespace = getattr(node, "namespace", {}) or {}
+        if not isinstance(namespace, dict):
+            namespace = {}
+        visibility = getattr(node, "visibility", None) or namespace.get("memplex_visibility")
+        visibility = str(visibility or "workspace").strip().lower()
+        subject_id = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
+        if subject_id is None:
+            owner = getattr(node, "owner", None)
+            subject_id = str(owner).strip() if owner is not None and str(owner).strip() else None
+        workspace_id = self._identity_value(node, "workspace_id", "memplex_workspace_id")
+
+        if visibility == "user":
+            return subject_id == context.principal.subject_id
+        if visibility == "workspace":
+            return workspace_id == context.workspace_id
+        if visibility == "session":
+            provenance = getattr(node, "provenance", {}) or {}
+            if not isinstance(provenance, dict):
+                provenance = {}
+            source_agent = (
+                provenance.get("agent_id")
+                or namespace.get("memplex_source_agent")
+                or namespace.get("memplex_agent")
+            )
+            return (
+                workspace_id == context.workspace_id
+                and subject_id == context.principal.subject_id
+                and getattr(node, "origin_session", None) == context.session_id
+                and source_agent == context.agent_id
+            )
+        return False
+
+    def _visible_node(self, memory_id: str, context: AuthorizationContext) -> Any:
+        """Load one node and hide inaccessible identifiers from callers."""
+        try:
+            node = self._typed_lookup_for(context).get(memory_id)
+        except Exception as exc:
+            logger.debug("authorized node lookup failed for %s: %s", memory_id, exc)
+            return None
+        if node is None or not self._is_node_visible(node, context):
+            return None
+        return node
+
+    def _require_visible_node(self, memory_id: str, context: AuthorizationContext) -> Any:
+        """Return a visible node or raise the uniform opaque mutation error."""
+        node = self._visible_node(memory_id, context)
+        if node is None:
+            raise MemoryNotFoundError("Memory not found")
+        return node
+
+    def _filter_authorized_results(
+        self, results: List[SearchResult], context: AuthorizationContext
+    ) -> List[SearchResult]:
+        """Drop inaccessible search candidates before any ranking side effect."""
+        kept: List[SearchResult] = []
+        for result in results:
+            node = self._visible_node(result.func_id, context)
+            if node is not None:
+                kept.append(result)
+        return kept
+
+    @staticmethod
+    def _bind_extracted_identity(
+        extracted: ExtractedData,
+        context: AuthorizationContext,
+        *,
+        visibility: str = "workspace",
+    ) -> None:
+        """Stamp every extraction product before any store operation begins."""
+        seen: set[int] = set()
+        for nodes in (
+            extracted.functions,
+            extracted.facts,
+            extracted.preferences,
+            getattr(extracted.graph, "nodes", []),
+        ):
+            for node in nodes:
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                bind_node_identity(node, context, visibility=visibility)
 
     # ── LLM initialisation ──────────────────────────────────────
 
@@ -203,6 +685,28 @@ class MemplexService:
             logger.info("LLM enhancer not available (%s); using rule-based fallback", exc)
             self._llm = None
 
+    # ── Wiki searcher initialisation ────────────────────────────────
+
+    def _build_wiki_searcher(self, cfg: MemplexConfig) -> Optional[object]:
+        """Build a DualIndexSearch over compiled wiki pages when enabled.
+
+        Returns ``None`` when wiki is disabled or construction fails; the
+        retriever then passes wiki_search through to ``store.fts_search``.
+        """
+        wiki_cfg = getattr(cfg, "wiki", None)
+        if wiki_cfg is None or not getattr(wiki_cfg, "enabled", False):
+            return None
+        try:
+            from memplex.wiki.search import DualIndexSearch
+
+            return DualIndexSearch(
+                wiki_dir=Path(wiki_cfg.dir).expanduser(),
+                embedding_service=self._embedding_service,
+            )
+        except Exception as exc:
+            logger.debug("wiki searcher init failed; wiki path falls back to FTS: %s", exc)
+            return None
+
     # ── Injection scan helper ──────────────────────────────────────
     # ``_extract_scan_text`` lives on ``IndirectInjectionGuard`` (llm/
     # injection_guard.py) and is shared by both the write path (here,
@@ -220,8 +724,12 @@ class MemplexService:
         top_k: int = 10,
         owner: Optional[str] = None,
         max_tokens: int = 4000,
-        namespace_filter: Optional[Dict[str, str]] = None,
+        namespace_filter: Optional[
+            Dict[str, Optional[str]] | List[Dict[str, Optional[str]]]
+        ] = None,
         explain: bool = False,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> QueryResult:
         """Unified query entry point.
 
@@ -246,11 +754,27 @@ class MemplexService:
             Estimated as ``len(summary) // 4``.
         namespace_filter:
             Optional exact-match metadata filter applied before rerank and
-            ``access_count`` updates. Used by agent adapters to isolate turns.
+            ``access_count`` updates. A list expresses OR alternatives. Used
+            by agent adapters to enforce visibility before touching results.
         explain:
             Include a product-facing retrieval trace that explains the stages,
             filters, budgets, and final injected candidates.
         """
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+        store = self._store_for(context)
+        # A compiled wiki index is not tenant-addressable.  On a scoped
+        # backend, use its SQL/FTS path instead of producing global wiki
+        # candidates and attempting to remove them afterwards.
+        retriever = (
+            self._retriever
+            if store is self.store
+            else MultiPathRetriever(
+                store,
+                embedding_service=self._embedding_service,
+                wiki_searcher=None,
+            )
+        )
         scope = self._detect_scope(text)
         start = datetime.now()
         trace: Optional[Dict[str, Any]] = None
@@ -274,30 +798,46 @@ class MemplexService:
                 "stages": [],
             }
 
-        # Pre-compute query_vector (multi-path reuse)
+        # Pre-compute query_vector (multi-path reuse). Query-side embeds
+        # use embed_query (transform-only) so TF-IDF corpus statistics do
+        # not drift with query history.
         query_vector: Optional[Vector] = None
         if self._embedding_service is not None:
             if self._llm is not None and self._config.embedding.hyde_enabled:
                 query_vector = self._compute_hyde_vector(text)
-            query_vector = query_vector or self._embedding_service.embed(text)
+            query_vector = query_vector or self._embedding_service.embed_query(text)
         if trace is not None:
             trace["embedding"]["query_vector_available"] = query_vector is not None
 
-        # Parallel multi-path retrieval
-        futures: Dict[concurrent.futures.Future, str] = {}
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
-                futures[pool.submit(self._retriever.rag_search, text, top_k, query_vector)] = "rag"
-            if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
-                futures[pool.submit(self._retriever.wiki_search, text, top_k)] = "wiki"
-            if scope in (QueryScope.RELATION, QueryScope.ALL):
-                futures[pool.submit(self._retriever.graph_search, text, top_k, query_vector)] = (
-                    "graph"
+        # Parallel multi-path retrieval. ``top_k`` is one global candidate
+        # budget, not a per-path allowance: otherwise QueryScope.ALL silently
+        # triples model-controlled work. Split the budget as evenly as
+        # possible; when the budget is smaller than the number of paths, the
+        # zero-budget paths are not scheduled.
+        searches = []
+        if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
+            searches.append(("rag", retriever.rag_search, (query_vector,)))
+        if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
+            searches.append(("wiki", retriever.wiki_search, ()))
+        if scope in (QueryScope.RELATION, QueryScope.ALL):
+            searches.append(("graph", retriever.graph_search, (query_vector,)))
+
+        candidate_budget = max(0, int(top_k))
+        per_path, remainder = divmod(candidate_budget, len(searches))
+        futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
+        with ThreadPoolExecutor(max_workers=len(searches)) as pool:
+            for index, (path, search, extra_args) in enumerate(searches):
+                path_budget = per_path + (1 if index < remainder else 0)
+                if path_budget == 0:
+                    continue
+                futures[pool.submit(search, text, path_budget, *extra_args)] = (
+                    path,
+                    path_budget,
                 )
 
             all_results: List[List[SearchResult]] = []
             for future in as_completed(futures):
-                path = futures[future]
+                path, path_budget = futures[future]
                 try:
                     path_results = future.result()
                     all_results.append(path_results)
@@ -306,6 +846,7 @@ class MemplexService:
                             {
                                 "stage": f"{path}_search",
                                 "status": "ok",
+                                "candidate_budget": path_budget,
                                 "candidates": len(path_results),
                             }
                         )
@@ -317,6 +858,7 @@ class MemplexService:
                                 "stage": f"{path}_search",
                                 "status": "failed",
                                 "error": str(exc),
+                                "candidate_budget": path_budget,
                                 "candidates": 0,
                             }
                         )
@@ -328,12 +870,24 @@ class MemplexService:
                 {
                     "stage": "merge_deduplicate",
                     "input_paths": len(all_results),
+                    "candidate_budget": candidate_budget,
                     "candidates": len(results),
+                }
+            )
+        before_authorization = len(results)
+        results = self._filter_authorized_results(results, context)
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "authorization_filter",
+                    "before": before_authorization,
+                    "after": len(results),
+                    "boundary": "Authenticated tenant and visibility ACL filter.",
                 }
             )
         if namespace_filter:
             before_namespace = len(results)
-            results = self._retriever.filter_by_namespace(results, namespace_filter)
+            results = retriever.filter_by_namespace(results, namespace_filter)
             if trace is not None:
                 trace["stages"].append(
                     {
@@ -343,11 +897,33 @@ class MemplexService:
                         "boundary": "exact-match metadata filter; not an ACL engine",
                     }
                 )
+        if owner is not None:
+            before_owner = len(results)
+            results = self._filter_by_owner(results, owner, context=context)
+            if trace is not None:
+                trace["stages"].append(
+                    {
+                        "stage": "owner_filter",
+                        "owner": owner,
+                        "before": before_owner,
+                        "after": len(results),
+                        "boundary": "exact-match owner filter; not an ACL engine",
+                    }
+                )
 
         # Stage 1: 5-dim bi-encoder rerank
         if self._reranker is not None:
             before_rerank = len(results)
-            results = self._reranker.rerank(text, results, top_k * 2, query_vector)
+            reranker = (
+                self._reranker
+                if store is self.store
+                else Reranker(
+                    embedding_service=self._embedding_service,
+                    weights=self._config.reranker.weights,
+                    storage=store,
+                )
+            )
+            results = reranker.rerank(text, results, top_k * 2, query_vector)
             if trace is not None:
                 trace["stages"].append(
                     {
@@ -379,7 +955,7 @@ class MemplexService:
         # enforcement that previously only AgentMemoryRuntime applied.
         if results:
             before_injection = len(results)
-            results = self._drop_injection_suspected(results)
+            results = self._drop_injection_suspected(results, store=store)
             if trace is not None and len(results) != before_injection:
                 trace["stages"].append(
                     {
@@ -407,7 +983,7 @@ class MemplexService:
         # signal is diagnosable rather than silently swallowed.
         if results:
             try:
-                self.store.increment_access_batch([r.func_id for r in results])
+                store.increment_access_batch([r.func_id for r in results])
             except Exception as exc:
                 logger.debug(
                     "increment_access_batch failed (frequency signal lost for %d results): %s",
@@ -460,6 +1036,7 @@ class MemplexService:
             scope=scope,
             latency_ms=latency,
             tokens_used=used,
+            max_tokens=max_tokens,
             truncated=truncated,
             explanation=build_query_explanation(trace),
         )
@@ -470,14 +1047,20 @@ class MemplexService:
         top_k: int = 10,
         owner: Optional[str] = None,
         max_tokens: int = 4000,
-        namespace_filter: Optional[Dict[str, str]] = None,
+        namespace_filter: Optional[
+            Dict[str, Optional[str]] | List[Dict[str, Optional[str]]]
+        ] = None,
         explain: bool = False,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> QueryResult:
         """Async version of :meth:`query`.
 
         Runs the synchronous ``query`` in a thread pool so it does not
         block the event loop (for FastAPI / MCP Server use).
         """
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
@@ -488,6 +1071,7 @@ class MemplexService:
                 max_tokens=max_tokens,
                 namespace_filter=namespace_filter,
                 explain=explain,
+                authorization=context,
             ),
         )
 
@@ -541,6 +1125,7 @@ class MemplexService:
         *,
         attributes: Optional[Dict[str, Any]] = None,
         needs_review: Optional[bool] = None,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> List[Function]:
         """Annotate stored memories through the service boundary.
 
@@ -555,31 +1140,76 @@ class MemplexService:
         never reaches an LLM context window. Never pass untrusted
         user/document text as an attribute value; route such text through
         :meth:`write` / :meth:`write_text` instead, where it is scanned.
+
+        Typed nodes (Fact / Preference, resolvable via the optional
+        ``get_fact`` / ``get_preference`` store APIs) carry no free-form
+        ``attributes`` map. For them, only ``memplex_*`` keys are projected
+        into the base ``namespace`` field; ``needs_review`` is persisted for
+        every memory type.
         """
 
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+        memory_ids = list(memory_ids)
+        visible_nodes = [self._require_visible_node(memory_id, context) for memory_id in memory_ids]
+        controlled_annotate = getattr(store, "annotate_nodes", None)
+        if callable(controlled_annotate):
+            # One COW pair commit for a mixed Function/Fact/Preference batch.
+            # Visibility is resolved for every ID before this call, so a bad
+            # ID cannot leave an earlier sibling partially published.
+            return controlled_annotate(
+                memory_ids,
+                attributes=attributes,
+                needs_review=needs_review,
+            )
         updated: List[Function] = []
-        for memory_id in memory_ids:
-            func = self.store.get(memory_id)
-            if func is None:
+        typed_updated: list = []
+        for node in visible_nodes:
+            if isinstance(node, Function):
+                func = node
+                if attributes:
+                    func.attributes.update(attributes)
+                if needs_review is not None:
+                    func.needs_review = needs_review
+                updated.append(func)
                 continue
             if attributes:
-                func.attributes.update(attributes)
+                # Typed nodes have no free-form ``attributes`` field, but
+                # Memplex namespace keys are part of their MemoryNode base
+                # projection.  Applying them here makes annotate_memories a
+                # real persistence boundary even for stores whose getters do
+                # not return live objects (for example PostgreSQL adapters).
+                node.namespace.update(
+                    {
+                        str(key): str(value)
+                        for key, value in attributes.items()
+                        if str(key).startswith("memplex_") and value is not None
+                    }
+                )
             if needs_review is not None:
-                func.needs_review = needs_review
-            updated.append(func)
+                node.needs_review = needs_review
+            typed_updated.append(node)
 
-        if not updated:
+        if not updated and not typed_updated:
             return []
 
-        save = getattr(self.store, "_save", None)
-        if callable(save):
-            save()
-        else:
-            source = SourceDocument(type="metadata_update", source_type=SourceType.WIKI)
-            for func in updated:
-                self.store.add(func, source)
+        source = SourceDocument(type="metadata_update", source_type=SourceType.WIKI)
+        for func in updated:
+            replace = getattr(store, "replace_function", None)
+            if callable(replace):
+                replace(func)
+            else:
+                store.add(func, source)
+        for node in typed_updated:
+            add = getattr(
+                store,
+                "add_fact" if getattr(node, "memory_type", "") == "fact" else "add_preference",
+                None,
+            )
+            if callable(add):
+                add(node)
 
-        return updated
+        return updated + typed_updated
 
     # ════════════════════════════════════════════════════════════════
     #  HyDE
@@ -602,7 +1232,7 @@ class MemplexService:
                     asyncio.run,
                     self._llm.enhance_query_hyde_text(text),
                 ).result(timeout=5.0)
-            return self._embedding_service.embed(hyde_text)
+            return self._embedding_service.embed_query(hyde_text)
         except Exception as exc:
             logger.warning("HyDE failed, falling back to raw query vector: %s", exc)
             return None
@@ -611,7 +1241,13 @@ class MemplexService:
     #  Write operations
     # ════════════════════════════════════════════════════════════════
 
-    def write(self, source: SourceDocument) -> ExtractedData:
+    def write(
+        self,
+        source: SourceDocument,
+        *,
+        visibility: str = "workspace",
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> ExtractedData:
         """Write new content: extract Functions -> build graph edges
         -> ``store.merge()``.
 
@@ -626,6 +1262,9 @@ class MemplexService:
             The extracted Functions and graph data (including any
             merge results).
         """
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+
         # 0. Strip <private>...</private> blocks before extraction so
         #    operator-marked secrets never reach storage. Applies to every
         #    write caller (CLI/HTTP/MCP/corpus/agent_runtime), not only the
@@ -635,8 +1274,22 @@ class MemplexService:
         if getattr(source, "content", None):
             source.content = strip_private_tags(source.content)
 
-        # 1. CoreEngine: full extraction pipeline
-        extracted = self._engine.extract(source)
+        # 1. CoreEngine: full extraction pipeline.  PostgreSQL graph-edge
+        # detection reads existing memories, so it receives the same scoped
+        # facade as persistence instead of consulting the shared base store.
+        engine = self._engine if store is self.store else CoreEngine(store=store)
+        extracted = engine.extract(source)
+
+        # Identity must be bound before any typed-node store write, graph
+        # merge, or background work observes an extracted memory.
+        self._bind_extracted_identity(extracted, context, visibility=visibility)
+
+        # 1b. Persist Fact / Preference nodes. Previously only Functions
+        #     were stored, so fact/preference-intent paragraphs (e.g.
+        #     "I prefer ...") were extracted and then silently dropped,
+        #     making them unrecallable. Duck-typed: backends without the
+        #     optional typed APIs skip with a debug trace.
+        self._persist_typed_nodes(extracted, store=store)
 
         # 2. Flag indirect-injection-suspected functions at write time.
         #    Memories are RETAINED (co-located legitimate content must not be
@@ -646,6 +1299,7 @@ class MemplexService:
         #    only logged "skipped" while neither skipping nor flagging.
         if extracted.functions:
             today = datetime.now().strftime("%Y-%m-%d")
+            self._prune_injection_scans(today)
             for func in extracted.functions:
                 memory_type = getattr(func, "memory_type", "function")
                 scan_text = IndirectInjectionGuard._extract_scan_text(func, memory_type)
@@ -661,24 +1315,25 @@ class MemplexService:
                         attrs["memplex_injection_suspected"] = "true"
                     self._injection_scans_24h[today] = self._injection_scans_24h.get(today, 0) + 1
 
-            self.store.merge(extracted.graph)
+            store.merge(extracted.graph)
 
             # Invalidate graph builder cache so next write sees new data
             self._graph_builder.invalidate_cache()
 
         # 3. Background tasks (index build, wiki compile, etc.)
         # These are submitted to the background worker asynchronously.
-        try:
-            for func in extracted.functions:
-                self._worker.submit(
-                    BackgroundTask.BUILD_INDEX,
-                    {"func_id": func.id, "source_id": source.id if source else None},
-                )
-        except Exception as exc:
-            # Background tasks are best-effort, but a submission failure
-            # should not vanish silently -- debug-log so the dropped index
-            # build is traceable.
-            logger.debug("background task submission failed: %s", exc)
+        if not self._is_production_profile():
+            try:
+                for func in extracted.functions:
+                    self._worker.submit(
+                        BackgroundTask.BUILD_INDEX,
+                        {"func_id": func.id, "source_id": source.id if source else None},
+                    )
+            except Exception as exc:
+                # Background tasks are best-effort, but a submission failure
+                # should not vanish silently -- debug-log so the dropped index
+                # build is traceable.
+                logger.debug("background task submission failed: %s", exc)
 
         # 4. Threshold-triggered background compaction.
         # Previously compaction was manual-only (or Claude Code's Stop hook).
@@ -686,11 +1341,50 @@ class MemplexService:
         # in the background worker so the store does not grow unbounded on
         # the non-Claude paths (CLI/HTTP/MCP/Codex). Hard limit forces it
         # even if a previous run is still pending.
-        self._maybe_schedule_compaction()
+        if not self._is_production_profile():
+            self._maybe_schedule_compaction(store=store)
 
         return extracted
 
-    def _maybe_schedule_compaction(self) -> None:
+    def _persist_typed_nodes(self, extracted: ExtractedData, *, store: Any = None) -> None:
+        """Persist extracted Fact / Preference nodes through the store's
+        optional typed APIs.
+
+        Duck-typed: when the backend does not implement ``add_fact`` /
+        ``add_preference`` the nodes are skipped with a debug log instead
+        of failing the write. Individual persistence failures are also
+        best-effort (debug-logged) so one bad node cannot lose the rest
+        of the extraction.
+        """
+        store = self.store if store is None else store
+        for kind, nodes, method_name in (
+            ("fact", extracted.facts, "add_fact"),
+            ("preference", extracted.preferences, "add_preference"),
+        ):
+            if not nodes:
+                continue
+            add = getattr(store, method_name, None)
+            if not callable(add):
+                logger.debug(
+                    "store %s has no %s; skipping %d extracted %s node(s)",
+                    type(store).__name__,
+                    method_name,
+                    len(nodes),
+                    kind,
+                )
+                continue
+            for node in nodes:
+                try:
+                    add(node)
+                except Exception as exc:
+                    logger.debug(
+                        "%s persistence failed for %s: %s",
+                        kind,
+                        getattr(node, "id", "?"),
+                        exc,
+                    )
+
+    def _maybe_schedule_compaction(self, *, store: Any = None) -> None:
         """Submit a background compaction when the corpus crosses thresholds.
 
         Reads ``compaction.warn_threshold`` (soft trigger) and
@@ -698,7 +1392,8 @@ class MemplexService:
         a full worker queue or a counting failure never blocks the write.
         """
         try:
-            total = len(self.store.list_functions(limit=100000))
+            store = self.store if store is None else store
+            total = self._count_functions_exact(store)
             warn = self._config.compaction.warn_threshold
             hard = self._config.compaction.hard_limit
             if total >= hard or (total >= warn and self._worker.queue_depth == 0):
@@ -715,10 +1410,24 @@ class MemplexService:
         except Exception as exc:
             logger.debug("compaction scheduling check failed: %s", exc)
 
+    @staticmethod
+    def _count_functions_exact(store: Any, *, page_size: int = 10_000) -> int:
+        """Count every Function through the public paginated storage contract."""
+        total = 0
+        while True:
+            page = store.list_functions(offset=total, limit=page_size)
+            count = len(page)
+            total += count
+            if count < page_size:
+                return total
+
     def write_text(
         self,
         text: str,
         source_type: str = "text",
+        *,
+        visibility: str = "workspace",
+        authorization: Optional[AuthorizationContext] = None,
     ) -> ExtractedData:
         """Convenience: write raw text content.
 
@@ -734,26 +1443,119 @@ class MemplexService:
         -------
         ExtractedData
         """
+        context = self._require_authorization(authorization)
         source = SourceDocument(
             type=source_type,
             content=text,
             source_type=SourceType.WIKI,
         )
-        return self.write(source)
+        return self.write(source, visibility=visibility, authorization=context)
 
     # ════════════════════════════════════════════════════════════════
     #  Memory operations
     # ════════════════════════════════════════════════════════════════
 
-    def get(self, memory_id: str) -> Optional[Function]:
-        """Retrieve a single Function by ID, or ``None``."""
-        return self.store.get(memory_id)
+    def get(
+        self,
+        memory_id: str,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> Optional[Function]:
+        """Retrieve a single memory node by ID, or ``None``.
+
+        Functions resolve through ``store.get``; Fact/Preference nodes
+        resolve through the optional typed store APIs (``get_fact`` /
+        ``get_preference``) so capture/recall flows treat every memory
+        type uniformly (previously a typed id always returned ``None``).
+        """
+        context = self._require_authorization(authorization)
+        # The unbound development API is intentionally a compatibility
+        # surface for local tooling. Production never reaches this branch
+        # because ``_require_authorization`` rejects absent credentials.
+        if authorization is None and self._is_local_development_context(context):
+            return self._typed_lookup_for(context).get(memory_id)
+        return self._visible_node(memory_id, context)
+
+    def get_timeline(
+        self,
+        memory_id: str,
+        limit: int = 20,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> list:
+        """Return a visible memory's changelog, hiding cross-scope IDs."""
+        context = self._require_authorization(authorization)
+        if self._visible_node(memory_id, context) is None:
+            return []
+        try:
+            return list(self._store_for(context).get_timeline(memory_id, limit=limit))
+        except Exception as exc:
+            logger.debug("get_timeline failed for %s: %s", memory_id, exc)
+            return []
+
+    def list_observations(
+        self,
+        category: Optional[str] = None,
+        owner: Optional[str] = None,
+        limit: int = 1000,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> List[Observation]:
+        """List captured Observation nodes through the store's optional API.
+
+        Thin pass-through to ``store.list_observations`` with *category*
+        (see ``OBSERVATION_CATEGORIES``) and *owner* (namespace) filters.
+        Duck-typed: backends without Observation listing support return
+        ``[]`` with a debug trace instead of failing the caller.
+        """
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+        list_fn = getattr(store, "list_observations", None)
+        if not callable(list_fn):
+            logger.debug(
+                "store %s has no list_observations; returning empty list",
+                type(store).__name__,
+            )
+            return []
+        try:
+            observations = list(list_fn(limit=limit, category=category, owner=owner))
+            if authorization is None and self._is_local_development_context(context):
+                return observations
+            return [
+                observation
+                for observation in observations
+                if self._is_node_visible(observation, context)
+            ]
+        except Exception as exc:
+            logger.debug("list_observations failed: %s", exc)
+            return []
+
+    def add_observation(
+        self,
+        observation: Observation,
+        *,
+        visibility: str = "workspace",
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> Observation:
+        """Bind and persist an Observation through the authorized store."""
+
+        context = self._require_authorization(authorization)
+        bind_node_identity(observation, context, visibility=visibility)
+        add = getattr(self._store_for(context), "add_observation", None)
+        if not callable(add):
+            raise NotImplementedError(
+                f"store {type(self.store).__name__} has no add_observation API"
+            )
+        add(observation)
+        return observation
 
     def update_memory(
         self,
         memory_id: str,
         role: str,
         new_value: str,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> UpdateResult:
         """Update a Function's field value.
 
@@ -771,15 +1573,10 @@ class MemplexService:
         -------
         UpdateResult
         """
-        func = self.store.get(memory_id)
-        if func is None:
-            return UpdateResult(
-                memory_id=memory_id,
-                role=role,
-                new_value=new_value,
-                success=False,
-                error="Function not found",
-            )
+        context = self._require_authorization(authorization)
+        func = self._require_visible_node(memory_id, context)
+        if not isinstance(func, Function):
+            raise MemoryNotFoundError("Memory not found")
 
         old_value = None
         values = getattr(func, role, None)
@@ -824,10 +1621,16 @@ class MemplexService:
             if isinstance(attrs, dict):
                 attrs["memplex_injection_suspected"] = "true"
 
-        # Re-merge to persist
+        # Lite uses explicit replacement so a detached snapshot is never
+        # accidentally routed through the name-merge semantics.
         from memplex.models import SourceDocument as SD
 
-        self.store.add(func, SD(type="manual_update", source_type=SourceType.WIKI))
+        store = self._store_for(context)
+        replace = getattr(store, "replace_function", None)
+        if callable(replace):
+            replace(func)
+        else:
+            store.add(func, SD(type="manual_update", source_type=SourceType.WIKI))
 
         return UpdateResult(
             memory_id=memory_id,
@@ -838,9 +1641,24 @@ class MemplexService:
             success=True,
         )
 
-    def delete(self, memory_id: str) -> None:
-        """Soft-delete a Function by ID."""
-        self.store.delete(memory_id)
+    def delete(
+        self,
+        memory_id: str,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> None:
+        """Delete a visible memory through its typed store boundary."""
+        context = self._require_authorization(authorization)
+        node = self._require_visible_node(memory_id, context)
+        delete_method = {
+            "fact": "delete_fact",
+            "preference": "delete_preference",
+            "observation": "delete_observation",
+        }.get(getattr(node, "memory_type", ""), "delete")
+        delete = getattr(self._store_for(context), delete_method, None)
+        if not callable(delete):
+            raise MemoryNotFoundError("Memory not found")
+        delete(memory_id)
 
     # ════════════════════════════════════════════════════════════════
     #  Feedback
@@ -853,6 +1671,8 @@ class MemplexService:
         value_index: int,
         verdict: str,
         reason: Optional[str] = None,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> None:
         """Submit user feedback on a memory field value.
 
@@ -869,15 +1689,30 @@ class MemplexService:
         reason:
             Optional free-text explanation.
         """
+        context = self._require_authorization(authorization)
+        node = self._require_visible_node(memory_id, context)
+        visibility = str(getattr(node, "visibility", None) or "workspace").strip().lower()
         fb = MemoryFeedback(
             memory_id=memory_id,
             field_role=field_role,
             value_index=value_index,
             verdict=FeedbackVerdict(verdict),
             reason=reason,
-            source="user",
+            source=context.principal.subject_id,
+            owner=context.principal.subject_id,
+            tenant_id=context.principal.tenant_id,
+            owner_subject_id=context.principal.subject_id,
+            workspace_id=context.workspace_id,
+            visibility=visibility,
+            provenance={
+                **context.provenance,
+                "agent_id": context.agent_id,
+                "authentication_id": context.principal.authentication_id or "",
+                "request_id": context.request_id,
+                "session_id": context.session_id,
+            },
         )
-        self._feedback_store.record(fb)
+        self._feedback_store_for(context).record(fb)
 
     def apply_resolution(
         self,
@@ -885,6 +1720,8 @@ class MemplexService:
         field_role: str,
         action: str,
         new_value: Optional[str] = None,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> dict:
         """Apply a resolution to a pending feedback review.
 
@@ -904,10 +1741,17 @@ class MemplexService:
         dict
             ``{"status": "resolved", "action": action}``
         """
-        self._feedback_store.resolve(memory_id, field_role, action)
+        context = self._require_authorization(authorization)
+        self._require_visible_node(memory_id, context)
+        self._feedback_store_for(context).resolve(memory_id, field_role, action)
 
         if action == "merge" and new_value:
-            self.update_memory(memory_id, field_role, new_value)
+            self.update_memory(
+                memory_id,
+                field_role,
+                new_value,
+                authorization=context,
+            )
 
         return {"status": "resolved", "action": action}
 
@@ -915,6 +1759,8 @@ class MemplexService:
         self,
         owner: Optional[str] = None,
         limit: int = 100,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> list:
         """Return pending feedback reviews, optionally filtered by owner.
 
@@ -922,10 +1768,21 @@ class MemplexService:
         -------
         list[PendingReview]
         """
-        pending = self._feedback_store.get_pending()
-        if owner is not None:
-            pending = [p for p in pending if getattr(p, "source", None) == owner]
-        return pending[:limit]
+        context = self._require_authorization(authorization)
+        pending = []
+        for review in self._feedback_store_for(context).get_pending():
+            node = self._visible_node(review.memory_id, context)
+            if node is None:
+                continue
+            # ``owner`` remains a compatibility narrowing filter, but is
+            # evaluated against the related memory rather than feedback
+            # metadata supplied by a caller.
+            if owner is not None and getattr(node, "owner", None) != owner:
+                continue
+            pending.append(review)
+            if len(pending) >= limit:
+                break
+        return pending
 
     # ════════════════════════════════════════════════════════════════
     #  Management
@@ -934,12 +1791,20 @@ class MemplexService:
     def health(self) -> dict:
         """Return health / readiness status.
 
+        Status semantics are component-based: ``"healthy"`` when storage
+        responds and the embedding service is present, ``"warning"`` when
+        the embedding service is missing (retrieval degrades to FTS-only),
+        ``"degraded"`` when storage errors. Whether the background worker
+        has been started is reported separately via ``worker_running`` --
+        not calling :meth:`start` is a lifecycle choice, not a component
+        failure, so pre-start health no longer reports a spurious warning.
+
         Returns
         -------
         dict
             Keys: ``status``, ``backend``, ``functions_total``, ``edges_total``,
             ``queue_depth``, ``last_compaction``, ``injection_scans_detected_24h``,
-            ``dead_letters_pending``, ``version``.
+            ``dead_letters_pending``, ``worker_running``, ``version``.
         """
         # Determine overall status
         try:
@@ -949,14 +1814,16 @@ class MemplexService:
             storage_status = f"error: {exc}"
 
         worker_running = self._worker._running
-        all_ok = storage_status == "ok" and self._embedding_service is not None and worker_running
-        has_warnings = storage_status != "ok" or not worker_running
-        status = "healthy" if all_ok else ("warning" if has_warnings else "degraded")
+        if storage_status != "ok":
+            status = "degraded"
+        elif self._embedding_service is None:
+            status = "warning"
+        else:
+            status = "healthy"
 
         # Count functions
         try:
-            funcs = self.store.list_functions(limit=100000)
-            functions_total = len(funcs)
+            functions_total = self._count_functions_exact(self.store)
         except Exception as exc:
             logger.debug("health: list_functions failed, reporting 0: %s", exc)
             functions_total = 0
@@ -977,8 +1844,10 @@ class MemplexService:
         if last_compaction is not None:
             last_compaction = last_compaction.isoformat()
 
-        # Injection scans detected in last 24h
+        # Injection scans detected in last 24h (prune stale date keys so
+        # the map cannot grow one entry per day forever).
         today = datetime.now().strftime("%Y-%m-%d")
+        self._prune_injection_scans(today)
         injection_scans_detected_24h = self._injection_scans_24h.get(today, 0)
 
         # Dead letters (failed tasks)
@@ -990,18 +1859,87 @@ class MemplexService:
         return {
             "status": status,
             "backend": self._config.storage.backend,
-            "storage_path": str(self._resolve_store_path()),
             "functions_total": functions_total,
             "edges_total": edges_total,
             "queue_depth": queue_depth,
             "last_compaction": last_compaction,
             "injection_scans_detected_24h": injection_scans_detected_24h,
             "dead_letters_pending": dead_letters_pending,
+            "worker_running": worker_running,
             "version": version,
             # Scalability/load indicators (for auto-adaptive decisions
             # and operator visibility into congestion).
             "sync": self._sync_health(),
         }
+
+    def runtime_status(self) -> dict[str, object]:
+        """Return a fixed, low-information runtime status for operators."""
+        return {
+            "schema_version": 1,
+            "lifecycle": self._runtime_lifecycle.state,
+            "worker_running": bool(self._worker._running),
+            "sync_enabled": self._sync_dispatcher is not None,
+        }
+
+    def operations_metrics_status(self) -> dict[str, object]:
+        """Return only bounded counters consumed by the metrics endpoint."""
+        try:
+            from memplex.worker import TaskStatus
+
+            worker_counts = self._worker._task_store.status_counts()
+            worker_pending = worker_counts.get(TaskStatus.PENDING, 0)
+            worker_leased = worker_counts.get(TaskStatus.RUNNING, 0)
+            worker_dead_letters = worker_counts.get(TaskStatus.FAILED, 0)
+        except Exception:
+            worker_pending = 0
+            worker_leased = 0
+            worker_dead_letters = 0
+        sync = self.sync_status()
+        resources = self._postgres_resources
+        return {
+            "runtime_state": self._runtime_lifecycle.state,
+            "worker_pending": worker_pending,
+            "worker_leased": worker_leased,
+            "worker_dead_letters": worker_dead_letters,
+            "sync_pending": sync["pending"],
+            "sync_leased": sync["leased"],
+            "sync_dead_letters": sync["dead_letters"],
+            "pool_business_leases": 0 if resources is None else resources.business_lease_count,
+            "pool_high_watermark": 0 if resources is None else resources.pool_high_watermark,
+            "pool_max_connections": 0 if resources is None else resources.pool_max_connections,
+            "shutdown_deadline_exceeded_total": 0,
+        }
+
+    def readiness_status(self) -> dict[str, object]:
+        """Return fail-closed orchestration readiness without secret detail."""
+        lifecycle = self._runtime_lifecycle.state
+        storage_ready = True
+        resources = self._postgres_resources
+        if resources is not None:
+            storage_ready = resources.state == "READY"
+        elif lifecycle == "ready":
+            try:
+                self.store.list_functions(limit=1)
+            except Exception:
+                storage_ready = False
+        if lifecycle == "ready" and not storage_ready:
+            try:
+                self._runtime_lifecycle.mark_faulted()
+            except RuntimeError:
+                pass
+            lifecycle = self._runtime_lifecycle.state
+        ready = lifecycle == "ready" and storage_ready
+        return {
+            "schema_version": 1,
+            "status": "ready" if ready else "not_ready",
+            "lifecycle": lifecycle,
+            "storage": "ready" if storage_ready else "unavailable",
+        }
+
+    def begin_draining(self) -> None:
+        """Close readiness before any shutdown work begins."""
+        if self._runtime_lifecycle.state in {"starting", "ready"}:
+            self._runtime_lifecycle.start_draining()
 
     def _resolve_store_path(self) -> str:
         """Safely resolve the underlying storage path for display.
@@ -1042,7 +1980,7 @@ class MemplexService:
             store._auto_pull_thread is not None and store._auto_pull_thread.is_alive()
         )
         info["push_failures"] = store._push_failures
-        info["pending_push_futures"] = len(store._push_futures)
+        info["pending_push_tasks"] = store.pending_push_tasks
         info["last_pull_at"] = store.last_pull_at
         # SSE subscriber count (server-side only; client reports 0).
         try:
@@ -1056,8 +1994,7 @@ class MemplexService:
     def stats(self) -> dict:
         """Return storage and usage statistics."""
         try:
-            funcs = self.store.list_functions(limit=100000)
-            total = len(funcs)
+            total = self._count_functions_exact(self.store)
         except Exception as exc:
             logger.debug("stats: list_functions failed, reporting 0: %s", exc)
             total = 0
@@ -1069,7 +2006,6 @@ class MemplexService:
             "total_functions": total,
             "total_edges": total_edges,
             "storage_backend": self._config.storage.backend,
-            "storage_path": str(self._resolve_store_path()),
             "embedding_model": self._config.embedding.model,
         }
 
@@ -1101,16 +2037,71 @@ class MemplexService:
         results: List[SearchResult],
         *,
         max_tokens: Optional[int] = None,
+        authorization: Optional[AuthorizationContext] = None,
     ) -> Optional[str]:
         """Filter injection-suspected results and wrap the rest for LLM context.
 
         Wraps :meth:`IndirectInjectionGuard.filter_and_wrap` so adapters
         (notably ``agent_runtime``) do not import the guard directly. Keeps
         the read-path injection defence behind the service boundary.
-        """
-        return IndirectInjectionGuard.filter_and_wrap(results, self.store)
 
-    def _drop_injection_suspected(self, results: List[SearchResult]) -> List[SearchResult]:
+        The guard is handed the typed-node facade so Fact/Preference hits
+        (resolvable via the optional ``get_fact`` / ``get_preference``
+        store APIs) are wrapped for context instead of being dropped as
+        unresolvable ids.
+        """
+        context = self._require_authorization(authorization)
+        return IndirectInjectionGuard.filter_and_wrap(
+            results,
+            self._typed_lookup_for(context),
+        )
+
+    def _prune_injection_scans(self, today: str) -> None:
+        """Drop non-current date keys from ``_injection_scans_24h``.
+
+        The map is keyed by ``YYYY-MM-DD`` and only today's count is ever
+        read (health reporting), so older keys are dead weight.
+        """
+        if len(self._injection_scans_24h) > 1 or (
+            self._injection_scans_24h and today not in self._injection_scans_24h
+        ):
+            self._injection_scans_24h = {
+                k: v for k, v in self._injection_scans_24h.items() if k == today
+            }
+
+    def _filter_by_owner(
+        self,
+        results: List[SearchResult],
+        owner: str,
+        *,
+        context: Optional[AuthorizationContext] = None,
+    ) -> List[SearchResult]:
+        """Keep only results whose stored node is owned by *owner*.
+
+        The node's ``owner`` is resolved through the typed-node facade
+        (Function first, then the optional Fact/Preference APIs). Nodes
+        without an owner never match. Lookup failures keep the result --
+        a store hiccup must not silently drop legitimate memory (same
+        availability posture as the injection filter).
+        """
+        kept: List[SearchResult] = []
+        for r in results:
+            try:
+                lookup = self._typed_lookup if context is None else self._typed_lookup_for(context)
+                node = lookup.get(r.func_id)
+            except Exception as exc:
+                logger.debug("owner filter: lookup failed for %s, keeping result: %s", r.func_id, exc)
+                node = None
+            if node is None:
+                kept.append(r)
+                continue
+            if getattr(node, "owner", None) == owner:
+                kept.append(r)
+        return kept
+
+    def _drop_injection_suspected(
+        self, results: List[SearchResult], *, store: Any = None
+    ) -> List[SearchResult]:
         """Drop results whose stored Function is flagged injection-suspected.
 
         Read-side enforcement paired with the write-time flag in ``write()``.
@@ -1122,7 +2113,7 @@ class MemplexService:
         kept: List[SearchResult] = []
         for r in results:
             try:
-                func = self.store.get(r.func_id)
+                func = (self.store if store is None else store).get(r.func_id)
             except Exception as exc:
                 logger.debug(
                     "injection filter: store.get failed for %s, keeping result: %s",
@@ -1155,24 +2146,163 @@ class MemplexService:
 
     def start(self) -> None:
         """Start the background worker thread (+ auto-pull/SSE if configured)."""
-        self._worker.start()
-        # If the store is sync-enabled, start the periodic pull thread and
-        # the SSE push-notification listener so this node stays current with
-        # the central server without manual 'sync sync pull'.
+        if self._runtime_lifecycle.state == "ready":
+            return
+        try:
+            self._worker.start()
+            if self._sync_dispatcher is not None:
+                self._sync_dispatcher.start()
+            # If the store is sync-enabled, start the periodic pull thread and
+            # the SSE push-notification listener so this node stays current with
+            # the central server without manual 'sync sync pull'.
+            from memplex.sync import SyncableStore
+
+            if isinstance(self.store, SyncableStore):
+                self.store.start_auto_pull()
+                self.store.start_sse_listener()
+            self._runtime_lifecycle.mark_ready()
+        except BaseException:
+            if self._runtime_lifecycle.state == "starting":
+                self._runtime_lifecycle.mark_faulted()
+            raise
+
+    def stop(self, *, drain_sync: bool = True) -> dict[str, object]:
+        """Stop the background worker thread (+ auto-pull/SSE if running).
+
+        Pending async sync pushes are flushed first so writes accepted
+        before shutdown reach the remote instead of dying with the
+        process.
+        """
+        with self._lifecycle_condition:
+            if self._service_stop_state == "stopped":
+                assert self._service_stop_result is not None
+                return self._service_stop_result
+            if self._service_stop_state == "faulted":
+                assert self._service_stop_error is not None
+                raise self._service_stop_error
+            if self._service_stop_state == "stopping":
+                while self._service_stop_state == "stopping":
+                    self._lifecycle_condition.wait()
+                if self._service_stop_state == "faulted":
+                    assert self._service_stop_error is not None
+                    raise self._service_stop_error
+                assert self._service_stop_result is not None
+                return self._service_stop_result
+            self._service_stop_state = "stopping"
+            self.begin_draining()
+        try:
+            result = self._stop_runtime(drain_sync=drain_sync)
+        except BaseException as exc:
+            if self._runtime_lifecycle.state == "draining":
+                self._runtime_lifecycle.mark_faulted()
+            with self._lifecycle_condition:
+                self._service_stop_error = exc
+                self._service_stop_state = "faulted"
+                self._lifecycle_condition.notify_all()
+            raise
+        with self._lifecycle_condition:
+            if self._runtime_lifecycle.state == "draining":
+                self._runtime_lifecycle.mark_stopped()
+            self._service_stop_result = result
+            self._service_stop_state = "stopped"
+            self._lifecycle_condition.notify_all()
+            return result
+
+    def _stop_runtime(self, *, drain_sync: bool) -> dict[str, object]:
+        """Perform the single-owner shutdown sequence used by :meth:`stop`."""
         from memplex.sync import SyncableStore
 
-        if isinstance(self.store, SyncableStore):
-            self.store.start_auto_pull()
-            self.store.start_sse_listener()
+        primary_error: BaseException | None = None
+        sync_result = None
+        worker_result = None
+        try:
+            if (
+                self._sync_dispatcher is not None
+                and not drain_sync
+                and self._sync_dispatcher.running
+            ):
+                raise RuntimeError(
+                    "cannot skip sync drain after dispatcher start"
+                )
+            if self._sync_dispatcher is not None and drain_sync:
+                sync_result = self._sync_dispatcher.stop(
+                    self._config.sync.drain_timeout_seconds
+                )
+            if isinstance(self.store, SyncableStore):
+                self.store.flush_push()
+                self.store.stop_sse_listener()
+                self.store.stop_auto_pull()
+            worker_result = self._worker.stop(
+                timeout=self._config.worker.drain_timeout_seconds
+            )
+        except BaseException as exc:
+            primary_error = exc
+        try:
+            self._close_postgres_resources_once()
+        except BaseException:
+            if primary_error is None:
+                raise
+        if primary_error is not None:
+            raise primary_error
+        return {
+            "sync": None if sync_result is None else sync_result.to_dict(),
+            "worker": None if worker_result is None else worker_result.to_dict(),
+        }
 
-    def stop(self) -> None:
-        """Stop the background worker thread (+ auto-pull/SSE if running)."""
-        from memplex.sync import SyncableStore
+    def sync_status(self) -> dict[str, int]:
+        """Return durable sync counters without exposing peer transport data."""
+        if self._sync_dispatcher is None:
+            return {
+                "pending": 0,
+                "leased": 0,
+                "delivered": 0,
+                "disabled_targets": 0,
+                "dead_letters": 0,
+            }
+        return self._sync_dispatcher.status().to_dict()
 
-        if isinstance(self.store, SyncableStore):
-            self.store.stop_sse_listener()
-            self.store.stop_auto_pull()
-        self._worker.stop()
+    def drain_sync(self, deadline: float | None = None):
+        """Synchronously drain local-origin durable deliveries."""
+        if self._sync_dispatcher is None:
+            from memplex.sync_protocol import SyncDrainResult
+
+            return SyncDrainResult(True, 0, 0, 0, 0, False)
+        timeout = (
+            self._config.sync.drain_timeout_seconds
+            if deadline is None
+            else deadline
+        )
+        return self._sync_dispatcher.drain(timeout)
+
+    def replay_sync_dead_letter(self, target_id: str, event_id: str) -> bool:
+        """Replay one durable terminal delivery by stable peer identity."""
+        if self._sync_dispatcher is None:
+            return False
+        return self._sync_dispatcher.replay(target_id, event_id)
+
+    def list_sync_dead_letters(self, *, limit: int = 100) -> list[dict[str, object]]:
+        """List fixed-code DLQ entries without peer URLs or exceptions."""
+        if self._sync_dispatcher is None:
+            return []
+        return [
+            item.to_dict()
+            for item in self._sync_dispatcher.list_dead_letters(limit=limit)
+        ]
+
+    def pull_sync(
+        self,
+        target_id: str,
+        *,
+        max_pages: int = 100,
+    ):
+        """Pull bounded signed pages from one configured peer."""
+        if self._sync_dispatcher is None:
+            raise RuntimeError("sync dispatcher is not configured")
+        return self._sync_dispatcher.pull(
+            target_id,
+            max_pages=max_pages,
+            page_size=self._config.sync.page_size,
+        )
 
     # ── Memory type detection ─────────────────────────────────────
     # Exposed as a bound staticmethod for backward-compatible callers

@@ -13,10 +13,12 @@ from typing import List, Optional
 from memplex.models import (
     BatchResult,
     ChangelogEvent,
+    Fact,
     Function,
     GraphData,
     MergeResult,
     Observation,
+    Preference,
     SearchFilters,
     SearchResult,
     SourceDocument,
@@ -50,6 +52,100 @@ class MemoryStore(ABC):
     @abstractmethod
     def add_observation(self, observation: Observation) -> None:
         """Persist an Observation event."""
+
+    # ── Fact / Preference (OPTIONAL extension points) ───────────────
+    # These are *optional* capabilities: the WikiCompiler duck-types
+    # ``list_facts`` / ``list_preferences`` (hasattr/getattr), and the
+    # service layer feature-checks before persisting extracted
+    # Fact/Preference nodes.  Backends that do not support these memory
+    # types may simply inherit the defaults below.
+
+    def add_fact(self, fact: Fact) -> None:
+        """OPTIONAL: persist a Fact node (upsert by ``fact.id``).
+
+        Default raises :class:`NotImplementedError`; backends supporting
+        declarative memory override this.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support Fact storage")
+
+    def add_preference(self, preference: Preference) -> None:
+        """OPTIONAL: persist a Preference node (upsert by id).
+
+        Default raises :class:`NotImplementedError`; backends supporting
+        preference memory override this.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support Preference storage")
+
+    def get_fact(self, fact_id: str) -> Optional[Fact]:
+        """OPTIONAL: retrieve a single Fact by ID, or ``None``.
+
+        Default returns ``None`` (backend has no Fact storage).
+        """
+        return None
+
+    def get_preference(self, preference_id: str) -> Optional[Preference]:
+        """OPTIONAL: retrieve a single Preference by ID, or ``None``.
+
+        Default returns ``None`` (backend has no Preference storage).
+        """
+        return None
+
+    def list_facts(
+        self,
+        offset: int = 0,
+        limit: int = 1000,
+        owner: Optional[str] = None,
+    ) -> List[Fact]:
+        """OPTIONAL: paginated Fact listing, optionally filtered by *owner*.
+
+        Default returns ``[]`` so duck-typed callers (e.g. WikiCompiler)
+        degrade gracefully on backends without Fact storage.
+        """
+        return []
+
+    def list_preferences(
+        self,
+        offset: int = 0,
+        limit: int = 1000,
+        owner: Optional[str] = None,
+    ) -> List[Preference]:
+        """OPTIONAL: paginated Preference listing, optionally by *owner*.
+
+        Default returns ``[]`` (same reasoning as :meth:`list_facts`).
+        """
+        return []
+
+    def list_observations(
+        self,
+        offset: int = 0,
+        limit: int = 1000,
+        category: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> List[Observation]:
+        """OPTIONAL: paginated Observation listing, optionally filtered by
+        *category* (see ``OBSERVATION_CATEGORIES``) and/or *owner*.
+
+        Default returns ``[]`` so duck-typed callers (e.g. WikiCompiler,
+        which already probes ``list_observations``) degrade gracefully on
+        backends without Observation listing support.
+        """
+        return []
+
+    def get_observation(self, observation_id: str) -> Optional[Observation]:
+        """OPTIONAL: retrieve one Observation by ID, or ``None``."""
+        return None
+
+    def delete_fact(self, fact_id: str) -> None:
+        """OPTIONAL: delete a Fact by ID.  Default is a no-op."""
+        return None
+
+    def delete_preference(self, preference_id: str) -> None:
+        """OPTIONAL: delete a Preference by ID.  Default is a no-op."""
+        return None
+
+    def delete_observation(self, observation_id: str) -> None:
+        """OPTIONAL: delete an Observation by ID. Default is a no-op."""
+        return None
 
     @abstractmethod
     def increment_access(self, func_id: str) -> None:
@@ -98,9 +194,11 @@ class MemoryStore(ABC):
         func_id: str,
         edge_types: Optional[List[str]] = None,
         max_hops: int = 1,
+        limit: Optional[int] = None,
     ) -> List[Function]:
         """Return neighbour Functions reachable within *max_hops* edges,
-        optionally restricted to *edge_types*.
+        optionally restricted to *edge_types* and capped in the storage
+        query by *limit*. ``None`` preserves the historical unbounded API.
         """
 
     @abstractmethod

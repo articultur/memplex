@@ -9,11 +9,9 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
 
 from memplex.core.extractors.markdown import MarkdownExtractor  # noqa: E402
 from memplex.core.extractors.vision_mapper import VisionMapper  # noqa: E402
-from memplex.models.misc import FieldValue  # noqa: E402
 
 # ── MarkdownExtractor ────────────────────────────────────────────────
 
@@ -86,3 +84,89 @@ def test_image_extractor_import_or_skip():
 
     ext = ImageExtractor()
     assert ext is not None
+
+
+# ── ImageExtractor: OCR lang + vision prompt (regression) ────────────
+
+
+def test_image_ocr_uses_valid_tesseract_lang(tmp_path, monkeypatch):
+    """Regression: lang='eng+chi' is an invalid tesseract language code;
+    must be 'eng+chi_sim'."""
+    import sys
+    import types
+
+    from memplex.core.extractors.image import ImageExtractor
+
+    img = tmp_path / "sample.png"
+    img.write_bytes(b"fake-image-bytes")
+
+    calls = {}
+
+    def fake_image_to_string(image, lang=None):
+        calls["lang"] = lang
+        return " recognized text "
+
+    fake_pil = types.ModuleType("PIL")
+    fake_pil.Image = types.SimpleNamespace(open=lambda path: object())
+    monkeypatch.setitem(
+        sys.modules, "pytesseract", types.SimpleNamespace(image_to_string=fake_image_to_string)
+    )
+    monkeypatch.setitem(sys.modules, "PIL", fake_pil)
+
+    ext = ImageExtractor()
+    assert ext.extract(str(img)) == "recognized text"
+    assert calls["lang"] == "eng+chi_sim"
+
+
+def test_image_vision_prompt_forwarded_to_provider(tmp_path):
+    """Regression: the prompt parameter of extract_with_vision was declared
+    but never passed to the provider."""
+    from memplex.core.extractors.image import ImageExtractor
+
+    img = tmp_path / "sample.png"
+    img.write_bytes(b"fake-image-bytes")
+
+    seen = {}
+
+    def provider(path, prompt=None):
+        seen["path"] = path
+        seen["prompt"] = prompt
+        return {"page_type": "design"}
+
+    ext = ImageExtractor()
+    ext.set_vision_provider(provider)
+    result = ext.extract_with_vision(str(img), prompt="描述这张设计图")
+
+    assert result == {"page_type": "design"}
+    assert seen["prompt"] == "描述这张设计图"
+
+
+def test_image_vision_legacy_provider_without_prompt_still_works(tmp_path):
+    """Providers registered before the prompt parameter accept only
+    (image_path); they must keep working when a prompt is supplied."""
+    from memplex.core.extractors.image import ImageExtractor
+
+    img = tmp_path / "sample.png"
+    img.write_bytes(b"fake-image-bytes")
+
+    ext = ImageExtractor()
+    ext.set_vision_provider(lambda path: {"page_type": "legacy"})
+    assert ext.extract_with_vision(str(img), prompt="自定义提示") == {"page_type": "legacy"}
+
+
+def test_image_vision_no_prompt_calls_provider_plain(tmp_path):
+    from memplex.core.extractors.image import ImageExtractor
+
+    img = tmp_path / "sample.png"
+    img.write_bytes(b"fake-image-bytes")
+
+    seen = {}
+
+    def provider(path, prompt="UNSET"):
+        seen["prompt"] = prompt
+        return {"page_type": "plain"}
+
+    ext = ImageExtractor()
+    ext.set_vision_provider(provider)
+    assert ext.extract_with_vision(str(img)) == {"page_type": "plain"}
+    assert seen["prompt"] == "UNSET"

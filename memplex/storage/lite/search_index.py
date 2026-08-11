@@ -127,6 +127,20 @@ class SQLiteFTSIndex:
         finally:
             conn.close()
 
+    def rebuild(self) -> None:
+        """Force a full rebuild of the FTS5 sidecar.
+
+        Clears the per-function signature cache and the whole-store
+        signature so the incremental diff in ``_ensure_index`` re-indexes
+        every function, then runs the rebuild immediately.  Used by the
+        background worker's BUILD_INDEX handler.
+        """
+        self._indexed_sigs = {}
+        self._signature = None
+        conn = self._ensure_index()
+        if conn is not None:
+            conn.close()
+
     def _score_match_query(
         self,
         *,
@@ -192,6 +206,12 @@ class SQLiteFTSIndex:
                 # were added/removed -- O(changes) instead of O(N) per write.
                 current_sigs = self._per_func_signatures()
                 indexed = self._indexed_sigs
+                cleared_stale_sidecar = not indexed
+                if cleared_stale_sidecar:
+                    # A new process can inherit a stale persistent sidecar.
+                    # Clear it before reindexing the current committed pair.
+                    conn.execute("DELETE FROM memplex_fts")
+                    conn.execute("DELETE FROM memplex_trigram")
                 to_upsert = [fid for fid, sig in current_sigs.items() if indexed.get(fid) != sig]
                 to_remove = [fid for fid in indexed if fid not in current_sigs]
                 for fid in to_upsert:
@@ -218,12 +238,28 @@ class SQLiteFTSIndex:
                 for fid in to_remove:
                     conn.execute("DELETE FROM memplex_fts WHERE func_id = ?", (fid,))
                     conn.execute("DELETE FROM memplex_trigram WHERE func_id = ?", (fid,))
-                if to_upsert or to_remove:
+                # Deleting a stale sidecar's final rows is itself a durable
+                # cache mutation.  Commit even when the authoritative pair is
+                # empty, otherwise close() rolls the DELETE back.
+                if cleared_stale_sidecar or to_upsert or to_remove:
                     conn.commit()
                 self._indexed_sigs = current_sigs
                 self._signature = signature
                 self._disabled = False
             return conn
+        except sqlite3.DatabaseError:
+            conn.close()
+            # Search is an acceleration cache, never a source of truth.
+            # Recreate a corrupt sidecar from the published JSON snapshot.
+            for candidate in (
+                self._path,
+                self._path.with_name(self._path.name + "-wal"),
+                self._path.with_name(self._path.name + "-shm"),
+            ):
+                candidate.unlink(missing_ok=True)
+            self._indexed_sigs = {}
+            self._signature = None
+            return self._ensure_index()
         except sqlite3.Error:
             conn.close()
             self._disabled = True

@@ -131,7 +131,9 @@ class TestCoreEngineExtract:
 
     def test_function_has_content_hash(self):
         engine = CoreEngine()
-        source = _make_source("这是一个测试段落。")
+        # Action-oriented text (no fact/preference intent keywords) so the
+        # paragraph is routed to a Function node.
+        source = _make_source("用户执行测试段落操作。")
         extracted = engine.extract(source)
 
         func = extracted.functions[0]
@@ -218,3 +220,168 @@ class TestCoreEngineSourceType:
 
         for func in extracted.functions:
             assert func.source_type == SourceType.CODE
+
+
+# ── Conflict detection (runs before dedup) ──────────────────────────
+
+
+def _make_function(func_id: str, condition_desc: str, paragraph: str) -> Function:
+    return Function(
+        id=func_id,
+        name="数据同步",
+        name_normalized="数据同步",
+        condition=[FieldValue(desc=condition_desc)],
+        source_paragraphs=[paragraph],
+    )
+
+
+class TestConflictDetection:
+    """Regression: step 7 dedup previously merged all same-name Functions
+    before ConflictResolver ran, making conflict detection unreachable.
+    Conflicts must now be detected first and flagged needs_review instead
+    of being silently merged."""
+
+    def test_same_name_different_condition_flagged_not_merged(self, monkeypatch):
+        funcs = [
+            _make_function("func_a", "网络可用时", "p1"),
+            _make_function("func_b", "每小时触发", "p2"),
+        ]
+        monkeypatch.setattr(
+            "memplex.core.engine._build_functions_from_paragraphs",
+            lambda paragraphs, source: funcs,
+        )
+        engine = CoreEngine()
+        extracted = engine.extract(_make_source("非空文本以触发管线。"))
+
+        assert len(extracted.functions) == 2
+        assert all(f.needs_review for f in extracted.functions)
+
+    def test_same_name_same_condition_merged_without_review(self, monkeypatch):
+        funcs = [
+            _make_function("func_a", "网络可用时", "p1"),
+            _make_function("func_b", "网络可用时", "p2"),
+        ]
+        monkeypatch.setattr(
+            "memplex.core.engine._build_functions_from_paragraphs",
+            lambda paragraphs, source: funcs,
+        )
+        engine = CoreEngine()
+        extracted = engine.extract(_make_source("非空文本以触发管线。"))
+
+        assert len(extracted.functions) == 1
+        assert extracted.functions[0].needs_review is False
+
+    def test_batch_cross_source_conflict_flagged_not_merged(self, monkeypatch):
+        def fake_builder(paragraphs, source):
+            tag = "a" if "alpha" in source.content else "b"
+            return [_make_function(f"func_{tag}", f"条件{tag}", f"p_{tag}")]
+
+        monkeypatch.setattr(
+            "memplex.core.engine._build_functions_from_paragraphs", fake_builder
+        )
+        engine = CoreEngine()
+        extracted = engine.extract_batch(
+            [_make_source("alpha 来源文本。"), _make_source("beta 来源文本。")]
+        )
+
+        assert len(extracted.functions) == 2
+        assert all(f.needs_review for f in extracted.functions)
+
+
+# ── cross_references independence ───────────────────────────────────
+
+
+class TestCrossReferences:
+    def test_cross_references_are_independent_copies(self, monkeypatch):
+        """Regression: the same list object was assigned to every Function's
+        cross_references; mutating one leaked into all others."""
+        funcs = [
+            Function(id="func_a", name="功能甲", name_normalized="功能甲"),
+            Function(id="func_b", name="功能乙", name_normalized="功能乙"),
+        ]
+        monkeypatch.setattr(
+            "memplex.core.engine._build_functions_from_paragraphs",
+            lambda paragraphs, source: funcs,
+        )
+        engine = CoreEngine()
+        monkeypatch.setattr(
+            engine.ref_linker,
+            "extract_references",
+            lambda text: [{"type": "url", "value": "https://example.com"}],
+        )
+
+        extracted = engine.extract(_make_source("非空文本以触发引用提取。"))
+        assert len(extracted.functions) == 2
+
+        extracted.functions[0].cross_references.append({"type": "injected"})
+        assert len(extracted.functions[1].cross_references) == 1
+
+
+# ── Fact / Preference intent routing ─────────────────────────────────
+
+
+class TestCoreEngineFactPreferenceExtraction:
+    def test_fact_intent_paragraph_produces_fact(self):
+        engine = CoreEngine()
+        extracted = engine.extract(_make_source("巴黎是法国的首都。"))
+        assert extracted.functions == []
+        assert len(extracted.facts) == 1
+        fact = extracted.facts[0]
+        assert fact.memory_type == "fact"
+        assert fact.id.startswith("fact_")
+        assert fact.subject == "巴黎"
+        assert fact.predicate == "是"
+        assert fact.object_ == "法国的首都"
+        assert fact.content_hash is not None
+        assert fact.created_at and fact.updated_at
+
+    def test_english_fact_copula_split(self):
+        engine = CoreEngine()
+        extracted = engine.extract(_make_source("The API is a REST interface."))
+        assert len(extracted.facts) == 1
+        fact = extracted.facts[0]
+        assert fact.subject == "The API"
+        assert fact.predicate == "is"
+        assert fact.object_ == "a REST interface"
+
+    def test_preference_intent_paragraph_produces_preference(self):
+        engine = CoreEngine()
+        extracted = engine.extract(_make_source("用户喜欢暗色主题界面。"))
+        assert extracted.functions == []
+        assert len(extracted.preferences) == 1
+        pref = extracted.preferences[0]
+        assert pref.memory_type == "preference"
+        assert pref.id.startswith("pref_")
+        assert "暗色主题" in pref.preference
+
+    def test_function_intent_default_unchanged(self):
+        engine = CoreEngine()
+        source = _make_source("用户点击登录按钮。系统验证用户名和密码。")
+        extracted = engine.extract(source)
+        assert extracted.functions
+        assert extracted.facts == []
+        assert extracted.preferences == []
+
+    def test_mixed_intents_split_nodes(self):
+        engine = CoreEngine()
+        source = _make_source("用户点击保存按钮。\n\n巴黎是法国的首都。")
+        extracted = engine.extract(source)
+        assert len(extracted.functions) == 1
+        assert len(extracted.facts) == 1
+
+    def test_extract_batch_merges_facts_and_preferences(self):
+        engine = CoreEngine()
+        sources = [
+            _make_source("巴黎是法国的首都。"),
+            _make_source("用户喜欢暗色主题。"),
+        ]
+        extracted = engine.extract_batch(sources)
+        assert len(extracted.facts) == 1
+        assert len(extracted.preferences) == 1
+
+    def test_extracted_data_facts_default_empty(self):
+        """ExtractedData stays backward compatible: facts/preferences
+        default to empty lists."""
+        data = ExtractedData(functions=[], delta=False)
+        assert data.facts == []
+        assert data.preferences == []

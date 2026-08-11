@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 
 const { spawnSync } = require("node:child_process");
+const path = require("node:path");
 
-const scriptUrl =
-  process.env.MEMPLEX_INSTALL_SCRIPT_URL ||
-  "https://raw.githubusercontent.com/articultur/memplex/main/scripts/install-agent.sh";
-const pythonPackage = process.env.MEMPLEX_PACKAGE || "memplex==3.2.7";
-
-function quote(arg) {
-  return `'${String(arg).replace(/'/g, `'\\''`)}'`;
-}
+const installerPath = path.join(__dirname, "..", "install-agent.sh");
 
 function printHelp() {
   console.log(`Memplex agent memory setup
@@ -33,12 +27,12 @@ Examples:
 }
 
 function runInstaller(args) {
-  const quotedArgs = ["--package", pythonPackage]
-    .concat(args)
-    .map(quote)
-    .join(" ");
-  const command = `curl -fsSL ${quote(scriptUrl)} | bash -s -- ${quotedArgs}`;
-  const result = spawnSync("bash", ["-lc", command], {
+  if (args.some((arg) => arg === "--package" || arg.startsWith("--package="))) {
+    console.error("package override is not allowed");
+    process.exit(2);
+  }
+  const installerArgs = [installerPath].concat(args);
+  const result = spawnSync("bash", installerArgs, {
     stdio: "inherit",
     env: process.env,
   });

@@ -1,6 +1,9 @@
 """Extract content from DOCX files."""
 
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class DOCXExtractor:
@@ -48,7 +51,8 @@ class DOCXExtractor:
 
             return "\n\n".join(paragraphs)
 
-        except Exception:
+        except Exception as e:
+            logger.warning("DOCX extraction failed for %s: %s", path, e)
             return None
 
     def extract_full(self, path: str) -> dict:
@@ -96,5 +100,6 @@ class DOCXExtractor:
                 },
             }
 
-        except Exception:
+        except Exception as e:
+            logger.warning("DOCX full extraction failed for %s: %s", path, e)
             return None

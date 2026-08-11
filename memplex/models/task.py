@@ -34,6 +34,37 @@ class TaskInfo:
     error: Optional[str] = None
     retry_count: int = 0
     max_retries: int = 3
+    next_attempt_at: Optional[datetime] = None
+    lease_until: Optional[datetime] = None
+    last_error_code: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerDrainResult:
+    drained: bool
+    completed: int
+    pending: int
+    leased: int
+    dead_letters: int
+    deadline_exceeded: bool
+
+    def __post_init__(self) -> None:
+        if type(self.drained) is not bool or type(self.deadline_exceeded) is not bool:
+            raise TypeError("worker drain flags must be exact bools")
+        for name in ("completed", "pending", "leased", "dead_letters"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative exact int")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "drained": self.drained,
+            "completed": self.completed,
+            "pending": self.pending,
+            "leased": self.leased,
+            "dead_letters": self.dead_letters,
+            "deadline_exceeded": self.deadline_exceeded,
+        }
 
 
 class CompactionScope(Enum):

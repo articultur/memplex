@@ -1,8 +1,11 @@
 """LLM Provider protocol definition."""
 
+import logging
 from typing import Protocol, runtime_checkable
 
 from memplex.models import IntentType
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -101,7 +104,8 @@ def create_provider(
                     local_model=local_model,
                 )
                 providers.append(p)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Provider %r unavailable, skipping in fallback chain: %s", name, exc)
                 continue
         return FallbackChain(providers)
 

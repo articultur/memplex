@@ -14,7 +14,9 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+import yaml
 
 from memplex.models import (
     Fact,
@@ -22,6 +24,7 @@ from memplex.models import (
     Function,
     LintIssue,
     LintResult,
+    MemoryNode,
     Observation,
     Preference,
     SearchResult,
@@ -30,6 +33,7 @@ from memplex.models import (
 )
 
 if TYPE_CHECKING:
+    from memplex.config import GraphConfig
     from memplex.storage.base import MemoryStore
     from memplex.wiki.search import DualIndexSearch
 
@@ -58,6 +62,12 @@ class WikiCompiler:
     dual_index:
         Optional :class:`DualIndexSearch` for hybrid search.
         When ``None``, search falls back to filename + grep.
+    graph_config:
+        Optional :class:`memplex.config.GraphConfig`.  When given and
+        ``community_detection_enabled`` is true, :meth:`compile_all` also
+        emits community concept pages via
+        :class:`memplex.wiki.community.GraphCommunityDetector`
+        (``community_min_size`` filters out small communities).
     """
 
     def __init__(
@@ -65,10 +75,12 @@ class WikiCompiler:
         store: MemoryStore,
         wiki_dir: Path = DEFAULT_WIKI_DIR,
         dual_index: Optional["DualIndexSearch"] = None,
+        graph_config: Optional["GraphConfig"] = None,
     ) -> None:
         self._store = store
         self.wiki_dir = wiki_dir
         self.dual_index = dual_index
+        self._graph_config = graph_config
         self._lock = threading.Lock()
 
     # ── Page compilation ──────────────────────────────────────────────
@@ -213,6 +225,7 @@ class WikiCompiler:
         body_lines.append(f"**Domain:** {obs.domain or 'uncategorized'}")
         body_lines.append(f"**Confidence:** {obs.confidence:.2f}")
         body_lines.append(f"**Actor:** {obs.actor}")
+        body_lines.append(f"**Category:** {obs.category}")
         if obs.observed_at:
             body_lines.append(f"**Observed At:** {obs.observed_at}")
         body_lines.append("")
@@ -294,18 +307,121 @@ class WikiCompiler:
             metadata={"type": "index", "total_entities": len(all_funcs)},
         )
 
+    def compile_domain_page(self, domain: str, nodes: List[MemoryNode]) -> WikiPage:
+        """Generate a domain aggregate page.
+
+        Produces the ``domain_<domain>`` page targeted by the
+        ``[[domain_<domain>]]`` links in ``index.md``, listing every
+        memory node that belongs to *domain*.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        page_id = f"domain_{domain}"
+
+        lines: list[str] = [f"# Domain: {domain}", ""]
+        lines.append(f"**Entities:** {len(nodes)}")
+        lines.append("")
+        for node in sorted(nodes, key=lambda n: (n.memory_type, n.name or n.id)):
+            name = node.name or node.id
+            lines.append(
+                f"- [[{node.id}]] {name} "
+                f"({node.memory_type}, confidence: {node.confidence:.2f})"
+            )
+        lines.append("")
+
+        frontmatter = self._build_frontmatter(
+            page_id=page_id,
+            name=f"Domain: {domain}",
+            domain=domain,
+            memory_type="domain",
+            confidence=1.0,
+            created_at=now,
+            updated_at=now,
+        )
+        content = frontmatter + "\n".join(lines)
+        return WikiPage(
+            page_id=page_id,
+            content=content,
+            metadata={"type": "domain", "domain": domain, "entity_count": len(nodes)},
+        )
+
     def compile_all(self) -> List[WikiPage]:
-        """Compile all memory nodes from the store into Wiki pages."""
+        """Compile all memory nodes from the store into Wiki pages.
+
+        Covers all four memory types (Function / Fact / Preference /
+        Observation).  Facts, preferences and observations are picked up
+        when the store exposes the optional ``list_facts`` /
+        ``list_preferences`` / ``list_observations`` methods.  Also
+        emits per-domain aggregate pages (targets of the ``[[domain_*]]``
+        links in ``index.md``) and the index page itself.  When a
+        ``graph_config`` with ``community_detection_enabled`` was injected,
+        community concept pages are appended as well.
+        """
         pages: List[WikiPage] = []
 
-        # Compile functions
-        funcs = self._store.list_functions(limit=100000)
-        for func in funcs:
-            pages.append(self.compile_function(func))
+        nodes: List[MemoryNode] = list(self._store.list_functions(limit=100000))
+        nodes.extend(self._list_optional("list_facts"))
+        nodes.extend(self._list_optional("list_preferences"))
+        nodes.extend(self._list_optional("list_observations"))
+
+        for node in nodes:
+            pages.append(self._compile_node(node))
+
+        # Domain aggregate pages
+        domain_groups: Dict[str, List[MemoryNode]] = {}
+        for node in nodes:
+            domain_groups.setdefault(node.domain or "uncategorized", []).append(node)
+        for domain, members in sorted(domain_groups.items()):
+            pages.append(self.compile_domain_page(domain, members))
+
+        # Community concept pages (gated by graph config)
+        pages.extend(self.compile_communities())
 
         # Compile index
         pages.append(self.compile_index())
         return pages
+
+    def compile_communities(self) -> List[WikiPage]:
+        """Compile community concept pages via GraphCommunityDetector.
+
+        Returns an empty list when no ``graph_config`` was injected or
+        ``community_detection_enabled`` is false, or when the store does
+        not expose ``get_graph``.  ``community_min_size`` filters out
+        communities below the configured size.
+        """
+        config = self._graph_config
+        if config is None or not config.community_detection_enabled:
+            return []
+        get_graph = getattr(self._store, "get_graph", None)
+        if not callable(get_graph):
+            return []
+
+        from memplex.wiki.community import GraphCommunityDetector
+
+        try:
+            graph = get_graph()
+        except Exception as exc:
+            logger.warning("Community detection skipped: get_graph failed: %s", exc)
+            return []
+        detector = GraphCommunityDetector(min_community_size=config.community_min_size)
+        communities = detector.detect_communities(graph)
+        return detector.generate_concept_pages(communities, self._store)
+
+    def _list_optional(self, method_name: str) -> List[MemoryNode]:
+        """Call an optional per-type listing method on the store, if present."""
+        lister = getattr(self._store, method_name, None)
+        if not callable(lister):
+            return []
+        return list(lister(limit=100000))
+
+    def _compile_node(self, node: MemoryNode) -> WikiPage:
+        """Dispatch a memory node to its per-type compile method."""
+        if isinstance(node, Fact):
+            return self.compile_fact(node)
+        if isinstance(node, Preference):
+            return self.compile_preference(node)
+        if isinstance(node, Observation):
+            return self.compile_observation(node)
+        return self.compile_function(node)
 
     # ── Search ────────────────────────────────────────────────────────
 
@@ -330,7 +446,10 @@ class WikiCompiler:
         # Read all wiki pages from disk
         pages = self._read_all_pages()
         page_ids = {p.page_id for p in pages}
-        all_funcs = {f.id for f in self._store.list_functions(limit=100000)}
+        store_funcs = self._store.list_functions(limit=100000)
+        all_funcs = {f.id for f in store_funcs}
+        # Domain pages generated by compile_all / compile_domain_page
+        known_domain_pages = {f"domain_{f.domain or 'uncategorized'}" for f in store_funcs}
 
         for page in pages:
             content = page.content
@@ -346,24 +465,24 @@ class WikiCompiler:
                 )
                 continue
 
-            # Parse frontmatter boundaries
-            parts = content.split("---")
-            if len(parts) < 3:
+            # Real YAML parse of the frontmatter block
+            if self._parse_frontmatter(content) is None:
                 issues.append(
                     LintIssue(
                         page_id=page.page_id,
                         severity="error",
-                        message="Malformed frontmatter (missing closing ---)",
+                        message="Invalid or malformed YAML frontmatter",
                     )
                 )
 
             # Check wikilinks
             links = _WIKILINK_RE.findall(content)
             for link_target in links:
-                # Skip domain links and non-function links
-                if link_target.startswith("domain_"):
-                    continue
-                if link_target not in page_ids and link_target not in all_funcs:
+                if (
+                    link_target not in page_ids
+                    and link_target not in all_funcs
+                    and link_target not in known_domain_pages
+                ):
                     issues.append(
                         LintIssue(
                             page_id=page.page_id,
@@ -371,6 +490,29 @@ class WikiCompiler:
                             message=f"Broken wikilink: [[{link_target}]]",
                         )
                     )
+
+        # Orphan detection: count inbound wikilinks across entity pages
+        # plus index.md (which links to every entity and domain page).
+        inbound: Dict[str, int] = {}
+        link_sources = list(pages)
+        index_path = self.wiki_dir / "index.md"
+        if index_path.exists():
+            link_sources.append(
+                WikiPage(page_id="index", content=index_path.read_text(encoding="utf-8"))
+            )
+        for source in link_sources:
+            for link_target in _WIKILINK_RE.findall(source.content):
+                if link_target != source.page_id:
+                    inbound[link_target] = inbound.get(link_target, 0) + 1
+        for page in pages:
+            if inbound.get(page.page_id, 0) == 0:
+                issues.append(
+                    LintIssue(
+                        page_id=page.page_id,
+                        severity="warning",
+                        message="Orphaned page (no inbound links)",
+                    )
+                )
 
         total = len(pages)
         return LintResult(
@@ -411,7 +553,8 @@ class WikiCompiler:
         with self._lock:
             # Rotate if needed
             if log_path.exists():
-                line_count = sum(1 for _ in open(log_path, encoding="utf-8"))
+                with log_path.open(encoding="utf-8") as f:
+                    line_count = sum(1 for _ in f)
                 if line_count >= MAX_LOG_LINES:
                     self._rotate_log(log_path)
 
@@ -449,6 +592,24 @@ class WikiCompiler:
             "",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _parse_frontmatter(content: str) -> Optional[dict]:
+        """Parse the YAML frontmatter block of a wiki page.
+
+        Returns the parsed mapping, or ``None`` when the block is
+        missing, unterminated, not valid YAML, or not a mapping.
+        """
+        if not content.startswith("---"):
+            return None
+        end = content.find("\n---", 3)
+        if end == -1:
+            return None
+        try:
+            data = yaml.safe_load(content[3:end])
+        except yaml.YAMLError:
+            return None
+        return data if isinstance(data, dict) else None
 
     @staticmethod
     def _field_section(heading: str, values: List[FieldValue]) -> list[str]:
@@ -515,12 +676,13 @@ class WikiCompiler:
 
     def _rotate_log(self, log_path: Path) -> None:
         """Rotate log.md into numbered archives."""
-        for i in range(MAX_LOG_ARCHIVES - 1, 0, -1):
+        for i in range(MAX_LOG_ARCHIVES, 0, -1):
             src = self.wiki_dir / f"log.archive.{i}.md"
-            dst = self.wiki_dir / f"log.archive.{i + 1}.md"
-            if src.exists():
-                if i + 1 > MAX_LOG_ARCHIVES:
-                    src.unlink()
-                else:
-                    src.rename(dst)
+            if not src.exists():
+                continue
+            if i >= MAX_LOG_ARCHIVES:
+                # Oldest archive falls off the end
+                src.unlink()
+            else:
+                src.rename(self.wiki_dir / f"log.archive.{i + 1}.md")
         log_path.rename(self.wiki_dir / "log.archive.1.md")

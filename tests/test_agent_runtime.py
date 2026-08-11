@@ -254,3 +254,51 @@ def test_adapter_manifest_exposes_agent_specific_install_shapes():
     assert "mcp" in claude["integration_modes"]
     assert openclaw["config"]["plugins"]["slots"]["memory"] == "memplex"
     assert hermes["config"]["memory"]["provider"] == "memplex"
+
+
+def test_openclaw_profile_advertises_native_plugin_tools_and_hooks():
+    """The profile must match the loadable OpenClaw runtime contract."""
+    from memplex.adapters.agent_runtime import get_agent_manifest
+
+    manifest = get_agent_manifest("openclaw")
+    assert manifest["tools"] == ["memory_recall", "memory_store"]
+    assert manifest["hook_events"] == [
+        "before_prompt_build",
+        "agent_end",
+        "session_end",
+    ]
+    assert "native-plugin" in manifest["integration_modes"]
+
+
+def test_runtime_starts_self_created_service(tmp_path, monkeypatch):
+    """A runtime built without a service must start() its own service so
+    background_consolidation and friends actually run."""
+    from memplex.adapters.agent_runtime import AgentMemoryRuntime
+
+    monkeypatch.setenv("MEMPLEX_STORAGE_BACKEND", "lite")
+    monkeypatch.setenv("MEMPLEX_STORAGE_PATH", str(tmp_path / "store"))
+    started = []
+    real_start = MemplexService.start
+
+    def spy_start(self):
+        started.append(self)
+        return real_start(self)
+
+    monkeypatch.setattr(MemplexService, "start", spy_start)
+    runtime = AgentMemoryRuntime(agent="codex")
+    try:
+        assert started == [runtime.service]
+    finally:
+        runtime.service.stop()
+
+
+def test_runtime_does_not_start_caller_provided_service(tmp_path, monkeypatch):
+    """Caller-provided services are owned by the caller; the runtime must
+    not start() them a second time."""
+    from memplex.adapters.agent_runtime import AgentMemoryRuntime
+
+    service = _make_service(tmp_path / "memory.json")
+    started = []
+    monkeypatch.setattr(MemplexService, "start", lambda self: started.append(self))
+    AgentMemoryRuntime(service=service, agent="codex")
+    assert started == []

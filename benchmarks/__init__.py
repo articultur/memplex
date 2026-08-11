@@ -5,6 +5,7 @@ from .base import (
     BenchmarkRunner,
     BenchmarkRunnerFactory,
     BenchmarkSample,
+    BenchmarkSourceDocument,
     EvaluationDataset,
 )
 from .evaluator import (
@@ -17,6 +18,10 @@ from .loader import (
 from .locomo import (
     LocomoDataset,
     LocomoRunner,
+)
+from .memory_eval import (
+    MemoryBenchmarkDataset,
+    MemoryBenchmarkRunner,
 )
 from .metrics import (
     MemoryMetrics,
@@ -51,6 +56,7 @@ __all__ = [
     "EvaluationDataset",
     "BenchmarkRunner",
     "BenchmarkRunnerFactory",
+    "BenchmarkSourceDocument",
     # Metrics
     "precision_at_k",
     "recall_at_k",
@@ -76,6 +82,9 @@ __all__ = [
     # LoCoMo
     "LocomoDataset",
     "LocomoRunner",
+    # Memory benchmark
+    "MemoryBenchmarkDataset",
+    "MemoryBenchmarkRunner",
     # Evaluator + Loader
     "BenchmarkEvaluator",
     "download_dataset",

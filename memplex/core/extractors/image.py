@@ -1,7 +1,10 @@
 """Extract text from images using OCR or external vision providers."""
 
+import logging
 import os
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ImageExtractor:
@@ -32,12 +35,13 @@ class ImageExtractor:
         """
         self._external_ocr = fn
 
-    def set_vision_provider(self, fn: Callable[[str], Optional[dict]]) -> None:
+    def set_vision_provider(self, fn: Callable[..., Optional[dict]]) -> None:
         """
         Register an external vision/LLM provider.
 
         Args:
-            fn: Callable that takes (image_path) returns vision dict or None.
+            fn: Callable that takes (image_path) and optionally a ``prompt``
+                keyword argument, returns vision dict or None.
                 The dict should have keys: page_type, components[], layout, design_tools, design_system
         """
         self._external_vision = fn
@@ -84,7 +88,7 @@ class ImageExtractor:
                 if result:
                     return result.strip() if isinstance(result, str) else result
             except Exception as e:
-                print(f"External OCR failed: {e}")
+                logger.warning("External OCR failed: %s", e)
 
         # 2. Internal pytesseract
         try:
@@ -92,10 +96,10 @@ class ImageExtractor:
             from PIL import Image
 
             image = Image.open(image_path)
-            text = pytesseract.image_to_string(image, lang="eng+chi")
+            text = pytesseract.image_to_string(image, lang="eng+chi_sim")
             return text.strip()
         except Exception as e:
-            print(f"OCR failed for {image_path}: {e}")
+            logger.warning("OCR failed for %s: %s", image_path, e)
             return None
 
     def extract_with_vision(self, image_path: str, prompt: str = None) -> Optional[dict]:
@@ -122,24 +126,38 @@ class ImageExtractor:
             last_error = None
             for attempt in range(self._vision_max_retries):
                 try:
-                    result = self._external_vision(image_path)
+                    result = self._call_vision_provider(image_path, prompt)
                     if result:
                         return result
                 except TimeoutError:
                     last_error = f"Timeout after {self._vision_timeout}s (attempt {attempt + 1}/{self._vision_max_retries})"
-                    print(f"External vision timeout: {last_error}")
+                    logger.warning("External vision timeout: %s", last_error)
                 except Exception as e:
                     last_error = f"{type(e).__name__}: {e} (attempt {attempt + 1}/{self._vision_max_retries})"
-                    print(f"External vision failed: {last_error}")
+                    logger.warning("External vision failed: %s", last_error)
 
                 if attempt < self._vision_max_retries - 1:
                     wait_time = 2**attempt  # exponential backoff: 1s, 2s
                     time.sleep(wait_time)
 
             if last_error:
-                print(f"Vision exhausted after {self._vision_max_retries} attempts")
+                logger.warning("Vision exhausted after %d attempts", self._vision_max_retries)
 
         return None
+
+    def _call_vision_provider(self, image_path: str, prompt: Optional[str]) -> Optional[dict]:
+        """Invoke the registered vision provider, passing ``prompt`` when given.
+
+        Providers registered before the ``prompt`` parameter existed accept
+        only ``(image_path)``; fall back to the legacy call for those.
+        """
+        if prompt is not None:
+            try:
+                return self._external_vision(image_path, prompt=prompt)
+            except TypeError:
+                # Legacy provider without a prompt parameter.
+                return self._external_vision(image_path)
+        return self._external_vision(image_path)
 
     def extract_full(self, image_path: str, vision_result: dict = None) -> dict:
         """

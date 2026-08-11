@@ -37,7 +37,8 @@ class LLMWikiGenerator:
     llm_enhancer:
         The :class:`LLMEnhancer` instance used for LLM calls.
     sep:
-        Separator string used to delimit sections in generated pages.
+        Separator string appended after sections injected into generated
+        pages (e.g. the LLM cross-reference block) to delimit them.
     max_input_length:
         Maximum character length for sanitized inputs sent to the LLM.
     """
@@ -203,7 +204,9 @@ class LLMWikiGenerator:
                     ]
                     if link_lines:
                         cross_ref_block = (
-                            "\n## Cross-References (LLM)\n" + "\n".join(link_lines) + "\n"
+                            "\n## Cross-References (LLM)\n"
+                            + "\n".join(link_lines)
+                            + f"\n{self.sep}\n"
                         )
                         new_content = page.content.rstrip() + cross_ref_block
                         updated.append(
@@ -218,6 +221,7 @@ class LLMWikiGenerator:
                 logger.warning(
                     "Cross-reference generation failed for %s, keeping original",
                     page.page_id,
+                    exc_info=True,
                 )
 
             updated.append(page)

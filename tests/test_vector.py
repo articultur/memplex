@@ -173,8 +173,10 @@ def test_create_vector_store_unknown_backend_raises():
 
 
 def test_create_vector_store_chroma_unavailable_raises():
-    """Requesting chroma when it is absent must raise (not silently fall back)."""
-    with pytest.raises(ValueError):
+    """Requesting chroma when it is absent must raise a clear ImportError
+    naming the missing dependency (not silently fall back, and not a
+    misleading 'unknown backend' ValueError)."""
+    with pytest.raises(ImportError, match="chromadb"):
         create_vector_store("chroma")
 
 

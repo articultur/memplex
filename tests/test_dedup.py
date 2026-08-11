@@ -170,3 +170,39 @@ def test_merge_memories_combines_fields():
     merged = MemoryDeduplicator._merge_memories([a, b])
     descs = {fv.desc for fv in merged.trigger}
     assert {"alpha", "beta"} <= descs
+
+
+# ── FAISS opt-out (compaction.dedup_use_faiss wiring) ────────────────
+
+
+def test_use_faiss_true_uses_faiss_backend_when_available(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "faiss", types.ModuleType("faiss"))
+    monkeypatch.setattr(
+        MemoryDeduplicator,
+        "_semantic_dedup_faiss",
+        lambda self, memories: calls.append(len(memories)) or list(memories),
+    )
+    d = MemoryDeduplicator(_StubEmbedder(), use_faiss=True)
+    d._semantic_dedup([_mem("a"), _mem("b")])
+    assert calls == [2]
+
+
+def test_use_faiss_false_skips_faiss_backend(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "faiss", types.ModuleType("faiss"))
+    monkeypatch.setattr(
+        MemoryDeduplicator,
+        "_semantic_dedup_faiss",
+        lambda self, memories: calls.append(len(memories)) or list(memories),
+    )
+    d = MemoryDeduplicator(_StubEmbedder(), use_faiss=False)
+    result = d._semantic_dedup([_mem("a", desc="alpha"), _mem("b", desc="beta")])
+    assert calls == []
+    assert len(result) == 2

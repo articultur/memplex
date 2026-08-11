@@ -10,7 +10,7 @@ from pathlib import Path
 
 from memplex.adapters.mcp_server import MCPServer
 from memplex.config import MemplexConfig
-from memplex.product import run_doctor
+from memplex.product import apply_profile, run_doctor
 from memplex.service import MemplexService
 
 
@@ -316,11 +316,7 @@ def test_mcp_product_tools_are_available(tmp_path):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path / "store")
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
 
     server = MCPServer(config=cfg)
     tools = server._handle_tools_list({})["tools"]
@@ -347,11 +343,7 @@ def test_doctor_smoke_cleans_canary_when_query_fails(tmp_path, monkeypatch):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path / "store")
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
     service = MemplexService(config=cfg)
 
     def fail_query(*args, **kwargs):
@@ -365,3 +357,204 @@ def test_doctor_smoke_cleans_canary_when_query_fails(tmp_path, monkeypatch):
         assert all("memplex-doctor-smoke-token" not in func.name for func in funcs)
     finally:
         service.stop()
+
+
+# ── MCP stdio protocol robustness ────────────────────────────────────
+
+
+def _mcp_cfg(tmp_path: Path) -> MemplexConfig:
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(tmp_path / "store")
+    return cfg
+
+
+def test_mcp_malformed_json_yields_parse_error_and_server_continues(tmp_path, monkeypatch):
+    """A single malformed line must not kill the server: it answers
+    -32700 (Parse error) for the bad line, skips blank lines, and keeps
+    serving instead of treating the bad line as EOF."""
+    import io
+
+    server = MCPServer(config=_mcp_cfg(tmp_path))
+    stdin = io.StringIO('{"broken json\n\n{"jsonrpc": "2.0", "method": "ping", "id": 1}\n')
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    server.run()
+
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+    assert lines[0]["error"]["code"] == -32700
+    assert lines[0]["id"] is None
+    assert lines[1] == {"jsonrpc": "2.0", "result": {}, "id": 1}
+
+
+def test_mcp_notification_gets_no_response(tmp_path):
+    """Real MCP notifications ("notifications/initialized", ...) must not
+    be answered; the old endswith("/notification") check never matched."""
+    server = MCPServer(config=_mcp_cfg(tmp_path))
+    assert server._handle_request({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+
+
+def test_mcp_unknown_tool_returns_invalid_params(tmp_path):
+    """Unknown tools/call names map to -32602 (Invalid params), not the
+    generic -32603 (Internal error)."""
+    server = MCPServer(config=_mcp_cfg(tmp_path))
+    server._service = object()  # skip lazy service creation; dispatch fails first
+    response = server._handle_request(
+        {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "memory_nonexistent", "arguments": {}},
+            "id": 7,
+        }
+    )
+    assert response["error"]["code"] == -32602
+    assert response["id"] == 7
+
+
+def test_mcp_server_info_version_matches_package_version(tmp_path):
+    """serverInfo.version must track the package version dynamically."""
+    from memplex.adapters.agent_installer import _package_version
+
+    server = MCPServer(config=_mcp_cfg(tmp_path))
+    info = server._handle_initialize({})
+    assert info["serverInfo"]["version"] == _package_version()
+
+
+# ── Wave 1: token cost exposure on MCP tools ────────────────────────
+
+
+def _mcp_offline_cfg(tmp_path: Path) -> MemplexConfig:
+    cfg = _mcp_cfg(tmp_path)
+    cfg.llm.query_enhancement = False
+    return cfg
+
+
+def test_mcp_memory_search_exposes_token_costs(tmp_path):
+    """memory_search annotates every result with est_tokens and the
+    payload top level carries tokens_used / max_tokens / truncated."""
+    server = MCPServer(config=_mcp_offline_cfg(tmp_path))
+    try:
+        server._ensure_service()
+        server._tool_memory_add({"content": "mcp-token-canary: search must annotate token costs."})
+        payload = server._tool_memory_search({"query": "mcp-token-canary"})
+        assert payload["total"] >= 1
+        assert payload["tokens_used"] >= 1
+        assert payload["max_tokens"] > 0
+        assert payload["truncated"] is False
+        assert all(item["est_tokens"] >= 1 for item in payload["results"])
+        assert sum(item["est_tokens"] for item in payload["results"]) == payload["tokens_used"]
+    finally:
+        if server._service is not None:
+            server._service.stop()
+
+
+def test_mcp_memory_get_exposes_est_tokens(tmp_path):
+    """memory_get (the expensive full-detail layer) reports est_tokens."""
+    server = MCPServer(config=_mcp_offline_cfg(tmp_path))
+    try:
+        server._ensure_service()
+        added = server._tool_memory_add({"content": "mcp-get-token-canary: full detail costs more."})
+        memory_id = added["function_ids"][0]
+        payload = server._tool_memory_get({"memory_id": memory_id})
+        assert payload["id"] == memory_id
+        assert payload["est_tokens"] >= 1
+        missing = server._tool_memory_get({"memory_id": "func_does_not_exist"})
+        assert "est_tokens" not in missing
+        assert missing["error"] == "Memory not found"
+    finally:
+        if server._service is not None:
+            server._service.stop()
+
+
+def test_mcp_tool_descriptions_match_token_annotations(tmp_path):
+    """Tool descriptions must describe the token-cost fields actually
+    returned by memory_search / memory_get."""
+    server = MCPServer(config=_mcp_cfg(tmp_path))
+    tools = {tool["name"]: tool for tool in server._handle_tools_list({})["tools"]}
+    assert "est_tokens" in tools["memory_search"]["description"]
+    assert "tokens_used" in tools["memory_search"]["description"]
+    assert "est_tokens" in tools["memory_get"]["description"]
+
+
+# ── Wave 2a: corpus_index per-file error isolation ───────────────────
+
+
+def test_corpus_index_skips_unreadable_files(tmp_path):
+    """A non-UTF-8 file in the corpus must be skipped with a warning,
+    not abort the whole index run."""
+    env = _offline_env(tmp_path)
+    root = tmp_path / "corpus-root"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "guide.md").write_text(
+        "binary-skip-token: readable corpus file.\n",
+        encoding="utf-8",
+    )
+    (root / "docs" / "blob.bin").write_bytes(b"\xff\xfe\x00\x01not-utf-8\x80\x81")
+    manifest = root / "memplex-corpus.toml"
+    manifest.write_text(
+        "\n".join(
+            [
+                "[corpus]",
+                'name = "docs"',
+                'scope = "project"',
+                'include = ["docs/*"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    index = _run_memplex(
+        ["--output", "json", "corpus", "index", "--manifest", str(manifest)],
+        env=env,
+    )
+    assert index.returncode == 0, index.stderr
+    payload = json.loads(index.stdout)
+    assert payload["status"] == "indexed"
+    assert payload["indexed_count"] >= 1
+    # Only the readable file was indexed (one file may yield >1 memory).
+    assert {item["source_path"] for item in payload["indexed"]} == {"docs/guide.md"}
+    assert payload["skipped_count"] == 1
+    assert payload["skipped"][0]["path"] == "docs/blob.bin"
+
+
+# ── Wave 2a: apply_profile maps profiles onto real config ────────────
+
+
+def test_apply_profile_max_recall_sets_token_budget():
+    cfg = MemplexConfig()
+    report = apply_profile(cfg, "max-recall")
+    assert cfg.retrieval.default_max_tokens == 4000
+    assert report["applied"] == {"retrieval.default_max_tokens": 4000}
+    assert report["profile"]["name"] == "max-recall"
+    # Keys without a config counterpart surface as declarative policy.
+    assert report["declarative"]["recommended_top_k"] == 10
+    assert report["declarative"]["auto_capture"] == "auto"
+
+
+def test_apply_profile_resets_remote_embedding_model():
+    cfg = MemplexConfig()
+    cfg.embedding.model = "openai:text-embedding-3-small"
+    report = apply_profile(cfg, "privacy")
+    assert cfg.embedding.model == "default"
+    assert report["applied"]["embedding.model"] == "default"
+    assert report["declarative"]["review_required"] is True
+
+
+def test_apply_profile_local_leaves_local_embedding_untouched():
+    cfg = MemplexConfig()
+    report = apply_profile(cfg, "local")
+    assert cfg.embedding.model == "default"
+    assert report["applied"] == {}
+    assert report["declarative"]["auto_recall"] is True
+    assert report["declarative"]["review_required"] is False
+
+
+def test_apply_profile_unknown_or_missing_name_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown setup profile"):
+        apply_profile(MemplexConfig(), "nope")
+    with pytest.raises(ValueError, match="requires a profile name"):
+        apply_profile(MemplexConfig(), None)

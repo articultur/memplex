@@ -11,7 +11,6 @@ from pathlib import Path
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
 
 from memplex.adapters._shared import (  # noqa: E402
     dataclass_to_dict,

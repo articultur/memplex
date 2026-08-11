@@ -37,7 +37,15 @@ htmlcov/
 # Virtual envs
 venv/
 .venv/
+.venv-pgcheck/
 env/
 
 # Temp
 ~/output/
+/_g008_dyn/
+/_tmp_mem/
+/_tmp_rate
+/postgresql:/
+
+# Internal planning and local review artifacts
+/docs/superpowers/

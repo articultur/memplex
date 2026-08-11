@@ -19,9 +19,9 @@ from memplex.models import (  # noqa: E402
     FieldValue,
     Function,
     GraphData,
-    GraphEdge,
     Observation,
     Preference,
+    SearchResult,
     SourceType,
     WikiPage,
 )
@@ -57,6 +57,25 @@ class _StubStore:
         return list(self._funcs)[:limit]
 
 
+class _FullStubStore(_StubStore):
+    """Store exposing the optional per-type listing methods."""
+
+    def __init__(self, funcs=None, facts=None, prefs=None, observations=None):
+        super().__init__(funcs)
+        self._facts = facts or []
+        self._prefs = prefs or []
+        self._observations = observations or []
+
+    def list_facts(self, limit=100):
+        return list(self._facts)[:limit]
+
+    def list_preferences(self, limit=100):
+        return list(self._prefs)[:limit]
+
+    def list_observations(self, limit=100):
+        return list(self._observations)[:limit]
+
+
 class _StubEmbedding:
     DIM = 8
 
@@ -66,6 +85,35 @@ class _StubEmbedding:
             vec[hash(tok) % self.DIM] += 1.0
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
+
+
+class _FixedEmbedding:
+    """Every text embeds to the same unit vector (similarity always 1.0)."""
+
+    def embed(self, text):
+        return [1.0, 0.0]
+
+
+class _StubLLM:
+    def __init__(self, text="generated", json_result=None, fail=False):
+        self._text = text
+        self._json = json_result or {}
+        self._fail = fail
+
+    async def complete(self, prompt):
+        if self._fail:
+            raise RuntimeError("llm down")
+        return self._text
+
+    async def complete_json(self, prompt):
+        if self._fail:
+            raise RuntimeError("llm down")
+        return self._json
+
+
+class _StubEnhancer:
+    def __init__(self, llm):
+        self.llm = llm
 
 
 def _page(pid, content):
@@ -298,3 +346,374 @@ def test_rotate_log_archives_existing_log(tmp_path):
     archive = tmp_path / "log.archive.1.md"
     assert archive.exists()
     assert "old content" in archive.read_text(encoding="utf-8")
+
+
+def test_rotate_log_discards_oldest_archive(tmp_path):
+    """The oldest archive (>= MAX_LOG_ARCHIVES) is dropped on rotation."""
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    (tmp_path / "log.archive.5.md").write_text("stale\n", encoding="utf-8")
+    log_path = tmp_path / "log.md"
+    log_path.write_text("current\n", encoding="utf-8")
+    compiler._rotate_log(log_path)
+    assert not (tmp_path / "log.archive.5.md").exists()
+    assert (tmp_path / "log.archive.1.md").read_text(encoding="utf-8") == "current\n"
+
+
+# ── compile_all: all memory types + domain pages ─────────────────────
+
+
+def test_compile_all_covers_all_memory_types(tmp_path):
+    store = _FullStubStore(
+        funcs=[_func(fid="f1")],
+        facts=[
+            Fact(
+                id="fact_1",
+                name="api is rest",
+                subject="API",
+                predicate="is",
+                object_="REST",
+                source_type=SourceType.WIKI,
+            )
+        ],
+        prefs=[
+            Preference(
+                id="pref_1",
+                name="dark theme",
+                aspect="theme",
+                preference="dark",
+                source_type=SourceType.WIKI,
+            )
+        ],
+        observations=[
+            Observation(
+                id="obs_1",
+                name="deploy failed",
+                event="deploy failed",
+                source_type=SourceType.WIKI,
+            )
+        ],
+    )
+    compiler = WikiCompiler(store=store, wiki_dir=tmp_path)
+    pages = compiler.compile_all()
+    ids = {p.page_id for p in pages}
+    assert {"f1", "fact_1", "pref_1", "obs_1", "index"} <= ids
+
+
+def test_compile_all_dispatches_nodes_by_memory_type(tmp_path):
+    """A store returning non-Function nodes still compiles them correctly."""
+    store = _StubStore(
+        funcs=[
+            Fact(
+                id="fact_9",
+                name="x",
+                subject="a",
+                predicate="b",
+                object_="c",
+                source_type=SourceType.WIKI,
+            )
+        ]
+    )
+    compiler = WikiCompiler(store=store, wiki_dir=tmp_path)
+    ids = {p.page_id for p in compiler.compile_all()}
+    assert "fact_9" in ids
+
+
+def test_compile_all_generates_domain_pages(tmp_path):
+    funcs = [_func(fid="f1", domain="auth"), _func(fid="f2", domain="db")]
+    compiler = WikiCompiler(store=_StubStore(funcs=funcs), wiki_dir=tmp_path)
+    pages = compiler.compile_all()
+    ids = {p.page_id for p in pages}
+    assert "domain_auth" in ids
+    assert "domain_db" in ids
+    domain_page = next(p for p in pages if p.page_id == "domain_auth")
+    assert "[[f1]]" in domain_page.content
+
+
+def test_compile_domain_page_lists_member_entities(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    page = compiler.compile_domain_page("auth", [_func(fid="f1", domain="auth")])
+    assert page.page_id == "domain_auth"
+    assert "[[f1]]" in page.content
+    assert page.content.startswith("---")
+
+
+# ── WikiCompiler.lint ────────────────────────────────────────────────
+
+
+def _frontmatter_page(pid, body=""):
+    content = (
+        "---\n"
+        f'id: "{pid}"\n'
+        'name: "x"\n'
+        'domain: "auth"\n'
+        'memory_type: "function"\n'
+        "confidence: 1.0\n"
+        'created_at: "2024-01-01"\n'
+        'updated_at: "2024-01-01"\n'
+        "---\n\n" + body
+    )
+    return _page(pid, content)
+
+
+def test_lint_clean_wiki_passes(tmp_path):
+    """compile_all output written to disk lints with zero issues."""
+    funcs = [_func(fid="f1", domain="auth")]
+    compiler = WikiCompiler(store=_StubStore(funcs=funcs), wiki_dir=tmp_path)
+    for page in compiler.compile_all():
+        if page.page_id == "index":
+            compiler.write_index(page)
+        else:
+            compiler.write_page(page)
+    result = compiler.lint()
+    assert result.passed
+    assert result.issues == []
+
+
+def test_lint_missing_frontmatter_is_error(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_page("p1", "# no frontmatter here"))
+    result = compiler.lint()
+    assert not result.passed
+    assert any(
+        i.severity == "error" and "frontmatter" in i.message.lower() for i in result.issues
+    )
+
+
+def test_lint_invalid_yaml_frontmatter_is_error(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_page("bad", "---\n: broken: [\n---\n\n# body"))
+    result = compiler.lint()
+    assert not result.passed
+    assert any(i.severity == "error" and "YAML" in i.message for i in result.issues)
+
+
+def test_lint_unterminated_frontmatter_is_error(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_page("bad", '---\nid: "x"\n'))
+    result = compiler.lint()
+    assert not result.passed
+    assert any(i.severity == "error" for i in result.issues)
+
+
+def test_lint_broken_wikilink_warning(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_frontmatter_page("p1", "links to [[ghost_page]]"))
+    result = compiler.lint()
+    assert any("Broken wikilink: [[ghost_page]]" in i.message for i in result.issues)
+
+
+def test_lint_domain_link_resolves_against_store_domains(tmp_path):
+    store = _StubStore(funcs=[_func(fid="f1", domain="auth")])
+    compiler = WikiCompiler(store=store, wiki_dir=tmp_path)
+    compiler.write_page(_frontmatter_page("p1", "see [[domain_auth]]"))
+    result = compiler.lint()
+    assert not any("Broken wikilink" in i.message for i in result.issues)
+
+
+def test_lint_unknown_domain_link_warns(tmp_path):
+    """No blanket domain_ skip: unknown domain links are broken."""
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_frontmatter_page("p1", "see [[domain_nowhere]]"))
+    result = compiler.lint()
+    assert any("Broken wikilink: [[domain_nowhere]]" in i.message for i in result.issues)
+
+
+def test_lint_orphaned_page_warning(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_frontmatter_page("p_linker", "links to [[p_linked]]"))
+    compiler.write_page(_frontmatter_page("p_linked", "no links"))
+    result = compiler.lint()
+    orphan_ids = {i.page_id for i in result.issues if "Orphaned" in i.message}
+    assert orphan_ids == {"p_linker"}
+
+
+def test_lint_index_links_prevent_orphan_warning(tmp_path):
+    compiler = WikiCompiler(store=_StubStore(), wiki_dir=tmp_path)
+    compiler.write_page(_frontmatter_page("p1", "no links"))
+    idx = WikiPage(page_id="index", content="# Index\n\n- [[p1]]", metadata={})
+    compiler.write_index(idx)
+    result = compiler.lint()
+    assert not any("Orphaned" in i.message for i in result.issues)
+
+
+# ── DualIndexSearch: FTS word boundaries, RRF, vector threshold ──────
+
+
+def test_fts_search_matches_word_boundaries(tmp_path):
+    """'ai' must not match inside 'said'."""
+    idx = DualIndexSearch(wiki_dir=tmp_path, embedding_service=_StubEmbedding())
+    idx.add_page(_page("p1", "he said nothing relevant"))
+    idx.add_page(_page("p2", "the ai model"))
+    ids = {r.func_id for r in idx._fts_search("ai")}
+    assert "p2" in ids
+    assert "p1" not in ids
+
+
+def _result(fid):
+    return SearchResult(
+        func_id=fid,
+        name=fid,
+        domain="",
+        relevance_score=1.0,
+        summary="",
+        source_type=SourceType.WIKI,
+    )
+
+
+def test_rrf_merges_fts_and_vector_results():
+    fts = [_result("a"), _result("b")]
+    vec = [_result("b"), _result("c")]
+    merged = DualIndexSearch._reciprocal_rank_fusion(fts, vec)
+    ids = [r.func_id for r in merged]
+    assert set(ids) == {"a", "b", "c"}
+    # b appears in both lists -> highest RRF score
+    assert ids[0] == "b"
+
+
+def test_dual_index_search_includes_vector_only_hit(tmp_path):
+    """A page matching only via vector similarity is still returned."""
+    idx = DualIndexSearch(wiki_dir=tmp_path, embedding_service=_FixedEmbedding())
+    idx.add_page(_page("p_vec", "zzz qqq"))
+    results = idx.search("nomatchterm", top_k=5)
+    assert "p_vec" in {r.func_id for r in results}
+
+
+def test_dual_index_vector_threshold_configurable(tmp_path):
+    idx = DualIndexSearch(
+        wiki_dir=tmp_path,
+        embedding_service=_FixedEmbedding(),
+        vector_threshold=1.1,  # above the max possible cosine similarity
+    )
+    idx.add_page(_page("p1", "zzz"))
+    assert idx.search("nomatch", top_k=5) == []
+
+
+# ── LLMWikiGenerator (stubbed LLM) ───────────────────────────────────
+
+
+async def test_generate_entity_page_calls_llm():
+    gen = LLMWikiGenerator(llm_enhancer=_StubEnhancer(_StubLLM(text="wiki page text")))
+    out = await gen.generate_entity_page(_func())
+    assert out == "wiki page text"
+
+
+async def test_update_cross_references_injects_links_and_sep():
+    llm = _StubLLM(json_result={"related": [{"id": "other_page", "reason": "related"}]})
+    gen = LLMWikiGenerator(llm_enhancer=_StubEnhancer(llm))
+    pages = [_page("p1", "# p1\n\nbody"), _page("p2", "# p2\n\nbody")]
+    updated = await gen.update_cross_references(pages)
+    cross_ref_section = updated[0].content.split("Cross-References (LLM)")[1]
+    assert "[[other_page]]" in cross_ref_section
+    assert "---" in cross_ref_section
+
+
+async def test_update_cross_references_custom_sep():
+    llm = _StubLLM(json_result={"related": [{"id": "x", "reason": "r"}]})
+    gen = LLMWikiGenerator(llm_enhancer=_StubEnhancer(llm), sep="***")
+    updated = await gen.update_cross_references([_page("p1", "body")])
+    assert "***" in updated[0].content
+
+
+async def test_update_cross_references_failure_keeps_original():
+    gen = LLMWikiGenerator(llm_enhancer=_StubEnhancer(_StubLLM(fail=True)))
+    updated = await gen.update_cross_references([_page("p1", "original body")])
+    assert updated[0].content == "original body"
+
+
+# ── Package exports ──────────────────────────────────────────────────
+
+
+def test_wiki_package_exports_graph_community_detector():
+    import memplex.wiki
+
+    assert memplex.wiki.GraphCommunityDetector is GraphCommunityDetector
+
+
+# ── WikiCompiler community wiring (Wave 2a: graph.community_* config) ──
+
+
+class _GraphStubStore(_StubStore):
+    """Store stub exposing get_graph/get for community detection."""
+
+    def get_graph(self, func_ids=None):
+        return GraphData(nodes=list(self._funcs), edges=[])
+
+    def get(self, memory_id):
+        return next((f for f in self._funcs if f.id == memory_id), None)
+
+
+def _graph_config(enabled=True, min_size=3):
+    from memplex.config import GraphConfig
+
+    return GraphConfig(community_detection_enabled=enabled, community_min_size=min_size)
+
+
+def test_compile_communities_empty_without_graph_config(tmp_path):
+    """Default behaviour unchanged: no graph_config -> no community pages."""
+    funcs = [_func(fid=f"f{i}") for i in range(3)]
+    compiler = WikiCompiler(store=_GraphStubStore(funcs), wiki_dir=tmp_path)
+    assert compiler.compile_communities() == []
+
+
+def test_compile_communities_disabled_by_config(tmp_path):
+    funcs = [_func(fid=f"f{i}") for i in range(3)]
+    compiler = WikiCompiler(
+        store=_GraphStubStore(funcs),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=False),
+    )
+    assert compiler.compile_communities() == []
+
+
+def test_compile_communities_emits_concept_pages(tmp_path):
+    funcs = [_func(fid=f"f{i}", domain="auth") for i in range(3)]
+    compiler = WikiCompiler(
+        store=_GraphStubStore(funcs),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=True, min_size=3),
+    )
+    pages = compiler.compile_communities()
+    assert len(pages) == 1
+    assert pages[0].page_id.startswith("community_")
+    assert "[[f0]]" in pages[0].content
+
+
+def test_compile_communities_min_size_filters_small_communities(tmp_path):
+    funcs = [_func(fid=f"f{i}", domain="auth") for i in range(3)]
+    compiler = WikiCompiler(
+        store=_GraphStubStore(funcs),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=True, min_size=10),
+    )
+    assert compiler.compile_communities() == []
+
+
+def test_compile_communities_skips_store_without_get_graph(tmp_path):
+    compiler = WikiCompiler(
+        store=_StubStore([_func()]),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=True),
+    )
+    assert compiler.compile_communities() == []
+
+
+def test_compile_all_includes_community_pages_when_enabled(tmp_path):
+    funcs = [_func(fid=f"f{i}", domain="auth") for i in range(3)]
+    compiler = WikiCompiler(
+        store=_GraphStubStore(funcs),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=True, min_size=3),
+    )
+    pages = compiler.compile_all()
+    assert any(p.page_id.startswith("community_") for p in pages)
+
+
+def test_compile_all_excludes_community_pages_when_disabled(tmp_path):
+    funcs = [_func(fid=f"f{i}", domain="auth") for i in range(3)]
+    compiler = WikiCompiler(
+        store=_GraphStubStore(funcs),
+        wiki_dir=tmp_path,
+        graph_config=_graph_config(enabled=False),
+    )
+    pages = compiler.compile_all()
+    assert not any(p.page_id.startswith("community_") for p in pages)

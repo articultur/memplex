@@ -5,6 +5,9 @@
   "bin": {
     "memplex-install-hermes": "bin/memplex-install-hermes.js"
   },
+  "dependencies": {
+    "memplex": "3.3.0"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18"

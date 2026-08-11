@@ -102,7 +102,7 @@ The npm command installs the Python runtime into a persistent venv and writes
 host-specific config. For Python-first users:
 
 ```bash
-uv tool install memplex==3.2.7
+uv tool install memplex==3.3.0
 memplex setup
 ```
 

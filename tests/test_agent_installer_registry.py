@@ -7,17 +7,24 @@ completeness vs AGENT_PROFILES, signature correctness, and dispatch
 behaviour for known/unknown agents.
 """
 
+import json
 import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
+from pathlib import Path
+
 import pytest  # noqa: E402
 
+from memplex.adapters import agent_installer  # noqa: E402
 from memplex.adapters.agent_installer import (  # noqa: E402
     _INSTALLERS,
     AgentInstallerSpec,
     _install_one,
     _uninstall_one,
+    inspect_agent_installation,
+    install_agent,
+    uninstall_agent,
 )
 from memplex.adapters.agent_runtime import AGENT_PROFILES  # noqa: E402
 
@@ -40,9 +47,9 @@ def test_every_registry_entry_has_install_and_uninstall(agent):
 
 
 def test_registry_needs_identity_flag_matches_signatures():
-    """codex/claude-code are (target_dir,...) only; openclaw/hermes take identity."""
-    assert _INSTALLERS["codex"].needs_identity is False
-    assert _INSTALLERS["claude-code"].needs_identity is False
+    """Native hosts persist identity; Claude Code delegates to its plugin bundle."""
+    assert _INSTALLERS["codex"].needs_identity is True
+    assert _INSTALLERS["claude-code"].needs_identity is True
     assert _INSTALLERS["openclaw"].needs_identity is True
     assert _INSTALLERS["hermes"].needs_identity is True
 
@@ -94,3 +101,269 @@ def test_registry_is_module_level_singleton():
     from memplex.adapters.agent_installer import _INSTALLERS as again
 
     assert again is _INSTALLERS
+
+
+def _assert_failed_install_restored(root: Path, config_name: str, original: str) -> None:
+    config_path = root / config_name
+    assert config_path.read_text() == original
+
+
+def _snapshot_tree(root: Path):
+    """Return an exact small-tree snapshot suitable for rollback assertions."""
+
+    if not root.exists():
+        return None
+    snapshot = {}
+    paths = [root, *sorted(root.rglob("*"))]
+    for path in paths:
+        relative = "." if path == root else str(path.relative_to(root))
+        mode = path.lstat().st_mode & 0o7777
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", mode, os.readlink(path))
+        elif path.is_dir():
+            snapshot[relative] = ("dir", mode)
+        else:
+            snapshot[relative] = ("file", mode, path.read_bytes())
+    return snapshot
+
+
+def test_codex_single_host_failure_restores_preinstall_state(tmp_path, monkeypatch):
+    original = 'model = "gpt-5.5"\n'
+    (tmp_path / "config.toml").write_text(original)
+
+    def fail_final_config(*_args, **_kwargs):
+        raise OSError("injected codex config failure")
+
+    monkeypatch.setattr(agent_installer, "_replace_managed_block", fail_final_config)
+    with pytest.raises(OSError, match="injected codex"):
+        install_agent("codex", target_dir=tmp_path, user_id="alice", project_path=tmp_path)
+
+    _assert_failed_install_restored(tmp_path, "config.toml", original)
+    assert not (tmp_path / "plugins" / "marketplaces" / "memplex").exists()
+    assert not (tmp_path / "plugins" / "cache" / "memplex").exists()
+
+
+def test_all_host_failure_restores_exact_preexisting_managed_state(tmp_path):
+    """A later host failure must not uninstall an earlier preexisting host."""
+
+    target = tmp_path / "agents"
+    target.mkdir()
+    install_agent(
+        "codex",
+        target_dir=target,
+        user_id="alice",
+        project_path=tmp_path / "workspace-a",
+    )
+    config_path = target / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n# caller-owned sentinel\n")
+    config_path.chmod(0o3640)
+    marketplace_path = target / "plugins" / "marketplaces" / "memplex"
+    marketplace_referent = tmp_path / "codex-marketplace-referent"
+    marketplace_path.rename(marketplace_referent)
+    marketplace_path.symlink_to(marketplace_referent, target_is_directory=True)
+    provider_path = target / "memplex.json"
+    provider_path.write_text('{"name":"memplex","provider":"custom"}\n')
+    (target / "caller-owned.txt").write_text("preserve me exactly\n")
+    before = _snapshot_tree(target)
+    referent_before = _snapshot_tree(marketplace_referent)
+
+    with pytest.raises(RuntimeError, match="Failed to install hermes"):
+        install_agent(
+            "all",
+            target_dir=target,
+            user_id="alice",
+            project_path=tmp_path / "workspace-b",
+        )
+
+    assert _snapshot_tree(target) == before
+    assert _snapshot_tree(marketplace_referent) == referent_before
+
+
+def test_install_snapshot_restores_a_dangling_symbolic_link(tmp_path):
+    """A dangling managed link is preexisting state, not an absent path."""
+
+    referent = tmp_path / "future-managed-target"
+    link = tmp_path / "managed-link"
+    link.symlink_to(referent)
+    original_target = os.readlink(link)
+    snapshots, snapshot_root = agent_installer._snapshot_install_paths([link])
+    referent.write_text("created during failed install\n")
+
+    errors = agent_installer._restore_install_snapshot(snapshots, snapshot_root)
+
+    assert errors == []
+    assert link.is_symlink()
+    assert os.readlink(link) == original_target
+    assert not referent.exists()
+
+
+def test_claude_single_host_failure_restores_preinstall_state(tmp_path, monkeypatch):
+    original_write_text = Path.write_text
+
+    def fail_marker(path, *args, **kwargs):
+        if path.name == ".memplex-install-state.json":
+            raise OSError("injected claude marker failure")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_marker)
+    with pytest.raises(OSError, match="injected claude"):
+        install_agent("claude-code", target_dir=tmp_path, user_id="alice", project_path=tmp_path)
+
+    assert not (tmp_path / "plugins" / "marketplaces" / "articultur").exists()
+    assert not (tmp_path / "plugins" / "cache" / "articultur" / "memplex").exists()
+    assert not (tmp_path / "settings.json").exists()
+    assert not (tmp_path / "plugins" / "known_marketplaces.json").exists()
+    assert not (tmp_path / "plugins" / "installed_plugins.json").exists()
+
+
+def test_claude_install_uninstall_restores_exact_registry_prestate(tmp_path):
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    settings = tmp_path / "settings.json"
+    known = plugins / "known_marketplaces.json"
+    installed = plugins / "installed_plugins.json"
+    settings.write_text('{\n  // caller comment\n  "theme": "dark"\n}\n')
+    known.write_text('{"other":{"installLocation":"/caller"}}\n')
+    installed.write_text('{"version":2,"plugins":{"other@caller":[]}}\n')
+    settings.chmod(0o640)
+    before = {
+        path: (path.read_bytes(), path.stat().st_mode & 0o777)
+        for path in (settings, known, installed)
+    }
+
+    install_agent(
+        "claude-code",
+        target_dir=tmp_path,
+        user_id="alice",
+        project_path=tmp_path,
+    )
+
+    assert (
+        tmp_path
+        / "plugins"
+        / "cache"
+        / "articultur"
+        / "memplex"
+        / agent_installer._package_version()
+    ).is_dir()
+    uninstall_agent("claude-code", target_dir=tmp_path)
+
+    for path, (content, mode) in before.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_mode & 0o777 == mode
+    assert not (tmp_path / "plugins" / "marketplaces" / "articultur").exists()
+    assert not (tmp_path / "plugins" / "cache" / "articultur" / "memplex").exists()
+
+
+def test_claude_uninstall_preserves_registry_drift_and_removes_only_memplex(tmp_path):
+    install_agent(
+        "claude-code",
+        target_dir=tmp_path,
+        user_id="alice",
+        project_path=tmp_path,
+    )
+    settings_path = tmp_path / "settings.json"
+    known_path = tmp_path / "plugins" / "known_marketplaces.json"
+    installed_path = tmp_path / "plugins" / "installed_plugins.json"
+
+    settings = json.loads(settings_path.read_text())
+    settings["callerAfterInstall"] = True
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    known = json.loads(known_path.read_text())
+    known["caller"] = {"installLocation": "/caller"}
+    known_path.write_text(json.dumps(known, indent=2) + "\n")
+    installed = json.loads(installed_path.read_text())
+    installed["plugins"]["caller@local"] = []
+    installed_path.write_text(json.dumps(installed, indent=2) + "\n")
+
+    uninstall_agent("claude-code", target_dir=tmp_path)
+
+    settings = json.loads(settings_path.read_text())
+    assert settings["callerAfterInstall"] is True
+    assert "memplex@articultur" not in settings.get("enabledPlugins", {})
+    assert "articultur" not in settings.get("extraKnownMarketplaces", {})
+    assert "articultur" not in json.loads(known_path.read_text())
+    assert json.loads(known_path.read_text())["caller"]["installLocation"] == "/caller"
+    assert "memplex@articultur" not in json.loads(installed_path.read_text())["plugins"]
+    assert "caller@local" in json.loads(installed_path.read_text())["plugins"]
+
+
+@pytest.mark.parametrize("host", ["codex", "claude-code", "openclaw", "hermes"])
+def test_four_host_reinstall_upgrade_preserves_healthy_state_and_prestate(tmp_path, host):
+    root = tmp_path / host
+    root.mkdir()
+    originals = {
+        "codex": (root / "config.toml", 'model = "caller"\n'),
+        "claude-code": (root / "settings.json", '{"theme":"dark"}\n'),
+        "openclaw": (
+            root / "openclaw.json",
+            json.dumps(
+                {
+                    "plugins": {
+                        "slots": {"memory": "other"},
+                        "entries": {},
+                        "allow": ["other"],
+                        "bundledDiscovery": "allowlist",
+                    }
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+        ),
+        "hermes": (root / "config.yaml", "memory:\n  provider: caller\n"),
+    }
+    config_path, original = originals[host]
+    config_path.write_text(original)
+
+    install_agent(host, target_dir=root, user_id="alice", project_path=tmp_path)
+    install_agent(host, target_dir=root, user_id="alice", project_path=tmp_path)
+
+    status = inspect_agent_installation(host, target_dir=root)
+    assert status["status"] == "healthy"
+    assert status["install_state"] == {
+        "installed": True,
+        "selected": True,
+        "managed": True,
+        "reinstall_needed": False,
+    }
+
+    uninstall_agent(host, target_dir=root)
+    assert config_path.read_text() == original
+
+
+def test_snapshot_cleanup_failure_is_visible_in_logs(tmp_path, monkeypatch, caplog):
+    def fail_cleanup(_path):
+        raise OSError("snapshot cleanup unavailable")
+
+    monkeypatch.setattr(agent_installer.shutil, "rmtree", fail_cleanup)
+    agent_installer._cleanup_snapshot_root(tmp_path / "snapshot")
+
+    assert "snapshot cleanup unavailable" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("agent", "config_name", "managed_paths"),
+    [
+        ("openclaw", "openclaw.json", ("extensions/memplex",)),
+        ("hermes", "config.yaml", ("memplex.json", "plugins/memplex")),
+    ],
+)
+def test_configured_host_failure_restores_preinstall_state(
+    tmp_path, monkeypatch, agent, config_name, managed_paths
+):
+    original = "{}\n" if agent == "openclaw" else "model: test\n"
+    (tmp_path / config_name).write_text(original)
+    original_atomic_write = agent_installer._write_text_atomic
+
+    def fail_config(path, text):
+        if path.name == config_name:
+            raise OSError(f"injected {agent} config failure")
+        return original_atomic_write(path, text)
+
+    monkeypatch.setattr(agent_installer, "_write_text_atomic", fail_config)
+    with pytest.raises(OSError, match=f"injected {agent}"):
+        install_agent(agent, target_dir=tmp_path, user_id="alice", project_path=tmp_path)
+
+    _assert_failed_install_restored(tmp_path, config_name, original)
+    for relative in managed_paths:
+        assert not (tmp_path / relative).exists()

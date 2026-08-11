@@ -38,16 +38,21 @@ class BenchmarkEvaluator:
         MemplexService instance to evaluate.
     output_dir:
         Directory for results and reports. Defaults to ``.memplex/benchmarks``.
+    output_file:
+        File name (within ``output_dir``) for JSONL results.
+        Defaults to ``results.jsonl``.
     """
 
     def __init__(
         self,
         service: MemplexService,
         output_dir: str = ".memplex/benchmarks",
+        output_file: str = "results.jsonl",
     ) -> None:
         self.service = service
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_file = output_file
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -215,16 +220,9 @@ class BenchmarkEvaluator:
         write_memories: bool,
     ) -> List[BenchmarkResult]:
         """Load dataset and run both retrieval and generation benchmarks."""
-        # Create dataset and runner
-        try:
-            dataset = BenchmarkRunnerFactory.create_dataset(dataset_name)
-            runner = BenchmarkRunnerFactory.create_runner(dataset_name)
-        except KeyError:
-            # Fallback: try LocomoDataset/LocomoRunner directly
-            from benchmarks.locomo import LocomoDataset, LocomoRunner
-
-            dataset = LocomoDataset()
-            runner = LocomoRunner(dataset)
+        # Create dataset and runner (raises KeyError for unknown datasets)
+        dataset = BenchmarkRunnerFactory.create_dataset(dataset_name)
+        runner = BenchmarkRunnerFactory.create_runner(dataset_name)
 
         # Load samples
         samples = dataset.load(dataset_path)
@@ -282,7 +280,7 @@ class BenchmarkEvaluator:
         for sample in samples:
             try:
                 source_doc = dataset.to_memories(sample)
-                metadata = source_doc.metadata or {}
+                metadata = getattr(source_doc, "metadata", None) or {}
 
                 # Check for direct memory seeding (memory_benchmark style)
                 if hasattr(dataset, "get_memory_id"):
@@ -305,7 +303,7 @@ class BenchmarkEvaluator:
                 self.service.write(source_doc)
                 seeded += 1
             except Exception as exc:
-                logger.debug("Failed to seed sample %s: %s", sample.id, exc)
+                logger.warning("Failed to seed sample %s: %s", sample.id, exc)
                 continue
 
         logger.info("Seeded %d/%d memories", seeded, len(samples))
@@ -313,8 +311,7 @@ class BenchmarkEvaluator:
     def _seed_direct_memory(self, memory, memory_type: str) -> None:
         """Seed a memory object directly into the store.
 
-        Handles Fact, Preference, and Observation types by converting them
-        to Function storage format.
+        Converts typed benchmark memories to searchable Function records.
         """
         from memplex.models.memory import Fact, Function, Observation, Preference
         from memplex.models.source import SourceDocument, SourceType
@@ -328,14 +325,10 @@ class BenchmarkEvaluator:
                 .strip()
                 .replace(" ", "_"),
                 domain=None,
-                memory_type="fact",
+                memory_type="function",
                 source_type=memory.source_type,
                 created_at=memory.created_at,
                 updated_at=memory.updated_at,
-                trigger=[],
-                condition=[],
-                action=[],
-                benefit=[],
             )
             content = (
                 f"{memory.subject} {memory.predicate} {memory.object_}".strip()
@@ -350,22 +343,16 @@ class BenchmarkEvaluator:
             self.service.store.add(func, source)
 
         elif memory_type == "preference" and isinstance(memory, Preference):
+            name = memory.name or f"Preference: {memory.aspect}"
             func = Function(
                 id=memory.id,
-                name=memory.name or f"Preference: {memory.aspect}",
-                name_normalized=(memory.name or f"Preference: {memory.aspect}")
-                .lower()
-                .strip()
-                .replace(" ", "_"),
+                name=name,
+                name_normalized=name.lower().strip().replace(" ", "_"),
                 domain=None,
-                memory_type="preference",
+                memory_type="function",
                 source_type=memory.source_type,
                 created_at=memory.created_at,
                 updated_at=memory.updated_at,
-                trigger=[],
-                condition=[],
-                action=[],
-                benefit=[],
             )
             source = SourceDocument(
                 type="benchmark",
@@ -375,22 +362,16 @@ class BenchmarkEvaluator:
             self.service.store.add(func, source)
 
         elif memory_type == "observation" and isinstance(memory, Observation):
+            name = memory.name or f"Observed: {memory.event[:50]}"
             func = Function(
                 id=memory.id,
-                name=memory.name or f"Observed: {memory.event[:50]}",
-                name_normalized=(memory.name or f"Observed: {memory.event[:50]}")
-                .lower()
-                .strip()
-                .replace(" ", "_"),
+                name=name,
+                name_normalized=name.lower().strip().replace(" ", "_"),
                 domain=None,
-                memory_type="observation",
+                memory_type="function",
                 source_type=memory.source_type,
                 created_at=memory.created_at,
                 updated_at=memory.updated_at,
-                trigger=[],
-                condition=[],
-                action=[],
-                benefit=[],
             )
             source = SourceDocument(
                 type="benchmark",
@@ -404,7 +385,7 @@ class BenchmarkEvaluator:
         results: Dict[str, List[BenchmarkResult]],
     ) -> None:
         """Append all results to a JSONL file, one JSON object per line."""
-        output_path = self.output_dir / "results.jsonl"
+        output_path = self.output_dir / self.output_file
         mode = "a" if output_path.exists() else "w"
 
         with open(output_path, mode, encoding="utf-8") as fh:
@@ -522,7 +503,11 @@ def run_benchmark_cli(
     svc.start()
 
     try:
-        evaluator = BenchmarkEvaluator(svc, output_dir=str(Path(output).parent))
+        evaluator = BenchmarkEvaluator(
+            svc,
+            output_dir=str(Path(output).parent),
+            output_file=Path(output).name,
+        )
 
         # Resolve "all" to all available datasets
         if dataset == "all":

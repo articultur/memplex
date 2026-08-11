@@ -1,0 +1,207 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-build-tools:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Download exact build backends
+        run: |
+          python -m pip download --only-binary=:all: --dest wheelhouse \
+            --require-hashes --no-deps --requirement release/build-tools.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-build-tools
+          path: wheelhouse
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: prepare-build-tools
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.14.0'
+      - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: '0.10.9'
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-build-tools
+          path: wheelhouse
+      - name: Install the pre-fetched build backend
+        run: |
+          python -m venv "$RUNNER_TEMP/release-build-venv"
+          "$RUNNER_TEMP/release-build-venv/bin/python" -m pip install \
+            --no-index --find-links wheelhouse --require-hashes \
+            --requirement release/build-tools.txt
+      - name: Build twice with network-disabled backend resolution
+        env:
+          MEMPLEX_RELEASE_NO_BUILD_ISOLATION: '1'
+          UV_PYTHON: ${{ runner.temp }}/release-build-venv/bin/python
+        run: |
+          epoch="$(git show -s --format=%ct HEAD)"
+          python scripts/build_release_artifacts.py \
+            --source . --output "$RUNNER_TEMP/release-a" \
+            --tag "$GITHUB_REF_NAME" --source-date-epoch "$epoch" --umask 022
+          python scripts/build_release_artifacts.py \
+            --source . --output "$RUNNER_TEMP/release-b" \
+            --tag "$GITHUB_REF_NAME" --source-date-epoch "$epoch" --umask 077
+          for artifact in "$RUNNER_TEMP/release-a"/*; do
+            cmp "$artifact" "$RUNNER_TEMP/release-b/$(basename "$artifact")"
+          done
+          cp -R "$RUNNER_TEMP/release-a" release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: memplex-release-bundle
+          path: release
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: memplex-release-bundle
+          path: release
+      - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            release/*.whl
+            release/*.tar.gz
+            release/*.tgz
+            release/release-checksums.json
+            release/release-manifest.json
+            release/release-sbom.cdx.json
+      - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            release/*.whl
+            release/*.tar.gz
+            release/*.tgz
+          sbom-path: release/release-sbom.cdx.json
+
+  publish-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: attest
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: memplex-release-bundle
+          path: release
+      - id: preflight
+        name: Enforce PyPI immutability
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, urllib.error, urllib.request
+          root = pathlib.Path('release')
+          manifest = json.loads((root / 'release-manifest.json').read_text())
+          version = manifest['version']
+          expected = {
+              item['name']: item['sha256'] for item in manifest['artifacts']
+              if item['name'].endswith(('.whl', '.tar.gz'))
+          }
+          try:
+              with urllib.request.urlopen(f'https://pypi.org/pypi/memplex/{version}/json') as response:
+                  published = json.load(response)
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+              published = None
+          publish = published is None
+          if published is not None:
+              existing = {item['filename']: item['digests']['sha256'] for item in published['urls']}
+              if existing != expected:
+                  raise SystemExit('digest conflict')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'publish={str(publish).lower()}\n')
+          PY
+          mkdir pypi-dist
+          cp release/*.whl release/*.tar.gz pypi-dist/
+      - if: steps.preflight.outputs.publish == 'true'
+        uses: pypa/gh-action-pypi-publish@106e0b0b7c337fa67ed433972f777c6357f78598 # v1.13.0
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+
+  publish-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [attest, publish-pypi]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22.14.0'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: memplex-release-bundle
+          path: release
+      - name: Install trusted-publishing-capable npm
+        run: npm install --global npm@11.5.1
+      - id: preflight
+        name: Enforce npm immutability
+        run: |
+          package="$(find release -maxdepth 1 -name '*.tgz' -print -quit)"
+          version="${GITHUB_REF_NAME#v}"
+          local_integrity="sha512-$(openssl dgst -sha512 -binary "$package" | openssl base64 -A)"
+          set +e
+          existing="$(npm view "memplex@${version}" dist.integrity --json 2>npm-view.err)"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            publish=false
+            existing="${existing%\"}"
+            existing="${existing#\"}"
+            if [ "$existing" != "$local_integrity" ]; then
+              echo 'digest conflict' >&2
+              exit 1
+            fi
+          elif grep -Eq 'E404|code E404' npm-view.err; then
+            publish=true
+          else
+            echo 'npm registry preflight failed' >&2
+            exit 1
+          fi
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - if: steps.preflight.outputs.publish == 'true'
+        run: npm publish release/*.tgz --access public --provenance

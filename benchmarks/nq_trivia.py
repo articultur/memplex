@@ -92,14 +92,14 @@ _HF_CONFIGS = {
         },
     },
     "triviaqa": {
-        # Use mteb version or fallback to synthetic
-        "dataset_id": "mteb/nq",
-        "split": "test",
+        "dataset_id": "mandarjoshi/trivia_qa",
+        "config": "rc.nocontext",
+        "split": "validation",
         "max_samples": 100,
         "field_mapping": {
-            "id": lambda x: str(x.get("query-id", "")),
-            "question": lambda x: x.get("query", ""),
-            "answer": lambda x: "",
+            "id": lambda x: str(x.get("question_id", "")),
+            "question": lambda x: x.get("question", ""),
+            "answer": lambda x: _extract_triviaqa_answer(x),
             "context": lambda x: "",
         },
     },
@@ -679,8 +679,6 @@ class NQTriviaDataset(EvaluationDataset):
             SourceDocument suitable for MemplexService.write().
         """
         context = sample.metadata.get("context", "")
-        dataset = sample.metadata.get("dataset", self.dataset_name)
-
         if context:
             content = f"Question: {sample.query}\n\nContext: {context}"
         else:
@@ -947,8 +945,6 @@ class NQTriviaRunner(BenchmarkRunner):
             query_result = service.query(sample.query, top_k=5)
             query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
             total_latency += query_latency
-
-            retrieved_text = " ".join(r.summary for r in query_result.results)
 
             prediction = ""
             for r in query_result.results:

@@ -86,17 +86,30 @@ class _SimpleTFIDFEmbedder:
         self._doc_count: int = 0
 
     def encode(self, text: str) -> Vector:
+        """Encode a document, updating vocab/idf corpus statistics."""
+        return self._encode(text, update_stats=True)
+
+    def encode_query(self, text: str) -> Vector:
+        """Encode a query WITHOUT updating vocab/idf statistics.
+
+        Query-time encoding must not mutate the corpus statistics, otherwise
+        stored document vectors would drift with query history.
+        """
+        return self._encode(text, update_stats=False)
+
+    def _encode(self, text: str, update_stats: bool) -> Vector:
         words = text.lower().split()
         if not words:
             return [0.0] * self.dimension
 
-        # Update vocabulary
-        self._doc_count += 1
-        unique_words = set(words)
-        for w in unique_words:
-            if w not in self._vocab:
-                self._vocab[w] = len(self._vocab)
-            self._idf[w] = self._idf.get(w, 0) + 1
+        if update_stats:
+            # Update vocabulary (document path only)
+            self._doc_count += 1
+            unique_words = set(words)
+            for w in unique_words:
+                if w not in self._vocab:
+                    self._vocab[w] = len(self._vocab)
+                self._idf[w] = self._idf.get(w, 0) + 1
 
         # TF-IDF vector
         vec = [0.0] * self.dimension
@@ -104,11 +117,11 @@ class _SimpleTFIDFEmbedder:
         for w in words:
             tf[w] = tf.get(w, 0) + 1
 
+        import math
+
         for w, count in tf.items():
             idx = self._vocab.get(w, -1) % self.dimension
             idf = self._doc_count / (self._idf.get(w, 1) + 1)
-            import math
-
             vec[idx] = (count / len(words)) * math.log(idf + 1)
 
         # L2 normalize
@@ -240,6 +253,13 @@ class EmbeddingService:
         Optional :class:`MemoryStore` for ``refresh`` / ``refresh_all``.
     vector_store:
         Optional :class:`VectorStore` for upsert operations.
+    batch_size:
+        Default batch size for :meth:`embed_batch` (wired from
+        ``config.embedding.batch_size`` by the service layer).
+    contextual_retrieval:
+        Default for :meth:`embed_function`'s *use_contextual* (wired
+        from ``config.embedding.contextual_retrieval`` by the service
+        layer).
     """
 
     _OFFLINE_MODELS = {"default", "tfidf", "offline", "lite", "local"}
@@ -258,11 +278,15 @@ class EmbeddingService:
         dimension: int = 384,
         storage: Optional["MemoryStore"] = None,
         vector_store: Optional["VectorStoreProtocol"] = None,
+        batch_size: int = 32,
+        contextual_retrieval: bool = True,
     ) -> None:
         self.model = model
         self.dimension = dimension
         self.storage = storage
         self.vector_store = vector_store
+        self.batch_size = batch_size
+        self.contextual_retrieval = contextual_retrieval
         self._embedder = self._create_embedder(model, dimension)
 
     # ── Public API ──────────────────────────────────────────────────
@@ -271,21 +295,43 @@ class EmbeddingService:
         """Generate an embedding vector for a single text."""
         return self._embedder.encode(text)
 
-    def embed_batch(self, texts: List[str], batch_size: int = 32) -> List[Vector]:
-        """Batch generate embedding vectors."""
+    def embed_query(self, text: str) -> Vector:
+        """Embed a query-time text without mutating corpus statistics.
+
+        Backends with internal statistics (TF-IDF) expose ``encode_query``
+        so that document vectors do not drift with query history; other
+        backends fall back to the regular ``encode``.
+        """
+        encode_query = getattr(self._embedder, "encode_query", None)
+        if callable(encode_query):
+            return encode_query(text)
+        return self._embedder.encode(text)
+
+    def embed_batch(self, texts: List[str], batch_size: Optional[int] = None) -> List[Vector]:
+        """Batch generate embedding vectors.
+
+        *batch_size* defaults to the service-level default configured at
+        construction (``self.batch_size``) when not given explicitly.
+        """
+        if batch_size is None:
+            batch_size = self.batch_size
         return self._embedder.encode_batch(texts, batch_size=batch_size)
 
     def embed_function(
         self,
         func: Function,
         source: Optional[object] = None,
-        use_contextual: bool = True,
+        use_contextual: Optional[bool] = None,
     ) -> Vector:
         """Generate an embedding for a Function.
 
         When *source* is available and *use_contextual* is True, a document
-        context prefix is prepended (Contextual Retrieval).
+        context prefix is prepended (Contextual Retrieval). *use_contextual*
+        defaults to the configured ``self.contextual_retrieval`` when not
+        given explicitly.
         """
+        if use_contextual is None:
+            use_contextual = self.contextual_retrieval
         content = self.function_to_text(func)
         if use_contextual and source is not None:
             origin = (

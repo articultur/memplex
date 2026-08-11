@@ -10,9 +10,9 @@ Stages::
 
 Concurrency safety::
 
-    Compaction runs under a mutually-exclusive lock (FileLock for
-    Lite/Standard, PGAdvisoryLock for Enterprise).  If the lock is
-    already held, ``run()`` returns immediately with ``skipped=True``.
+    Compaction runs under a mutually-exclusive FileLock (POSIX
+    ``fcntl.flock``).  If the lock is already held, ``run()`` returns
+    immediately with ``skipped=True``.
 
 Usage::
 
@@ -23,12 +23,11 @@ Usage::
 from __future__ import annotations
 
 import abc
-import fcntl
 import hashlib
 import logging
 import os
 import time
-from dataclasses import dataclass
+import uuid
 from datetime import datetime, timezone
 
 
@@ -53,11 +52,34 @@ from memplex.models import (
 from memplex.retrieval.dedup import MemoryDeduplicator
 from memplex.retrieval.embedding import EmbeddingService
 from memplex.storage.base import MemoryStore
+from memplex.storage.lite.durability import _load_fcntl
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist directory entries such as archive creation and rename."""
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ensure_directory_tree_durable(directory: Path) -> None:
+    """Create missing ancestors one at a time and fsync each parent entry."""
+    missing: list[Path] = []
+    cursor = directory
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    for child in reversed(missing):
+        child.mkdir(exist_ok=True)
+        # A directory fsync covers the newly created child entry in its parent.
+        _fsync_directory(child.parent)
 
 
 # ── Compaction lock abstraction ────────────────────────────────────────
@@ -80,7 +102,7 @@ class CompactionLock(abc.ABC):
 
 
 class FileLock(CompactionLock):
-    """POSIX ``fcntl.flock``-based file lock (Lite / Standard backends).
+    """POSIX ``fcntl.flock``-based file lock.
 
     Lock file: ``lock_dir / {key_sha1}.lock``.
     Suitable for single-machine multi-process scenarios.
@@ -95,6 +117,7 @@ class FileLock(CompactionLock):
     async def try_acquire(self) -> bool:
         self._lock_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR)
+        fcntl = _load_fcntl()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fd = fd
@@ -105,52 +128,10 @@ class FileLock(CompactionLock):
 
     async def release(self) -> None:
         if self._fd is not None:
+            fcntl = _load_fcntl()
             fcntl.flock(self._fd, fcntl.LOCK_UN)
             os.close(self._fd)
             self._fd = None
-
-
-class PGAdvisoryLock(CompactionLock):
-    """PostgreSQL ``pg_try_advisory_lock`` (Enterprise backend).
-
-    The lock ID is derived by hashing *key* to a positive int64.
-    Advisory locks are released when the connection is returned to the
-    pool, so process crashes automatically clear them.
-    """
-
-    def __init__(self, key: str, pool: object) -> None:
-        self._pool = pool
-        raw = int(hashlib.sha256(key.encode()).hexdigest(), 16)
-        self._lock_id: int = raw % (2**63)
-        self._conn = None
-
-    async def try_acquire(self) -> bool:
-        conn = await self._pool.acquire()
-        result = await conn.fetchval("SELECT pg_try_advisory_lock($1)", self._lock_id)
-        if result:
-            self._conn = conn
-            return True
-        await self._pool.release(conn)
-        return False
-
-    async def release(self) -> None:
-        if self._conn is not None:
-            await self._conn.fetchval("SELECT pg_advisory_unlock($1)", self._lock_id)
-            await self._pool.release(self._conn)
-            self._conn = None
-
-
-# ── Checkpoint ────────────────────────────────────────────────────────
-
-
-@dataclass
-class _Checkpoint:
-    """Checkpoint written after each stage for crash-recovery."""
-
-    stage_name: str
-    processed_offset: int
-    processed_ids: List[str]
-    timestamp: str
 
 
 # ── CompactionPipeline ────────────────────────────────────────────────
@@ -180,7 +161,6 @@ class CompactionPipeline:
         self._store = store
         self._embedding = embedding_service
         self._config = config
-        self._pg_pool: Optional[object] = None  # injected for Enterprise
 
     # ── Lock helpers ────────────────────────────────────────────────
 
@@ -190,10 +170,6 @@ class CompactionPipeline:
 
     def _build_lock(self, scope: CompactionScope) -> CompactionLock:
         key = self._lock_key(scope)
-        backend = getattr(self._config, "storage", None)
-        backend_name = getattr(backend, "backend", "lite") if backend else "lite"
-        if backend_name == "enterprise" and self._pg_pool is not None:
-            return PGAdvisoryLock(key=key, pool=self._pg_pool)
         lock_dir = Path.home() / ".memplex" / "locks"
         return FileLock(key=key, lock_dir=lock_dir)
 
@@ -246,9 +222,6 @@ class CompactionPipeline:
                 logger.warning("Compaction aborted at stage %s", stage)
                 break
 
-            # Write checkpoint after each completed stage
-            self._write_checkpoint(stage, result)
-
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
         return CompactionResult(
@@ -286,7 +259,7 @@ class CompactionPipeline:
         wired by the application layer via LLM providers.
         """
         t0 = time.monotonic()
-        functions = self._store.list_functions(limit=100000)
+        _generation, functions = self._function_snapshot()
         elapsed = int((time.monotonic() - t0) * 1000)
         return CompactionStageResult(
             stage="extract",
@@ -299,23 +272,107 @@ class CompactionPipeline:
     # ── Stage: Dedup ────────────────────────────────────────────────
 
     async def _execute_dedup(self, scope: CompactionScope) -> CompactionStageResult:
-        """Dedup stage: remove exact and semantic duplicates."""
+        """Dedup stage: remove exact and semantic duplicates.
+
+        Memories dropped by :meth:`MemoryDeduplicator.deduplicate` are
+        actually deleted from the store, and merged field-values are
+        written back onto the surviving memory, so the reported
+        removed/merged counts reflect real state changes.
+        """
         t0 = time.monotonic()
-        functions = self._store.list_functions(limit=100000)
+        expected_generation, functions = self._function_snapshot()
         memories: List[Memory] = list(functions)
 
         threshold = self._config.compaction.dedup_threshold
-        deduplicator = MemoryDeduplicator(self._embedding, threshold=threshold)
+        chunk_threshold = self._config.compaction.chunk_threshold
+        deduplicator = MemoryDeduplicator(
+            self._embedding,
+            threshold=threshold,
+            chunk_threshold=chunk_threshold,
+            use_faiss=self._config.compaction.dedup_use_faiss,
+        )
         result = deduplicator.deduplicate(memories)
-        elapsed = int((time.monotonic() - t0) * 1000)
 
+        kept_by_id = {m.id: m for m in result.deduplicated}
+        orig_by_id = {m.id: m for m in memories}
+
+        delete_ids = [m.id for m in memories if m.id not in kept_by_id]
+        removed = len(delete_ids)
+
+        # Write merged content back onto surviving live objects.
+        touched = False
+        for kept in result.deduplicated:
+            original = orig_by_id.get(kept.id)
+            if original is not None and kept is not original:
+                self._sync_merged_fields(original, kept)
+                touched = True
+        if self._apply_compaction(list(result.deduplicated), delete_ids, expected_generation):
+            # One durable pair transaction: no survivor is published without
+            # all losers being deleted.
+            pass
+        else:
+            for identifier in delete_ids:
+                self._store.delete(identifier)
+            if touched:
+                self._replace_functions(list(result.deduplicated))
+
+        elapsed = int((time.monotonic() - t0) * 1000)
         return CompactionStageResult(
             stage="dedup",
             processed=result.original_count,
-            removed=result.exact_removed + result.semantic_removed,
+            removed=removed,
             merged=result.semantic_removed,
             duration_ms=elapsed,
         )
+
+    @staticmethod
+    def _sync_merged_fields(target: Memory, merged: Memory) -> None:
+        """Copy merged field-values from *merged* onto the live *target*."""
+        for role in ("trigger", "condition", "action", "benefit"):
+            if hasattr(merged, role):
+                setattr(target, role, list(getattr(merged, role)))
+        target.source_paragraphs = list(getattr(merged, "source_paragraphs", []))
+        if getattr(merged, "updated_at", None):
+            target.updated_at = merged.updated_at
+
+    def _replace_functions(self, functions: List[Memory]) -> None:
+        """Use an explicit persistence API; never reflect into `_save`."""
+        replace = getattr(self._store, "replace_function", None)
+        if callable(replace):
+            for function in functions:
+                replace(function)
+            return
+        from memplex.models import SourceDocument, SourceType
+
+        for function in functions:
+            self._store.add(
+                function,
+                SourceDocument(type="compaction", source_type=SourceType.WIKI),
+            )
+
+    def _function_snapshot(self) -> tuple[Optional[int], List[Memory]]:
+        """Bind compaction input to one store generation when supported."""
+        snapshot = getattr(self._store, "compaction_snapshot", None)
+        if callable(snapshot):
+            generation, functions = snapshot()
+            return generation, list(functions)
+        return None, list(self._store.list_functions(limit=100000))
+
+    def _apply_compaction(
+        self, replacements: List[Memory], delete_ids: List[str], expected_generation: Optional[int]
+    ) -> bool:
+        apply = getattr(self._store, "apply_compaction", None)
+        if not callable(apply):
+            return False
+        if expected_generation is None:
+            apply(replacements=replacements, delete_ids=delete_ids)
+        else:
+            apply(
+                replacements=replacements,
+                delete_ids=delete_ids,
+                expected_generation=expected_generation,
+            )
+        return True
 
     # ── Stage: Summarize ────────────────────────────────────────────
 
@@ -327,7 +384,7 @@ class CompactionPipeline:
         - Mark low-score entries as ``status="deprecated"`` for later Prune
         """
         t0 = time.monotonic()
-        functions = self._store.list_functions(limit=100000)
+        expected_generation, functions = self._function_snapshot()
         max_values = self._config.compaction.field_max_values
         processed = 0
         trimmed = 0
@@ -352,6 +409,12 @@ class CompactionPipeline:
             if trimmed_this:
                 processed += 1
 
+        if trimmed:
+            if self._apply_compaction(functions, [], expected_generation):
+                pass
+            else:
+                self._replace_functions(functions)
+
         elapsed = int((time.monotonic() - t0) * 1000)
         return CompactionStageResult(
             stage="summarize",
@@ -373,13 +436,15 @@ class CompactionPipeline:
         - FieldValue entries with ``status="deprecated"``
         """
         t0 = time.monotonic()
-        functions = self._store.list_functions(limit=100000)
+        expected_generation, functions = self._function_snapshot()
         conf_thresh = self._config.compaction.prune_confidence_threshold
         max_age_days = self._config.compaction.prune_max_age_days
         min_access = self._config.compaction.prune_min_access_count
         review_ttl = self._config.compaction.needs_review_ttl_days
 
         removed = 0
+        delete_ids: list[str] = []
+        fields_trimmed = 0
         processed = len(functions)
         now = datetime.now(timezone.utc)
 
@@ -433,10 +498,26 @@ class CompactionPipeline:
                     if len(kept) < before:
                         setattr(func, role, kept)
                         removed += before - len(kept)
+                        fields_trimmed += before - len(kept)
 
             if should_delete:
-                self._store.delete(func.id)
+                delete_ids.append(func.id)
                 removed += 1
+
+        # Whole-Function deletes persist via store.delete(); in-place
+        # FieldValue trimming needs an explicit flush on JSON backends.
+        if delete_ids or fields_trimmed:
+            if self._apply_compaction(
+                [function for function in functions if function.id not in delete_ids],
+                delete_ids,
+                expected_generation,
+            ):
+                pass
+            else:
+                for identifier in delete_ids:
+                    self._store.delete(identifier)
+                if fields_trimmed:
+                    self._replace_functions(functions)
 
         elapsed = int((time.monotonic() - t0) * 1000)
         return CompactionStageResult(
@@ -454,16 +535,25 @@ class CompactionPipeline:
 
         Archive directory: ``~/.memplex/archive/``.
         Memories with very low access count and age beyond the max age
-        threshold are serialised to JSON files and then soft-deleted.
+        threshold are serialised (full Function body) to JSON files and
+        then soft-deleted.
         """
         t0 = time.monotonic()
         archive_dir = Path.home() / ".memplex" / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _ensure_directory_tree_durable(archive_dir)
+        except Exception as exc:
+            logger.warning("Failed to prepare durable archive directory: %s", exc)
+            return CompactionStageResult(
+                stage="archive", processed=0, removed=0, merged=0,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            )
 
-        functions = self._store.list_functions(limit=100000)
+        expected_generation, functions = self._function_snapshot()
         max_age_days = self._config.compaction.prune_max_age_days
         now = datetime.now(timezone.utc)
         archived = 0
+        delete_ids: list[str] = []
 
         for func in functions:
             # Only archive very old, very rarely accessed memories
@@ -478,31 +568,40 @@ class CompactionPipeline:
 
             age_days = (now - _ensure_aware(updated)).days
             if age_days > max_age_days and func.access_count == 0:
-                # Write to archive
+                # Write the FULL Function body (all role fields, attributes,
+                # source paragraphs, ...) so the archive is restorable.
                 archive_file = archive_dir / f"{func.id}.json"
+                tmp = archive_file.with_name(f".{archive_file.name}.unwritten")
                 try:
                     import json
-
-                    from memplex.worker import _json_serializer
-
-                    with open(archive_file, "w", encoding="utf-8") as fh:
+                    payload = func.to_dict()
+                    payload["archived_at"] = now.isoformat()
+                    payload["original_updated_at"] = str(updated)
+                    tmp = archive_file.with_name(f".{archive_file.name}.{uuid.uuid4().hex}.tmp")
+                    with open(tmp, "w", encoding="utf-8") as fh:
                         json.dump(
-                            {
-                                "id": func.id,
-                                "name": func.name,
-                                "domain": func.domain,
-                                "archived_at": now.isoformat(),
-                                "original_updated_at": str(updated),
-                            },
+                            payload,
                             fh,
-                            default=_json_serializer,
+                            ensure_ascii=False,
+                            allow_nan=False,
                             indent=2,
                         )
-                    self._store.delete(func.id)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, archive_file)
+                    _fsync_directory(archive_dir)
+                    delete_ids.append(func.id)
                     archived += 1
                 except Exception as exc:
+                    tmp.unlink(missing_ok=True)
                     logger.warning("Failed to archive %s: %s", func.id, exc)
 
+        if delete_ids:
+            if self._apply_compaction([], delete_ids, expected_generation):
+                pass
+            else:
+                for identifier in delete_ids:
+                    self._store.delete(identifier)
         elapsed = int((time.monotonic() - t0) * 1000)
         return CompactionStageResult(
             stage="archive",
@@ -511,33 +610,3 @@ class CompactionPipeline:
             merged=0,
             duration_ms=elapsed,
         )
-
-    # ── Checkpoint ──────────────────────────────────────────────────
-
-    def _write_checkpoint(self, stage: str, result: CompactionStageResult) -> None:
-        """Write a checkpoint after each stage for crash-recovery."""
-        checkpoint_dir = Path.home() / ".memplex" / "checkpoints"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        cp = _Checkpoint(
-            stage_name=stage,
-            processed_offset=result.processed,
-            processed_ids=[],
-            timestamp=datetime.now().isoformat(),
-        )
-        cp_file = checkpoint_dir / "latest.json"
-        try:
-            import json
-
-            with open(cp_file, "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "stage_name": cp.stage_name,
-                        "processed_offset": cp.processed_offset,
-                        "processed_ids": cp.processed_ids,
-                        "timestamp": cp.timestamp,
-                    },
-                    fh,
-                    indent=2,
-                )
-        except OSError as exc:
-            logger.warning("Failed to write checkpoint: %s", exc)

@@ -1,8 +1,8 @@
 """GraphBuilder -- construct graph edges from Function nodes.
 
-Detects REFERENCES, DEPENDS_ON, CONFLICTS_WITH, ASSOCIATED_WITH, and
-BELONGS_TO edges by analysing cross-references, name patterns, and
-domain membership.
+Detects REFERENCES, DEPENDS_ON, CONFLICTS_WITH, ASSOCIATED_WITH,
+SEMANTIC_SIMILAR, and BELONGS_TO edges by analysing cross-references,
+name patterns, domain membership, and (optionally) embedding similarity.
 
 Works with :class:`MemoryStore` for persistence, unlike the legacy
 ``merger/graph_builder.py`` which was single-run only.
@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from memplex.models import (
     EdgeType,
     Function,
     GraphData,
     GraphEdge,
+    domain_node_id,
+    validate_domain,
 )
 
 if TYPE_CHECKING:
@@ -43,16 +45,25 @@ class GraphBuilder:
         Active :class:`MemoryStore` backend (used for name lookups).
     config:
         Optional :class:`MemplexConfig` (reads ``graph`` sub-config).
+    embedding_service:
+        Optional duck-typed embedder (anything with an ``embed(text)``
+        method, e.g. :class:`EmbeddingService`).  When given, SEMANTIC_SIMILAR
+        edges are detected between Functions whose embedding cosine
+        similarity exceeds ``graph.semantic_similar_threshold`` (capped at
+        ``graph.semantic_similar_max_edges`` per Function).  Without it no
+        SEMANTIC_SIMILAR edges are produced.
     """
 
     def __init__(
         self,
         store: MemoryStore,
         config: Optional[MemplexConfig] = None,
+        embedding_service: Optional[Any] = None,
     ) -> None:
         self._store = store
         self._config = config
         self._graph_config: Optional[GraphConfig] = config.graph if config else None
+        self._embedding_service = embedding_service
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -72,6 +83,7 @@ class GraphBuilder:
             to look up neighbour nodes).  If ``None``, edges are
             computed from scratch.
         """
+        validate_domain(func.domain)
         edges: List[GraphEdge] = []
         existing_set = self._edge_set(existing_graph)
 
@@ -144,7 +156,7 @@ class GraphBuilder:
 
         # 4. BELONGS_TO -- domain membership
         if func.domain:
-            domain_id = f"domain_{func.domain.replace(' ', '_').lower()}"
+            domain_id = domain_node_id(func.domain)
             key = (func.id, domain_id, EdgeType.BELONGS_TO.value)
             if key not in existing_set:
                 edges.append(
@@ -176,6 +188,10 @@ class GraphBuilder:
                             )
                         )
                         existing_set.add(key)
+
+        # 6. SEMANTIC_SIMILAR -- embedding similarity above the configured
+        # threshold (requires an injected embedding service)
+        edges.extend(self._detect_semantic_similar(func, all_funcs, existing_set))
 
         return edges
 
@@ -227,6 +243,99 @@ class GraphBuilder:
         b_triggers = {fv.desc.lower() for fv in b.trigger}
         return bool(a_triggers & b_triggers)
 
+    # ── SEMANTIC_SIMILAR edge detection ───────────────────────────────
+
+    def _detect_semantic_similar(
+        self,
+        func: Function,
+        all_funcs: List[Function],
+        existing_set: Set[tuple],
+    ) -> List[GraphEdge]:
+        """Detect SEMANTIC_SIMILAR edges via embedding cosine similarity.
+
+        Inactive unless an embedding service was injected.  Candidate
+        Functions whose similarity to *func* reaches
+        ``graph.semantic_similar_threshold`` are linked, best-first, up to
+        ``graph.semantic_similar_max_edges`` per Function.
+        """
+        if self._embedding_service is None:
+            return []
+        threshold = (
+            self._graph_config.semantic_similar_threshold if self._graph_config else 0.85
+        )
+        max_edges = (
+            self._graph_config.semantic_similar_max_edges if self._graph_config else 10
+        )
+
+        func_vec = self._embed_func(func)
+        if func_vec is None:
+            return []
+
+        scored: List[tuple] = []
+        for other in all_funcs:
+            if other.id == func.id:
+                continue
+            key = (func.id, other.id, EdgeType.SEMANTIC_SIMILAR.value)
+            rev_key = (other.id, func.id, EdgeType.SEMANTIC_SIMILAR.value)
+            if key in existing_set or rev_key in existing_set:
+                continue
+            other_vec = self._embed_func(other)
+            if other_vec is None:
+                continue
+            similarity = self._cosine_similarity(func_vec, other_vec)
+            if similarity >= threshold:
+                scored.append((similarity, other))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        edges: List[GraphEdge] = []
+        for similarity, other in scored[:max_edges]:
+            edges.append(
+                self._make_edge(
+                    source=func.id,
+                    target=other.id,
+                    edge_type=EdgeType.SEMANTIC_SIMILAR.value,
+                    weight=similarity,
+                    evidence=[f"embedding cosine similarity {similarity:.3f}"],
+                )
+            )
+            existing_set.add((func.id, other.id, EdgeType.SEMANTIC_SIMILAR.value))
+        return edges
+
+    def _embed_func(self, func: Function) -> Optional[List[float]]:
+        """Embed a Function's text (cached per build batch)."""
+        if not hasattr(self, "_embedding_cache"):
+            self._embedding_cache: Dict[str, Optional[List[float]]] = {}
+        if func.id in self._embedding_cache:
+            return self._embedding_cache[func.id]
+        try:
+            function_to_text = getattr(self._embedding_service, "function_to_text", None)
+            text = (
+                function_to_text(func)
+                if callable(function_to_text)
+                else " ".join(
+                    part
+                    for part in [func.name, func.domain or ""]
+                    + [fv.desc for fv in func.trigger + func.action]
+                    if part
+                )
+            )
+            vector = list(self._embedding_service.embed(text))
+        except Exception as exc:
+            logger.debug("semantic-similar: embed failed for %s: %s", func.id, exc)
+            vector = None
+        self._embedding_cache[func.id] = vector
+        return vector
+
+    @staticmethod
+    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
     # ── Utility helpers ─────────────────────────────────────────────
 
     @staticmethod
@@ -277,9 +386,11 @@ class GraphBuilder:
         return self._funcs_cache
 
     def invalidate_cache(self) -> None:
-        """Clear the internal function list cache."""
+        """Clear the internal function list and embedding caches."""
         if hasattr(self, "_funcs_cache"):
             del self._funcs_cache
+        if hasattr(self, "_embedding_cache"):
+            del self._embedding_cache
 
 
 # ── Rule-based fallback (no store) ───────────────────────────────────
@@ -297,6 +408,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
     seen: set = set()
 
     for func in functions:
+        validate_domain(func.domain)
         # REFERENCES from cross-references
         for ref in func.cross_references:
             target = ref.get("target", "")

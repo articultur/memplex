@@ -84,6 +84,18 @@ class BenchmarkResult:
 # ── Abstract Interfaces ───────────────────────────────────────────────────────
 
 
+@dataclass
+class BenchmarkSourceDocument(SourceDocument):
+    """SourceDocument carrying benchmark memory payloads for direct seeding.
+
+    ``SourceDocument`` itself has no metadata field; benchmark datasets use
+    this subclass to hand Fact/Preference/Observation objects to
+    ``BenchmarkEvaluator._seed_memories`` alongside the document content.
+    """
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 class EvaluationDataset(ABC):
     """Abstract base for loading benchmark datasets.
 
@@ -216,7 +228,14 @@ class BenchmarkRunnerFactory:
         if name not in cls._runners:
             available = list(cls._runners.keys())
             raise KeyError(f"No runner registered for '{name}'. Available: {available}")
-        return cls._runners[name]()
+        runner = cls._runners[name]()
+        # Runners shared across registrations (e.g. NQTriviaRunner serves
+        # "nq"/"triviaqa"/"nq_trivia") default their label to the composite
+        # name, which mislabels per-dataset results in JSONL output. Sync the
+        # label with the registered name so results are attributable.
+        if hasattr(runner, "name"):
+            runner.name = name
+        return runner
 
     @classmethod
     def create_dataset(cls, name: str) -> EvaluationDataset:

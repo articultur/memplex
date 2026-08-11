@@ -12,7 +12,11 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.logging_config import JsonFormatter, configure_logging  # noqa: E402
+from memplex.logging_config import (  # noqa: E402
+    JsonFormatter,
+    configure_logging,
+    install_sensitive_data_filters,
+)
 
 
 def _make_record(name="memplex.service", level=logging.INFO, msg="hello", **extra):
@@ -85,6 +89,26 @@ def test_json_formatter_handles_non_json_extra_value():
     assert "obj" in parsed
 
 
+def test_json_formatter_redacts_sync_cursor_authorization_and_dsn():
+    record = _make_record(
+        msg=(
+            "GET /sync/v1/changes?cursor=signed-secret-cursor "
+            "Authorization: Bearer bearer-secret "
+            "postgresql://app:db-password@db.example/memplex"
+        ),
+        cursor="extra-secret-cursor",
+        request_digest="a" * 64,
+    )
+    rendered = JsonFormatter().format(record)
+
+    assert "signed-secret-cursor" not in rendered
+    assert "bearer-secret" not in rendered
+    assert "db-password" not in rendered
+    assert "extra-secret-cursor" not in rendered
+    assert "[REDACTED]" in rendered
+    assert "a" * 64 in rendered
+
+
 def test_json_formatter_timestamp_is_iso8601():
     import re
 
@@ -153,3 +177,30 @@ def test_end_to_end_json_log_is_parseable(caplog):
     parsed = json.loads(line)
     assert parsed["message"] == "real message"
     assert parsed["k"] == "v"
+
+
+def test_uvicorn_access_handler_redacts_cursor_after_server_configures_logging():
+    access = logging.getLogger("uvicorn.access")
+    previous_handlers = list(access.handlers)
+    previous_propagate = access.propagate
+    buffer = io.StringIO()
+    handler = logging.StreamHandler(buffer)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        access.handlers = [handler]
+        access.propagate = False
+        install_sensitive_data_filters()
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1",
+            "GET",
+            "/sync/v1/changes?cursor=signed-access-secret",
+            "1.1",
+            200,
+        )
+        rendered = buffer.getvalue()
+        assert "signed-access-secret" not in rendered
+        assert "cursor=[REDACTED]" in rendered
+    finally:
+        access.handlers = previous_handlers
+        access.propagate = previous_propagate

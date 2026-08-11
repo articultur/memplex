@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "memplex": {
+      "command": "bash",
+      "args": ["./scripts/codex-plugin.sh", "mcp"],
+      "cwd": ".",
+      "env_vars": [
+        "MEMPLEX_CONFIG",
+        "MEMPLEX_PYTHON",
+        "MEMPLEX_PROJECT_ROOT",
+        "MEMPLEX_SESSION_ID",
+        "MEMPLEX_STORAGE_BACKEND",
+        "MEMPLEX_STORAGE_PATH",
+        "MEMPLEX_USER_ID"
+      ]
+    }
+  }
+}

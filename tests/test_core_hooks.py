@@ -10,10 +10,17 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
 
 from memplex.core.hooks.collector import ObservationCollector  # noqa: E402
 from memplex.core.hooks.hook_event import HookEvent  # noqa: E402
+from memplex.core.hooks.policy import (  # noqa: E402
+    NARRATIVE_LIMIT,
+    RateLimiter,
+    hash_event_payload,
+    summarize_tool_input,
+    tool_event_key,
+    tool_narrative,
+)
 from memplex.core.hooks.registry import HookRegistry, get_default_registry  # noqa: E402
 
 # ── HookEvent enum ───────────────────────────────────────────────────
@@ -136,3 +143,104 @@ def test_collector_dedup_skips_consecutive_identical():
     first_count = len(store.observations)
     c._on_tool_use(dict(ctx))  # identical consecutive -> deduped
     assert len(store.observations) == first_count
+
+
+# ── _extract_file_paths mode separation (regression) ─────────────────
+
+
+def test_extract_file_paths_read_tool_only_in_read_mode():
+    """Regression: a Read tool file path previously landed in both
+    files_read and files_modified."""
+    c = ObservationCollector(store=_StubStore())
+    ti = {"file_path": "/tmp/x.py"}
+    assert c._extract_file_paths(ti, None, "read", "Read") == ["/tmp/x.py"]
+    assert c._extract_file_paths(ti, None, "modified", "Read") == []
+
+
+def test_extract_file_paths_write_tools_only_in_modified_mode():
+    c = ObservationCollector(store=_StubStore())
+    ti = {"file_path": "/tmp/x.py"}
+    for tool in ("Write", "Edit"):
+        assert c._extract_file_paths(ti, None, "modified", tool) == ["/tmp/x.py"]
+        assert c._extract_file_paths(ti, None, "read", tool) == []
+
+
+def test_extract_file_paths_unknown_tool_keeps_legacy_behavior():
+    c = ObservationCollector(store=_StubStore())
+    ti = {"file_path": "/tmp/x.py"}
+    assert c._extract_file_paths(ti, None, "read", "NotebookEdit") == ["/tmp/x.py"]
+    assert c._extract_file_paths(ti, None, "modified", "NotebookEdit") == ["/tmp/x.py"]
+
+
+def test_collector_read_observation_separates_read_and_modified():
+    import json
+
+    store = _StubStore()
+    c = ObservationCollector(store=store)
+    c._on_tool_use(
+        {"tool_name": "Read", "tool_input": {"file_path": "/tmp/x.py"}, "tool_result": "ok"}
+    )
+    ctx = json.loads(store.observations[0].context)
+    assert ctx["files_read"] == ["/tmp/x.py"]
+    assert ctx["files_modified"] == []
+
+
+# ── Shared policy (memplex.core.hooks.policy) ──────────────────────────
+# Single source of truth consumed by the collector, the plugin
+# hook-runner, and agent_runtime capture dedup.
+
+
+def test_hash_event_payload_deterministic_and_order_insensitive():
+    assert hash_event_payload({"a": 1, "b": 2}) == hash_event_payload({"b": 2, "a": 1})
+    assert hash_event_payload({"a": 1}) != hash_event_payload({"a": 2})
+
+
+def test_tool_event_key_scopes_by_tool_name():
+    payload = {"file_path": "/tmp/x.py"}
+    assert tool_event_key("Read", payload) == tool_event_key("Read", dict(payload))
+    assert tool_event_key("Read", payload) != tool_event_key("Write", payload)
+    assert tool_event_key("Read", None) == tool_event_key("Read", {})
+
+
+def test_tool_narrative_specialised_tools():
+    assert tool_narrative("Read", {"file_path": "/tmp/x.py"}) == "[Read] Read: /tmp/x.py"
+    assert tool_narrative("Write", {"file_path": "/tmp/x.py"}) == "[Write] Write: /tmp/x.py"
+    assert tool_narrative("Edit", {"file_path": "/tmp/x.py"}) == "[Edit] Edit: /tmp/x.py"
+    assert tool_narrative("Bash", {"command": "ls -la"}) == "[Bash] Bash: ls -la"
+
+
+def test_tool_narrative_truncates_long_payloads():
+    narrative = tool_narrative("CustomTool", {"data": "x" * 500})
+    assert narrative.startswith("[CustomTool] ")
+    assert len(narrative) <= NARRATIVE_LIMIT
+
+
+def test_tool_narrative_unknown_tool_falls_back_to_json():
+    narrative = tool_narrative("NotebookEdit", {"notebook_path": "/tmp/n.ipynb"})
+    assert narrative.startswith("[NotebookEdit] ")
+    assert "notebook_path" in narrative
+
+
+def test_tool_narrative_empty_input_returns_empty():
+    assert tool_narrative("Write", {}) == ""
+    assert tool_narrative("unknown", None) == ""
+
+
+def test_summarize_tool_input_picks_priority_key():
+    assert summarize_tool_input({"command": "ls", "file_path": "/tmp/x"}) == "file_path=/tmp/x"
+    assert summarize_tool_input({"custom": "v"}) == "custom=v"
+    assert summarize_tool_input({}) == ""
+
+
+def test_rate_limiter_blocks_after_max():
+    rl = RateLimiter(max_per_minute=2)
+    assert rl.allow() is True
+    assert rl.allow() is True
+    assert rl.allow() is False
+
+
+def test_collector_delegates_to_shared_policy():
+    c = ObservationCollector(store=_StubStore())
+    ti = {"file_path": "/tmp/x.py"}
+    assert c._extract_narrative("Read", ti, None) == tool_narrative("Read", ti)
+    assert c._summarize_input({"command": "ls"}) == summarize_tool_input({"command": "ls"})

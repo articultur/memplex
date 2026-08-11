@@ -2,8 +2,8 @@
   "mcpServers": {
     "memplex": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-m", "memplex.adapters.mcp_server"]
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.sh"]
     }
   }
 }

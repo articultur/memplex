@@ -1,8 +1,11 @@
 """Extract text and images from PDF files."""
 
+import logging
 import os
 import tempfile
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class PDFExtractor:
@@ -50,7 +53,8 @@ class PDFExtractor:
                     if text:
                         pages.append(text)
             return pages if pages else None
-        except Exception:
+        except Exception as e:
+            logger.warning("PDF text extraction failed for %s: %s", pdf_path, e)
             return None
 
     def _extract_images_pymupdf(self, pdf_path: str) -> List[List[Dict[str, Any]]]:
@@ -86,7 +90,8 @@ class PDFExtractor:
                 images_per_page.append(page_images)
             doc.close()
             return images_per_page
-        except Exception:
+        except Exception as e:
+            logger.warning("PyMuPDF image extraction failed for %s: %s", pdf_path, e)
             return []
 
     def _extract_images_pdfplumber(self, pdf_path: str) -> List[List[Dict[str, Any]]]:
@@ -116,7 +121,8 @@ class PDFExtractor:
                         )
                     images_per_page.append(page_images)
             return images_per_page
-        except Exception:
+        except Exception as e:
+            logger.warning("pdfplumber image extraction failed for %s: %s", pdf_path, e)
             return []
 
     def extract_full(self, pdf_path: str) -> Optional[dict]:
@@ -142,5 +148,6 @@ class PDFExtractor:
                 "page_count": len(pages_text),
                 "images": images,
             }
-        except Exception:
+        except Exception as e:
+            logger.warning("PDF full extraction failed for %s: %s", pdf_path, e)
             return None

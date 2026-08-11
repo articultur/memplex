@@ -1,6 +1,7 @@
 """Test storage layer: LiteMemoryStore add/get/merge/delete/list_functions,
 ChangelogStore append/get_timeline, vector_search / fts_search."""
 
+import logging
 import os
 import sqlite3
 
@@ -9,21 +10,27 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 from datetime import datetime
 from pathlib import Path
 
+import pytest  # noqa: E402
+
 from memplex.models import (
     BatchResult,
     ChangelogEvent,
+    Fact,
     FieldValue,
     Function,
     GraphData,
     GraphEdge,
     MergeResult,
     Observation,
+    Preference,
     SearchFilters,
     SourceDocument,
     SourceType,
 )
 from memplex.storage.changelog import ChangelogStore
+from memplex.storage.lite.durability import LiteStorageIntegrityError
 from memplex.storage.lite.store import LiteMemoryStore
+from memplex.sync_repository import SyncCapturePolicy
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -62,6 +69,24 @@ class TestLiteMemoryStoreAdd:
         assert result is not None
         assert result.id == "func_1"
         assert result.name == "Login"
+
+    def test_add_rechecks_mutated_reserved_function_id_before_any_write(self, tmp_path):
+        store = _make_store(tmp_path)
+        func = _make_func("func_valid", "Login")
+        func.id = "domain_auth"  # construction validation must not be bypassable
+
+        with pytest.raises(ValueError, match="保留"):
+            store.add(func, _make_source())
+        assert store.list_functions() == []
+
+    def test_add_rechecks_mutated_non_string_domain_before_any_write(self, tmp_path):
+        store = _make_store(tmp_path)
+        func = _make_func("func_valid_domain", "Login", domain="auth")
+        func.domain = {"forged": "domain"}
+
+        with pytest.raises(ValueError, match="domain"):
+            store.add(func, _make_source())
+        assert store.list_functions() == []
 
     def test_add_creates_changelog(self, tmp_path):
         store = _make_store(tmp_path)
@@ -164,6 +189,65 @@ class TestLiteMemoryStoreMerge:
         assert isinstance(result, MergeResult)
         assert result.merged is True
         assert result.new_functions == 1
+
+    def test_merge_rejects_mutated_or_duck_nodes_without_edges(self, tmp_path):
+        store = _make_store(tmp_path)
+        func = _make_func("func_valid", "Source")
+        func.id = "domain_source"
+        graph = GraphData(
+            nodes=[func],
+            edges=[GraphEdge(source="domain_source", target="anything", edge_type="REFERENCES")],
+        )
+
+        with pytest.raises(ValueError, match="保留"):
+            store.merge(graph)
+        assert store.list_functions() == []
+        assert store._edges == []
+
+    def test_merge_rechecks_mutated_non_string_domain_before_edges(self, tmp_path):
+        store = _make_store(tmp_path)
+        func = _make_func("func_valid_domain_merge", "Source", domain="auth")
+        func.domain = 0
+        with pytest.raises(ValueError, match="domain"):
+            store.merge(
+                GraphData(
+                    nodes=[func],
+                    edges=[GraphEdge(func.id, "target", "REFERENCES")],
+                )
+            )
+        assert store.list_functions() == []
+        assert store._edges == []
+
+    def test_merge_rejects_duck_node_before_any_edge_write(self, tmp_path):
+        store = _make_store(tmp_path)
+
+        class DuckFunction:
+            id = "func_duck"
+            name = "Duck"
+
+        with pytest.raises(ValueError, match="Function"):
+            store.merge(
+                GraphData(
+                    nodes=[DuckFunction()],
+                    edges=[GraphEdge("func_duck", "target", "REFERENCES")],
+                )
+            )
+        assert store.list_functions() == []
+        assert store._edges == []
+
+    def test_merge_rejects_forged_belongs_to_before_memory_or_disk_publish(self, tmp_path):
+        store = _make_store(tmp_path)
+        source = _make_func("func_belongs_none", "Source", domain=None)
+        graph = GraphData(
+            nodes=[source],
+            edges=[GraphEdge(source.id, "domain_forged", "BELONGS_TO")],
+        )
+
+        with pytest.raises(ValueError, match="BELONGS_TO"):
+            store.merge(graph)
+        assert store.list_functions() == []
+        assert store._edges == []
+        assert not (tmp_path / "memory.json").exists()
 
     def test_merge_existing_function_updates(self, tmp_path):
         store = _make_store(tmp_path)
@@ -473,6 +557,45 @@ class TestLiteMemoryStoreNeighbors:
         neighbors = store.get_neighbors("func_nh", max_hops=0)
         assert neighbors == []
 
+    def test_get_neighbors_limit_uses_bounded_adjacency_lookup(self, tmp_path):
+        store = _make_store(tmp_path)
+        hub = _make_func("func_hub", "Hub")
+        nodes = [hub, *[_make_func(f"func_dense_{i}", f"Dense {i}") for i in range(20)]]
+        edges = [
+            GraphEdge(source=hub.id, target=node.id, edge_type="REFERENCES")
+            for node in nodes[1:]
+        ]
+        store.merge(GraphData(nodes=nodes, edges=edges))
+
+        class _NoGlobalScan(list):
+            def __iter__(self):
+                raise AssertionError("get_neighbors scanned the global edge list")
+
+        store._edges = _NoGlobalScan(store._edges)
+
+        neighbors = store.get_neighbors(hub.id, max_hops=1, limit=2)
+
+        assert len(neighbors) == 2
+
+    def test_neighbor_index_survives_load_and_tracks_delete_and_clear(self, tmp_path):
+        store = _make_store(tmp_path)
+        hub = _make_func("func_index_hub", "Hub")
+        neighbor = _make_func("func_index_neighbor", "Neighbor")
+        store.merge(
+            GraphData(
+                nodes=[hub, neighbor],
+                edges=[GraphEdge(hub.id, neighbor.id, "REFERENCES")],
+            )
+        )
+
+        reloaded = _make_store(tmp_path)
+        assert [node.id for node in reloaded.get_neighbors(hub.id, limit=1)] == [neighbor.id]
+
+        reloaded.delete(neighbor.id)
+        assert reloaded.get_neighbors(hub.id, limit=1) == []
+        reloaded.clear()
+        assert reloaded._edges_by_node == {}
+
 
 # ── LiteMemoryStore: Observations ────────────────────────────────────
 
@@ -498,6 +621,80 @@ class TestLiteMemoryStoreObservation:
         assert len(reopened._observations) == 1
         assert reopened._observations[0].id == "obs_persist"
         assert reopened._observations[0].event == "reboot survived"
+
+    def test_observation_category_survives_restart(self, tmp_path):
+        # category must round-trip through the JSON file.
+        store = _make_store(tmp_path)
+        store.add_observation(
+            Observation(id="obs_cat", name="Cat", event="fixed it", category="bugfix")
+        )
+
+        reopened = _make_store(tmp_path)
+        assert reopened._observations[0].category == "bugfix"
+
+    def test_observation_category_round_trips_through_durable_envelope(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_observation(Observation(id="obs_legacy", name="Legacy", event="old"))
+
+        reopened = _make_store(tmp_path)
+        assert reopened._observations[0].category == "note"
+
+    def test_list_observations_all(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_observation(Observation(id="o1", name="A", event="e1", category="bugfix"))
+        store.add_observation(Observation(id="o2", name="B", event="e2", category="decision"))
+        assert [o.id for o in store.list_observations()] == ["o1", "o2"]
+
+    def test_list_observations_filter_by_category(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_observation(Observation(id="o1", name="A", event="e1", category="bugfix"))
+        store.add_observation(Observation(id="o2", name="B", event="e2", category="decision"))
+        store.add_observation(Observation(id="o3", name="C", event="e3", category="bugfix"))
+        assert [o.id for o in store.list_observations(category="bugfix")] == ["o1", "o3"]
+        assert store.list_observations(category="discovery") == []
+
+    def test_list_observations_filter_by_owner(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_observation(Observation(id="o1", name="A", event="e1", owner="alice"))
+        store.add_observation(Observation(id="o2", name="B", event="e2", owner="bob"))
+        assert [o.id for o in store.list_observations(owner="alice")] == ["o1"]
+
+    def test_delete_observation_is_durable_and_emits_tombstone(self, tmp_path):
+        store = LiteMemoryStore(
+            path=tmp_path / "memory.json",
+            sync_capture_policy=SyncCapturePolicy("required", "lite-local"),
+        )
+        observation = Observation(
+            id="obs-delete",
+            name="Delete",
+            event="remove me",
+            tenant_id="tenant-a",
+            owner="subject-a",
+            owner_subject_id="subject-a",
+            workspace_id="workspace-a",
+            visibility="workspace",
+        )
+        store.add_observation(observation)
+
+        store.delete_observation("obs-delete")
+
+        assert store.get_observation("obs-delete") is None
+        reopened = LiteMemoryStore(
+            path=tmp_path / "memory.json",
+            sync_capture_policy=SyncCapturePolicy("required", "lite-local"),
+        )
+        assert reopened.get_observation("obs-delete") is None
+        assert any(
+            event["node_type"] == "observation"
+            and event["operation"] == "tombstone"
+            for event in reopened._sync_state["outbox"]
+        )
+
+    def test_list_observations_pagination(self, tmp_path):
+        store = _make_store(tmp_path)
+        for i in range(5):
+            store.add_observation(Observation(id=f"o{i}", name="A", event="e"))
+        assert [o.id for o in store.list_observations(offset=1, limit=2)] == ["o1", "o2"]
 
 
 class TestLiteMemoryStoreNoDeprecatedUtcnow:
@@ -588,7 +785,7 @@ class TestLiteMemoryStoreClear:
 
 
 class TestLiteMemoryStorePersistence:
-    def test_save_and_reload(self, tmp_path):
+    def test_commit_current_state_and_reload(self, tmp_path):
         store = _make_store(tmp_path)
         func = _make_func("func_persist", "PersistTest", triggers=[FieldValue(desc="trigger text")])
         store.add(func, _make_source())
@@ -600,6 +797,47 @@ class TestLiteMemoryStorePersistence:
         assert loaded.name == "PersistTest"
         assert len(loaded.trigger) == 1
         assert loaded.trigger[0].desc == "trigger text"
+
+    def test_load_rejects_reserved_function_id_before_indexing_edges(self, tmp_path):
+        path = tmp_path / "memory.json"
+        path.write_text(
+            '{"functions":[{"id":"domain_auth","name":"virtual"}],'
+            '"edges":[{"source":"domain_auth","target":"x",'
+            '"edge_type":"REFERENCES"}]}',
+            encoding="utf-8",
+        )
+        (tmp_path / "changelog.json").write_text("[]", encoding="utf-8")
+
+        with pytest.raises(LiteStorageIntegrityError, match="authoritative payload"):
+            LiteMemoryStore(path=path)
+
+    def test_load_rejects_legacy_forged_belongs_to_before_publish(self, tmp_path):
+        path = tmp_path / "memory.json"
+        path.write_text(
+            '{"functions":[{"id":"func_legacy_domain","name":"source","domain":null}],'
+            '"edges":[{"source":"func_legacy_domain","target":"domain_forged",'
+            '"edge_type":"BELONGS_TO"}]}',
+            encoding="utf-8",
+        )
+        (tmp_path / "changelog.json").write_text("[]", encoding="utf-8")
+        with pytest.raises(LiteStorageIntegrityError, match="authoritative payload"):
+            LiteMemoryStore(path=path)
+
+    def test_live_domain_mutation_cannot_overwrite_last_valid_disk_snapshot(self, tmp_path):
+        path = tmp_path / "memory.json"
+        store = LiteMemoryStore(path=path)
+        original = _make_func("func_live_domain", "Original", domain="auth")
+        store.add(original, _make_source())
+        detached = store.get(original.id)
+        assert detached is not None
+        detached.domain = []
+        store.add(_make_func("func_unrelated", "Unrelated"), _make_source())
+
+        reopened = LiteMemoryStore(path=path)
+        persisted = reopened.get(original.id)
+        assert persisted is not None
+        assert persisted.domain == "auth"
+        assert reopened.get("func_unrelated") is not None
 
 
 # ── ChangelogStore ───────────────────────────────────────────────────
@@ -708,12 +946,12 @@ def test_increment_access_batch_updates_all_matching(tmp_path):
     assert store.get("batch-3").access_count == 0
 
 
-def test_increment_access_batch_empty_or_all_missing_skips_save(tmp_path):
-    """When nothing matches, _save must not fire (no-op)."""
+def test_increment_access_batch_empty_or_all_missing_skips_commit_current_state(tmp_path):
+    """When nothing matches, _commit_current_state must not fire (no-op)."""
     store = LiteMemoryStore(path=tmp_path / "m.json")
     save_calls = []
-    original_save = store._save
-    store._save = lambda: save_calls.append(1) or original_save()
+    original_commit_current_state = store._commit_current_state
+    store._commit_current_state = lambda: save_calls.append(1) or original_commit_current_state()
     store.increment_access_batch([])
     assert save_calls == []
     store.increment_access_batch(["totally-missing"])
@@ -721,7 +959,7 @@ def test_increment_access_batch_empty_or_all_missing_skips_save(tmp_path):
 
 
 def test_increment_access_batch_persists_once_not_n_times(tmp_path):
-    """THE performance fix: N func ids -> exactly 1 _save call, not N.
+    """THE performance fix: N func ids -> exactly 1 _commit_current_state call, not N.
 
     Previously service.query called increment_access per result, each
     triggering a full JSON rewrite. This test pins the batch contract so
@@ -743,12 +981,12 @@ def test_increment_access_batch_persists_once_not_n_times(tmp_path):
             SourceDocument(type="text", source_type=SourceType.WIKI),
         )
     save_calls = []
-    original_save = store._save
-    store._save = lambda: save_calls.append(1) or original_save()
+    original_commit_current_state = store._commit_current_state
+    store._commit_current_state = lambda: save_calls.append(1) or original_commit_current_state()
     # 10 valid ids in one batch call
     store.increment_access_batch([f"perf-{i}" for i in range(10)])
     assert len(save_calls) == 1, (
-        f"batch must persist once, got {len(save_calls)} _save calls for 10 ids"
+        f"batch must persist once, got {len(save_calls)} _commit_current_state calls for 10 ids"
     )
 
 
@@ -761,29 +999,25 @@ def test_service_query_uses_single_batched_increment(tmp_path):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path)
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
     svc = MemplexService(config=cfg)
     try:
         # Seed several memories that match a common token.
         for i in range(4):
             svc.write_text(f"perf-batch-canary: variant {i} for recall.")
-        # Spy on the lite store's _save.
+        # Spy on the lite store's _commit_current_state.
         save_calls = []
-        original = svc.store._save
-        svc.store._save = lambda: save_calls.append(1) or original()
+        original = svc.store._commit_current_state
+        svc.store._commit_current_state = lambda: save_calls.append(1) or original()
         result = svc.query("perf-batch-canary", top_k=10)
-        # Count _save calls made DURING the access-increment phase only.
-        # (query may call _save elsewhere? -- the access phase is the only
-        # write in query, so any _save calls here are from it.)
+        # Count _commit_current_state calls made DURING the access-increment phase only.
+        # (query may call _commit_current_state elsewhere? -- the access phase is the only
+        # write in query, so any _commit_current_state calls here are from it.)
         pre_count = len(save_calls)
         # The increment happened inside query; assert it was batched (<=1).
         # Allow 0 (empty results) or 1 (batched), never N.
         assert pre_count <= 1, (
-            f"query triggered {pre_count} _save calls for {len(result.results)} results; "
+            f"query triggered {pre_count} _commit_current_state calls for {len(result.results)} results; "
             "access counting must be batched into a single persistence pass"
         )
     finally:
@@ -871,3 +1105,232 @@ def test_fts5_incremental_removes_deleted_func(tmp_path):
     store.vector_search("keepme", top_k=5)
     assert "del-inc-1" not in idx._indexed_sigs
     assert all(r.func_id != "del-inc-1" for r in store.vector_search("keepme", top_k=5))
+
+
+# ── create_store factory: warnings on silent fallbacks ───────────────
+
+
+def test_create_store_warns_when_configured_path_unusable(monkeypatch, caplog, tmp_path):
+    """Previously a bad configured path was silently swallowed and the
+    store fell back to ~/.memplex with no trace."""
+    import memplex.storage as storage_mod
+
+    class FlakyStore:
+        def __init__(self, path=None):
+            if path is not None:
+                raise PermissionError("denied")
+
+    monkeypatch.setattr(storage_mod, "LiteMemoryStore", FlakyStore)
+    with caplog.at_level(logging.WARNING, logger="memplex.storage"):
+        store = storage_mod.create_store("lite", path=str(tmp_path / "nope"))
+    assert isinstance(store, FlakyStore)  # fallback instance (path=None)
+    assert any("falling back" in r.message for r in caplog.records)
+
+
+def test_create_store_warns_for_unimplemented_standard_enterprise(caplog, tmp_path):
+    """standard/enterprise silently mapped to lite; a warning is now logged."""
+    import memplex.storage as storage_mod
+
+    with caplog.at_level(logging.WARNING, logger="memplex.storage"):
+        storage_mod.create_store("standard", path=str(tmp_path))
+    assert any("standard" in r.message and "lite" in r.message for r in caplog.records)
+
+
+# ── vector store factory: honest error messages ──────────────────────
+
+
+def test_create_vector_store_chroma_missing_raises_clear_error(monkeypatch):
+    """backend='chroma' without chromadb used to raise a misleading
+    ValueError('Unknown vector store backend'); now it is an ImportError
+    that names the missing dependency."""
+    import memplex.storage.vector as vector_mod
+
+    monkeypatch.setattr(vector_mod, "_CHROMA_AVAILABLE", False)
+    with pytest.raises(ImportError, match="chromadb"):
+        vector_mod.create_vector_store("chroma")
+
+
+def test_create_vector_store_auto_falls_back_to_inmemory(monkeypatch):
+    import memplex.storage.vector as vector_mod
+
+    monkeypatch.setattr(vector_mod, "_CHROMA_AVAILABLE", False)
+    store = vector_mod.create_vector_store("auto")
+    assert isinstance(store, vector_mod.InMemoryVectorStore)
+
+
+def test_create_vector_store_unknown_backend_raises_value_error():
+    from memplex.storage.vector import create_vector_store
+
+    with pytest.raises(ValueError, match="Unknown vector store backend"):
+        create_vector_store("not-a-backend")
+
+
+# ── lite search fallback leaves no dead state behind ─────────────────
+
+
+def test_fts_fallback_does_not_set_dead_fts_disabled_attr(monkeypatch, tmp_path):
+    """_fts_disabled was write-only dead state; the fallback must work
+    without it."""
+    store = _make_store(tmp_path)
+    store.add(
+        _make_func(
+            "func_no_dead_state",
+            "Fallback target",
+            actions=[FieldValue(desc="unique-token-zqx fallback")],
+        ),
+        _make_source(),
+    )
+
+    def fail_sqlite(text, top_k):
+        raise sqlite3.OperationalError("fts5 unavailable")
+
+    monkeypatch.setattr(store, "_sqlite_fts_search", fail_sqlite)
+    results = store.vector_search("unique-token-zqx", top_k=5)
+    assert results and results[0].func_id == "func_no_dead_state"
+    assert not hasattr(store, "_fts_disabled")
+
+
+# ── LiteMemoryStore: Fact / Preference ───────────────────────────────
+
+
+def _make_fact(fact_id="fact_1", subject="API", obj="REST interface", owner=None):
+    return Fact(
+        id=fact_id,
+        name=f"{subject} fact",
+        subject=subject,
+        predicate="is",
+        object_=obj,
+        source_type=SourceType.WIKI,
+        owner=owner,
+    )
+
+
+def _make_preference(pref_id="pref_1", aspect="theme", preference="dark mode", owner=None):
+    return Preference(
+        id=pref_id,
+        name=f"{aspect} preference",
+        aspect=aspect,
+        preference=preference,
+        source_type=SourceType.WIKI,
+        owner=owner,
+    )
+
+
+class TestLiteMemoryStoreFactPreference:
+    def test_add_and_get_fact(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact())
+        got = store.get_fact("fact_1")
+        assert got is not None
+        assert got.subject == "API"
+        assert got.object_ == "REST interface"
+        assert got.created_at and got.updated_at
+
+    def test_add_fact_upserts_by_id(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact(obj="v1"))
+        store.add_fact(_make_fact(obj="v2"))
+        assert store.get_fact("fact_1").object_ == "v2"
+        assert len(store.list_facts()) == 1
+
+    def test_add_and_get_preference(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_preference(_make_preference())
+        got = store.get_preference("pref_1")
+        assert got is not None
+        assert got.aspect == "theme"
+        assert got.preference == "dark mode"
+
+    def test_list_facts_owner_filter_and_pagination(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact("fact_a", owner="alice"))
+        store.add_fact(_make_fact("fact_b", owner="bob"))
+        store.add_fact(_make_fact("fact_c", owner="alice"))
+        assert len(store.list_facts()) == 3
+        assert len(store.list_facts(owner="alice")) == 2
+        assert len(store.list_facts(offset=1, limit=1)) == 1
+
+    def test_list_preferences_owner_filter(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_preference(_make_preference("pref_a", owner="alice"))
+        store.add_preference(_make_preference("pref_b", owner="bob"))
+        assert len(store.list_preferences(owner="bob")) == 1
+
+    def test_delete_fact_and_preference(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact())
+        store.add_preference(_make_preference())
+        store.delete_fact("fact_1")
+        store.delete_preference("pref_1")
+        assert store.get_fact("fact_1") is None
+        assert store.get_preference("pref_1") is None
+        # Deleting a missing id is a silent no-op.
+        store.delete_fact("fact_missing")
+
+    def test_persistence_roundtrip(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact())
+        store.add_preference(_make_preference())
+
+        reloaded = _make_store(tmp_path)
+        fact = reloaded.get_fact("fact_1")
+        pref = reloaded.get_preference("pref_1")
+        assert fact is not None and fact.object_ == "REST interface"
+        assert pref is not None and pref.preference == "dark mode"
+
+    def test_durable_file_includes_typed_node_collections(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add(_make_func("func_legacy", "legacy"), _make_source())
+        reloaded = _make_store(tmp_path)
+        assert reloaded.get("func_legacy") is not None
+        assert reloaded.list_facts() == []
+        assert reloaded.list_preferences() == []
+
+    def test_clear_removes_facts_and_preferences(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact())
+        store.add_preference(_make_preference())
+        store.clear()
+        assert store.list_facts() == []
+        assert store.list_preferences() == []
+
+    def test_fts_search_covers_fact_content(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_fact(_make_fact(obj="unique-fact-token-zqx"))
+        results = store.fts_search("unique-fact-token-zqx", top_k=5)
+        assert any(r.func_id == "fact_1" for r in results)
+
+    def test_fts_search_covers_preference_content(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add_preference(_make_preference(preference="unique-pref-token-zqx"))
+        results = store.fts_search("unique-pref-token-zqx", top_k=5)
+        assert any(r.func_id == "pref_1" for r in results)
+
+    def test_fts_search_merges_functions_and_facts(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.add(
+            _make_func(
+                "func_mix",
+                "Mix",
+                actions=[FieldValue(desc="shared-token-zqx action")],
+            ),
+            _make_source(),
+        )
+        store.add_fact(_make_fact(obj="shared-token-zqx fact"))
+        results = store.fts_search("shared-token-zqx", top_k=10)
+        hit_ids = {r.func_id for r in results}
+        assert "func_mix" in hit_ids
+        assert "fact_1" in hit_ids
+
+
+def test_merge_field_values_enforces_max_values_per_field():
+    """The model-level cap (Function.MAX_VALUES_PER_FIELD) is enforced on merge."""
+    from memplex.models import FieldValue, Function
+    from memplex.storage.lite.store import _merge_field_values
+
+    existing = [FieldValue(desc=f"existing-{i}") for i in range(Function.MAX_VALUES_PER_FIELD)]
+    incoming = [FieldValue(desc=f"incoming-{i}") for i in range(5)]
+    merged = _merge_field_values(existing, incoming)
+    assert len(merged) == Function.MAX_VALUES_PER_FIELD
+    # Existing values win; overflow from incoming is dropped.
+    assert merged[-1].desc == f"existing-{Function.MAX_VALUES_PER_FIELD - 1}"

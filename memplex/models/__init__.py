@@ -9,8 +9,11 @@ from .graph import (
     EdgeType,
     GraphData,
     GraphEdge,
+    domain_node_id,
 )
 from .memory import (
+    DEFAULT_OBSERVATION_CATEGORY,
+    OBSERVATION_CATEGORIES,
     Fact,
     Function,
     Memory,
@@ -18,6 +21,7 @@ from .memory import (
     Observation,
     Preference,
     create_memory_node,
+    validate_belongs_to_edges,
 )
 from .misc import (
     MAX_FUNC_ID_LENGTH,
@@ -40,6 +44,7 @@ from .misc import (
     ValidationResult,
     WikiIndex,
     WikiPage,
+    validate_domain,
     validate_func_id,
 )
 from .paragraph import (
@@ -65,4 +70,5 @@ from .task import (
     CompactionStageResult,
     TaskInfo,
     TaskStatus,
+    WorkerDrainResult,
 )

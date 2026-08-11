@@ -1,10 +1,13 @@
 """Handle remote URL input."""
 
+import logging
 import os
 import re
 import tempfile
 from typing import Optional, Tuple
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class URLHandler:
@@ -170,10 +173,10 @@ class URLHandler:
             for _ in range(self.MAX_REDIRECTS + 1):
                 parsed = urlparse(current_url)
                 if parsed.scheme not in ("http", "https"):
-                    print(f"Refusing non-http(s) URL: {current_url}")
+                    logger.warning("Refusing non-http(s) URL: %s", current_url)
                     return None
                 if not self._is_safe_host(parsed.hostname or ""):
-                    print(f"Refusing unsafe host: {parsed.hostname}")
+                    logger.warning("Refusing unsafe host: %s", parsed.hostname)
                     return None
 
                 req = urllib.request.Request(
@@ -194,14 +197,14 @@ class URLHandler:
                     location = headers.get("Location")
                     response.close()
                     if not location:
-                        print(f"Redirect without Location: {current_url}")
+                        logger.warning("Redirect without Location: %s", current_url)
                         return None
                     current_url = urljoin(current_url, location)
                     continue
 
                 if status >= 400:
                     response.close()
-                    print(f"HTTP {status} fetching URL {current_url}")
+                    logger.warning("HTTP %d fetching URL %s", status, current_url)
                     return None
 
                 content_type = headers.get("Content-Type", "").lower()
@@ -210,7 +213,9 @@ class URLHandler:
                 finally:
                     response.close()
                 if data is None:
-                    print(f"Response exceeds {self.MAX_RESPONSE_BYTES} bytes: {current_url}")
+                    logger.warning(
+                        "Response exceeds %d bytes: %s", self.MAX_RESPONSE_BYTES, current_url
+                    )
                     return None
 
                 if "text" in content_type or "markdown" in content_type:
@@ -237,11 +242,11 @@ class URLHandler:
                 text = data.decode("utf-8", errors="replace")
                 return ("html", text)
 
-            print(f"Too many redirects for URL {url}")
+            logger.warning("Too many redirects for URL %s", url)
             return None
 
         except Exception as e:
-            print(f"Failed to fetch URL {url}: {e}")
+            logger.warning("Failed to fetch URL %s: %s", url, e)
             return None
 
     def cleanup_temp_file(self, path: str) -> bool:

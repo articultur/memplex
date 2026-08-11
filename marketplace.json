@@ -6,6 +6,7 @@
   "plugins": [
     {
       "name": "memplex",
+      "version": "3.3.0",
       "source": {
         "source": "git",
         "url": "https://github.com/articultur/memplex.git"

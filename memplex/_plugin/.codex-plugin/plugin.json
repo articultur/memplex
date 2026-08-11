@@ -1,0 +1,40 @@
+{
+  "name": "memplex",
+  "version": "3.3.0",
+  "description": "Memplex 跨宿主持久记忆：Codex 原生 Hook、MCP 与共享工作区召回",
+  "author": {
+    "name": "articultur",
+    "url": "https://github.com/articultur"
+  },
+  "homepage": "https://github.com/articultur/memplex#readme",
+  "repository": "https://github.com/articultur/memplex",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "mcp",
+    "memory",
+    "knowledge-graph",
+    "multi-agent"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.codex.mcp.json",
+  "hooks": "./hooks/hooks-codex.json",
+  "interface": {
+    "displayName": "Memplex",
+    "shortDescription": "Codex、Claude Code、OpenClaw 与 Hermes 的共享持久记忆",
+    "longDescription": "在 Codex 会话开始和每轮提示时自动召回，在工具调用和回合结束时自动捕获，并通过 MCP 暴露显式记忆工具。",
+    "developerName": "articultur",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/articultur/memplex",
+    "defaultPrompt": [
+      "召回这个工作区之前的决策和约定",
+      "保存本轮值得跨代理复用的结论"
+    ],
+    "brandColor": "#6366F1"
+  }
+}

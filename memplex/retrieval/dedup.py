@@ -2,9 +2,10 @@
 
 Dedup strategies (by scale, automatic fallback)::
 
-    1. FAISS IVF ANN     -- O(n log n), cross-domain, requires faiss-cpu
-    2. NumPy matrix      -- O(n*d), grouped by domain, requires numpy
-    3. Pure Python       -- O(n^2), zero dependencies, Lite fallback
+    1. FAISS IndexFlatIP  -- exact inner-product (cosine) search,
+                             cross-domain, requires faiss-cpu
+    2. NumPy matrix       -- O(n*d), grouped by domain, requires numpy
+    3. Pure Python        -- O(n^2), zero dependencies, Lite fallback
 
 Usage::
 
@@ -64,11 +65,13 @@ class MemoryDeduplicator:
         strategy: DedupStrategy = DedupStrategy.BOTH,
         threshold: float = 0.95,
         chunk_threshold: int = 20000,
+        use_faiss: bool = True,
     ) -> None:
         self.embedder = embedding_service
         self.strategy = strategy
         self.threshold = threshold
         self.chunk_threshold = chunk_threshold
+        self.use_faiss = use_faiss
 
         # Counters set at the start of each ``deduplicate`` call
         self._original_count: int = 0
@@ -119,7 +122,8 @@ class MemoryDeduplicator:
     def _choose_better(a: Memory, b: Memory) -> Memory:
         """Pick the higher-quality memory to keep.
 
-        Priority: newer *updated_at* > more populated fields > higher confidence.
+        Priority: newer *updated_at* > more populated fields
+        (trigger/condition/action/benefit).
         """
         # updated_at comparison (they may be str or datetime)
         a_updated = str(getattr(a, "updated_at", "") or "")
@@ -146,18 +150,20 @@ class MemoryDeduplicator:
         """Semantic dedup with automatic backend selection.
 
         Routing:
-        1. FAISS IVF ANN (if *faiss* is importable) -- global, cross-domain.
+        1. FAISS IndexFlatIP exact search (if *faiss* is importable)
+           -- global, cross-domain.
         2. NumPy matrix (if *numpy* is importable, n <= chunk_threshold)
            -- grouped by domain when n > chunk_threshold.
         3. Pure-Python pairwise -- O(n^2), zero dependencies.
         """
-        # 1. FAISS (best)
-        try:
-            import faiss  # noqa: F401 -- check availability
+        # 1. FAISS (best, unless disabled via ``use_faiss``)
+        if self.use_faiss:
+            try:
+                import faiss  # noqa: F401 -- check availability
 
-            return self._semantic_dedup_faiss(memories)
-        except ImportError:
-            pass
+                return self._semantic_dedup_faiss(memories)
+            except ImportError:
+                pass
 
         # 2. NumPy (good for medium scale)
         if len(memories) > self.chunk_threshold:

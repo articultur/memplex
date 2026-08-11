@@ -2,7 +2,7 @@
 
 Provides a ``VectorStore`` Protocol plus two implementations:
 
-* ``InMemoryVectorStore`` -- TF-IDF bag-of-words cosine similarity, zero
+* ``InMemoryVectorStore`` -- bag-of-words cosine similarity, zero
   external dependencies.
 * ``ChromaVectorStore`` -- ChromaDB + sentence-transformers for production
   quality embeddings.
@@ -61,7 +61,7 @@ class VectorStore(Protocol):
 
 
 class InMemoryVectorStore:
-    """In-memory TF-IDF cosine similarity store.
+    """In-memory bag-of-words cosine similarity store.
 
     Zero external dependencies.  Suitable for Lite backend and testing.
     """
@@ -243,8 +243,15 @@ def create_vector_store(backend: str = "auto") -> VectorStore:
     backend:
         ``"inmemory"`` | ``"chroma"`` | ``"auto"`` (default).
         ``"auto"`` prefers ChromaDB and falls back to InMemory.
+        ``"chroma"`` without chromadb installed raises ``ImportError``.
     """
-    if backend == "chroma" and _CHROMA_AVAILABLE:
+    if backend == "chroma":
+        if not _CHROMA_AVAILABLE:
+            raise ImportError(
+                "chromadb is not installed; install it with: "
+                "pip install chromadb sentence-transformers "
+                "(or use backend='inmemory')."
+            )
         return ChromaVectorStore()
     if backend == "inmemory":
         return InMemoryVectorStore()

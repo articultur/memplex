@@ -7,11 +7,14 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 from pathlib import Path
 
+import pytest
+
 from memplex.models import (
     EdgeType,
     FieldValue,
     Function,
     SourceType,
+    domain_node_id,
 )
 from memplex.processing.graph_builder import GraphBuilder
 from memplex.storage.lite.store import LiteMemoryStore
@@ -37,6 +40,21 @@ def _make_store(tmp_path=None):
 
         tmp_path = Path(tempfile.mkdtemp()) / "memory.json"
     return LiteMemoryStore(path=tmp_path)
+
+
+@pytest.mark.parametrize("domain", [True, 0, 1.5, {}, [], ()])
+def test_domain_node_id_rejects_non_string_values(domain):
+    with pytest.raises(ValueError, match="domain"):
+        domain_node_id(domain)
+
+
+def test_graph_builder_rechecks_mutated_domain_before_emitting_edges(tmp_path):
+    store = _make_store(tmp_path / "mem.json")
+    builder = GraphBuilder(store=store)
+    func = _make_func("func_domain_mutated", "Domain", domain="auth")
+    func.domain = 0
+    with pytest.raises(ValueError, match="domain"):
+        builder.process(func)
 
 
 # ── REFERENCES edge ─────────────────────────────────────────────────
@@ -206,6 +224,19 @@ class TestBelongsToEdge:
         assert len(belong_edges) >= 1
         assert "domain_" in belong_edges[0].target
 
+    def test_domain_node_id_preserves_graph_builder_legacy_whitespace_and_unicode(self, tmp_path):
+        assert domain_node_id("  A  B ") == "domain___a__b_"
+        assert domain_node_id("通 用") == "domain_通_用"
+
+        builder = GraphBuilder(store=_make_store(tmp_path / "mem.json"))
+        function = _make_func("func-domain-parity", "Parity", domain="  A  B ")
+        edge = next(
+            item
+            for item in builder.process(function)
+            if item.edge_type == EdgeType.BELONGS_TO.value
+        )
+        assert edge.target == domain_node_id(function.domain)
+
 
 # ── ASSOCIATED_WITH edge ─────────────────────────────────────────────
 
@@ -276,3 +307,109 @@ class TestCacheInvalidation:
         builder._funcs_cache = []
         builder.invalidate_cache()
         assert not hasattr(builder, "_funcs_cache")
+
+
+# ── SEMANTIC_SIMILAR edge (Wave 2a: graph.semantic_similar_* wiring) ──
+
+
+class _VocabEmbedding:
+    """Deterministic embedder: dims keyed by a fixed vocabulary.
+
+    Texts sharing vocabulary words get high cosine similarity; disjoint
+    texts get 0.0 -- no reliance on ``hash()`` stability across runs.
+    """
+
+    VOCAB = ("alpha", "beta", "gamma")
+
+    def embed(self, text):
+        tokens = text.lower().split()
+        vec = [float(tokens.count(word)) for word in self.VOCAB]
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm == 0:
+            return vec
+        return [v / norm for v in vec]
+
+
+def _make_config(threshold=0.85, max_edges=10):
+    from memplex.config import MemplexConfig
+
+    cfg = MemplexConfig()
+    cfg.graph.semantic_similar_threshold = threshold
+    cfg.graph.semantic_similar_max_edges = max_edges
+    return cfg
+
+
+class TestSemanticSimilarEdge:
+    def _store_with(self, tmp_path, funcs):
+        from memplex.models import SourceDocument
+
+        store = _make_store(tmp_path / "mem.json")
+        for f in funcs:
+            store.add(f, SourceDocument(type="text", source_type=SourceType.WIKI))
+        return store
+
+    def test_similar_functions_produce_semantic_similar_edge(self, tmp_path):
+        func_a = _make_func("func_a", "alpha helper", actions=[FieldValue(desc="alpha work")])
+        func_b = _make_func("func_b", "alpha worker", actions=[FieldValue(desc="alpha work")])
+        store = self._store_with(tmp_path, [func_a])
+
+        builder = GraphBuilder(
+            store=store, config=_make_config(), embedding_service=_VocabEmbedding()
+        )
+        edges = builder.process(func_b)
+        sim_edges = [e for e in edges if e.edge_type == EdgeType.SEMANTIC_SIMILAR.value]
+        assert len(sim_edges) == 1
+        assert sim_edges[0].source == "func_b"
+        assert sim_edges[0].target == "func_a"
+        assert sim_edges[0].weight >= 0.85
+
+    def test_dissimilar_functions_produce_no_edge(self, tmp_path):
+        func_a = _make_func("func_a", "gamma helper", actions=[FieldValue(desc="gamma work")])
+        func_b = _make_func("func_b", "alpha worker", actions=[FieldValue(desc="alpha work")])
+        store = self._store_with(tmp_path, [func_a])
+
+        builder = GraphBuilder(
+            store=store, config=_make_config(), embedding_service=_VocabEmbedding()
+        )
+        edges = builder.process(func_b)
+        assert [e for e in edges if e.edge_type == EdgeType.SEMANTIC_SIMILAR.value] == []
+
+    def test_threshold_from_config_is_respected(self, tmp_path):
+        """An unreachable threshold disables SEMANTIC_SIMILAR entirely."""
+        func_a = _make_func("func_a", "alpha helper", actions=[FieldValue(desc="alpha work")])
+        func_b = _make_func("func_b", "alpha worker", actions=[FieldValue(desc="alpha work")])
+        store = self._store_with(tmp_path, [func_a])
+
+        builder = GraphBuilder(
+            store=store,
+            config=_make_config(threshold=1.1),  # cosine can never exceed 1.0
+            embedding_service=_VocabEmbedding(),
+        )
+        edges = builder.process(func_b)
+        assert [e for e in edges if e.edge_type == EdgeType.SEMANTIC_SIMILAR.value] == []
+
+    def test_max_edges_caps_edges_per_function(self, tmp_path):
+        others = [
+            _make_func(f"func_{i}", f"alpha helper {i}", actions=[FieldValue(desc="alpha work")])
+            for i in range(3)
+        ]
+        func_new = _make_func("func_new", "alpha worker", actions=[FieldValue(desc="alpha work")])
+        store = self._store_with(tmp_path, others)
+
+        builder = GraphBuilder(
+            store=store, config=_make_config(max_edges=2), embedding_service=_VocabEmbedding()
+        )
+        edges = builder.process(func_new)
+        sim_edges = [e for e in edges if e.edge_type == EdgeType.SEMANTIC_SIMILAR.value]
+        assert len(sim_edges) == 2
+
+    def test_no_embedding_service_produces_no_edges(self, tmp_path):
+        """Default behaviour unchanged: without an embedding service the
+        SEMANTIC_SIMILAR detector is inactive."""
+        func_a = _make_func("func_a", "alpha helper", actions=[FieldValue(desc="alpha work")])
+        func_b = _make_func("func_b", "alpha worker", actions=[FieldValue(desc="alpha work")])
+        store = self._store_with(tmp_path, [func_a])
+
+        builder = GraphBuilder(store=store, config=_make_config())
+        edges = builder.process(func_b)
+        assert [e for e in edges if e.edge_type == EdgeType.SEMANTIC_SIMILAR.value] == []

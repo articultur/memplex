@@ -65,7 +65,7 @@ class Reranker:
 
         raw_relevance      0.25  -- original score from each retrieval path
         semantic_similarity 0.30  -- cosine(query_vec, result_vec)
-        recency_decay       0.15  -- exponential decay (~0.5 at 30 days)
+        recency_decay       0.15  -- exponential decay (~0.61 at 30 days)
         source_authority    0.15  -- requirement > meeting > code > wiki
         frequency           0.15  -- log-scaled access count * recency
 
@@ -128,7 +128,7 @@ class Reranker:
             return []
 
         if query_vector is None:
-            query_vector = self.embedder.embed(query)
+            query_vector = self._embed_query_text(query)
 
         scored: list[tuple[float, SearchResult]] = []
 
@@ -140,7 +140,7 @@ class Reranker:
             if r.vector_cache is not None:
                 result_vector = r.vector_cache
             else:
-                result_vector = self.embedder.embed(r.summary)
+                result_vector = self._embed_query_text(r.summary)
             semantic_score = cosine_similarity(query_vector, result_vector)
 
             # 3. Recency decay
@@ -154,7 +154,8 @@ class Reranker:
             if self.storage is not None:
                 try:
                     func = self.storage.get(r.func_id)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("rerank: storage.get failed for %s: %s", r.func_id, exc)
                     func = None
             frequency_score = self._frequency_score(func) if func else 0.5
 
@@ -174,12 +175,23 @@ class Reranker:
 
     # ── Dimension scorers ───────────────────────────────────────────
 
+    def _embed_query_text(self, text: str) -> Vector:
+        """Embed query-time text without polluting TF-IDF corpus statistics.
+
+        Uses ``embed_query`` when the embedding service provides it (TF-IDF
+        backend), otherwise falls back to ``embed``.
+        """
+        embed_query = getattr(self.embedder, "embed_query", None)
+        if callable(embed_query):
+            return embed_query(text)
+        return self.embedder.embed(text)
+
     @staticmethod
     def _recency_decay(updated_at: Optional[datetime]) -> float:
-        """Exponential time decay.  ~0.5 at 30 days, range [0, 1].
+        """Exponential time decay.  ~0.61 at 30 days, range [0, 1].
 
         Uses the same formula as the design spec:
-        ``min(1.0, exp(-days / 60))``
+        ``min(1.0, exp(-days / 60))``  (0.5 is reached at ~41.6 days)
         """
         if updated_at is None:
             return 0.5

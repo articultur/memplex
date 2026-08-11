@@ -66,19 +66,32 @@ def build_query_explanation(
     for stage in trace.get("stages", []):
         name = stage.get("stage", "")
         if name.endswith("_search"):
-            paths.append(
-                {
-                    "name": name[: -len("_search")],
-                    "status": stage.get("status"),
-                    "candidates": stage.get("candidates", 0),
-                }
-            )
+            path = {
+                "name": name[: -len("_search")],
+                "status": stage.get("status"),
+                "candidates": stage.get("candidates", 0),
+            }
+            if stage.get("candidate_budget") is not None:
+                path["candidate_budget"] = stage["candidate_budget"]
+            paths.append(path)
         elif name == "merge_deduplicate":
             retrieval["merged_candidates"] = stage.get("candidates", 0)
+            if stage.get("candidate_budget") is not None:
+                retrieval["candidate_budget"] = stage["candidate_budget"]
         elif name == "namespace_filter":
             filters.append(
                 {
                     "type": "namespace",
+                    "before": stage.get("before", 0),
+                    "after": stage.get("after", 0),
+                    "boundary": stage.get("boundary"),
+                }
+            )
+        elif name == "owner_filter":
+            filters.append(
+                {
+                    "type": "owner",
+                    "owner": stage.get("owner"),
                     "before": stage.get("before", 0),
                     "after": stage.get("after", 0),
                     "boundary": stage.get("boundary"),
@@ -111,6 +124,10 @@ def build_query_explanation(
         elif name == "token_budget":
             budget["tokens_used"] = stage.get("tokens_used", 0)
             budget["truncated"] = stage.get("truncated", False)
+            # The stage records the effective budget cap; prefer it over the
+            # top-level trace value when present.
+            if stage.get("max_tokens") is not None:
+                budget["max_tokens"] = stage["max_tokens"]
             selection["after_token_budget"] = stage.get("after", 0)
 
     return {

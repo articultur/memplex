@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from memplex.config import MemplexConfig
+from memplex.auth import PrincipalRegistry, PrincipalRegistryError
+from memplex.config import MemplexConfig, normalize_deployment_contract
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,472 @@ SCOPE_DESCRIPTIONS: dict[str, str] = {
     "global": "Explicitly shared memory. Memplex does not promote data here implicitly.",
 }
 
+_INDUSTRIAL_COMPLETED_GATES: tuple[tuple[str, str, str], ...] = (
+    (
+        "schema_migrations_atomicity",
+        "Versioned migrations, atomic storage operations, and concurrency proof.",
+        "G003 versioned migrations, atomic storage, concurrency, least privilege, "
+        "wheel verification, and independent reviews passed",
+    ),
+    (
+        "durable_sync_backpressure",
+        "Durable outbox/inbox, gap-free cursors, idempotency, and bounded work.",
+        "G004 durable sync/backpressure, fault matrix, 100001 backlog, "
+        "and dual fresh reviews passed",
+    ),
+)
+
+_INDUSTRIAL_BLOCKED_GATES: tuple[tuple[str, str, str], ...] = (
+    (
+        "release_supply_chain",
+        "Reproducible signed artifacts and clean registry installation gates.",
+        "G007",
+    ),
+    (
+        "four_host_e2e",
+        "Real Codex, Claude Code, OpenClaw, and Hermes lifecycle matrix.",
+        "G008",
+    ),
+    (
+        "capacity_chaos",
+        "Production-scale load, soak, chaos, and independent final review.",
+        "G009",
+    ),
+)
+
+
+def _blocked_industrial_gate(
+    gate_id: str, requirement: str, next_goal: str
+) -> dict[str, Any]:
+    gate: dict[str, Any] = {
+        "id": gate_id,
+        "status": "blocked",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": next_goal,
+    }
+    return gate
+
+
+def _completed_industrial_gate(
+    gate_id: str, requirement: str, evidence: str
+) -> dict[str, Any]:
+    return {
+        "id": gate_id,
+        "status": "pass",
+        "required": True,
+        "requirement": requirement,
+        "evidence": evidence,
+    }
+
+
+def _backup_restore_dr_gate() -> dict[str, Any]:
+    requirement = "Verified backup, restore, PITR, and measured RPO/RTO drills."
+    artifact_value = os.environ.get("MEMPLEX_G005_BACKUP_ARTIFACT")
+    report_value = os.environ.get("MEMPLEX_G005_DRILL_REPORT")
+    if artifact_value is None and report_value is None:
+        return _blocked_industrial_gate("backup_restore_dr", requirement, "G005")
+    invalid = {
+        "id": "backup_restore_dr",
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": "G005",
+        "evidence": "signed PostgreSQL restore drill invalid",
+    }
+    if (
+        type(artifact_value) is not str
+        or not artifact_value.strip()
+        or type(report_value) is not str
+        or not report_value.strip()
+    ):
+        return invalid
+    try:
+        from memplex.backup import (
+            drill_result_from_json,
+            load_backup_signing_key,
+            load_verified_backup_manifest,
+        )
+
+        key = load_backup_signing_key()
+        artifact = Path(artifact_value)
+        manifest = load_verified_backup_manifest(artifact, key)
+        report = drill_result_from_json(Path(report_value).read_bytes())
+        report.verify(key)
+        if (
+            manifest.backend != "postgres"
+            or report.backup_id != manifest.backup_id
+            or report.key_id != manifest.key_id
+            or report.data_digest != manifest.payload_sha256
+            or not report.industrial_gate_closing
+        ):
+            return invalid
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        "backup_restore_dr",
+        requirement,
+        "signed PostgreSQL restore drill verified",
+    )
+
+
+def _principal_tenant_acl_gate(profile: str, backend: str) -> dict[str, Any]:
+    """Report the G002 contract without disclosing registry configuration.
+
+    Readiness is an operator-facing diagnostic, so an invalid registry must
+    fail closed but must not echo JSON, credential identifiers, subjects, or
+    parser detail.  The HTTP/CLI/MCP runtime remains responsible for its
+    stricter startup-time validation and authentication behavior.
+    """
+
+    try:
+        registry = PrincipalRegistry.from_environment()
+    except PrincipalRegistryError:
+        return {
+            "id": "principal_tenant_acl",
+            "status": "fail",
+            "required": True,
+            "requirement": "Authenticated principal and tenant authorization across every entry point.",
+            "next_goal": "G002-principal-acl",
+            "evidence": "principal registry invalid",
+        }
+
+    if registry is None:
+        evidence = "principal registry missing"
+    elif profile != "production" or backend != "postgres":
+        evidence = "principal registry configured; production postgres required"
+    else:
+        return {
+            "id": "principal_tenant_acl",
+            "status": "pass",
+            "required": True,
+            "requirement": "Authenticated principal and tenant authorization across every entry point.",
+            "next_goal": "G002-principal-acl",
+            "evidence": "principal registry configured",
+        }
+
+    return {
+        "id": "principal_tenant_acl",
+        "status": "fail",
+        "required": True,
+        "requirement": "Authenticated principal and tenant authorization across every entry point.",
+        "next_goal": "G002-principal-acl",
+        "evidence": evidence,
+    }
+
+
+def _operations_slo_gate() -> dict[str, Any]:
+    requirement = "Fail-fast production entry, probes, telemetry, alerts, and SLO evidence."
+    report_value = os.environ.get("MEMPLEX_G006_OPERATIONS_REPORT")
+    if report_value is None:
+        return _blocked_industrial_gate("operations_slo", requirement, "G006-slo")
+    invalid = {
+        "id": "operations_slo",
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": "G006-slo",
+        "evidence": "signed operations SLO evidence invalid",
+    }
+    if type(report_value) is not str or not report_value.strip():
+        return invalid
+    try:
+        from memplex.operations import (
+            alert_rules_sha256,
+            load_operations_report,
+            load_operations_signing_key,
+        )
+
+        report = load_operations_report(Path(report_value))
+        report.verify(load_operations_signing_key())
+        if (
+            report.alert_rules_sha256 != alert_rules_sha256()
+            or not report.industrial_gate_closing
+        ):
+            return invalid
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        "operations_slo",
+        requirement,
+        "signed measured operations SLO report verified",
+    )
+
+
+def _release_supply_chain_gate() -> dict[str, Any]:
+    requirement = "Reproducible signed artifacts and clean registry installation gates."
+    bundle_value = os.environ.get("MEMPLEX_G007_RELEASE_BUNDLE")
+    evidence_value = os.environ.get("MEMPLEX_G007_RELEASE_EVIDENCE")
+    key_value = os.environ.get("MEMPLEX_RELEASE_EVIDENCE_KEY")
+    if bundle_value is None and evidence_value is None and key_value is None:
+        return _blocked_industrial_gate("release_supply_chain", requirement, "G007")
+    invalid = {
+        "id": "release_supply_chain",
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": "G007",
+        "evidence": "signed release supply-chain evidence invalid",
+    }
+    if any(type(value) is not str or not value.strip() for value in (
+        bundle_value,
+        evidence_value,
+        key_value,
+    )):
+        return invalid
+    try:
+        from importlib.metadata import version
+
+        from memplex.release import read_release_evidence_file, verify_release_readiness_evidence
+
+        if len(key_value) != 64:
+            return invalid
+        signing_key = bytes.fromhex(key_value)
+        verify_release_readiness_evidence(
+            Path(bundle_value),
+            read_release_evidence_file(Path(evidence_value)),
+            signing_key=signing_key,
+            expected_version=version("memplex"),
+        )
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        "release_supply_chain",
+        requirement,
+        "signed immutable release bundle verified",
+    )
+
+
+def _four_host_e2e_gate() -> dict[str, Any]:
+    requirement = "Real Codex, Claude Code, OpenClaw, and Hermes lifecycle matrix."
+    report_value = os.environ.get("MEMPLEX_G008_HOST_LIFECYCLE_REPORT")
+    key_value = os.environ.get("MEMPLEX_HOST_LIFECYCLE_HMAC_KEY")
+    if report_value is None and key_value is None:
+        return _blocked_industrial_gate("four_host_e2e", requirement, "G008")
+    invalid = {
+        "id": "four_host_e2e",
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": "G008",
+        "evidence": "signed four-host lifecycle evidence invalid",
+    }
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (report_value, key_value)
+    ):
+        return invalid
+    try:
+        from importlib.metadata import version
+
+        from memplex.host_lifecycle import read_host_lifecycle_evidence
+
+        if len(key_value) != 64:
+            return invalid
+        signing_key = bytes.fromhex(key_value)
+        evidence = read_host_lifecycle_evidence(Path(report_value))
+        evidence.verify(signing_key, expected_version=version("memplex"))
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        "four_host_e2e",
+        requirement,
+        "signed real four-host lifecycle matrix verified",
+    )
+
+
+def _capacity_chaos_gate() -> dict[str, Any]:
+    requirement = "Production-scale load, soak, chaos, and independent final review."
+    report_value = os.environ.get("MEMPLEX_G009_CAPACITY_CHAOS_REPORT")
+    key_value = os.environ.get("MEMPLEX_CAPACITY_CHAOS_HMAC_KEY")
+    if report_value is None and key_value is None:
+        return _blocked_industrial_gate("capacity_chaos", requirement, "G009")
+    invalid = {
+        "id": "capacity_chaos",
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": "G009",
+        "evidence": "signed capacity and chaos evidence invalid",
+    }
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (report_value, key_value)
+    ):
+        return invalid
+    try:
+        from importlib.metadata import version
+
+        from memplex.capacity_chaos import (
+            load_capacity_chaos_signing_key,
+            read_capacity_chaos_evidence,
+        )
+
+        report = read_capacity_chaos_evidence(Path(report_value))
+        report.verify(
+            load_capacity_chaos_signing_key(),
+            expected_version=version("memplex"),
+        )
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        "capacity_chaos",
+        requirement,
+        "signed production-scale capacity and chaos evidence verified",
+    )
+
+
+def industrial_readiness_report(config: MemplexConfig) -> dict[str, Any]:
+    """Return the fail-closed industrial readiness contract and gate state."""
+
+    profile, backend = normalize_deployment_contract(config)
+    split_postgres_dsn_configured = (
+        profile == "production"
+        and backend == "postgres"
+        and type(config.storage.path) is str
+        and bool(config.storage.path.strip())
+        and type(config.storage.migration_dsn) is str
+        and bool(config.storage.migration_dsn.strip())
+    )
+    storage_evidence = (
+        "storage.backend=postgres; application and migration DSNs configured"
+        if split_postgres_dsn_configured
+        else "storage.backend=%s; production requires postgres plus application and migration DSNs"
+        % backend
+    )
+    gates: list[dict[str, Any]] = [
+        {
+            "id": "production_profile",
+            "status": "pass" if profile == "production" else "fail",
+            "required": True,
+            "evidence": f"deployment.profile={profile}",
+        },
+        {
+            "id": "production_storage",
+            "status": "pass" if split_postgres_dsn_configured else "fail",
+            "required": True,
+            "evidence": storage_evidence,
+        },
+        _principal_tenant_acl_gate(profile, backend),
+    ]
+    gates.extend(
+        _completed_industrial_gate(gate_id, requirement, evidence)
+        for gate_id, requirement, evidence in _INDUSTRIAL_COMPLETED_GATES
+    )
+    gates.append(_backup_restore_dr_gate())
+    gates.append(_operations_slo_gate())
+    gates.append(_release_supply_chain_gate())
+    gates.append(_four_host_e2e_gate())
+    gates.append(_capacity_chaos_gate())
+    gates.extend(
+        _blocked_industrial_gate(gate_id, requirement, next_goal)
+        for gate_id, requirement, next_goal in _INDUSTRIAL_BLOCKED_GATES
+        if gate_id not in {"release_supply_chain", "four_host_e2e", "capacity_chaos"}
+    )
+
+    counts = {
+        "passed": sum(1 for gate in gates if gate["status"] == "pass"),
+        "failed": sum(1 for gate in gates if gate["status"] == "fail"),
+        "blocked": sum(1 for gate in gates if gate["status"] == "blocked"),
+    }
+    ready = all(gate["status"] == "pass" for gate in gates)
+    return {
+        "schema_version": 1,
+        "status": "ready" if ready else "not_ready",
+        "ready": ready,
+        "maturity": "industrial" if ready else "developer_preview",
+        "deployment_profile": profile,
+        "production_topology": {
+            "application": "one_or_more_stateless_memplex_services",
+            "storage_backend": "postgres",
+            "lite": {
+                "production_supported": False,
+                "max_processes": 1,
+                "purpose": "single-process local development and tests",
+            },
+        },
+        "summary": {**counts, "total": len(gates)},
+        "blocking_gate_ids": [gate["id"] for gate in gates if gate["status"] != "pass"],
+        "gates": gates,
+        "boundary": (
+            "Unit and integration test counts do not establish industrial readiness; "
+            "every required gate needs machine evidence."
+        ),
+    }
+
+
+def migration_verification_report(store: Any) -> dict[str, Any]:
+    """Describe an already-ready local PostgreSQL store without attesting it.
+
+    The report is deliberately an unsigned convenience diagnostic.  It does
+    not open a service, issue synchronization calls, or substitute for the
+    independent industrial-readiness evidence required by later goals.
+    """
+    from memplex.storage import _unwrap_postgres_for_migration
+    from memplex.storage.migrations import discover_migrations
+    from memplex.storage.pool import validate_ready_postgres_pool
+
+    local = _unwrap_postgres_for_migration(store)
+    try:
+        ready_pool = validate_ready_postgres_pool(getattr(local, "_ready_pool", None))
+    except Exception as exc:
+        _ = exc
+        raise ValueError("PostgreSQL store has no verified storage readiness seal") from None
+    target = getattr(ready_pool, "target", None)
+    request = getattr(ready_pool, "request", None)
+    capability = getattr(ready_pool, "status", None)
+    database = getattr(target, "database", None)
+    schema = getattr(target, "schema", None)
+    capability_state = getattr(capability, "state", None)
+    capability_dim = getattr(capability, "dim", None)
+    request_policy = getattr(request, "policy", None)
+    if (
+        type(database) is not str
+        or not database
+        or type(schema) is not str
+        or not schema
+        or capability_state not in {"ready", "degraded", "disabled"}
+        or type(capability_dim) is not int
+        or request_policy not in {"required", "best_effort", "disabled"}
+    ):
+        raise ValueError("PostgreSQL store has no verified storage readiness seal")
+    known_version = len(discover_migrations())
+    return {
+        "schema_version": 1,
+        "signed": False,
+        "local_diagnostic_only": True,
+        "industrial_gate_closing": False,
+        "status": "diagnostic_only",
+        "schema": {
+            "status": "verified_by_ready_pool",
+            "database": database,
+            "schema": schema,
+        },
+        "ledger": {
+            "status": "verified_by_ready_pool",
+            "current_version": known_version,
+            "known_version": known_version,
+        },
+        "capability": {
+            "state": capability_state,
+            "dim": capability_dim,
+        },
+        "command": {
+            "schema_version": 1,
+            "surface": "memplex storage migration",
+            "version": "v1",
+        },
+        "test_references": [
+            "tests/test_storage_migrations.py",
+            "tests/test_cli_migrations.py",
+            "tests/test_industrial_readiness.py",
+        ],
+        "limitations": [
+            "本地 unsigned 诊断不能关闭 industrial readiness gate。",
+            "报告不包含 DSN、token、SQL、绑定参数或业务 payload。",
+        ],
+    }
+
 PRIVATE_CORPUS_PATTERNS = (
     ".codex",
     ".agents",
@@ -84,6 +552,62 @@ def setup_profile(name: Optional[str]) -> Optional[dict[str, Any]]:
     return {"name": name, **SETUP_PROFILES[name]}
 
 
+_REMOTE_EMBEDDING_PREFIXES = ("hf:", "openai:", "anthropic:")
+
+
+def apply_profile(config: MemplexConfig, name: str) -> dict[str, Any]:
+    """Apply a setup profile's concrete settings to *config* in place.
+
+    Profile keys that map onto a real :class:`MemplexConfig` field are
+    written into *config*:
+
+    - ``remote_embedding_default=False`` resets a remote embedding model
+      (``hf:``/``openai:``/``anthropic:`` prefix) back to the local
+      ``"default"`` so the profile's offline boundary actually holds.
+    - ``recommended_token_budget`` sets
+      ``config.retrieval.default_max_tokens``.
+
+    Keys with no config counterpart today (``auto_recall``,
+    ``auto_capture``, ``review_required``, ``recommended_top_k``) are
+    returned under ``declarative`` for the caller (CLI setup / agent
+    runtime) to honour; they are not silently dropped.
+
+    Returns a report dict::
+
+        {
+            "profile": <profile dict>,
+            "applied": {"<dotted config path>": <new value>, ...},
+            "declarative": {"<key>": <value>, ...},
+        }
+
+    Raises ``ValueError`` for an unknown profile name.
+    """
+
+    profile = setup_profile(name)
+    if profile is None:
+        raise ValueError("apply_profile requires a profile name.")
+
+    applied: dict[str, Any] = {}
+    declarative: dict[str, Any] = {}
+
+    if profile.get("remote_embedding_default") is False:
+        model = config.embedding.model
+        if model.startswith(_REMOTE_EMBEDDING_PREFIXES):
+            config.embedding.model = "default"
+            applied["embedding.model"] = "default"
+
+    token_budget = profile.get("recommended_token_budget")
+    if token_budget is not None:
+        config.retrieval.default_max_tokens = int(token_budget)
+        applied["retrieval.default_max_tokens"] = config.retrieval.default_max_tokens
+
+    for key in ("auto_recall", "auto_capture", "review_required", "recommended_top_k"):
+        if key in profile:
+            declarative[key] = profile[key]
+
+    return {"profile": profile, "applied": applied, "declarative": declarative}
+
+
 def scope_catalog() -> dict[str, Any]:
     """Return the visibility-first scope vocabulary."""
 
@@ -103,29 +627,110 @@ def scope_explain(
 ) -> dict[str, Any]:
     """Explain the namespace metadata a runtime will use."""
 
-    project = str(Path(project_path or Path.cwd()).resolve())
-    user = user_id or "default"
+    from memplex.adapters.agent_runtime import describe_memory_scope
+
+    contract = describe_memory_scope(
+        agent=agent,
+        user_id=user_id,
+        session_id=session_id,
+        project_path=project_path,
+        storage_namespace=storage_namespace,
+    )
     return {
-        "agent": agent,
+        **contract,
         "scope_boundary": "Visibility-first metadata projection; not an ACL engine; enforcement remains in runtime/store filters.",
-        "read_visibility": ["agent", "user", "session", "project", "storage_namespace"],
-        "write_visibility": ["agent", "user", "session", "project", "storage_namespace"],
-        "namespace_filter": {
-            "memplex_agent": agent,
-            "memplex_user_id": user,
-            "memplex_session_id": session_id or "default",
-            "memplex_project_path": project,
-            "memplex_storage_namespace": storage_namespace,
-        },
+        "read_visibility": contract["visibility"]["read_order"],
+        "write_visibility": contract["visibility"]["supported"],
+        # Compatibility alias retained for callers that predate the OR-ed
+        # read_namespace_filters contract.
+        "namespace_filter": contract["write_namespace"],
         "catalog": SCOPE_DESCRIPTIONS,
     }
 
 
-def scope_preview(service, namespace_filter: dict[str, str], *, limit: int = 10) -> dict[str, Any]:
-    """Count and sample memories matching a namespace filter."""
+def run_agent_diagnostics(
+    service,
+    *,
+    agent: str = "codex",
+    target_dir: Optional[str | Path] = None,
+    user_id: Optional[str] = None,
+    session_id: str = "default",
+    project_path: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """Return one read-only integration snapshot for an agent host."""
+
+    from memplex.adapters.agent_installer import inspect_agent_installation
+    from memplex.adapters.agent_runtime import (
+        DEFAULT_MEMORY_VISIBILITY,
+        MEMORY_VISIBILITIES,
+        get_agent_manifest,
+    )
+
+    manifest = get_agent_manifest(agent)
+    installation = inspect_agent_installation(manifest["name"], target_dir=target_dir)
+    installed_identity = installation["identity"]
+    resolved_user = user_id or installed_identity.get("user_id")
+    resolved_project = project_path or installed_identity.get("project_path")
+    if user_id is not None or project_path is not None:
+        identity_source = "arguments"
+    elif installed_identity.get("user_id") or installed_identity.get("project_path"):
+        identity_source = "installed"
+    else:
+        identity_source = "runtime_default"
+
+    configured_visibility = str(
+        installation.get("configured_visibility") or DEFAULT_MEMORY_VISIBILITY
+    ).lower()
+    visibility_fallback = configured_visibility not in MEMORY_VISIBILITIES
+    effective_visibility = (
+        DEFAULT_MEMORY_VISIBILITY if visibility_fallback else configured_visibility
+    )
+    scope = scope_explain(
+        agent=manifest["name"],
+        user_id=resolved_user,
+        session_id=session_id,
+        project_path=str(resolved_project) if resolved_project is not None else None,
+        storage_namespace=service.storage_namespace(),
+    )
+    identity = {**scope["identity"], "source": identity_source}
+    return {
+        "schema_version": 1,
+        "selected_host": manifest["name"],
+        "manifest": manifest,
+        "identity": identity,
+        "workspace": {
+            "workspace_id": identity["workspace_id"],
+            "project_path": identity["project_path"],
+            "storage_namespace": identity["storage_namespace"],
+        },
+        "visibility": {
+            "configured": configured_visibility,
+            "effective": effective_visibility,
+            "default": DEFAULT_MEMORY_VISIBILITY,
+            "supported": sorted(MEMORY_VISIBILITIES),
+            "fallback_applied": visibility_fallback,
+        },
+        "scope": scope,
+        "paths": installation["paths"],
+        "managed_state": installation["install_state"],
+        "install_state": installation,
+    }
+
+
+def scope_preview(
+    service,
+    namespace_filter: dict[str, Any] | list[dict[str, Any]],
+    *,
+    limit: int = 10,
+    scan_limit: int = 1_000,
+) -> dict[str, Any]:
+    """Count and sample a bounded window without computing a corpus total."""
+
+    selected_limit = min(100, max(0, int(limit)))
+    selected_scan_limit = min(1_000, max(1, int(scan_limit)))
 
     try:
-        funcs = service.store.list_functions(limit=100000)
+        funcs = service.store.list_functions(limit=selected_scan_limit)
     except Exception as exc:
         return {
             "status": "error",
@@ -133,10 +738,11 @@ def scope_preview(service, namespace_filter: dict[str, str], *, limit: int = 10)
             "namespace_filter": namespace_filter,
         }
 
+    filters = namespace_filter if isinstance(namespace_filter, list) else [namespace_filter]
     matches = []
     for func in funcs:
         attrs = getattr(func, "attributes", {}) or {}
-        if all(attrs.get(key) == value for key, value in namespace_filter.items()):
+        if any(all(attrs.get(key) == value for key, value in branch.items()) for branch in filters):
             matches.append(
                 {
                     "id": func.id,
@@ -149,10 +755,15 @@ def scope_preview(service, namespace_filter: dict[str, str], *, limit: int = 10)
     return {
         "status": "ok",
         "boundary": "Preview only; does not grant or change access.",
+        "count_boundary": "Counts describe only the bounded scan window, not the corpus total.",
         "namespace_filter": namespace_filter,
-        "total_functions": len(funcs),
-        "matching": len(matches),
-        "sample": matches[:limit],
+        "filter_mode": "or" if len(filters) > 1 else "single",
+        "scan_limit": selected_scan_limit,
+        "scanned_functions": len(funcs),
+        "scan_limit_reached": len(funcs) >= selected_scan_limit,
+        "matched_in_scan": len(matches),
+        "sample_limit": selected_limit,
+        "sample": matches[:selected_limit],
     }
 
 
@@ -300,9 +911,16 @@ def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[st
     manifest = load_corpus_manifest(path)
     root: Path = manifest["root"]
     indexed: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     for item in preview["included"]:
         source_path = root / item["path"]
-        text = source_path.read_text(encoding="utf-8")
+        try:
+            text = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # A single unreadable/non-UTF-8 file must not abort the whole index.
+            logger.warning("corpus_index: skipping unreadable file %s: %s", item["path"], exc)
+            skipped.append({"path": item["path"], "reason": str(exc)})
+            continue
         payload = (
             "Canonical Memplex corpus source.\n"
             f"Corpus: {manifest['name']}\n"
@@ -331,6 +949,8 @@ def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[st
         "boundary": "Canonical sources were indexed as read-only, reviewable memory; source files were not mutated.",
         "indexed_count": len(indexed),
         "indexed": indexed,
+        "skipped_count": len(skipped),
+        "skipped": skipped,
         "denied_count": preview["denied_count"],
         "denied": preview["denied"],
     }
@@ -379,6 +999,10 @@ def run_doctor(
     agent: str = "codex",
     profile: Optional[str] = None,
     smoke: bool = False,
+    target_dir: Optional[str | Path] = None,
+    user_id: Optional[str] = None,
+    session_id: str = "default",
+    project_path: Optional[str | Path] = None,
 ) -> dict[str, Any]:
     """Run productized readiness checks."""
 
@@ -394,6 +1018,7 @@ def run_doctor(
         }
     )
 
+    diagnostics: Optional[dict[str, Any]] = None
     try:
         manifest = get_agent_manifest(agent)
         checks.append(
@@ -402,13 +1027,52 @@ def run_doctor(
                 "status": "pass",
                 "details": {
                     "agent": manifest["name"],
-                    "manifest_version": manifest.get("version"),
-                    "hooks": sorted(manifest.get("hooks", {}).keys()),
+                    "schema_version": manifest["schema_version"],
+                    "hook_events": manifest["hook_events"],
+                    "integration_modes": manifest["integration_modes"],
+                    "tools": manifest["tools"],
+                    "memory_contract": manifest["memory_contract"],
                 },
             }
         )
     except Exception as exc:
         checks.append({"name": "agent_manifest", "status": "fail", "error": str(exc)})
+    else:
+        try:
+            diagnostics = run_agent_diagnostics(
+                service,
+                agent=agent,
+                target_dir=target_dir,
+                user_id=user_id,
+                session_id=session_id,
+                project_path=project_path,
+            )
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": "agent_installation",
+                    "status": "fail",
+                    "error": str(exc),
+                }
+            )
+        else:
+            installation = diagnostics["install_state"]
+            checks.append(
+                {
+                    "name": "agent_installation",
+                    "status": "pass" if installation["status"] == "healthy" else "warning",
+                    "details": installation,
+                }
+            )
+            checks.append(
+                {
+                    "name": "memory_scope_contract",
+                    "status": "warning"
+                    if diagnostics["identity"]["user_id"] == "default"
+                    else "pass",
+                    "details": diagnostics["scope"],
+                }
+            )
 
     if profile is not None:
         checks.append(
@@ -469,7 +1133,7 @@ def run_doctor(
     if sync_info.get("enabled"):
         sse_subs = sync_info.get("sse_subscribers", 0)
         push_fails = sync_info.get("push_failures", 0)
-        pending = sync_info.get("pending_push_futures", 0)
+        pending = sync_info.get("pending_push_tasks", 0)
         advice: list = []
         if sse_subs > 400:
             advice.append(
@@ -493,7 +1157,7 @@ def run_doctor(
                 "details": {
                     "sse_subscribers": sse_subs,
                     "push_failures": push_fails,
-                    "pending_push_futures": pending,
+                    "pending_push_tasks": pending,
                     "advice": advice,
                 },
             }
@@ -505,6 +1169,7 @@ def run_doctor(
         "status": status,
         "agent": agent,
         "profile": setup_profile(profile),
+        "agent_diagnostics": diagnostics,
         "checks": checks,
         "next_steps": []
         if not failed

@@ -26,9 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Wikilink pattern
-_WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-
 
 class DualIndexSearch:
     """Hybrid FTS + vector search over wiki pages.
@@ -39,15 +36,19 @@ class DualIndexSearch:
         Root directory for wiki files.
     embedding_service:
         EmbeddingService for generating and comparing vector embeddings.
+    vector_threshold:
+        Minimum cosine similarity for a vector-search hit to be kept.
     """
 
     def __init__(
         self,
         wiki_dir: Path,
         embedding_service: EmbeddingService,
+        vector_threshold: float = 0.1,
     ) -> None:
         self.wiki_dir = wiki_dir
         self._embedding = embedding_service
+        self.vector_threshold = vector_threshold
 
         # In-memory FTS index: page_id -> content (lowercased)
         self._fts_index: Dict[str, str] = {}
@@ -75,6 +76,7 @@ class DualIndexSearch:
             logger.warning(
                 "Failed to embed page %s, skipping vector index",
                 page.page_id,
+                exc_info=True,
             )
 
     def search(self, query: str, top_k: int = 10) -> List[SearchResult]:
@@ -117,15 +119,17 @@ class DualIndexSearch:
             logger.info("No entities directory at %s, index empty", entities_dir)
             return
 
+        page_count = 0
         for md_file in entities_dir.glob("*.md"):
             page_id = md_file.stem
             content = md_file.read_text(encoding="utf-8")
             page = WikiPage(page_id=page_id, content=content)
             self.add_page(page)
+            page_count += 1
 
         logger.info(
             "Rebuilt index: %d pages (fts=%d, vector=%d)",
-            len(self._fts_index),
+            page_count,
             len(self._fts_index),
             len(self._vector_index),
         )
@@ -190,15 +194,20 @@ class DualIndexSearch:
         """Keyword search over indexed page content.
 
         Simple TF-based scoring: count of query word occurrences.
+        Terms are matched on word boundaries so that e.g. ``ai`` does
+        not match inside ``said``.
         """
         query_lower = query.lower()
         query_terms = set(query_lower.split())
+        term_patterns = {
+            term: re.compile(r"\b" + re.escape(term) + r"\b") for term in query_terms
+        }
 
         results: List[SearchResult] = []
         for page_id, content in self._fts_index.items():
             score = 0.0
             for term in query_terms:
-                count = content.count(term)
+                count = len(term_patterns[term].findall(content))
                 if count > 0:
                     score += min(count / 10.0, 1.0)
             if score > 0:
@@ -228,13 +237,13 @@ class DualIndexSearch:
         try:
             query_vector = self._embedding.embed(query)
         except Exception:
-            logger.warning("Failed to embed query, skipping vector search")
+            logger.warning("Failed to embed query, skipping vector search", exc_info=True)
             return []
 
         results: List[SearchResult] = []
         for page_id, doc_vector in self._vector_index.items():
             similarity = self._cosine_similarity(query_vector, doc_vector)
-            if similarity > 0.1:  # Minimum relevance threshold
+            if similarity > self.vector_threshold:  # Minimum relevance threshold
                 content = self._fts_index.get(page_id, "")
                 summary = self._extract_summary(content)
                 results.append(

@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from memplex.core.associator.domain_classifier import DomainClassifier
@@ -33,23 +33,27 @@ from memplex.core.extractors.vision_mapper import VisionMapper
 from memplex.core.handlers.clipboard import ClipboardHandler
 from memplex.core.handlers.file_handler import FileHandler
 from memplex.core.handlers.url_handler import URLHandler
+from memplex.intent import detect_memory_type
 from memplex.models import (
     ExtractedData,
-    FieldValue,
+    Fact,
     Function,
     GraphData,
+    Preference,
     SourceDocument,
 )
 from memplex.models.paragraph import ParagraphCollection
 from memplex.processing.function_builder import (
     build_functions_from_paragraphs as _build_functions_from_paragraphs,
 )
-from memplex.processing.function_builder import normalize_name as _normalize_name
+from memplex.processing.function_builder import normalize_name
 from memplex.processing.graph_builder import GraphBuilder, build_edges_rule_based
 from memplex.processing.merger.confidence_calculator import ConfidenceCalculator
 from memplex.processing.merger.conflict_resolver import ConflictResolver
 
 logger = logging.getLogger(__name__)
+
+_normalize_name = normalize_name
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -71,13 +75,17 @@ class CoreEngine:
 
     1. **Handler** -- acquire raw content from source type
     2. **Extractor** -- content -> L1 Paragraphs
-    3. **Paragraph -> Function** -- with multi-value ``FieldValue`` fields
-    4. **DomainClassifier** -- assign domain
-    5. **RefLinker** -- resolve cross-references
-    6. **EntityAligner** -- deduplicate/merge
-    7. **ConflictResolver** -- detect conflicts
-    8. **ConfidenceCalculator** -- compute confidence
-    9. **GraphBuilder** -- build relationship edges
+    3. **Vision/image** -- map pre-extracted vision data to Functions
+    4. **Paragraph -> Function** -- with multi-value ``FieldValue`` fields
+    5. **DomainClassifier** -- assign domain
+    6. **RefLinker** -- resolve cross-references
+    7. **ConflictResolver** -- detect conflicts (before dedup so that
+       same-name Functions with differing conditions are flagged with
+       ``needs_review`` instead of being silently merged)
+    8. **EntityAligner** -- deduplicate/merge (conflicted Functions are
+       kept separate)
+    9. **ConfidenceCalculator** -- compute confidence
+    10. **GraphBuilder** -- build relationship edges
 
     Parameters
     ----------
@@ -167,14 +175,28 @@ class CoreEngine:
                 except OSError:
                     pass
 
-        # Step 4: Paragraphs -> Functions
-        functions = _build_functions_from_paragraphs(paragraphs, source)
+        # Step 4: Paragraphs -> memory nodes.  Paragraphs whose intent
+        # classifies as fact / preference (memplex.intent.detect) produce
+        # Fact / Preference nodes; everything else produces Functions
+        # (previous behaviour, including observation-intent text).
+        facts: List[Fact] = []
+        preferences: List[Preference] = []
+        func_paragraphs = ParagraphCollection()
+        for para in paragraphs.paragraphs:
+            intent = detect_memory_type(para.raw_text or "")
+            if intent == "fact":
+                facts.append(self._build_fact_from_paragraph(para, source))
+            elif intent == "preference":
+                preferences.append(self._build_preference_from_paragraph(para, source))
+            else:
+                func_paragraphs.add(para)
+        functions = _build_functions_from_paragraphs(func_paragraphs, source)
 
         # Merge vision/image functions
         functions.extend(vision_functions)
         functions.extend(image_functions)
 
-        if not functions:
+        if not functions and not facts and not preferences:
             return ExtractedData(
                 functions=[],
                 graph=GraphData(nodes=[], edges=[]),
@@ -189,24 +211,20 @@ class CoreEngine:
         if text:
             refs = self.ref_linker.extract_references(text)
             for func in functions:
-                func.cross_references = refs
+                # Each Function gets its own copy -- assigning the same list
+                # object would make later per-function mutations leak across
+                # all Functions.
+                func.cross_references = list(refs)
 
-        # Step 7: EntityAligner -- deduplicate/merge
-        functions = self._deduplicate_functions(functions)
+        # Step 7: ConflictResolver -- detect conflicts BEFORE dedup so that
+        # same-name Functions with differing conditions are flagged instead
+        # of being silently merged by the EntityAligner (v3.2 §1.6: all
+        # conflicting values are preserved and marked needs_review).
+        conflicted_ids = self._flag_conflicts(functions)
 
-        # Step 8: ConflictResolver -- detect conflicts
-        conflicts = self.conflict_resolver.detect_conflicts(functions)
-        for conflict in conflicts:
-            if conflict.needs_human:
-                for val in conflict.values:
-                    target_id = val.get("source", "")
-                    for func in functions:
-                        if (
-                            func.id == target_id
-                            or func.source_paragraphs
-                            and target_id in func.source_paragraphs
-                        ):
-                            func.needs_review = True
+        # Step 8: EntityAligner -- deduplicate/merge (conflicted Functions
+        # are excluded from merging so both values survive for review).
+        functions = self._deduplicate_functions(functions, skip_ids=conflicted_ids)
 
         # Step 9: ConfidenceCalculator -- compute confidence for each function
         for func in functions:
@@ -220,6 +238,8 @@ class CoreEngine:
             functions=functions,
             graph=graph,
             delta=False,
+            facts=facts,
+            preferences=preferences,
         )
 
     def extract_batch(self, sources: List[SourceDocument]) -> ExtractedData:
@@ -236,15 +256,22 @@ class CoreEngine:
             Merged extraction results from all sources.
         """
         all_functions: List[Function] = []
-        all_edges: list = []
+        all_facts: List[Fact] = []
+        all_preferences: List[Preference] = []
 
         for source in sources:
             extracted = self.extract(source)
             all_functions.extend(extracted.functions)
-            all_edges.extend(extracted.graph.edges)
+            all_facts.extend(extracted.facts)
+            all_preferences.extend(extracted.preferences)
+
+        # Detect cross-source conflicts before the batch-level dedup,
+        # otherwise same-name Functions from different sources would be
+        # silently merged (same reasoning as in ``extract``).
+        conflicted_ids = self._flag_conflicts(all_functions)
 
         # Deduplicate across batch
-        all_functions = self._deduplicate_functions(all_functions)
+        all_functions = self._deduplicate_functions(all_functions, skip_ids=conflicted_ids)
 
         # Rebuild graph with deduped functions
         graph = self._build_graph(all_functions)
@@ -253,6 +280,8 @@ class CoreEngine:
             functions=all_functions,
             graph=graph,
             delta=False,
+            facts=all_facts,
+            preferences=all_preferences,
         )
 
     # ════════════════════════════════════════════════════════════════
@@ -367,14 +396,99 @@ class CoreEngine:
         # All text goes through MarkdownExtractor (handles plain text too)
         return self.markdown_extractor.extract(text, source=source_hint)
 
-    def _deduplicate_functions(self, functions: List[Function]) -> List[Function]:
-        """Use EntityAligner to merge duplicate Functions."""
-        if len(functions) <= 1:
+    # ── Fact / Preference builders (intent-routed paragraphs) ──────
+
+    @staticmethod
+    def _build_fact_from_paragraph(para, source: SourceDocument) -> Fact:
+        """Build a Fact node from a fact-intent paragraph.
+
+        Subject/predicate/object are split on the first copula
+        (``" is "`` / ``" are "`` / ``"是"`` etc.).  When no copula is
+        present the paragraph text becomes the object under the generic
+        predicate ``"states"``.
+        """
+        raw = (para.raw_text or "").strip()
+        first_sentence = re.split(r"[。.!?！？\n]", raw, maxsplit=1)[0].strip() or raw
+        subject, predicate, obj = "", "states", first_sentence
+        for copula in (" is ", " are ", " means ", "是", "指的是", "定义为", "意味着"):
+            if copula in first_sentence:
+                head, _, tail = first_sentence.partition(copula)
+                subject, predicate, obj = head.strip(), copula.strip(), tail.strip()
+                break
+        content_hash = hashlib.sha256(raw.encode()).hexdigest()
+        name = para.section if para.section else raw[:50]
+        now = datetime.now(timezone.utc).isoformat()
+        return Fact(
+            id=f"fact_{content_hash[:16]}",
+            name=name,
+            subject=subject or name,
+            predicate=predicate,
+            object_=obj,
+            source_paragraphs=[para.id],
+            source_type=source.source_type,
+            content_hash=content_hash,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @staticmethod
+    def _build_preference_from_paragraph(para, source: SourceDocument) -> Preference:
+        """Build a Preference node from a preference-intent paragraph."""
+        raw = (para.raw_text or "").strip()
+        content_hash = hashlib.sha256(raw.encode()).hexdigest()
+        name = para.section if para.section else raw[:50]
+        now = datetime.now(timezone.utc).isoformat()
+        return Preference(
+            id=f"pref_{content_hash[:16]}",
+            name=name,
+            aspect=name,
+            preference=raw,
+            source_paragraphs=[para.id],
+            source_type=source.source_type,
+            content_hash=content_hash,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _flag_conflicts(self, functions: List[Function]) -> set:
+        """Detect conflicts and mark involved Functions ``needs_review``.
+
+        Returns the set of Function ids involved in a human-reviewable
+        conflict so the dedup step can keep them separate.
+        """
+        conflicted_ids: set = set()
+        conflicts = self.conflict_resolver.detect_conflicts(functions)
+        for conflict in conflicts:
+            if conflict.needs_human:
+                for val in conflict.values:
+                    target_id = val.get("source", "")
+                    for func in functions:
+                        if (
+                            func.id == target_id
+                            or func.source_paragraphs
+                            and target_id in func.source_paragraphs
+                        ):
+                            func.needs_review = True
+                            conflicted_ids.add(func.id)
+        return conflicted_ids
+
+    def _deduplicate_functions(
+        self, functions: List[Function], skip_ids: set | None = None
+    ) -> List[Function]:
+        """Use EntityAligner to merge duplicate Functions.
+
+        Functions whose id is in ``skip_ids`` (e.g. involved in a detected
+        conflict) are passed through unchanged and never merged.
+        """
+        skip_ids = skip_ids or set()
+        candidates = [f for f in functions if f.id not in skip_ids]
+        if len(candidates) <= 1:
             return functions
 
         # Build entity dicts for EntityAligner
         entity_dicts = [
-            {"id": f.id, "name": f.name, "name_normalized": f.name_normalized} for f in functions
+            {"id": f.id, "name": f.name, "name_normalized": f.name_normalized}
+            for f in candidates
         ]
 
         merge_groups = self.entity_aligner.find_merge_candidates(entity_dicts, threshold=0.9)
@@ -384,7 +498,7 @@ class CoreEngine:
 
         # Build merge map
         merge_map: dict = {}  # canonical_id -> list of Function
-        func_by_id: dict = {f.id: f for f in functions}
+        func_by_id: dict = {f.id: f for f in candidates}
         merged_ids: set = set()
 
         for group in merge_groups:
@@ -428,6 +542,9 @@ class CoreEngine:
             for sp in other.source_paragraphs:
                 if sp not in canonical.source_paragraphs:
                     canonical.source_paragraphs.append(sp)
+
+            # A merged Function inherits the review flag from any member.
+            canonical.needs_review = canonical.needs_review or other.needs_review
 
         return canonical
 

@@ -48,5 +48,6 @@ class QueryResult:
     scope: QueryScope
     latency_ms: int
     tokens_used: int = 0
+    max_tokens: int = 0
     truncated: bool = False
     explanation: Optional[Dict[str, Any]] = None

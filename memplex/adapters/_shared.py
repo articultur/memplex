@@ -6,9 +6,9 @@ module name) and exist to keep ``cli.py``, ``mcp_server.py``, and
 three need:
 
 - :func:`dataclass_to_dict` -- recursive dataclass/dict/list serializer
-  for JSON-friendly output (Enum/datetime leaves are NOT handled here;
-  callers that need those use the dedicated serializer in
-  ``http_api._dataclass_to_dict``).
+  for JSON-friendly output (``Enum`` leaves -> ``.value``, ``datetime``
+  -> isoformat). This is the canonical serializer for every adapter;
+  ``http_api`` imports it from here as ``_dataclass_to_dict``.
 - :func:`get_plugin_source_dir` -- resolve the bundled ``_plugin/`` dir
   (or the dev-mode ``plugin/`` dir) relative to the memplex package.
 - :func:`marketplace_json` -- the Claude Code marketplace descriptor.
@@ -19,8 +19,16 @@ a one-line change instead of a three-file hunt.
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
+
+# Hard trust-boundary limits shared by every model-facing adapter.  These
+# live outside any one host integration so Codex, Claude Code, OpenClaw and
+# Hermes cannot drift onto different operational budgets.
+MAX_MODEL_SEARCH_RESULTS = 100
+MAX_MODEL_TOKEN_BUDGET = 32_000
+MAX_MODEL_SEARCH_CANDIDATES = 500
+MAX_MODEL_COLLECTION_RESULTS = 1_000
+MAX_MODEL_SCAN_ITEMS = 1_000
 
 
 def dataclass_to_dict(obj):

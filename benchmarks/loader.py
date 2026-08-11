@@ -255,11 +255,57 @@ def _generate_locomo_synthetic(path: Path) -> Path:
     return path
 
 
+def _generate_triviaqa_synthetic(path: Path) -> Path:
+    """Generate synthetic TriviaQA-like samples (question + answer aliases)."""
+    samples = [
+        {
+            "question_id": f"tc_{i}",
+            "question": question,
+            "answer": {"Value": value, "Aliases": aliases},
+            "search_results": {"web_results": []},
+        }
+        for i, (question, value, aliases) in enumerate(
+            [
+                (
+                    "Which planet is known as the Red Planet?",
+                    "Mars",
+                    ["Mars", "the Red Planet"],
+                ),
+                (
+                    "Who painted the Mona Lisa?",
+                    "Leonardo da Vinci",
+                    ["Leonardo da Vinci", "Da Vinci"],
+                ),
+                (
+                    "What is the chemical symbol for gold?",
+                    "Au",
+                    ["Au", "AU"],
+                ),
+                (
+                    "Which ocean is the deepest?",
+                    "Pacific Ocean",
+                    ["Pacific Ocean", "the Pacific"],
+                ),
+                (
+                    "Who wrote the play 'Romeo and Juliet'?",
+                    "William Shakespeare",
+                    ["William Shakespeare", "Shakespeare"],
+                ),
+            ],
+            start=1,
+        )
+    ]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(samples, fh, indent=2)
+    logger.info("Generated %d synthetic TriviaQA samples at %s", len(samples), path)
+    return path
+
+
 _SYNTHETIC_GENERATORS: Dict[str, callable] = {
     "popqa": _generate_popqa_synthetic,
     "hotpotqa": _generate_hotpotqa_synthetic,
     "nq": _generate_nq_synthetic,
-    "triviaqa": _generate_nq_synthetic,  # Reuse NQ format
+    "triviaqa": _generate_triviaqa_synthetic,
     "locomo": _generate_locomo_synthetic,
 }
 
@@ -306,9 +352,11 @@ def download_dataset(
 
     dataset_name = dataset_name.lower().strip()
 
-    # Check for existing file first
+    # Check for existing file first. Skipped when force_synthetic is set:
+    # ``--synthetic`` promises freshly generated data, and a stale cache
+    # (e.g. a previous HuggingFace download) would silently override it.
     expected_file = output_dir / f"{dataset_name}.json"
-    if expected_file.exists():
+    if expected_file.exists() and not force_synthetic:
         logger.info("Using cached dataset: %s", expected_file)
         return expected_file
 

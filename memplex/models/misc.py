@@ -15,11 +15,28 @@ _FUNC_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def validate_func_id(func_id: str) -> str:
+    if not isinstance(func_id, str):
+        raise ValueError("Function ID 必须是字符串")
+    # ``domain_`` is GraphBuilder's virtual-node namespace.  It must never
+    # become durable Function state, otherwise a graph edge can be confused
+    # with a real memory row.  This is deliberately case-sensitive to retain
+    # compatibility with pre-existing upper-case IDs.
+    if func_id.startswith("domain_"):
+        raise ValueError(f"Function ID 使用了保留的 domain_ 命名空间: {func_id!r}")
     if len(func_id) > MAX_FUNC_ID_LENGTH:
         raise ValueError(f"Function ID 过长: {len(func_id)} > {MAX_FUNC_ID_LENGTH}")
     if not _FUNC_ID_PATTERN.fullmatch(func_id):
         raise ValueError(f"Function ID 含非法字符: {func_id!r}")
     return func_id
+
+
+def validate_domain(domain: object) -> str | None:
+    """Validate the persisted Function domain contract."""
+    if domain is None:
+        return None
+    if type(domain) is not str:
+        raise ValueError("Function domain 必须是字符串或 None")
+    return domain
 
 
 # ── FieldValue (multi-value field entry) ────────────────────────
@@ -35,6 +52,43 @@ class FieldValue:
     created_at: Optional[datetime] = None
     status: str = "active"  # active | deprecated | disputed
 
+    def to_dict(self) -> Dict:
+        """Standard serialization covering every field.
+
+        This is the convergence target for the per-backend serializers
+        (lite / postgres / http_api), which historically drifted on
+        ``observation`` / ``created_at`` / ``status``.
+        """
+        return {
+            "desc": self.desc,
+            "sources": list(self.sources),
+            "source_method": self.source_method,
+            "weight": self.weight,
+            "observation": self.observation,
+            "created_at": (
+                self.created_at.isoformat()
+                if isinstance(self.created_at, datetime)
+                else self.created_at
+            ),
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "FieldValue":
+        """Inverse of :meth:`to_dict`; tolerant of missing keys."""
+        created_at = d.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        return cls(
+            desc=d.get("desc", ""),
+            sources=list(d.get("sources", [])),
+            source_method=d.get("source_method", "rule_based"),
+            weight=d.get("weight", 1.0),
+            observation=d.get("observation"),
+            created_at=created_at,
+            status=d.get("status", "active"),
+        )
+
 
 # ── Auxiliary types ─────────────────────────────────────────────
 
@@ -44,6 +98,11 @@ class ExtractedData:
     functions: list = field(default_factory=list)  # List[MemoryNode]
     graph: GraphData = field(default_factory=GraphData)
     delta: bool = False
+    # Fact / Preference nodes produced by intent classification of
+    # fact/preference paragraphs (CoreEngine.extract). Default empty so
+    # existing constructors stay source-compatible.
+    facts: list = field(default_factory=list)  # List[Fact]
+    preferences: list = field(default_factory=list)  # List[Preference]
 
 
 @dataclass

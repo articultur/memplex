@@ -9,13 +9,17 @@ The collector is enabled by calling ``attach()`` which registers its
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from memplex.core.hooks.hook_event import HookEvent
+from memplex.core.hooks.policy import (
+    RateLimiter,
+    summarize_tool_input,
+    tool_event_key,
+    tool_narrative,
+)
 from memplex.core.hooks.registry import HookRegistry, get_default_registry
 from memplex.models import Observation
 
@@ -29,15 +33,6 @@ if TYPE_CHECKING:
     from memplex.storage.base import MemoryStore
 
 logger = logging.getLogger(__name__)
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-
-def _hash_dict(d: dict) -> str:
-    """Deterministic MD5 of a dict's sorted JSON representation."""
-    import json
-
-    return hashlib.md5(json.dumps(d, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
 
 
 # ── ObservationCollector ─────────────────────────────────────────────────
@@ -74,15 +69,11 @@ class ObservationCollector:
         self._max_per_minute = max_per_minute
         self._session_id = session_id
 
-        # Rate-limiting window state
-        self._window_start = datetime.now(timezone.utc)
-        self._count_this_window = 0
+        # Rate-limiting (shared policy: fixed 1-minute window)
+        self._rate_limiter = RateLimiter(max_per_minute)
 
         # Deduplication: skip consecutive identical tool+input pairs
         self._last_event_key: Optional[str] = None
-
-        # Lock for all mutable state
-        self._lock = threading.RLock()
 
         # Currently attached registry (for detach)
         self._attached_registry: Optional[HookRegistry] = None
@@ -129,7 +120,7 @@ class ObservationCollector:
             return
 
         # 2. Deduplicate consecutive identical events
-        event_key = f"{tool_name}:{_hash_dict(tool_input)}"
+        event_key = tool_event_key(tool_name, tool_input)
         if event_key == self._last_event_key:
             return
         self._last_event_key = event_key
@@ -154,8 +145,12 @@ class ObservationCollector:
                     "tool_input_summary": self._summarize_input(tool_input),
                     "facts": [],
                     "concepts": [],
-                    "files_read": self._extract_file_paths(tool_input, tool_result, "read"),
-                    "files_modified": self._extract_file_paths(tool_input, tool_result, "modified"),
+                    "files_read": self._extract_file_paths(
+                        tool_input, tool_result, "read", tool_name
+                    ),
+                    "files_modified": self._extract_file_paths(
+                        tool_input, tool_result, "modified", tool_name
+                    ),
                     "functions_mentioned": [],
                 },
                 ensure_ascii=False,
@@ -173,70 +168,50 @@ class ObservationCollector:
             logger.warning("Failed to persist observation: %s", exc)
 
     # ── Extraction helpers ─────────────────────────────────────────────
+    # These delegate to memplex.core.hooks.policy, the single source of
+    # truth shared with the plugin hook-runner capture path.
 
     def _check_rate_limit(self) -> bool:
         """Return True if this event is within rate limit; otherwise drop."""
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            # Reset window if minute has passed
-            if (now - self._window_start).total_seconds() >= 60:
-                self._window_start = now
-                self._count_this_window = 0
-
-            if self._count_this_window >= self._max_per_minute:
-                return False
-            self._count_this_window += 1
-            return True
+        return self._rate_limiter.allow()
 
     def _extract_narrative(self, tool_name: str, tool_input: dict, tool_result: Any) -> str:
         """Generate a human-readable narrative from a tool execution."""
-        # Most useful tool patterns
-        if tool_name == "Read":
-            path = tool_input.get("file_path", "")
-            return f"[Read] {path}"
-        if tool_name == "Write" or tool_name == "Edit":
-            path = tool_input.get("file_path", "")
-            return f"[Write/Edit] {path}"
-        if tool_name == "Bash":
-            cmd = tool_input.get("command", "")[:60]
-            return f"[Bash] {cmd}"
-        if tool_name == "WebFetch":
-            url = tool_input.get("url", "")[:60]
-            return f"[WebFetch] {url}"
-        if tool_name == "Search":
-            query = tool_input.get("query", "")
-            return f"[Search] {query}"
-        return f"[{tool_name}]"
+        return tool_narrative(tool_name, tool_input, tool_result)
 
     def _summarize_input(self, tool_input: dict) -> str:
         """Create a one-line summary of tool input for Observation.tool_input_summary."""
-        if not tool_input:
-            return ""
-        # Pick the most important key
-        for key in ("file_path", "url", "query", "command", "name"):
-            if key in tool_input:
-                val = str(tool_input[key])
-                return f"{key}={val[:80]}"
-        # Fallback: first key
-        first_key = next(iter(tool_input), None)
-        if first_key:
-            return f"{first_key}={str(tool_input[first_key])[:80]}"
-        return ""
+        return summarize_tool_input(tool_input)
+
+    # Tools known to only read vs. only modify the file at ``file_path``.
+    _READ_ONLY_TOOLS = frozenset({"Read"})
+    _WRITE_TOOLS = frozenset({"Write", "Edit"})
 
     def _extract_file_paths(
         self,
         tool_input: dict,
         tool_result: Any,
         mode: str,
+        tool_name: str = "",
     ) -> List[str]:
         """Extract file paths touched by a tool (read or modified).
 
         This is a best-effort heuristic based on tool name and input keys.
+        Known read-only tools (Read) only contribute to ``mode="read"`` and
+        known writing tools (Write/Edit) only to ``mode="modified"``; other
+        tools keep the previous behavior of reporting ``file_path`` for both.
         """
         paths: List[str] = []
         # For Read/Write/Edit, check file_path
         if tool_input.get("file_path"):
-            paths.append(str(tool_input["file_path"]))
+            if tool_name in self._READ_ONLY_TOOLS:
+                if mode == "read":
+                    paths.append(str(tool_input["file_path"]))
+            elif tool_name in self._WRITE_TOOLS:
+                if mode == "modified":
+                    paths.append(str(tool_input["file_path"]))
+            else:
+                paths.append(str(tool_input["file_path"]))
         # For Bash, check for cp/mv/rm/ mkdir paths in command
         command = tool_input.get("command", "") or ""
         if command:

@@ -19,6 +19,8 @@ Usage::
     memplex agent install --agent all
     memplex agent uninstall --agent openclaw
     memplex unsetup          # Uninstall Claude Code plugin
+    memplex benchmark list   # List benchmark datasets (source checkout only)
+    memplex benchmark run --dataset locomo --synthetic --top-k 10
 
 Global options::
 
@@ -31,11 +33,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
 
@@ -49,6 +50,124 @@ def _make_service(config_path: Optional[str] = None):
 
     config = load_config(path=config_path)
     return MemplexService(config=config)
+
+
+class _AuthorizedService:
+    """Request-scoped service facade for a single CLI invocation.
+
+    CLI arguments are intentionally never consulted for identity.  The facade
+    injects the context established from the process environment into every
+    public service method that accepts ``authorization``.  This also keeps
+    higher-level CLI helpers (for example corpus commands) from accidentally
+    reintroducing an unscoped service call.
+    """
+
+    def __init__(self, service: Any, authorization: Any) -> None:
+        self._service = service
+        self._authorization = authorization
+
+    @property
+    def authorization(self) -> Any:
+        """Expose the adapter-established context to the agent runtime only."""
+        return self._authorization
+
+    @property
+    def store(self) -> Any:
+        scoped = getattr(self._service, "_store_for", None)
+        store = scoped(self._authorization) if callable(scoped) else self._service.store
+        return _AuthorizedStore(store, self._service, self._authorization)
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._service, name)
+        if not callable(attribute):
+            return attribute
+        try:
+            import inspect
+
+            accepts_authorization = "authorization" in inspect.signature(attribute).parameters
+        except (TypeError, ValueError):
+            accepts_authorization = False
+        if not accepts_authorization:
+            return attribute
+
+        def _bound(*args: Any, **kwargs: Any) -> Any:
+            if "authorization" in kwargs:
+                raise TypeError("CLI authorization is adapter-established and cannot be overridden")
+            return attribute(*args, authorization=self._authorization, **kwargs)
+
+        return _bound
+
+
+class _AuthorizedStore:
+    """Read-only visibility filter for legacy helpers that access ``store``.
+
+    The service already scopes its own public methods.  This small facade
+    closes the remaining adapter/product-helper escape hatch on Lite while
+    retaining the PostgreSQL authorized facade beneath it.
+    """
+
+    def __init__(self, store: Any, service: Any, authorization: Any) -> None:
+        self._store = store
+        self._service = service
+        self._authorization = authorization
+
+    def _visible(self, node: Any) -> Any:
+        predicate = getattr(self._service, "_is_node_visible", None)
+        if node is None or not callable(predicate) or not predicate(node, self._authorization):
+            return None
+        return node
+
+    def get(self, node_id: str) -> Any:
+        return self._visible(self._store.get(node_id))
+
+    def get_fact(self, node_id: str) -> Any:
+        getter = getattr(self._store, "get_fact", None)
+        return self._visible(getter(node_id)) if callable(getter) else None
+
+    def get_preference(self, node_id: str) -> Any:
+        getter = getattr(self._store, "get_preference", None)
+        return self._visible(getter(node_id)) if callable(getter) else None
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._store, name)
+        if not callable(attribute) or not name.startswith("list_"):
+            return attribute
+
+        def _filtered(*args: Any, **kwargs: Any) -> Any:
+            values = attribute(*args, **kwargs)
+            return [value for value in values if self._visible(value) is not None]
+
+        return _filtered
+
+
+def _cli_authorization(config_path: Optional[str] = None, *, agent_id: str = "cli"):
+    """Resolve the sole trusted identity source for CLI memory commands.
+
+    A configured principal registry is authoritative.  Production therefore
+    requires both that registry and an environment-held opaque credential;
+    legacy shared secrets deliberately cannot unlock this boundary.
+    """
+    from memplex.auth import local_development_context, resolve_environment_authorization
+    from memplex.config import load_config
+
+    config = load_config(path=config_path)
+    profile = str(getattr(config.deployment, "profile", "development")).strip().lower()
+    context = resolve_environment_authorization(
+        agent_id=agent_id,
+        session_id=os.environ.get("MEMPLEX_SESSION_ID", ""),
+        provenance={"transport": "cli"},
+        require_registry=profile == "production",
+    )
+    return context or local_development_context()
+
+
+def _make_authorized_service(
+    config_path: Optional[str] = None, *, agent_id: str = "cli"
+) -> tuple[Any, _AuthorizedService]:
+    """Authorize before constructing a service, then return its scoped facade."""
+    authorization = _cli_authorization(config_path, agent_id=agent_id)
+    service = _make_service(config_path)
+    return service, _AuthorizedService(service, authorization)
 
 
 def _fmt(data, output: str) -> str:
@@ -108,7 +227,7 @@ def _result_to_dict(result) -> dict:
 
 def cmd_query(args: argparse.Namespace) -> int:
     """Execute a memory query."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         result = svc.query(
             text=args.text,
@@ -126,6 +245,9 @@ def cmd_query(args: argparse.Namespace) -> int:
                     "relevance": round(r.relevance_score, 4),
                     "summary": r.summary,
                     "scope": r.domain,
+                    # Backfilled per-result by the service when max_tokens > 0;
+                    # otherwise fall back to the same summary-length formula.
+                    "est_tokens": r.token_estimate or (len(r.summary) // 4 + 1),
                 }
             )
 
@@ -134,6 +256,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
             "latency_ms": result.latency_ms,
             "tokens_used": result.tokens_used,
+            "max_tokens": result.max_tokens,
             "truncated": result.truncated,
             "results": out,
         }
@@ -147,12 +270,12 @@ def cmd_query(args: argparse.Namespace) -> int:
         print(_fmt(payload, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_write(args: argparse.Namespace) -> int:
     """Write new content into memory."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         if args.text:
             content = args.text
@@ -178,12 +301,41 @@ def cmd_write(args: argparse.Namespace) -> int:
         print(_fmt(out, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
+
+
+def cmd_observations(args: argparse.Namespace) -> int:
+    """List captured observation events with token estimates."""
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    try:
+        observations = svc.list_observations(
+            category=getattr(args, "category", None),
+            limit=getattr(args, "limit", 100),
+        )
+        out = []
+        for obs in observations:
+            summary = obs.context or obs.event or ""
+            out.append(
+                {
+                    "id": obs.id,
+                    "category": obs.category,
+                    "event": obs.event,
+                    "actor": obs.actor,
+                    "observed_at": obs.observed_at,
+                    # Same ~4 chars/token estimate as query/search results.
+                    "est_tokens": len(summary) // 4 + 1,
+                    "summary": summary[:200],
+                }
+            )
+        print(_fmt({"total": len(out), "observations": out}, args.output))
+        return 0
+    finally:
+        raw_service.stop()
 
 
 def cmd_get(args: argparse.Namespace) -> int:
     """Retrieve a single memory by ID."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         func = svc.get(args.memory_id)
         if func is None:
@@ -193,23 +345,23 @@ def cmd_get(args: argparse.Namespace) -> int:
         print(_fmt(_dataclass_to_dict(func), args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_delete(args: argparse.Namespace) -> int:
     """Delete a memory by ID."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         svc.delete(args.memory_id)
         print(_fmt({"status": "deleted", "id": args.memory_id}, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_feedback(args: argparse.Namespace) -> int:
     """Submit feedback for a memory field value."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         svc.submit_feedback(
             memory_id=args.memory_id,
@@ -231,81 +383,823 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         )
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_pending(args: argparse.Namespace) -> int:
     """List pending reviews."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         reviews = svc.get_pending_reviews()
         out = [_dataclass_to_dict(r) for r in reviews]
         print(_fmt({"total": len(out), "reviews": out}, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_compact(args: argparse.Namespace) -> int:
     """Run the compaction pipeline."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
+        is_local = getattr(raw_service, "_is_local_development_context", None)
+        if not callable(is_local) or not is_local(svc.authorization):
+            raise PermissionError(
+                "principal-scoped CLI compaction is unavailable; use an authorized maintenance worker"
+            )
         result = svc.compact(scope=getattr(args, "scope", "project"))
         out = _dataclass_to_dict(result)
         print(_fmt(out, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_health(args: argparse.Namespace) -> int:
-    """Health check."""
-    svc = _make_service(getattr(args, "config", None))
+    """Health check.
+
+    By default a ``warning`` status still exits 0 (backward compatible).
+    With ``--strict`` only ``healthy`` exits 0; anything else exits 1.
+    """
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         info = svc.health()
         print(_fmt(info, args.output))
-        return 0 if info.get("status") in {"healthy", "warning"} else 1
+        ok_statuses = {"healthy"} if getattr(args, "strict", False) else {"healthy", "warning"}
+        return 0 if info.get("status") in ok_statuses else 1
     finally:
-        svc.stop()
+        raw_service.stop()
+
+
+def cmd_readiness(args: argparse.Namespace) -> int:
+    """Print the fail-closed industrial readiness gate report."""
+
+    from memplex.config import load_config
+    from memplex.product import industrial_readiness_report
+
+    config = load_config(path=getattr(args, "config", None))
+    report = industrial_readiness_report(config)
+    print(_fmt(report, args.output))
+    if getattr(args, "strict", False) and not report["ready"]:
+        return 1
+    return 0
+
+
+def cmd_operations(args: argparse.Namespace) -> int:
+    """Run data-only operations/SLO inspection commands."""
+    from memplex.config import load_config
+    from memplex.operations import (
+        OperationsEvidenceError,
+        alert_rules_bytes,
+        alert_rules_sha256,
+        load_operations_report,
+        load_operations_signing_key,
+    )
+
+    action = getattr(args, "operations_command", None)
+    try:
+        if action == "status":
+            from memplex.product import industrial_readiness_report
+
+            report = industrial_readiness_report(
+                load_config(path=getattr(args, "config", None))
+            )
+            gate = next(item for item in report["gates"] if item["id"] == "operations_slo")
+            print(_fmt(gate, args.output))
+            return 0 if gate["status"] == "pass" else 1
+        if action == "verify-report":
+            report = load_operations_report(Path(args.report))
+            report.verify(load_operations_signing_key())
+            valid = (
+                report.alert_rules_sha256 == alert_rules_sha256()
+                and report.industrial_gate_closing
+            )
+            payload = {
+                "schema_version": 1,
+                "verified": valid,
+                "report_id": report.report_id,
+                "key_id": report.key_id,
+                "request_count": report.request_count,
+                "availability": report.availability,
+                "error_rate": report.error_rate,
+                "p95_latency_ms": report.p95_latency_ms,
+                "shutdown_drained": report.shutdown_drained,
+                "industrial_gate_closing": report.industrial_gate_closing,
+            }
+            print(_fmt(payload, args.output))
+            return 0 if valid else 1
+        if action == "alerts-check":
+            content = alert_rules_bytes()
+            count = content.count(b"      - alert:")
+            print(
+                _fmt(
+                    {
+                        "schema_version": 1,
+                        "verified": count == 8,
+                        "rule_count": count,
+                        "sha256": alert_rules_sha256(),
+                    },
+                    args.output,
+                )
+            )
+            return 0 if count == 8 else 1
+    except (OperationsEvidenceError, OSError, ValueError, TypeError):
+        print(_fmt({"error": "operations_evidence_invalid"}, args.output))
+        return 1
+    print(_fmt({"error": "operations_command_invalid"}, args.output))
+    return 1
+
+
+class _MigrationCommandError(RuntimeError):
+    """Operator-safe error boundary for PostgreSQL migration commands."""
+
+    def __init__(self, code: str, remediation: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.remediation = remediation
+
+
+def _migration_target_key(target: Any) -> tuple[Any, Any, Any, Any]:
+    """Compare only the server-resolved identity fields, never DSN text."""
+    from memplex.storage.migrations import PostgresTargetIdentity
+
+    if type(target) is not PostgresTargetIdentity:
+        raise _MigrationCommandError(
+            "postgres_target_invalid",
+            "确认迁移连接指向已解析的 PostgreSQL TCP 目标后重试。",
+        )
+
+    server_address = getattr(target, "server_address", None)
+    server_port = getattr(target, "server_port", None)
+    database = getattr(target, "database", None)
+    schema = getattr(target, "schema", None)
+    if (
+        type(server_address) is not str
+        or not server_address
+        or type(server_port) is not int
+        or not 1 <= server_port <= 65_535
+        or type(database) is not str
+        or not database
+        or type(schema) is not str
+        or not schema
+    ):
+        raise _MigrationCommandError(
+            "postgres_target_invalid",
+            "确认迁移连接指向已解析的 PostgreSQL TCP 目标后重试。",
+        )
+    return server_address, server_port, database, schema
+
+
+def _migration_application_principal_key(principal: Any) -> tuple[str, str]:
+    """Accept one exact, direct PostgreSQL application login identity."""
+    from memplex.storage.migrations import PostgresApplicationPrincipal
+
+    if (
+        type(principal) is not PostgresApplicationPrincipal
+        or type(principal.role) is not str
+        or not principal.role
+        or type(principal.session_role) is not str
+        or not principal.session_role
+        or principal.role != principal.session_role
+    ):
+        raise _MigrationCommandError(
+            "postgres_application_principal_invalid",
+            "确认应用连接以单一非特权 PostgreSQL 登录角色连接后重试。",
+        )
+    return principal.role, principal.session_role
+
+
+class _MigrationCommandContext:
+    """Data-only PostgreSQL migration collaborator for one CLI invocation."""
+
+    def __init__(
+        self,
+        migration_runner: Any,
+        application_runner: Any,
+        target: Any,
+        principal: Any,
+        application_acl: Any,
+        profile: str,
+    ) -> None:
+        self._runner = migration_runner
+        self._application_runner = application_runner
+        self._target = target
+        self._target_key = _migration_target_key(target)
+        self._principal_key = _migration_application_principal_key(principal)
+        self._application_acl = application_acl
+        self._profile = profile
+
+    def _options(self) -> dict[str, Any]:
+        return {
+            "expected_target": self._target,
+            "application_acl": self._application_acl,
+            "deployment_profile": self._profile,
+        }
+
+    def status(self) -> Any:
+        return self._runner.status(**self._options())
+
+    def plan(self) -> Any:
+        return self._runner.plan(**self._options())
+
+    def _fresh_strict_readback(self) -> Any:
+        """Rebind the application plane before an independent strict status read."""
+        fresh_target = self._application_runner.inspect_target()
+        if _migration_target_key(fresh_target) != self._target_key:
+            raise _MigrationCommandError(
+                "postgres_target_mismatch",
+                "确认 application 与 migration DSN 指向同一 PostgreSQL database/schema。",
+            )
+        fresh_principal = self._application_runner.inspect_application_principal(
+            expected_target=fresh_target
+        )
+        if _migration_application_principal_key(fresh_principal) != self._principal_key:
+            raise _MigrationCommandError(
+                "postgres_application_principal_invalid",
+                "确认应用连接以单一非特权 PostgreSQL 登录角色连接后重试。",
+            )
+        return self.status()
+
+    def apply(self) -> tuple[Any | None, Any]:
+        """Confirm the final ledger state even when the mutation call raises."""
+        mutation: Any | None = None
+        mutation_outcome_unknown = False
+        try:
+            mutation = self._runner.apply(**self._options())
+        except Exception:
+            mutation_outcome_unknown = True
+
+        try:
+            fresh = self._fresh_strict_readback()
+        except Exception:
+            if mutation_outcome_unknown:
+                raise _MigrationCommandError(
+                    "migration_outcome_requires_readback",
+                    "确认 PostgreSQL 连通性、应用身份与最小权限 ACL 后重新执行 status；不要重试写入。",
+                ) from None
+            raise _MigrationCommandError(
+                "migration_committed_acl_remediation_required",
+                "人工配置已批准的最小权限 ACL 后重新执行 status；命令不会自动 GRANT。",
+            ) from None
+
+        state = getattr(fresh, "state", None)
+        if state == "ready":
+            return mutation, fresh
+        if state == "upgrade_required":
+            raise _MigrationCommandError(
+                "migration_failed",
+                "迁移结构仍未收敛；检查 PostgreSQL migration 后重新执行 status 或 plan。",
+            )
+        if mutation_outcome_unknown:
+            raise _MigrationCommandError(
+                "migration_outcome_requires_readback",
+                "确认 PostgreSQL 连通性、应用身份与最小权限 ACL 后重新执行 status；不要重试写入。",
+            )
+        raise _MigrationCommandError(
+            "migration_committed_acl_remediation_required",
+            "人工配置已批准的最小权限 ACL 后重新执行 status；命令不会自动 GRANT。",
+        )
+
+
+def _build_migration_command_context(config_path: Optional[str] = None) -> _MigrationCommandContext:
+    """Resolve and validate migration/application connections without a service."""
+    from memplex.config import load_config, normalize_deployment_contract
+    from memplex.storage.migrations import (
+        ApplicationAclContract,
+        PostgresMigrationRunner,
+    )
+
+    config = load_config(path=config_path)
+    profile, backend = normalize_deployment_contract(config)
+    application_dsn = getattr(config.storage, "path", None)
+    migration_dsn = getattr(config.storage, "migration_dsn", None)
+    if backend != "postgres":
+        raise _MigrationCommandError(
+            "postgres_backend_required",
+            "将 storage.backend 配置为 postgres 后重试。",
+        )
+    if (
+        type(application_dsn) is not str
+        or not application_dsn.strip()
+        or type(migration_dsn) is not str
+        or not migration_dsn.strip()
+    ):
+        raise _MigrationCommandError(
+            "split_postgres_dsn_required",
+            "配置独立的 storage.path 与 storage.migration_dsn 后重试。",
+        )
+
+    try:
+        application_runner = PostgresMigrationRunner(application_dsn)
+        application_target = application_runner.inspect_target()
+        application_target_key = _migration_target_key(application_target)
+        principal = application_runner.inspect_application_principal(
+            expected_target=application_target
+        )
+        _migration_application_principal_key(principal)
+        migration_runner = PostgresMigrationRunner(migration_dsn)
+        migration_target = migration_runner.inspect_target()
+        if _migration_target_key(migration_target) != application_target_key:
+            raise _MigrationCommandError(
+                "postgres_target_mismatch",
+                "确认 application 与 migration DSN 指向同一 PostgreSQL database/schema。",
+            )
+        return _MigrationCommandContext(
+            migration_runner,
+            application_runner,
+            application_target,
+            principal,
+            ApplicationAclContract(principal.role),
+            profile,
+        )
+    except _MigrationCommandError:
+        raise
+    except Exception as exc:
+        _ = exc
+        raise _MigrationCommandError(
+            "migration_context_unavailable",
+            "确认 PostgreSQL 连通性、应用身份和最小权限 ACL 后重试。",
+        ) from None
+
+
+def _migration_plan_payload(plan: Any) -> dict[str, Any]:
+    """Project a runner plan to a small operator-safe public schema."""
+    values = plan if isinstance(plan, dict) else {
+        "state": getattr(plan, "state", None),
+        "current_version": getattr(plan, "current_version", None),
+        "known_version": getattr(plan, "known_version", None),
+        "pending": getattr(plan, "pending", None),
+    }
+    state = values.get("state")
+    current_version = values.get("current_version")
+    known_version = values.get("known_version")
+    pending = values.get("pending")
+    if (
+        state not in {"ready", "upgrade_required", "blocked"}
+        or type(current_version) is not int
+        or type(known_version) is not int
+        or not isinstance(pending, (tuple, list))
+    ):
+        raise _MigrationCommandError(
+            "migration_status_invalid",
+            "重新执行 status；若仍失败，请检查 PostgreSQL migration runner。",
+        )
+    pending_payload: list[dict[str, Any]] = []
+    for item in pending:
+        version = item.get("version") if isinstance(item, dict) else getattr(item, "version", None)
+        name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+        if type(version) is not int or type(name) is not str:
+            raise _MigrationCommandError(
+                "migration_status_invalid",
+                "重新执行 status；若仍失败，请检查 PostgreSQL migration runner。",
+            )
+        pending_payload.append({"version": version, "name": name})
+    return {
+        "schema_version": 1,
+        "state": state,
+        "current_version": current_version,
+        "known_version": known_version,
+        "pending": pending_payload,
+    }
+
+
+def _print_migration_error(args: argparse.Namespace, error: _MigrationCommandError) -> int:
+    print(
+        _fmt(
+            {
+                "schema_version": 1,
+                "status": "error",
+                "code": error.code,
+                "remediation": error.remediation,
+            },
+            args.output,
+        ),
+        file=sys.stderr,
+    )
+    return 1
+
+
+class _BackupCommandError(RuntimeError):
+    """Operator-safe error boundary for backup and restore commands."""
+
+    def __init__(self, code: str, remediation: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.remediation = remediation
+
+
+class _BackupCommandContext:
+    """Data-only backup collaborators for one CLI invocation."""
+
+    def __init__(
+        self,
+        *,
+        backend: str,
+        signing_key: bytes,
+        key_id: str,
+        default_destination: Path,
+        postgres_executor: Any | None = None,
+        migration_dsn: str | None = None,
+        lite_store: Any | None = None,
+        rpo_target_seconds: int = 300,
+        rto_target_seconds: int = 1800,
+        max_artifact_bytes: int = 64 * 1024**3,
+    ) -> None:
+        self._backend = backend
+        self._signing_key = signing_key
+        self._key_id = key_id
+        self._default_destination = default_destination
+        self._postgres_executor = postgres_executor
+        self._migration_dsn = migration_dsn
+        self._lite_store = lite_store
+        self._rpo_target_seconds = rpo_target_seconds
+        self._rto_target_seconds = rto_target_seconds
+        self._max_artifact_bytes = max_artifact_bytes
+
+    def create(self, destination: str | None) -> Any:
+        resolved = self._default_destination if destination is None else Path(destination)
+        if self._backend == "postgres":
+            return self._postgres_executor.create(
+                migration_dsn=self._migration_dsn,
+                destination=resolved,
+                signing_key=self._signing_key,
+                key_id=self._key_id,
+                max_bytes=self._max_artifact_bytes,
+            )
+        return self._lite_store.create_backup(
+            resolved,
+            self._signing_key,
+            self._key_id,
+            max_bytes=self._max_artifact_bytes,
+        )
+
+    def verify(self, artifact: str) -> Any:
+        from memplex.backup import verify_backup_artifact
+
+        return verify_backup_artifact(Path(artifact), self._signing_key)
+
+    def restore(self, artifact: str, target_schema: str) -> Any:
+        if self._backend == "postgres":
+            return self._postgres_executor.restore(
+                migration_dsn=self._migration_dsn,
+                artifact=Path(artifact),
+                signing_key=self._signing_key,
+                target_schema=target_schema,
+            )
+        if target_schema != "memory":
+            raise _BackupCommandError(
+                "backup_target_invalid",
+                "Lite 开发态恢复的 target schema 必须为 memory。",
+            )
+        started = __import__("time").monotonic()
+        verification = self.verify(artifact)
+        self._lite_store.restore_backup(Path(artifact), self._signing_key)
+        from memplex.backup import RestoreResult
+
+        return RestoreResult(
+            backup_id=verification.backup_id,
+            database=verification.database,
+            schema=verification.schema,
+            restored=True,
+            elapsed_seconds=__import__("time").monotonic() - started,
+        )
+
+    def pitr_status(self) -> Any:
+        if self._backend != "postgres":
+            raise _BackupCommandError(
+                "pitr_not_ready", "PITR 仅适用于 PostgreSQL 生产存储。"
+            )
+        from memplex.storage.postgres_backup import inspect_pitr_readiness
+
+        return inspect_pitr_readiness(self._migration_dsn)
+
+    def drill(self, artifact: str, target_schema: str) -> Any:
+        from datetime import UTC, datetime
+
+        from memplex.backup import load_verified_backup_manifest, run_restore_drill
+
+        if self._backend != "postgres":
+            raise _BackupCommandError(
+                "pitr_not_ready", "灾难恢复演练仅适用于 PostgreSQL 生产存储。"
+            )
+        manifest = load_verified_backup_manifest(Path(artifact), self._signing_key)
+        fault_cutoff = datetime.now(UTC)
+        restore_started = datetime.now(UTC)
+        restored = self.restore(artifact, target_schema)
+        if restored.backup_id != manifest.backup_id:
+            raise _BackupCommandError(
+                "backup_integrity_failed",
+                "备份工件在演练期间发生变化；请重新验证后重试。",
+            )
+        restore_verified = datetime.now(UTC)
+        return run_restore_drill(
+            backup_id=manifest.backup_id,
+            backup_completed_at=manifest.created_at,
+            fault_cutoff_at=fault_cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            restore_started_at=restore_started.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            restore_verified_at=restore_verified.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            rpo_target_seconds=self._rpo_target_seconds,
+            rto_target_seconds=self._rto_target_seconds,
+            data_digest=manifest.payload_sha256,
+            data_verified=True,
+            pitr=self.pitr_status(),
+            key_id=self._key_id,
+            signing_key=self._signing_key,
+        )
+
+
+def _build_backup_command_context(config_path: Optional[str] = None) -> _BackupCommandContext:
+    """Build backup collaborators without constructing MemplexService."""
+    from memplex.backup import load_backup_signing_key
+    from memplex.config import load_config, normalize_deployment_contract
+
+    try:
+        config = load_config(path=config_path)
+        profile, backend = normalize_deployment_contract(config)
+        signing_key = load_backup_signing_key()
+        key_id = config.backup.key_id
+        destination = Path(config.backup.directory).expanduser()
+        if backend == "postgres":
+            from memplex.storage.migrations import (
+                ApplicationAclContract,
+                IngressAclContract,
+                PostgresMigrationRunner,
+            )
+            from memplex.storage.postgres_backup import PostgresBackupExecutor
+
+            migration_dsn = config.storage.migration_dsn
+            if type(migration_dsn) is not str or not migration_dsn.strip():
+                raise _BackupCommandError(
+                    "backup_config_invalid",
+                    "配置非空 storage.migration_dsn 后重试。",
+                )
+            runner = PostgresMigrationRunner(migration_dsn)
+            target = runner.inspect_target()
+            application_runner = PostgresMigrationRunner(str(config.storage.path))
+            application_target = application_runner.inspect_target()
+            if application_target != target:
+                raise _BackupCommandError(
+                    "backup_config_invalid",
+                    "确认 application 与 migration DSN 指向同一 PostgreSQL target。",
+                )
+            application_principal = application_runner.inspect_application_principal(
+                expected_target=application_target
+            )
+            ingress_acl = None
+            if config.sync.enabled:
+                inbound_dsn = config.storage.inbound_dsn
+                if type(inbound_dsn) is not str or not inbound_dsn.strip():
+                    raise _BackupCommandError(
+                        "backup_config_invalid", "配置非空 storage.inbound_dsn 后重试。"
+                    )
+                inbound_runner = PostgresMigrationRunner(inbound_dsn)
+                inbound_target = inbound_runner.inspect_target()
+                if inbound_target != target:
+                    raise _BackupCommandError(
+                        "backup_config_invalid",
+                        "确认 inbound 与 migration DSN 指向同一 PostgreSQL target。",
+                    )
+                ingress_principal = inbound_runner.inspect_application_principal(
+                    expected_target=inbound_target
+                )
+                ingress_acl = IngressAclContract(ingress_principal.role)
+            executor = PostgresBackupExecutor(
+                expected_target=target,
+                timeout_seconds=config.backup.restore_timeout_seconds,
+                application_acl=ApplicationAclContract(application_principal.role),
+                ingress_acl=ingress_acl,
+                deployment_profile=profile,
+            )
+            return _BackupCommandContext(
+                backend=backend,
+                signing_key=signing_key,
+                key_id=key_id,
+                default_destination=destination,
+                postgres_executor=executor,
+                migration_dsn=migration_dsn,
+                rpo_target_seconds=config.backup.rpo_target_seconds,
+                rto_target_seconds=config.backup.rto_target_seconds,
+                max_artifact_bytes=config.backup.max_artifact_bytes,
+            )
+        from memplex.storage.lite.store import LiteMemoryStore
+
+        path = Path(config.storage.path).expanduser() / "memory.json"
+        return _BackupCommandContext(
+            backend=backend,
+            signing_key=signing_key,
+            key_id=key_id,
+            default_destination=destination,
+            lite_store=LiteMemoryStore(path, deployment_profile=profile),
+            rpo_target_seconds=config.backup.rpo_target_seconds,
+            rto_target_seconds=config.backup.rto_target_seconds,
+            max_artifact_bytes=config.backup.max_artifact_bytes,
+        )
+    except _BackupCommandError:
+        raise
+    except Exception:
+        raise _BackupCommandError(
+            "backup_config_invalid",
+            "确认备份配置、签名密钥与数据库工具后重试。",
+        ) from None
+
+
+def _build_backup_verification_context(
+    config_path: Optional[str] = None,
+) -> _BackupCommandContext:
+    """Build the offline artifact verifier without database or service access."""
+    from memplex.backup import load_backup_signing_key
+    from memplex.config import load_config
+
+    try:
+        config = load_config(path=config_path)
+        return _BackupCommandContext(
+            backend=str(config.storage.backend),
+            signing_key=load_backup_signing_key(),
+            key_id=str(config.backup.key_id),
+            default_destination=Path(config.backup.directory).expanduser(),
+        )
+    except Exception:
+        raise _BackupCommandError(
+            "backup_config_invalid",
+            "确认备份签名密钥与配置后重试。",
+        ) from None
+
+
+def _backup_payload(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else _dataclass_to_dict(value)
+    allowed = (
+        "backup_id",
+        "backend",
+        "database",
+        "schema",
+        "migration_version",
+        "payload_size",
+        "verified",
+        "restored",
+        "elapsed_seconds",
+        "ready",
+        "wal_level",
+        "archive_mode",
+        "archive_command_configured",
+        "full_page_writes",
+        "max_wal_senders",
+        "backup_completed_at",
+        "fault_cutoff_at",
+        "restore_started_at",
+        "restore_verified_at",
+        "observed_rpo_seconds",
+        "observed_rto_seconds",
+        "rpo_target_seconds",
+        "rto_target_seconds",
+        "data_digest",
+        "data_verified",
+        "pitr_ready",
+        "industrial_gate_closing",
+        "key_id",
+        "signature",
+    )
+    return {key: raw[key] for key in allowed if key in raw}
+
+
+def _print_backup_error(args: argparse.Namespace, error: _BackupCommandError) -> int:
+    print(
+        _fmt(
+            {
+                "schema_version": 1,
+                "status": "error",
+                "code": error.code,
+                "remediation": error.remediation,
+            },
+            args.output,
+        ),
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_storage_backup(args: argparse.Namespace) -> int:
+    try:
+        action = getattr(args, "backup_command", None)
+        builder = (
+            _build_backup_verification_context
+            if action == "verify"
+            else _build_backup_command_context
+        )
+        context = builder(getattr(args, "config", None))
+        if action == "create":
+            result = context.create(getattr(args, "destination", None))
+        elif action == "verify":
+            result = context.verify(args.artifact)
+        elif action == "restore":
+            result = context.restore(args.artifact, args.target_schema)
+        elif action == "pitr-status":
+            result = context.pitr_status()
+        elif action == "drill":
+            result = context.drill(args.artifact, args.target_schema)
+        else:
+            raise _BackupCommandError(
+                "backup_command_invalid",
+                "使用 storage backup create、verify、restore 或 pitr-status。",
+            )
+        print(_fmt(_backup_payload(result), args.output))
+        return 0
+    except _BackupCommandError as error:
+        return _print_backup_error(args, error)
+    except Exception:
+        return _print_backup_error(
+            args,
+            _BackupCommandError(
+                "backup_command_failed",
+                "确认备份配置、产物完整性与目标状态后重试。",
+            ),
+        )
+
+
+def cmd_storage(args: argparse.Namespace) -> int:
+    """Run PostgreSQL migration diagnostics without constructing a service."""
+    if getattr(args, "storage_command", None) == "backup":
+        return _cmd_storage_backup(args)
+    if getattr(args, "storage_command", None) != "migration":
+        return _print_migration_error(
+            args,
+            _MigrationCommandError(
+                "storage_command_invalid", "使用 memplex storage migration status、plan 或 apply。"
+            ),
+        )
+    try:
+        context = _build_migration_command_context(getattr(args, "config", None))
+        action = getattr(args, "migration_command", None)
+        if action == "status":
+            payload = {"command": "status", **_migration_plan_payload(context.status())}
+        elif action == "plan":
+            payload = {"command": "plan", **_migration_plan_payload(context.plan())}
+        elif action == "apply" and getattr(args, "dry_run", False):
+            payload = {
+                "command": "apply",
+                "dry_run": True,
+                **_migration_plan_payload(context.plan()),
+            }
+        elif action == "apply":
+            mutation, fresh = context.apply()
+            payload: dict[str, Any] = {
+                "command": "apply",
+                "dry_run": False,
+                "readback": _migration_plan_payload(fresh),
+            }
+            if mutation is None:
+                payload["outcome"] = "readback_confirmed"
+            else:
+                payload["mutation"] = _migration_plan_payload(mutation)
+        else:
+            raise _MigrationCommandError(
+                "migration_command_invalid", "使用 memplex storage migration status、plan 或 apply。"
+            )
+        print(_fmt(payload, args.output))
+        return 0
+    except _MigrationCommandError as error:
+        return _print_migration_error(args, error)
+    except Exception as exc:
+        _ = exc
+        return _print_migration_error(
+            args,
+            _MigrationCommandError(
+                "migration_command_failed",
+                "确认 PostgreSQL 连通性、应用身份和最小权限 ACL 后重试。",
+            ),
+        )
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
     """Display statistics."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         info = svc.stats()
         print(_fmt(info, args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Run productized readiness checks."""
     from memplex.product import run_doctor
 
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         report = run_doctor(
             svc,
             agent=getattr(args, "agent", "codex"),
             profile=getattr(args, "profile", None),
             smoke=getattr(args, "smoke", False) or getattr(args, "fix", False),
+            target_dir=getattr(args, "target_dir", None),
+            user_id=getattr(args, "user_id", None),
+            session_id=getattr(args, "session_id", "default"),
+            project_path=getattr(args, "project_path", None),
         )
         print(_fmt(report, args.output))
         return 0 if report["status"] == "pass" else 1
     finally:
-        svc.stop()
-
-
-def _service_storage_namespace(svc) -> str:
-    """Deprecated: use ``svc.storage_namespace()`` instead.
-
-    Kept temporarily for any external callers; routes to the public
-    service method so the storage-internal ``_path`` read no longer
-    happens in adapter code.
-    """
-    return svc.storage_namespace()
+        raw_service.stop()
 
 
 def cmd_scope(args: argparse.Namespace) -> int:
@@ -317,7 +1211,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
         print(_fmt(scope_catalog(), args.output))
         return 0
 
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         explained = scope_explain(
             agent=getattr(args, "agent", "codex"),
@@ -334,7 +1228,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
                 _fmt(
                     scope_preview(
                         svc,
-                        explained["namespace_filter"],
+                        explained["read_namespace_filters"],
                         limit=getattr(args, "limit", 10),
                     ),
                     args.output,
@@ -342,7 +1236,7 @@ def cmd_scope(args: argparse.Namespace) -> int:
             )
             return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
     print("Error: unknown scope command", file=sys.stderr)
     return 1
@@ -350,18 +1244,18 @@ def cmd_scope(args: argparse.Namespace) -> int:
 
 def cmd_policy(args: argparse.Namespace) -> int:
     """Show recall/capture policy."""
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         print(_fmt(svc.policy(agent=getattr(args, "agent", "codex")), args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
 
 def cmd_inbox(args: argparse.Namespace) -> int:
     """Review pending memory items through an inbox vocabulary."""
     action = getattr(args, "inbox_command", "list")
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         if action in {None, "list"}:
             reviews = svc.get_pending_reviews(limit=getattr(args, "limit", 100))
@@ -396,7 +1290,7 @@ def cmd_inbox(args: argparse.Namespace) -> int:
             print(_fmt(result, args.output))
             return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
     print("Error: unknown inbox command", file=sys.stderr)
     return 1
@@ -411,7 +1305,7 @@ def cmd_corpus(args: argparse.Namespace) -> int:
         print(_fmt(corpus_preview(args.manifest, limit=getattr(args, "limit", 100)), args.output))
         return 0
 
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         if action == "index":
             print(
@@ -439,7 +1333,7 @@ def cmd_corpus(args: argparse.Namespace) -> int:
             )
             return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
     print("Error: unknown corpus command", file=sys.stderr)
     return 1
@@ -449,12 +1343,63 @@ def cmd_report(args: argparse.Namespace) -> int:
     """Generate an operator report."""
     from memplex.product import operator_report
 
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
         print(_fmt(operator_report(svc, agent=getattr(args, "agent", "codex")), args.output))
         return 0
     finally:
-        svc.stop()
+        raw_service.stop()
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Benchmark commands (list / run).
+
+    The ``benchmarks`` package is not part of the distribution (pyproject
+    only ships ``memplex*``), so imports happen lazily inside this handler
+    and a missing package produces a clear error instead of a traceback.
+    """
+    try:
+        from benchmarks.base import BenchmarkRunnerFactory
+        from benchmarks.benchmark_cli import run_benchmark_command
+    except ImportError:
+        print(
+            "Error: benchmarks 仅源码可用 -- the 'benchmarks' package is not shipped "
+            "in the installed distribution. Run this command from the source "
+            "checkout (repository root) instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    action = getattr(args, "benchmark_command", None)
+    if action == "list":
+        datasets = sorted(BenchmarkRunnerFactory.available_datasets())
+        print(_fmt({"total": len(datasets), "datasets": datasets}, args.output))
+        return 0
+
+    if action == "run":
+        output_path = getattr(args, "benchmark_output", None) or (
+            ".memplex/benchmarks/results.jsonl"
+        )
+        results = run_benchmark_command(
+            dataset=args.dataset,
+            path=getattr(args, "path", None),
+            output=output_path,
+            retrieval_k=getattr(args, "top_k", 10),
+            force_synthetic=getattr(args, "synthetic", False),
+        )
+        # Compact per-dataset summary: best value per metric.
+        summary = {}
+        for name, dataset_results in sorted(results.items()):
+            best: dict = {}
+            for r in dataset_results:
+                if r.metric not in best or r.value > best[r.metric]:
+                    best[r.metric] = r.value
+            summary[name] = {m: round(v, 4) for m, v in sorted(best.items())}
+        print(_fmt({"status": "ok", "output": output_path, "results": summary}, args.output))
+        return 0
+
+    print("Error: unknown benchmark command", file=sys.stderr)
+    return 1
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -468,9 +1413,73 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from memplex.sync import SyncableStore
 
     action = getattr(args, "sync_command", None)
-    svc = _make_service(getattr(args, "config", None))
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    read_only = action == "status" or action == "dlq"
     try:
-        store = svc.store
+        dispatcher = getattr(raw_service, "_sync_dispatcher", None)
+        if dispatcher is not None:
+            if action == "status":
+                print(
+                    _fmt(
+                        {"status": "active", **raw_service.sync_status()},
+                        args.output,
+                    )
+                )
+                return 0
+            if action == "drain":
+                result = raw_service.drain_sync(
+                    getattr(args, "timeout", None)
+                )
+                print(_fmt(result.to_dict(), args.output))
+                return 0 if result.drained else 1
+            if action == "pull":
+                target_id = getattr(args, "target", None)
+                configured_targets = tuple(raw_service._config.sync.targets)
+                if target_id is None:
+                    if len(configured_targets) != 1:
+                        print(
+                            _fmt(
+                                {"error": "sync_target_required"}, args.output
+                            )
+                        )
+                        return 1
+                    target_id = configured_targets[0]
+                result = raw_service.pull_sync(target_id)
+                print(_fmt(asdict(result), args.output))
+                return 0
+            if action == "dlq":
+                dlq_action = getattr(args, "dlq_command", None)
+                if dlq_action == "list":
+                    print(
+                        _fmt(
+                            {
+                                "items": raw_service.list_sync_dead_letters(
+                                    limit=args.limit
+                                )
+                            },
+                            args.output,
+                        )
+                    )
+                    return 0
+                if dlq_action == "replay":
+                    replayed = raw_service.replay_sync_dead_letter(
+                        args.target, args.event_id
+                    )
+                    print(
+                        _fmt(
+                            {
+                                "replayed": replayed,
+                                "target_id": args.target,
+                                "event_id": args.event_id,
+                            },
+                            args.output,
+                        )
+                    )
+                    return 0 if replayed else 1
+                print(_fmt({"error": "unknown_dlq_command"}, args.output))
+                return 1
+
+        store = raw_service.store
         if not isinstance(store, SyncableStore):
             print(
                 _fmt(
@@ -493,7 +1502,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 _fmt(
                     {
                         "status": "active" if cfg.active else "inactive",
-                        "remote_url": cfg.url,
+                        "remote_configured": cfg.url is not None,
+                        "target_count": len(cfg.all_targets()),
                         "auth": "api_key" if cfg.api_key else ("bearer" if cfg.bearer else "none"),
                         "last_pull_at": store.last_pull_at,
                         "push_failures": store._push_failures,
@@ -504,14 +1514,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
             return 0
 
         if action == "pull":
-            summary = store.pull_incremental()
+            summary = store.authorized(svc.authorization).pull_incremental()
             print(_fmt(summary, args.output))
             return 0
 
         print(_fmt({"error": f"unknown sync command: {action!r}"}, args.output))
         return 1
     finally:
-        svc.stop()
+        raw_service.stop(drain_sync=not read_only)
 
 
 def cmd_agent(args: argparse.Namespace) -> int:
@@ -528,8 +1538,58 @@ def cmd_agent(args: argparse.Namespace) -> int:
         print(_fmt(list_agent_profiles(), args.output))
         return 0
     if action == "manifest":
+        if (args.agent or "").strip().lower() == "all":
+            manifests = {name: get_agent_manifest(name) for name in list_agent_profiles()}
+            print(_fmt(manifests, args.output))
+            return 0
         print(_fmt(get_agent_manifest(args.agent), args.output))
         return 0
+    if action == "status":
+        from memplex.product import run_agent_diagnostics
+
+        requested = (args.agent or "codex").strip().lower()
+        target_dir = getattr(args, "target_dir", None)
+        if requested == "all" and target_dir is not None:
+            print(
+                _fmt(
+                    {
+                        "status": "error",
+                        "error": (
+                            "--target-dir cannot represent four different host roots with "
+                            "--agent all; omit it or inspect each host separately."
+                        ),
+                    },
+                    args.output,
+                )
+            )
+            return 2
+        names = list(list_agent_profiles()) if requested == "all" else [requested]
+        raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+        try:
+            reports = {}
+            failed = False
+            for name in names:
+                try:
+                    reports[name] = run_agent_diagnostics(
+                        svc,
+                        agent=name,
+                        target_dir=target_dir,
+                        user_id=getattr(args, "user_id", None),
+                        session_id=getattr(args, "session_id", "default"),
+                        project_path=getattr(args, "project_path", None),
+                    )
+                except Exception as exc:
+                    failed = True
+                    reports[name] = {
+                        "schema_version": 1,
+                        "selected_host": name,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+        finally:
+            raw_service.stop()
+        print(_fmt(reports if requested == "all" else reports[names[0]], args.output))
+        return 1 if failed else 0
     if action == "install":
         result = install_agent(
             args.agent,
@@ -549,16 +1609,20 @@ def cmd_agent(args: argparse.Namespace) -> int:
         print(_fmt(_dataclass_to_dict(result), args.output))
         return 0
 
-    svc = _make_service(getattr(args, "config", None))
+    runtime_agent = str(getattr(args, "agent", "codex")).strip().lower() or "codex"
+    raw_service, svc = _make_authorized_service(
+        getattr(args, "config", None), agent_id=runtime_agent
+    )
     try:
         runtime = AgentMemoryRuntime(
-            service=svc,
-            agent=getattr(args, "agent", "codex"),
+            service=raw_service,
+            agent=runtime_agent,
             user_id=getattr(args, "user_id", None),
             session_id=getattr(args, "session_id", "default"),
             project_path=getattr(args, "project_path", None),
             top_k=getattr(args, "top_k", 5),
             token_budget=getattr(args, "token_budget", 1500),
+            authorization=svc.authorization,
         )
         if action == "recall":
             recalled = runtime.before_prompt(args.prompt)
@@ -573,7 +1637,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             print(_fmt({"status": "captured", "agent": runtime.agent}, args.output))
             return 0
     finally:
-        svc.stop()
+        raw_service.stop()
 
     print("Error: unknown agent command", file=sys.stderr)
     return 1
@@ -594,7 +1658,8 @@ def _get_marketplace_dir() -> Path:
 def cmd_setup(args: argparse.Namespace) -> int:
     """Install or uninstall Memplex in local agent hosts."""
     from memplex.adapters.agent_installer import install_agent, uninstall_agent
-    from memplex.product import setup_profile
+    from memplex.config import load_config
+    from memplex.product import apply_profile, setup_profile
 
     should_uninstall = getattr(args, "uninstall", False) or args.command == "uninstall"
     if should_uninstall:
@@ -611,16 +1676,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
             project_path=getattr(args, "project_path", None),
             dry_run=getattr(args, "dry_run", False),
         )
-    profile = setup_profile(getattr(args, "profile", None))
+    profile_name = getattr(args, "profile", None)
+    profile = setup_profile(profile_name)
     output = _dataclass_to_dict(result)
     if profile is not None:
-        output = {"profile": profile, "result": output}
+        # Apply the profile's concrete settings to the loaded config and
+        # surface what was applied vs what stays declarative (previously
+        # the profile was only displayed, never applied).
+        report = apply_profile(load_config(path=getattr(args, "config", None)), profile_name)
+        output = {
+            "profile": report["profile"],
+            "applied": report["applied"],
+            "declarative": report["declarative"],
+            "result": output,
+        }
     print(_fmt(output, args.output))
     return 0
 
 
 def cmd_unsetup(args: argparse.Namespace) -> int:
     """Uninstall Memplex Claude Code plugin."""
+    from memplex.adapters.agent_installer import uninstall_agent
+
     market_dir = _get_marketplace_dir()
 
     print("Memplex Plugin Uninstall")
@@ -630,7 +1707,7 @@ def cmd_unsetup(args: argparse.Namespace) -> int:
         print("  Plugin not installed (directory not found).")
         return 0
 
-    shutil.rmtree(market_dir)
+    uninstall_agent("claude-code", target_dir=market_dir.parents[2])
     print(f"  Removed: {market_dir}")
     print("\nMemplex plugin uninstalled. Restart Claude Code to apply.")
     return 0
@@ -662,6 +1739,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_agent_parsers(sub)
     _add_setup_parsers(sub)
     _add_sync_parsers(sub)
+    _add_storage_parsers(sub)
+    _add_operations_parsers(sub)
+    _add_benchmark_parsers(sub)
 
     return parser
 
@@ -674,7 +1754,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_query_parsers(sub) -> None:
-    """query + recall (the two recall-style commands)."""
+    """query + recall + observations (the recall-style commands)."""
     p_query = sub.add_parser("query", help="Query memory")
     p_query.add_argument("text", help="Query text")
     p_query.add_argument("--top-k", type=int, default=10, help="Max results")
@@ -690,6 +1770,15 @@ def _add_query_parsers(sub) -> None:
     p_recall.add_argument("--top-k", type=int, default=10, help="Max results")
     p_recall.add_argument("--max-tokens", type=int, default=4000, help="Token budget")
     p_recall.add_argument("--explain", action="store_true", help="Explain retrieval stages")
+
+    p_obs = sub.add_parser("observations", help="List captured observation events")
+    p_obs.add_argument(
+        "--category",
+        choices=["bugfix", "decision", "change", "discovery", "note"],
+        default=None,
+        help="Filter by observation category",
+    )
+    p_obs.add_argument("--limit", type=int, default=100, help="Max results (default 100)")
 
 
 def _add_write_parsers(sub) -> None:
@@ -729,7 +1818,20 @@ def _add_review_diag_parsers(sub) -> None:
         help="Compaction scope (default: project)",
     )
 
-    sub.add_parser("health", help="Health check")
+    p_health = sub.add_parser("health", help="Health check")
+    p_health.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 unless status is healthy (default: warning also exits 0)",
+    )
+    p_readiness = sub.add_parser(
+        "readiness", help="Report industrial production-readiness gates"
+    )
+    p_readiness.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 1 until every required industrial gate has machine evidence",
+    )
     sub.add_parser("stats", help="Show statistics")
 
     p_doctor = sub.add_parser("doctor", help="Check Memplex product readiness")
@@ -737,6 +1839,10 @@ def _add_review_diag_parsers(sub) -> None:
     p_doctor.add_argument("--profile", choices=["local", "privacy", "max-recall", "team"])
     p_doctor.add_argument("--smoke", action="store_true", help="Run capture/recall smoke")
     p_doctor.add_argument("--fix", action="store_true", help="Run safe local smoke checks")
+    p_doctor.add_argument("--target-dir", default=None)
+    p_doctor.add_argument("--user-id", default=None)
+    p_doctor.add_argument("--session-id", default="default")
+    p_doctor.add_argument("--project-path", default=None)
 
 
 def _add_product_parsers(sub) -> None:
@@ -807,6 +1913,19 @@ def _add_agent_parsers(sub) -> None:
         default="codex",
         help="Agent id: codex | claude-code | openclaw | hermes | all",
     )
+
+    p_agent_status = agent_sub.add_parser(
+        "status", help="Show read-only host, identity, scope, and install diagnostics"
+    )
+    p_agent_status.add_argument(
+        "--agent",
+        default="codex",
+        help="Agent id: codex | claude-code | openclaw | hermes | all",
+    )
+    p_agent_status.add_argument("--target-dir", default=None)
+    p_agent_status.add_argument("--user-id", default=None)
+    p_agent_status.add_argument("--session-id", default="default")
+    p_agent_status.add_argument("--project-path", default=None)
 
     p_agent_install = agent_sub.add_parser("install", help="Install Memplex into an agent host")
     p_agent_install.add_argument(
@@ -907,11 +2026,92 @@ def _add_one_setup_parser(sub, name: str, *, uninstall: bool = False):
 
 
 def _add_sync_parsers(sub) -> None:
-    """sync (nested: pull / status) -- multi-node memory sharing."""
-    p_sync = sub.add_parser("sync", help="Multi-node memory sync (pull/status)")
+    """sync lifecycle and durable-delivery controls."""
+    p_sync = sub.add_parser("sync", help="Reliable multi-node sync")
     sync_sub = p_sync.add_subparsers(dest="sync_command", help="Sync command")
-    sync_sub.add_parser("pull", help="Pull incremental changes from the remote")
+    p_pull = sync_sub.add_parser(
+        "pull", help="Pull bounded signed pages from one peer"
+    )
+    p_pull.add_argument("--target", default=None, help="Stable remote node id")
     sync_sub.add_parser("status", help="Show sync config and last-pull timestamp")
+    p_drain = sync_sub.add_parser(
+        "drain", help="Drain locally-originated durable deliveries"
+    )
+    p_drain.add_argument("--timeout", type=float, default=None)
+    p_dlq = sync_sub.add_parser("dlq", help="Inspect or replay dead letters")
+    dlq_sub = p_dlq.add_subparsers(dest="dlq_command", help="DLQ command")
+    p_dlq_list = dlq_sub.add_parser("list", help="List dead-letter entries")
+    p_dlq_list.add_argument("--limit", type=int, default=100)
+    p_replay = dlq_sub.add_parser("replay", help="Replay one dead letter")
+    p_replay.add_argument("--target", required=True, help="Stable remote node id")
+    p_replay.add_argument("--event-id", required=True, help="Event UUID")
+
+
+def _add_storage_parsers(sub) -> None:
+    """Storage maintenance commands kept separate from service startup."""
+    p_storage = sub.add_parser("storage", help="PostgreSQL storage maintenance")
+    storage_sub = p_storage.add_subparsers(dest="storage_command", help="Storage command")
+    p_migration = storage_sub.add_parser("migration", help="Inspect or apply PostgreSQL migrations")
+    migration_sub = p_migration.add_subparsers(
+        dest="migration_command", help="Migration command"
+    )
+    migration_sub.add_parser("status", help="Read current migration status")
+    migration_sub.add_parser("plan", help="Read pending migration plan")
+    p_apply = migration_sub.add_parser("apply", help="Apply pending migrations")
+    p_apply.add_argument(
+        "--dry-run", action="store_true", help="Validate and show the plan without writes"
+    )
+    p_backup = storage_sub.add_parser("backup", help="Create, verify, or restore backups")
+    backup_sub = p_backup.add_subparsers(dest="backup_command", help="Backup command")
+    p_backup_create = backup_sub.add_parser("create", help="Create a signed backup artifact")
+    p_backup_create.add_argument("--destination", default=None)
+    p_backup_verify = backup_sub.add_parser("verify", help="Verify a signed backup artifact")
+    p_backup_verify.add_argument("artifact")
+    p_backup_restore = backup_sub.add_parser("restore", help="Restore a verified backup")
+    p_backup_restore.add_argument("artifact")
+    p_backup_restore.add_argument("--target-schema", required=True)
+    backup_sub.add_parser("pitr-status", help="Inspect PostgreSQL PITR prerequisites")
+    p_backup_drill = backup_sub.add_parser("drill", help="Run a measured restore drill")
+    p_backup_drill.add_argument("--artifact", required=True)
+    p_backup_drill.add_argument("--target-schema", required=True)
+
+
+def _add_operations_parsers(sub) -> None:
+    """Production probes/SLO evidence commands that never construct service."""
+    parser = sub.add_parser("operations", help="Production operations and SLO evidence")
+    operations_sub = parser.add_subparsers(
+        dest="operations_command", help="Operations command"
+    )
+    operations_sub.add_parser("status", help="Read the operations_slo readiness gate")
+    verify = operations_sub.add_parser("verify-report", help="Verify a signed SLO report")
+    verify.add_argument("report")
+    operations_sub.add_parser("alerts-check", help="Verify packaged Prometheus alert rules")
+
+
+def _add_benchmark_parsers(sub) -> None:
+    """benchmark (nested: list / run) -- evaluation harness, source checkout only."""
+    p_bench = sub.add_parser("benchmark", help="Benchmarks (available from the source checkout)")
+    bench_sub = p_bench.add_subparsers(dest="benchmark_command", help="Benchmark command")
+    bench_sub.add_parser("list", help="List available benchmark datasets")
+
+    p_bench_run = bench_sub.add_parser("run", help="Run a benchmark dataset")
+    p_bench_run.add_argument(
+        "--dataset",
+        required=True,
+        help="Dataset name (see 'memplex benchmark list') or 'all'",
+    )
+    p_bench_run.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Skip HuggingFace download and generate synthetic data directly",
+    )
+    p_bench_run.add_argument("--top-k", type=int, default=10, help="Retrieval top-K (default: 10)")
+    p_bench_run.add_argument(
+        "--output",
+        dest="benchmark_output",
+        default=".memplex/benchmarks/results.jsonl",
+        help="Results JSONL file path (distinct from the global --output format flag)",
+    )
 
 
 # ── Entry point ─────────────────────────────────────────────────────
@@ -939,6 +2139,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     dispatch = {
         "query": cmd_query,
         "recall": cmd_query,
+        "observations": cmd_observations,
         "write": cmd_write,
         "get": cmd_get,
         "delete": cmd_delete,
@@ -946,6 +2147,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "pending": cmd_pending,
         "compact": cmd_compact,
         "health": cmd_health,
+        "readiness": cmd_readiness,
         "stats": cmd_stats,
         "doctor": cmd_doctor,
         "scope": cmd_scope,
@@ -955,6 +2157,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "report": cmd_report,
         "agent": cmd_agent,
         "sync": cmd_sync,
+        "storage": cmd_storage,
+        "operations": cmd_operations,
+        "benchmark": cmd_benchmark,
         "setup": cmd_setup,
         "install": cmd_setup,
         "stepup": cmd_setup,

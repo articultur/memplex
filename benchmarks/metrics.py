@@ -357,8 +357,10 @@ class MemoryMetrics:
 
         # Compare temporal order with access_count order
         # Ideally, newer memories should have higher access counts
-        temporal_order = sorted(memories, key=lambda m: m.get("created_at", ""))
-        access_order = sorted(memories, key=lambda m: m.get("access_count", 0), reverse=True)
+        temporal_order = sorted(memories, key=lambda m: getattr(m, "created_at", "") or "")
+        access_order = sorted(
+            memories, key=lambda m: getattr(m, "access_count", 0) or 0, reverse=True
+        )
 
         # Score: how many pairs are in correct relative order
         correct_pairs = 0
@@ -368,20 +370,14 @@ class MemoryMetrics:
                 total_pairs += 1
                 # temporal_order[i] should come before temporal_order[j]
                 # Check if access_order respects this
+                id_i = getattr(temporal_order[i], "id", None)
+                id_j = getattr(temporal_order[j], "id", None)
                 pos_i = next(
-                    (
-                        k
-                        for k, m in enumerate(access_order)
-                        if m.get("id") == temporal_order[i].get("id")
-                    ),
+                    (k for k, m in enumerate(access_order) if getattr(m, "id", None) == id_i),
                     -1,
                 )
                 pos_j = next(
-                    (
-                        k
-                        for k, m in enumerate(access_order)
-                        if m.get("id") == temporal_order[j].get("id")
-                    ),
+                    (k for k, m in enumerate(access_order) if getattr(m, "id", None) == id_j),
                     -1,
                 )
                 if pos_i != -1 and pos_j != -1 and pos_i < pos_j:
@@ -415,13 +411,9 @@ class MemoryMetrics:
 
         for fact_id in sample.expected_ids:
             try:
-                result = service.query(f"id:{fact_id}", top_k=1)
-                # Check if the correct fact was returned
-                if result and result.results:
-                    for res in result.results:
-                        if res.func_id == fact_id or fact_id in res.func_id:
-                            retained += 1
-                            break
+                mem = service.get(fact_id)
+                if mem is not None and getattr(mem, "id", None) == fact_id:
+                    retained += 1
             except Exception as e:
                 logger.debug("Could not retrieve fact %s: %s", fact_id, e)
                 continue
@@ -463,7 +455,7 @@ class MemoryMetrics:
                 neighbors = (
                     store.get_neighbors(source_id) if hasattr(store, "get_neighbors") else []
                 )
-                neighbor_ids = [n.get("id") if isinstance(n, dict) else str(n) for n in neighbors]
+                neighbor_ids = [getattr(n, "id", None) for n in neighbors]
                 if target_id in neighbor_ids:
                     connected += 1
         except Exception as e:

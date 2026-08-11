@@ -156,11 +156,7 @@ def test_explicit_huggingface_failure_falls_back_through_service(monkeypatch, tm
     cfg.storage.path = str(tmp_path / "store")
     cfg.embedding.model = "bge-m3"
     cfg.embedding.dimension = 16
-    cfg.llm.semantic_extraction = False
     cfg.llm.query_enhancement = False
-    cfg.llm.conflict_resolution = False
-    cfg.llm.summarization = False
-    cfg.llm.reranking = False
 
     service = MemplexService(config=cfg)
     try:
@@ -181,10 +177,13 @@ def test_release_version_surfaces_stay_in_sync_for_fresh_installs():
 
     installer = (PROJECT_ROOT / "scripts" / "install-agent.sh").read_text()
     assert f'DEFAULT_PACKAGE="memplex=={version}"' in installer
-    assert f"Default: memplex=={version}" in installer
+    assert "MEMPLEX_PACKAGE" not in installer
+    assert "--package" not in installer
+    assert "--from" not in installer
 
     npm_bin = (PROJECT_ROOT / "npm" / "memplex" / "bin" / "memplex.js").read_text()
-    assert f'"memplex=={version}"' in npm_bin
+    assert "install-agent.sh" in npm_bin
+    assert "raw.githubusercontent.com" not in npm_bin
 
     source_plugin = json.loads(
         (PROJECT_ROOT / "plugin" / ".claude-plugin" / "plugin.json").read_text()

@@ -10,7 +10,6 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
 
 from memplex.core.handlers.clipboard import ClipboardHandler  # noqa: E402
 from memplex.core.handlers.file_handler import FileHandler  # noqa: E402

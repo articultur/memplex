@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memplex"
-version = "3.2.7"
+version = "3.3.0"
 description = "Memplex - Memory Complex: multi-agent knowledge graph memory system with 3-layer retrieval"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
@@ -44,19 +46,19 @@ llm = [
     "openai>=1.0.0",
 ]
 postgres = [
-    "asyncpg>=0.29.0",
-]
-neo4j = [
-    "neo4j>=5.0.0",
+    "psycopg2-binary>=2.9",
 ]
 all = [
-    "memplex[embedding,extractors,vector,local-onnx,graph,http,llm]",
+    "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres]",
 ]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
+    # HTTP adapter deps so test_sync / test_http_api run under a plain dev install
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
 ]
 
 [project.scripts]
@@ -66,7 +68,9 @@ memplex = "memplex:main"
 include = ["memplex*"]
 
 [tool.setuptools.package-data]
-"memplex._plugin" = ["**/*", "**/.*", ".claude-plugin/*"]
+"memplex._plugin" = ["**/*", "**/.*", ".claude-plugin/*", ".codex-plugin/*"]
+"memplex.storage.migrations" = ["*.sql"]
+"memplex.operations_assets" = ["*.yml"]
 
 [tool.setuptools.exclude-package-data]
 "memplex._plugin" = ["**/__pycache__/**", "**/*.pyc"]
@@ -85,13 +89,8 @@ line-length = 100
 "memplex/core/extractors/docx.py" = ["F401"]
 "memplex/core/extractors/image.py" = ["F401"]
 "memplex/core/extractors/pdf.py" = ["F401"]
-# Factory registration at module bottom
-"memplex/benchmarks/locomo.py" = ["E402"]
 # Unused optional import
 "memplex/storage/__init__.py" = ["F401"]
-# Benchmark stub variables assigned for future use
-"memplex/benchmarks/nq_trivia.py" = ["F841"]
-"memplex/benchmarks/popqa_hotpot.py" = ["F841"]
 # Intentionally assigned variable
 "memplex/service.py" = ["F841"]
 "tests/test_hooks.py" = ["E741"]
@@ -99,8 +98,6 @@ line-length = 100
 [tool.ruff.lint]
 ignore = [
     # Re-export pattern: imports used by downstream modules
-    "F401",
-    # Availability-check imports in optional dependency extractors
     "F401",
     # Factory registration at end of module files
     "E402",
