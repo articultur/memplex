@@ -51,6 +51,15 @@ def _wait_ready(base: str, process: subprocess.Popen) -> None:
     raise AssertionError("uvicorn readiness timeout")
 
 
+def _deployment_binding_environment() -> dict[str, str]:
+    return {
+        "MEMPLEX_DEPLOYMENT_ID": "00000000-0000-4000-8000-000000000001",
+        "MEMPLEX_SOURCE_SHA256": "1" * 64,
+        "MEMPLEX_ARTIFACT_SHA256": "2" * 64,
+        "MEMPLEX_TARGET_IDENTITY_SHA256": "3" * 64,
+    }
+
+
 def test_real_uvicorn_sigterm_writes_verified_drain_report(tmp_path: Path) -> None:
     pytest.importorskip("uvicorn")
     port = _free_port()
@@ -66,6 +75,7 @@ def test_real_uvicorn_sigterm_writes_verified_drain_report(tmp_path: Path) -> No
             "MEMPLEX_OPERATIONS_HMAC_KEY": base64.b64encode(key).decode("ascii"),
             "MEMPLEX_G006_REPORT_OUTPUT": str(report_path),
             "MEMPLEX_OPERATIONS_REPORT_KEY_ID": "process-ops-key",
+            **_deployment_binding_environment(),
         }
     )
     code = (
@@ -96,7 +106,9 @@ def test_real_uvicorn_sigterm_writes_verified_drain_report(tmp_path: Path) -> No
         assert report.successful_requests == 2  # 4xx is not server unavailability
         assert report.shutdown_drained is True
         assert report.shutdown_deadline_exceeded is False
-        assert report.industrial_gate_closing is True
+        assert report.deployment_id == "00000000-0000-4000-8000-000000000001"
+        assert report.generated_at >= report.window_ended_at
+        assert report.industrial_gate_closing is False
     finally:
         if process.poll() is None:
             process.terminate()
@@ -120,6 +132,7 @@ def test_real_uvicorn_sigterm_drains_an_admitted_request(tmp_path: Path) -> None
             "MEMPLEX_G006_REPORT_OUTPUT": str(report_path),
             "MEMPLEX_OPERATIONS_REPORT_KEY_ID": "active-ops-key",
             "MEMPLEX_OPERATIONS_P95_LATENCY_TARGET_MS": "1000.0",
+            **_deployment_binding_environment(),
         }
     )
     code = (
@@ -170,7 +183,9 @@ def test_real_uvicorn_sigterm_drains_an_admitted_request(tmp_path: Path) -> None
         assert report.successful_requests == 1
         assert report.shutdown_drained is True
         assert report.shutdown_deadline_exceeded is False
-        assert report.industrial_gate_closing is True
+        assert report.deployment_id == "00000000-0000-4000-8000-000000000001"
+        assert report.generated_at >= report.window_ended_at
+        assert report.industrial_gate_closing is False
     finally:
         if process.poll() is None:
             process.terminate()

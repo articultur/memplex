@@ -117,7 +117,7 @@ def test_discover_migrations_from_built_wheel_contains_all_sql(tmp_path: Path) -
         "print([migration.version for migration in discover_migrations()])",
         tmp_path,
     )
-    assert result.stdout.strip() == "[1, 2, 3, 4, 5]"
+    assert result.stdout.strip() == "[1, 2, 3, 4, 5, 6]"
 
 
 @pytest.mark.parametrize(
@@ -453,7 +453,7 @@ def test_0004_pins_declarative_edge_function_integrity() -> None:
     """The new immutable resource carries only the reviewed FK/cascade design."""
     migrations = _migrations().discover_migrations()
     checksums = {migration.version: migration.checksum for migration in migrations}
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6]
     assert {version: checksums[version] for version in range(1, 5)} == {
         1: "b4ab57dd8545c0ca1573d83fc699c806f2c889bf2d42bea656971171e0fb6373",
         2: "8e932e605e4eb36f6ec410c5a589001133a2db29ba902ff34227ae0a223e9a16",
@@ -1484,7 +1484,9 @@ def test_apply_uses_the_fixed_signed_bigint_advisory_lock(
         runner_module,
         "schema_fingerprint",
             lambda _cur, **_kwargs: runner_module.SchemaFingerprint(
-            "post_g002_current", "fixture", "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5"
+            "post_g002_current",
+            "fixture",
+            "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6",
         ),
     )
     monkeypatch.setattr(runner, "_apply_plan_in_current_transaction", lambda *_args: None)

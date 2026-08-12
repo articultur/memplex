@@ -267,9 +267,12 @@ def _b64url_decode(value: object, name: str) -> bytes:
     if not _B64URL_RE.fullmatch(text):
         raise ValueError(f"{name} is not unpadded base64url")
     try:
-        return base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_", validate=True)
+        raw = base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_", validate=True)
     except ValueError as exc:
         raise ValueError(f"{name} is not base64url") from exc
+    if _b64url_encode(raw) != text:
+        raise ValueError(f"{name} is not canonical base64url")
+    return raw
 
 
 def _canonical_time(value: object, name: str) -> datetime:

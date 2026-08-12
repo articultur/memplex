@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Any
 
 from memplex.adapters.agent_runtime import AgentMemoryRuntime
+from memplex.adapters.managed_identity import (
+    derive_managed_host_root,
+    load_managed_identity,
+)
+from memplex.adapters.runtime_status import (
+    clear_runtime_status_on_success,
+    record_runtime_failure,
+    runtime_status_path,
+)
 from memplex.config import load_config
 from memplex.service import MemplexService
 
@@ -37,6 +46,47 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _clean_text(value: str) -> str:
     without_private = _PRIVATE_TAG_RE.sub("", value)
     return _RECALLED_BLOCK_RE.sub("", without_private).strip()
+
+
+def _validate_managed_bridge(payload: dict[str, Any]) -> None:
+    """Recheck the JS launcher's install-root proof before using managed scope."""
+
+    config = _mapping(payload.get("config"))
+    plugin_root = _text(os.environ.get("MEMPLEX_PLUGIN_ROOT")) or _text(
+        config.get("pluginRoot")
+    )
+    if not plugin_root:
+        return
+    expected_host_root = derive_managed_host_root(
+        plugin_root,
+        expected_agent="openclaw",
+    )
+    identity = load_managed_identity(
+        Path(plugin_root) / "memplex-agent.json",
+        expected_agent="openclaw",
+        expected_host_root=expected_host_root,
+    )
+    configured_host_root = _text(config.get("hostRoot"))
+    environment_host_root = _text(os.environ.get("OPENCLAW_CONFIG_DIR"))
+    for label, value in (
+        ("config hostRoot", configured_host_root),
+        ("OPENCLAW_CONFIG_DIR", environment_host_root),
+    ):
+        if not value:
+            raise ValueError(f"managed identity invalid; reinstall required: missing {label}")
+        candidate = Path(value)
+        try:
+            canonical = candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"managed identity invalid; reinstall required: invalid {label}"
+            ) from exc
+        if str(candidate) != str(canonical) or not os.path.samefile(
+            canonical, identity["host_root"]
+        ):
+            raise ValueError(
+                f"managed identity invalid; reinstall required: {label} host_root mismatch"
+            )
 
 
 def _content_text(content: Any) -> str:
@@ -61,6 +111,7 @@ def _content_text(content: Any) -> str:
 
 
 def _identity(payload: dict[str, Any]) -> dict[str, str]:
+    _validate_managed_bridge(payload)
     config = _mapping(payload.get("config"))
     context = _mapping(payload.get("context"))
     event = _mapping(payload.get("event"))
@@ -114,6 +165,29 @@ def _runtime(
     return runtime, service, identity
 
 
+def _runtime_status_path() -> Path:
+    root = Path(os.environ.get("OPENCLAW_CONFIG_DIR", Path.home() / ".openclaw"))
+    return runtime_status_path(root)
+
+
+def _record_runtime_failure(operation: str, error: BaseException) -> None:
+    try:
+        record_runtime_failure(
+            _runtime_status_path(), agent="openclaw", operation=operation, error=error
+        )
+    except Exception:
+        pass
+
+
+def _clear_runtime_status(operation: str) -> None:
+    try:
+        clear_runtime_status_on_success(
+            _runtime_status_path(), agent="openclaw", operation=operation, completed=True
+        )
+    except Exception:
+        pass
+
+
 def _last_turn(messages: Any) -> tuple[str, str]:
     if not isinstance(messages, list):
         return "", ""
@@ -141,18 +215,23 @@ def recall(payload: dict[str, Any]) -> dict[str, Any]:
     identity = _identity(payload)
     if not prompt:
         return {"prependContext": "", "total": 0, "identity": identity}
-    runtime, service, identity = _runtime(payload)
     try:
-        recalled = runtime.before_prompt(prompt)
-        return {
-            "prependContext": recalled.context,
-            "total": recalled.total,
-            "source": recalled.source,
-            "tokensUsed": recalled.tokens_used,
-            "identity": identity,
-        }
-    finally:
-        service.stop()
+        runtime, service, identity = _runtime(payload)
+        try:
+            recalled = runtime.before_prompt(prompt)
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("recall", exc)
+        raise
+    _clear_runtime_status("recall")
+    return {
+        "prependContext": recalled.context,
+        "total": recalled.total,
+        "source": recalled.source,
+        "tokensUsed": recalled.tokens_used,
+        "identity": identity,
+    }
 
 
 def capture(payload: dict[str, Any]) -> dict[str, Any]:
@@ -171,16 +250,21 @@ def capture(payload: dict[str, Any]) -> dict[str, Any]:
         "openclaw_run_id": _text(context.get("runId")) or _text(event.get("runId")),
         "memplex_visibility": _text(config.get("visibility")) or "workspace",
     }
-    runtime, service, identity = _runtime(payload)
     try:
-        runtime.after_response(
-            user_message=user_message,
-            assistant_message=assistant_message,
-            metadata=metadata,
-        )
-        return {"captured": True, "identity": identity}
-    finally:
-        service.stop()
+        runtime, service, identity = _runtime(payload)
+        try:
+            runtime.after_response(
+                user_message=user_message,
+                assistant_message=assistant_message,
+                metadata=metadata,
+            )
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("capture", exc)
+        raise
+    _clear_runtime_status("capture")
+    return {"captured": True, "identity": identity}
 
 
 def store(payload: dict[str, Any]) -> dict[str, Any]:
@@ -190,19 +274,24 @@ def store(payload: dict[str, Any]) -> dict[str, Any]:
     if not content:
         return {"stored": False, "reason": "empty_content", "identity": identity}
     config = _mapping(payload.get("config"))
-    runtime, service, identity = _runtime(payload)
     try:
-        runtime.capture_turn(
-            content,
-            "Stored explicitly by the OpenClaw memory_store tool.",
-            metadata={
-                "tool_name": "memory_store",
-                "memplex_visibility": _text(config.get("visibility")) or "workspace",
-            },
-        )
-        return {"stored": True, "identity": identity}
-    finally:
-        service.stop()
+        runtime, service, identity = _runtime(payload)
+        try:
+            runtime.capture_turn(
+                content,
+                "Stored explicitly by the OpenClaw memory_store tool.",
+                metadata={
+                    "tool_name": "memory_store",
+                    "memplex_visibility": _text(config.get("visibility")) or "workspace",
+                },
+            )
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("capture", exc)
+        raise
+    _clear_runtime_status("capture")
+    return {"stored": True, "identity": identity}
 
 
 def session_end(payload: dict[str, Any]) -> dict[str, Any]:

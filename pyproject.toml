@@ -7,59 +7,94 @@ name = "memplex"
 version = "3.3.0"
 description = "Memplex - Memory Complex: multi-agent knowledge graph memory system with 3-layer retrieval"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "pyyaml>=6.0",
-    "numpy>=1.24.0",
-    "requests>=2.28.0",
+    "pyyaml>=6.0,<7",
+    "numpy>=1.24.0,<3",
+    "requests>=2.28.0,<3",
 ]
 
 [project.optional-dependencies]
 embedding = [
-    "sentence-transformers>=2.0",
+    "sentence-transformers>=2.0,<6",
 ]
 extractors = [
-    "pdfplumber>=0.9.0",
-    "python-docx>=0.8.11",
-    "Pillow>=9.0",
-    "pytesseract>=0.3.10",
+    "pdfplumber>=0.9.0,<1",
+    "python-docx>=0.8.11,<2",
+    "Pillow>=9.0,<13",
+    "pytesseract>=0.3.10,<1",
 ]
 vector = [
-    "chromadb>=0.4.0",
-    "sentence-transformers>=2.0",
+    "chromadb>=0.4.0,<2",
+    "sentence-transformers>=2.0,<6",
 ]
 local-onnx = [
-    "onnxruntime>=1.17.0",
-    "tokenizers>=0.15.0",
+    "onnxruntime>=1.17.0,<2",
+    "tokenizers>=0.15.0,<1",
 ]
 graph = [
-    "networkx>=3.0",
-    "python-louvain>=0.16",
+    "networkx>=3.0,<4",
+    "python-louvain>=0.16,<1",
 ]
 http = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "fastapi>=0.100.0,<1",
+    "uvicorn>=0.23.0,<1",
 ]
 llm = [
-    "anthropic>=0.30.0",
-    "openai>=1.0.0",
+    "anthropic>=0.30.0,<1",
+    "openai>=1.0.0,<3",
 ]
 postgres = [
-    "psycopg2-binary>=2.9",
+    "psycopg2-binary>=2.9,<3",
+]
+# CI-only: real-PostgreSQL integration tests via a self-contained
+# ``pgserver`` binary (no system Postgres required). Kept out of ``dev`` so the
+# fast cross-platform test matrix stays lean; exercised by the dedicated
+# ``test-postgres`` CI job.
+pgtest = [
+    "pgserver>=0.1.4,<1",
+    "psycopg2-binary>=2.9,<3",
 ]
 all = [
     "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres]",
 ]
 dev = [
+    "build>=1.2,<2",
+    # ``python -m build --no-isolation`` is an explicit release/package-data
+    # contract in the test suite, so the selected backend must exist in the
+    # locked development environment rather than arriving from ambient tools.
+    "setuptools>=68,<82",
+    "wheel>=0.43,<1",
+    "mypy>=1.13,<2",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
-    "ruff>=0.1.0",
+    # ruff 0.16 broadened default rule selection; the codebase is lint-clean on
+    # the 0.15 line. Cap until the codebase is migrated to the newer defaults.
+    "ruff>=0.1.0,<0.16",
     # HTTP adapter deps so test_sync / test_http_api run under a plain dev install
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "fastapi>=0.100.0,<1",
+    "uvicorn>=0.23.0,<1",
+    # starlette's TestClient (used by the HTTP/sync/tenant-ACL test suites) is
+    # backed by httpx; without it the test modules fail at collection time.
+    "httpx>=0.24.0,<1",
 ]
+
+[tool.mypy]
+# Keep the first type gate focused on the typed PostgreSQL lifecycle boundary:
+# pool readiness, durable task persistence, and the public task repository.
+# Imported dependencies stay opaque until their own contracts are admitted to
+# the gate, so this check stays both actionable and bounded.
+files = [
+    "memplex/storage/postgres_resources.py",
+    "memplex/storage/postgres_tasks.py",
+    "memplex/task_repository.py",
+]
+python_version = "3.11"
+follow_imports = "skip"
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [project.scripts]
 memplex = "memplex:main"

@@ -145,6 +145,8 @@ class _MockCursor:
             return None
         if "RETURNING source, target, edge_type" in sql:
             return tuple(params[:3])
+        if "RETURNING task_id" in sql:
+            return (params[0],)
         if "RETURNING id" in sql:
             if len(params) > 1 and isinstance(params[0], str) and params[0].startswith("memplex-readiness-"):
                 return (params[1],)
@@ -171,7 +173,11 @@ class _MockCursor:
             return (params[1] if "WHERE tenant_id" in sql else params[0],)
         if "RETURNING source" in sql:
             return (params[1],)
-        if "SELECT id FROM" in sql or "SELECT memory_id FROM" in sql:
+        if (
+            "SELECT id FROM" in sql
+            or "SELECT memory_id FROM" in sql
+            or "SELECT task_id FROM" in sql
+        ):
             if "-other" in getattr(self, "_probe_tenant", ""):
                 return None
             return (params[-1],)
@@ -182,6 +188,7 @@ class _MockCursor:
     def fetchall(self):
         if self.executed and "SELECT table_name, has_table_privilege" in self.executed[-1][0]:
             return [
+                ("memplex_background_tasks", True),
                 ("memplex_sync_batches", True),
                 ("memplex_sync_cursors", True),
                 ("memplex_sync_deliveries", True),
@@ -277,7 +284,7 @@ def _test_target():
     )
 
 
-def _test_runner(*, target=None, apply=None, ensure=None, verify=None):
+def _test_runner(*, target=None, principal="fake", apply=None, ensure=None, verify=None):
     """Build an exact runner for the private resource-construction seam."""
     from memplex.storage.migrations import PostgresMigrationRunner
     from memplex.storage.migrations.runner import VectorCapabilityStatus
@@ -285,7 +292,9 @@ def _test_runner(*, target=None, apply=None, ensure=None, verify=None):
     runner = PostgresMigrationRunner("dbname=fake")
     runner.inspect_target = lambda: _test_target() if target is None else target
     from memplex.storage.migrations.runner import PostgresApplicationPrincipal
-    runner.inspect_application_principal = lambda **_kwargs: PostgresApplicationPrincipal("fake", "fake")
+    runner.inspect_application_principal = lambda **_kwargs: PostgresApplicationPrincipal(
+        principal, principal
+    )
     if apply is None:
         runner.apply = lambda *, expected_target=None, application_acl=None: None
     else:
@@ -323,6 +332,8 @@ def _install_resource_runner_sequence(
     *,
     application_target=None,
     migration_target=None,
+    application_principal="fake",
+    migration_principal="migration_role",
     apply=None,
     ensure=None,
     verify=None,
@@ -335,8 +346,13 @@ def _install_resource_runner_sequence(
     from memplex.storage import pool as pool_module
 
     runners = [
-        _test_runner(target=application_target),
-        _test_runner(target=migration_target, apply=apply, ensure=ensure),
+        _test_runner(target=application_target, principal=application_principal),
+        _test_runner(
+            target=migration_target,
+            principal=migration_principal,
+            apply=apply,
+            ensure=ensure,
+        ),
         _test_runner(verify=verify),
     ]
 
@@ -1803,6 +1819,37 @@ def test_resources_require_nonempty_exact_application_and_migration_dsns(dsn):
     if dsn is not None:
         with pytest.raises(TypeError, match="DSN"):
             PostgresStorageResources(dsn="dbname=fake", migration_dsn=dsn)
+
+
+def test_production_resources_reject_same_principal_before_catalogue_mutation(
+    monkeypatch,
+):
+    """Textually distinct DSNs cannot hide one shared database principal."""
+    from memplex.storage.migrations import MigrationIntegrityError
+    from memplex.storage.pool import PostgresStorageResources
+
+    mutation_calls: list[str] = []
+    pool_calls: list[str] = []
+    _install_resource_runner_sequence(
+        monkeypatch,
+        application_principal="shared_role",
+        migration_principal="shared_role",
+        apply=lambda **_kwargs: mutation_calls.append("apply"),
+    )
+    resources = PostgresStorageResources(
+        dsn="dbname=fake user=shared_role application_name=app",
+        migration_dsn="dbname=fake user=shared_role application_name=migration",
+        pool_factory=lambda *_args: pool_calls.append("pool") or _PoolMock(),
+    )
+
+    with pytest.raises(MigrationIntegrityError, match="principals must be distinct"):
+        resources.ensure_ready(
+            VectorCapabilityRequest(dim=0, policy="disabled"), "production"
+        )
+
+    assert mutation_calls == []
+    assert pool_calls == []
+    assert resources.state == "FAULTED"
 
 
 def test_resources_rejects_noop_mutation_when_independent_readback_is_not_ready(monkeypatch):

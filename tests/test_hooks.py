@@ -6,6 +6,7 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import pytest
 
 from memplex.adapters.claude_skill import generate_hook_sh, generate_skill_md
 from memplex.adapters.mcp_server import MCPServer
+from memplex.adapters.runtime_status import read_runtime_status, runtime_status_path
 from memplex.config import MemplexConfig
 from memplex.service import MemplexService
 
@@ -43,6 +45,29 @@ def mcp_server(tmp_path):
 
 HOOK_RUNNER = str(Path(__file__).resolve().parent.parent / "plugin" / "scripts" / "hook-runner.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _claude_plugin_root(host_root: Path) -> Path:
+    plugin_root = host_root / "plugins" / "marketplaces" / "articultur" / "plugin"
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    return plugin_root
+
+
+def _claude_identity(host_root: Path, project_path: Path | str, *, user_id: str) -> dict:
+    host_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "agent": "claude-code",
+        "user_id": user_id,
+        "project_path": str(Path(project_path).resolve(strict=False)),
+        "python": sys.executable,
+        "source_root": str(PROJECT_ROOT),
+        "host_root": str(host_root.resolve()),
+        "managed": {
+            "by": "memplex",
+            "installer": "memplex",
+            "schema_version": 1,
+        },
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -258,6 +283,26 @@ def _load_hook_runner():
     return module
 
 
+def test_claude_real_prompt_failure_persists_degraded_host_runtime_state(tmp_path, monkeypatch):
+    """A non-blocking Claude hook failure still leaves an operator-visible state."""
+    hr = _load_hook_runner()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(hr, "_read_stdin_json", lambda: {"prompt": "remember status"})
+
+    def fail_runtime(*_args, **_kwargs):
+        raise RuntimeError("Bearer claude-secret-must-not-persist")
+
+    monkeypatch.setattr(hr, "_init_runtime", fail_runtime)
+    with pytest.raises(SystemExit) as exited:
+        hr.cmd_prompt_submit()
+
+    assert exited.value.code == 0
+    assert read_runtime_status(runtime_status_path(tmp_path), agent="claude-code") == {
+        "reason": "runtime_operation_failed",
+        "state": "degraded",
+    }
+
+
 class TestHookRunnerInternals:
     """Regression tests for hook-runner.py helper functions."""
 
@@ -319,19 +364,12 @@ class TestHookRunnerInternals:
 
     def test_managed_claude_identity_is_runtime_fallback(self, tmp_path, monkeypatch):
         hr = _load_hook_runner()
-        plugin_root = tmp_path / "plugin"
+        claude_root = tmp_path / "claude"
+        plugin_root = _claude_plugin_root(claude_root)
         workspace = tmp_path / "workspace"
-        plugin_root.mkdir()
         workspace.mkdir()
         (plugin_root / "memplex-agent.json").write_text(
-            json.dumps(
-                {
-                    "agent": "claude-code",
-                    "user_id": "alice",
-                    "project_path": str(workspace),
-                    "managed": {"installer": "memplex"},
-                }
-            ),
+            json.dumps(_claude_identity(claude_root, workspace, user_id="alice")),
             encoding="utf-8",
         )
         monkeypatch.setenv("MEMPLEX_PLUGIN_ROOT", str(plugin_root))
@@ -348,15 +386,15 @@ class TestHookRunnerInternals:
         monkeypatch,
     ):
         hr = _load_hook_runner()
-        plugin_root = tmp_path / "plugin"
-        plugin_root.mkdir()
+        claude_root = tmp_path / "claude"
+        plugin_root = _claude_plugin_root(claude_root)
         (plugin_root / "memplex-agent.json").write_text(
             json.dumps(
-                {
-                    "user_id": "installed-user",
-                    "project_path": "/installed/project",
-                    "managed": {"by": "memplex"},
-                }
+                _claude_identity(
+                    claude_root,
+                    "/installed/project",
+                    user_id="installed-user",
+                )
             ),
             encoding="utf-8",
         )
@@ -380,6 +418,26 @@ class TestHookRunnerInternals:
         assert hr._project_path(payload) == "/installed/project"
         assert hr._session_id(data=payload) == "env-session"
 
+    def test_claude_runtime_adapter_rejects_identity_for_another_host_root(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        hr = _load_hook_runner()
+        claude_root = tmp_path / "host-a"
+        other_root = tmp_path / "host-b"
+        other_root.mkdir()
+        plugin_root = _claude_plugin_root(claude_root)
+        identity = _claude_identity(claude_root, tmp_path, user_id="alice")
+        identity["host_root"] = str(other_root.resolve())
+        (plugin_root / "memplex-agent.json").write_text(
+            json.dumps(identity), encoding="utf-8"
+        )
+        monkeypatch.setenv("MEMPLEX_PLUGIN_ROOT", str(plugin_root))
+
+        with pytest.raises(ValueError, match="host_root.*reinstall required|reinstall required.*host_root"):
+            hr._managed_identity()
+
     def test_claude_mcp_launcher_forces_managed_scope_and_preserves_host_session(
         self,
         tmp_path,
@@ -388,21 +446,14 @@ class TestHookRunnerInternals:
         hr = _load_hook_runner()
         from memplex.adapters.mcp_server import MCPServer
 
-        plugin_root = tmp_path / "plugin"
+        claude_root = tmp_path / "claude"
+        plugin_root = _claude_plugin_root(claude_root)
         workspace = tmp_path / "managed-workspace"
         attacker_workspace = tmp_path / "attacker-workspace"
-        plugin_root.mkdir()
         workspace.mkdir()
         attacker_workspace.mkdir()
         (plugin_root / "memplex-agent.json").write_text(
-            json.dumps(
-                {
-                    "agent": "claude-code",
-                    "user_id": "managed-alice",
-                    "project_path": str(workspace),
-                    "managed": {"by": "memplex"},
-                }
-            ),
+            json.dumps(_claude_identity(claude_root, workspace, user_id="managed-alice")),
             encoding="utf-8",
         )
         monkeypatch.setenv("MEMPLEX_PLUGIN_ROOT", str(plugin_root))
@@ -443,19 +494,12 @@ class TestHookRunnerInternals:
         hr = _load_hook_runner()
         from memplex.adapters.mcp_server import MCPServer
 
-        plugin_root = tmp_path / "plugin"
+        claude_root = tmp_path / "claude"
+        plugin_root = _claude_plugin_root(claude_root)
         workspace = tmp_path / "workspace"
-        plugin_root.mkdir()
         workspace.mkdir()
         (plugin_root / "memplex-agent.json").write_text(
-            json.dumps(
-                {
-                    "agent": "claude-code",
-                    "user_id": "managed-alice",
-                    "project_path": str(workspace),
-                    "managed": {"installer": "memplex"},
-                }
-            ),
+            json.dumps(_claude_identity(claude_root, workspace, user_id="managed-alice")),
             encoding="utf-8",
         )
         monkeypatch.setenv("MEMPLEX_PLUGIN_ROOT", str(plugin_root))
@@ -487,11 +531,11 @@ class TestHookRunnerInternals:
         marketplace_plugin.mkdir(parents=True)
         (marketplace_plugin / "memplex-agent.json").write_text(
             json.dumps(
-                {
-                    "user_id": "alice",
-                    "project_path": "/shared/project",
-                    "managed": {"installer": "memplex"},
-                }
+                _claude_identity(
+                    tmp_path / "claude",
+                    "/shared/project",
+                    user_id="alice",
+                )
             ),
             encoding="utf-8",
         )
@@ -516,16 +560,12 @@ class TestHookRunnerInternals:
 
     def test_managed_identity_is_mirrored_to_claude_plugin_data(self, tmp_path, monkeypatch):
         hr = _load_hook_runner()
-        plugin_root = tmp_path / "plugin"
+        claude_root = tmp_path / "claude"
+        plugin_root = _claude_plugin_root(claude_root)
         plugin_data = tmp_path / "plugin-data"
-        plugin_root.mkdir()
-        identity = {
-            "user_id": "alice",
-            "project_path": "/shared/project",
-            "managed": {"installer": "memplex"},
-        }
+        identity = _claude_identity(claude_root, "/shared/project", user_id="alice")
         (plugin_root / "memplex-agent.json").write_text(json.dumps(identity), encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_root))
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
         monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(plugin_data))
         monkeypatch.delenv("MEMPLEX_PLUGIN_ROOT", raising=False)
@@ -540,13 +580,10 @@ class TestHookRunnerInternals:
         hr = _load_hook_runner()
         plugin_data = tmp_path / "plugin-data"
         plugin_data.mkdir()
-        identity = {
-            "user_id": "alice",
-            "project_path": "/shared/project",
-            "managed": {"by": "memplex"},
-        }
+        claude_root = tmp_path / "claude"
+        identity = _claude_identity(claude_root, "/shared/project", user_id="alice")
         (plugin_data / "memplex-agent.json").write_text(json.dumps(identity), encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_root))
         monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(plugin_data))
         monkeypatch.delenv("MEMPLEX_PLUGIN_ROOT", raising=False)
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
@@ -1860,7 +1897,8 @@ class TestPluginConfig:
 
         launcher = (PROJECT_ROOT / "plugin" / "scripts" / "claude-hook.sh").read_text()
         assert "BASH_SOURCE[0]" in launcher
-        assert "CLAUDE_CONFIG_DIR" not in launcher
+        assert "CLAUDE_CONFIG_DIR" in launcher
+        assert "memplex-agent.json" in launcher
 
     def test_mcp_json_valid(self):
         data = json.loads(Path(PROJECT_ROOT / "plugin" / ".mcp.json").read_text())
@@ -1875,15 +1913,22 @@ class TestPluginConfig:
         wrapper_ref = " ".join(server.get("args", []))
         assert "mcp-server.sh" in wrapper_ref
 
-    def test_mcp_server_wrapper_supports_env_override_and_fallback(self):
+    def test_mcp_server_wrapper_requires_managed_identity(self):
         wrapper = PROJECT_ROOT / "plugin" / "scripts" / "mcp-server.sh"
         assert wrapper.exists()
         content = wrapper.read_text()
-        assert "MEMPLEX_PYTHON" in content
-        assert "command -v python3" in content
+        assert "memplex-agent.json" in content
+        assert "reinstall required" in content
+        assert "command -v python3" not in content
 
     def test_mcp_server_wrapper_serves_mcp_over_stdio(self, tmp_path):
-        wrapper = PROJECT_ROOT / "plugin" / "scripts" / "mcp-server.sh"
+        claude_root = tmp_path / "claude-root"
+        plugin_root = _claude_plugin_root(claude_root)
+        shutil.copytree(PROJECT_ROOT / "plugin", plugin_root, dirs_exist_ok=True)
+        (plugin_root / "memplex-agent.json").write_text(
+            json.dumps(_claude_identity(claude_root, PROJECT_ROOT, user_id="wrapper-test"))
+        )
+        wrapper = plugin_root / "scripts" / "mcp-server.sh"
         init_msg = json.dumps({"jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1})
         result = subprocess.run(
             ["bash", str(wrapper)],
@@ -1893,7 +1938,7 @@ class TestPluginConfig:
             timeout=30,
             env={
                 **os.environ,
-                "MEMPLEX_PYTHON": sys.executable,
+                "MEMPLEX_PLUGIN_ROOT": str(plugin_root),
                 "MEMPLEX_STORAGE_BACKEND": "lite",
                 "MEMPLEX_STORAGE_PATH": str(tmp_path / "wrapper-memory"),
             },

@@ -66,7 +66,7 @@
 
 ## SLO 证据
 
-HTTP 进程可在 shutdown 时通过 `MEMPLEX_G006_REPORT_OUTPUT` 写入一份原子替换的签名 report；签名 key 来自 `MEMPLEX_OPERATIONS_HMAC_KEY`，key id 来自 `operations.report_key_id`。至少产生一个业务请求样本、所有阈值通过且 shutdown 完整 drain，报告才会设置 `industrial_gate_closing=true`。
+HTTP 进程可在 shutdown 时通过 `MEMPLEX_G006_REPORT_OUTPUT` 写入一份原子替换的 schema v2 签名 report；签名 key 来自 `MEMPLEX_OPERATIONS_HMAC_KEY`，key id 来自 `operations.report_key_id`。发布系统还必须显式注入当前部署绑定：`MEMPLEX_DEPLOYMENT_ID`、`MEMPLEX_SOURCE_SHA256`、`MEMPLEX_ARTIFACT_SHA256` 与 `MEMPLEX_TARGET_IDENTITY_SHA256`。任一项缺失或不是规范 SHA-256 时，HTTP 进程 fail closed：不写 report，只记录不含输入值的固定告警事件。报告同时包含 `generated_at`；只有观测窗口不少于 5 分钟、请求不少于 1000、latency samples 不少于 128、所有阈值和完整 drain 均通过，才会设置 `industrial_gate_closing=true`。
 
 ```bash
 memplex --output json operations alerts-check
@@ -75,6 +75,10 @@ python scripts/verify_g006_operations_slo.py --report /secure/evidence/g006-oper
 export MEMPLEX_G006_OPERATIONS_REPORT=/secure/evidence/g006-operations.json
 memplex --output json readiness --strict
 ```
+
+`operations verify-report`、独立脚本与 readiness 都按当前统一部署绑定和
+`operations.report_key_id` 验证报告，并拒绝超过 15 分钟、短窗口、少样本或跨部署证据；公开输出不会
+回显报告路径、部署标识、摘要或签名 key。
 
 G001-G009 工程验收已经完成，但任一部署缺少当前有效的 G007-G009 或其他机器证据时，
 整体仍为 `not_ready`；只有全部门禁同时通过才报告 `ready / industrial`。

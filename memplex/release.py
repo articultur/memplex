@@ -447,7 +447,7 @@ def _verify_release_archives(payloads: Mapping[str, bytes], *, version: str) -> 
             wheel_names = {info.filename for info in infos}
             required_wheel = {
                 "memplex/release.py",
-                "memplex/storage/migrations/0005_reliable_sync.sql",
+                "memplex/storage/migrations/0006_background_tasks.sql",
                 "memplex/_plugin/.claude-plugin/plugin.json",
                 "memplex/_plugin/.codex-plugin/plugin.json",
             }
@@ -497,7 +497,7 @@ def _verify_release_archives(payloads: Mapping[str, bytes], *, version: str) -> 
                         f"{root}/README.md",
                         f"{root}/LICENSE",
                         f"{root}/memplex/release.py",
-                        f"{root}/memplex/storage/migrations/0005_reliable_sync.sql",
+                        f"{root}/memplex/storage/migrations/0006_background_tasks.sql",
                     }
                     if not required_sdist.issubset(names):
                         _fail("release_archive_member_invalid")

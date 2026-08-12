@@ -20,6 +20,12 @@ from memplex.adapters._shared import get_plugin_source_dir as _get_plugin_source
 from memplex.adapters._shared import marketplace_json as _marketplace_json
 from memplex.adapters.agent_runtime import get_agent_manifest
 from memplex.adapters.jsonc_edit import remove_jsonc_path, set_jsonc_path
+from memplex.adapters.managed_identity import (
+    ManagedIdentityError,
+    load_managed_identity,
+    validate_managed_identity,
+)
+from memplex.adapters.runtime_status import read_runtime_status, runtime_status_path
 from memplex.adapters.yaml_edit import (
     remove_yaml_path,
     set_yaml_scalar_path,
@@ -127,10 +133,37 @@ def uninstall_agent(
 ) -> list[AgentInstallResult]:
     """Remove Memplex integration from one or all supported agent hosts."""
 
-    return [
-        _uninstall_one(name, target_dir=target_dir, dry_run=dry_run)
-        for name in _expand_agents(agent)
-    ]
+    names = _expand_agents(agent)
+    results: list[AgentInstallResult] = []
+    removed: list[str] = []
+    transaction: tuple[dict[Path, _InstallSnapshot], Path] | None = None
+    if len(names) > 1 and not dry_run:
+        mutation_paths: list[Path] = []
+        for name in names:
+            _, host_paths = _agent_install_mutation_paths(name, target_dir)
+            mutation_paths.extend(host_paths)
+        snapshots, snapshot_root = _snapshot_install_paths(dict.fromkeys(mutation_paths))
+        transaction = snapshots, snapshot_root
+    try:
+        for name in names:
+            result = _uninstall_one(name, target_dir=target_dir, dry_run=dry_run)
+            results.append(result)
+            removed.append(name)
+    except Exception as exc:
+        if transaction is not None:
+            snapshots, snapshot_root = transaction
+            rollback_errors = _restore_install_snapshot(snapshots, snapshot_root)
+            transaction = None
+            restored = ", ".join(removed) or "none completed"
+            detail = f" Rolled back uninstalled agents to exact preuninstall state: {restored}."
+            if rollback_errors:
+                detail += f" Rollback errors: {'; '.join(rollback_errors)}."
+            raise RuntimeError(f"Failed to uninstall {name}: {exc}.{detail}") from exc
+        raise
+    finally:
+        if transaction is not None:
+            _cleanup_snapshot_root(transaction[1])
+    return results
 
 
 def inspect_agent_installation(
@@ -153,6 +186,7 @@ def inspect_agent_installation(
     installed = False
     selected = False
     managed = False
+    identity_valid = False
     footprint = False
 
     if selected_host == "codex":
@@ -180,7 +214,13 @@ def inspect_agent_installation(
             or marketplace_root.exists()
             or any(path.exists() for path in required.values())
         )
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     elif selected_host == "claude-code":
         market_dir = paths["marketplace_root"]
         marker_path = paths["managed_marker"]
@@ -203,7 +243,13 @@ def inspect_agent_installation(
         marker = _safe_read_json(marker_path, drift_reasons)
         managed = _is_managed_payload(marker) and _is_managed_json_file(identity_path)
         footprint = market_dir.exists() or any(path.exists() for path in required.values())
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     elif selected_host == "openclaw":
         config_path = paths["config"]
         extension_dir = paths["plugin"]
@@ -235,7 +281,13 @@ def inspect_agent_installation(
             or bool(entry)
             or (isinstance(slots, dict) and slots.get("memory") == "memplex")
         )
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     else:
         config_path = paths["config"]
         provider_path = paths["provider_config"]
@@ -262,7 +314,13 @@ def inspect_agent_installation(
         configured_visibility = str(provider.get("visibility", "workspace"))
         installed = _required_paths_exist(required, missing_paths)
         footprint = plugin_dir.exists() or provider_path.exists() or selected
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
 
     if footprint and not selected:
         drift_reasons.append("memory provider is not selected")
@@ -282,6 +340,10 @@ def inspect_agent_installation(
     else:
         status = "drifted"
 
+    runtime_status = read_runtime_status(runtime_status_path(root), agent=selected_host)
+    if status == "healthy" and runtime_status["state"] == "degraded":
+        status = "degraded"
+
     serialised_paths = {name: str(path) for name, path in paths.items()}
     return {
         "schema_version": 1,
@@ -298,6 +360,7 @@ def inspect_agent_installation(
         },
         "missing_paths": missing_paths,
         "drift_reasons": list(dict.fromkeys(drift_reasons)),
+        "runtime_status": runtime_status,
     }
 
 
@@ -621,16 +684,31 @@ def _safe_read_json(path: Path, errors: list[str]) -> dict[str, Any]:
         return {}
 
 
-def _installation_identity(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"user_id": None, "project_path": None, "source": "runtime"}
-    errors: list[str] = []
-    payload = _safe_read_json(path, errors)
+def _installation_identity(
+    path: Path,
+    *,
+    expected_agent: str,
+    expected_host_root: Path,
+    errors: list[str],
+) -> tuple[dict[str, Any], bool]:
+    try:
+        payload = load_managed_identity(
+            path,
+            expected_agent=expected_agent,
+            expected_host_root=expected_host_root,
+        )
+    except ManagedIdentityError as exc:
+        errors.append(f"managed identity invalid: {exc}")
+        return {
+            "user_id": None,
+            "project_path": None,
+            "source": str(path) if path.exists() else "runtime",
+        }, False
     return {
-        "user_id": payload.get("user_id"),
-        "project_path": payload.get("project_path"),
+        "user_id": payload["user_id"],
+        "project_path": payload["project_path"],
         "source": str(path),
-    }
+    }, True
 
 
 def _expand_agents(agent: str) -> list[str]:
@@ -762,13 +840,14 @@ def _install_codex(
             }
             _write_json(
                 identity_path,
-                {
-                    "agent": "codex",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="codex",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             _write_json(
                 marker_path,
@@ -1005,25 +1084,27 @@ def _install_claude_code(
             _write_json(marketplace_path, marketplace)
             _write_json(
                 identity_path,
-                {
-                    "agent": "claude-code",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="claude-code",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             identity_path.chmod(0o600)
             cache_identity = cache_target / "memplex-agent.json"
             _write_json(
                 cache_identity,
-                {
-                    "agent": "claude-code",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="claude-code",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             cache_identity.chmod(0o600)
             _write_json(cache_marker, {"managed": managed, "version": _package_version()})
@@ -1276,6 +1357,7 @@ def _install_openclaw(
                 user_id=resolved_user_id,
                 project_path=resolved_project_path,
                 source_root=source_root,
+                host_root=str(root.resolve()),
                 install_state={
                     "managed": {"installer": "memplex"},
                     "originalText": original_text,
@@ -1476,6 +1558,7 @@ def _install_hermes(
         "project_path": resolved_project_path,
         "python": _python_command(),
         "source_root": source_root,
+        "host_root": str(root.resolve()),
         "prefetch": True,
         "top_k": 5,
         "token_budget": 1500,
@@ -1639,8 +1722,51 @@ def _resolved_project_path(project_path: str | Path | None) -> str:
     return str(Path(candidate).expanduser().resolve(strict=False))
 
 
+def _managed_identity_payload(
+    *,
+    agent: str,
+    user_id: str,
+    project_path: str,
+    source_root: str,
+    host_root: str,
+    managed: dict[str, Any],
+) -> dict[str, Any]:
+    return validate_managed_identity(
+        {
+            "agent": agent,
+            "user_id": user_id,
+            "project_path": project_path,
+            "python": _python_command(),
+            "source_root": source_root,
+            "host_root": host_root,
+            "managed": managed,
+        },
+        expected_agent=agent,
+        expected_host_root=host_root,
+    )
+
+
 def _python_command() -> str:
-    return os.environ.get("MEMPLEX_PYTHON", sys.executable or "python")
+    """Return the absolute interpreter recorded in managed host integrations.
+
+    A launcher must not later resolve a different interpreter from PATH: its
+    dependencies and Memplex version belong to the persistent environment
+    chosen at installation time.
+    """
+
+    configured = os.environ.get("MEMPLEX_PYTHON") or sys.executable
+    if not configured:
+        raise RuntimeError("Memplex installer could not determine a Python interpreter")
+    interpreter = Path(configured).expanduser()
+    if not interpreter.is_absolute():
+        raise ValueError(
+            "MEMPLEX_PYTHON must be an absolute path so managed launchers do not use PATH"
+        )
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise ValueError(
+            "MEMPLEX_PYTHON must identify an existing executable file for managed launchers"
+        )
+    return str(interpreter)
 
 
 def _mcp_command() -> list[str]:
@@ -1707,6 +1833,7 @@ def _write_openclaw_extension(
     user_id: str,
     project_path: str,
     source_root: str,
+    host_root: str,
     install_state: dict[str, Any],
 ) -> None:
     if extension_dir.exists():
@@ -1777,14 +1904,14 @@ def _write_openclaw_extension(
     }
     _write_json(
         extension_dir / "memplex-agent.json",
-        {
-            "agent": "openclaw",
-            "user_id": user_id,
-            "project_path": project_path,
-            "python": _python_command(),
-            "source_root": source_root,
-            "managed": managed,
-        },
+        _managed_identity_payload(
+            agent="openclaw",
+            user_id=user_id,
+            project_path=project_path,
+            source_root=source_root,
+            host_root=host_root,
+            managed=managed,
+        ),
     )
     install_state_path = extension_dir / ".memplex-install-state.json"
     _write_json(install_state_path, install_state)
@@ -1793,11 +1920,158 @@ def _write_openclaw_extension(
 
 
 def _openclaw_plugin_javascript() -> str:
-    return r"""import { readFileSync } from "node:fs";
+    return r"""import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { delimiter } from "node:path";
+import { delimiter, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const identity = JSON.parse(readFileSync(new URL("./memplex-agent.json", import.meta.url), "utf8"));
+function identityError(detail) {
+  return new Error(`Memplex managed identity invalid; reinstall required: ${detail}`);
+}
+
+function parseJsonWithoutDuplicateKeys(text) {
+  let index = 0;
+  const skipWhitespace = () => {
+    while (/\s/u.test(text[index] || "")) index += 1;
+  };
+  const parseString = () => {
+    const start = index;
+    if (text[index] !== '"') throw new SyntaxError("expected string");
+    index += 1;
+    while (index < text.length) {
+      if (text[index] === "\\") {
+        index += 2;
+        continue;
+      }
+      if (text[index] === '"') {
+        index += 1;
+        return JSON.parse(text.slice(start, index));
+      }
+      index += 1;
+    }
+    throw new SyntaxError("unterminated string");
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    if (text[index] === "{") return parseObject();
+    if (text[index] === "[") {
+      const values = [];
+      index += 1;
+      skipWhitespace();
+      if (text[index] === "]") { index += 1; return values; }
+      while (true) {
+        values.push(parseValue());
+        skipWhitespace();
+        if (text[index] === "]") { index += 1; return values; }
+        if (text[index] !== ",") throw new SyntaxError("expected array separator");
+        index += 1;
+      }
+    }
+    if (text[index] === '"') return parseString();
+    const start = index;
+    while (index < text.length && !/[\s,}\]]/u.test(text[index])) index += 1;
+    if (start === index) throw new SyntaxError("expected value");
+    return JSON.parse(text.slice(start, index));
+  };
+  const parseObject = () => {
+    const value = {};
+    const keys = new Set();
+    index += 1;
+    skipWhitespace();
+    if (text[index] === "}") { index += 1; return value; }
+    while (true) {
+      skipWhitespace();
+      const key = parseString();
+      if (keys.has(key)) throw identityError(`duplicate key ${JSON.stringify(key)}`);
+      keys.add(key);
+      skipWhitespace();
+      if (text[index] !== ":") throw new SyntaxError("expected object colon");
+      index += 1;
+      value[key] = parseValue();
+      skipWhitespace();
+      if (text[index] === "}") { index += 1; return value; }
+      if (text[index] !== ",") throw new SyntaxError("expected object separator");
+      index += 1;
+    }
+  };
+  const value = parseValue();
+  skipWhitespace();
+  if (index !== text.length) throw new SyntaxError("trailing JSON content");
+  return value;
+}
+
+function exactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, i) => key === expected[i]);
+}
+
+function validateIdentity(value, expectedHostRoot) {
+  const keys = ["agent", "host_root", "managed", "project_path", "python", "source_root", "user_id"];
+  if (!exactKeys(value, keys)) throw identityError("identity must contain exact keys");
+  for (const field of ["agent", "user_id", "project_path", "python", "source_root", "host_root"]) {
+    if (typeof value[field] !== "string" || !value[field] || value[field] !== value[field].trim() ||
+        /[\u0000\r\n]/u.test(value[field])) {
+      throw identityError(`${field} must be canonical non-empty text`);
+    }
+  }
+  if (value.agent !== "openclaw") throw identityError("agent must be openclaw");
+  if (!exactKeys(value.managed, ["by", "installer", "schema_version"])) {
+    throw identityError("managed must contain exact ownership keys");
+  }
+  if (value.managed.by !== "memplex" || value.managed.installer !== "memplex" ||
+      value.managed.schema_version !== 1) {
+    throw identityError("managed ownership is invalid");
+  }
+  for (const field of ["project_path", "python", "source_root", "host_root"]) {
+    if (!isAbsolute(value[field])) throw identityError(`${field} must be absolute`);
+  }
+  try {
+    if (!statSync(value.python).isFile()) throw new Error("not a file");
+    accessSync(value.python, constants.X_OK);
+  } catch {
+    throw identityError("recorded Python interpreter is unavailable or not executable");
+  }
+  for (const field of ["source_root", "host_root"]) {
+    try {
+      if (!statSync(value[field]).isDirectory()) throw new Error("not a directory");
+    } catch {
+      throw identityError(`${field} directory is unavailable`);
+    }
+  }
+  let canonicalHostRoot;
+  let canonicalExpectedRoot;
+  try {
+    canonicalHostRoot = realpathSync(value.host_root);
+    canonicalExpectedRoot = realpathSync(expectedHostRoot);
+  } catch {
+    throw identityError("host_root binding cannot be resolved");
+  }
+  if (value.host_root !== canonicalHostRoot) {
+    throw identityError("host_root must be a canonical path");
+  }
+  const hostStat = statSync(canonicalHostRoot);
+  const expectedStat = statSync(canonicalExpectedRoot);
+  if (canonicalHostRoot !== canonicalExpectedRoot || hostStat.dev !== expectedStat.dev ||
+      hostStat.ino !== expectedStat.ino) {
+    throw identityError("host_root does not match the actual installation root");
+  }
+  return value;
+}
+
+function loadIdentity() {
+  try {
+    const raw = readFileSync(new URL("./memplex-agent.json", import.meta.url), "utf8");
+    const expectedHostRoot = realpathSync(resolve(pluginRoot, "../.."));
+    return validateIdentity(parseJsonWithoutDuplicateKeys(raw), expectedHostRoot);
+  } catch (error) {
+    if (String(error).includes("reinstall required")) throw error;
+    throw identityError("identity file is missing, unreadable, or invalid JSON");
+  }
+}
+
+const pluginRoot = realpathSync(fileURLToPath(new URL(".", import.meta.url)));
+const identity = loadIdentity();
 
 function effectiveConfig(pluginConfig) {
   return {
@@ -1815,6 +2089,8 @@ function effectiveConfig(pluginConfig) {
     projectPath: identity.project_path,
     python: identity.python,
     sourceRoot: identity.source_root,
+    hostRoot: identity.host_root,
+    pluginRoot,
   };
 }
 
@@ -1825,12 +2101,14 @@ function bridgeEnv(config) {
     PYTHONPATH: pythonPath,
     MEMPLEX_USER_ID: config.userId,
     MEMPLEX_PROJECT_ROOT: config.projectPath,
+    OPENCLAW_CONFIG_DIR: config.hostRoot,
+    MEMPLEX_PLUGIN_ROOT: config.pluginRoot,
   };
 }
 
 function callBridge(action, event, context, config) {
   return new Promise((resolve, reject) => {
-    const child = spawn(config.python || "python3", ["-m", "memplex.adapters.openclaw_plugin", action], {
+    const child = spawn(config.python, ["-m", "memplex.adapters.openclaw_plugin", action], {
       env: bridgeEnv(config),
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -1980,14 +2258,14 @@ def _write_hermes_provider_plugin(
     managed = provider_config.get("managed", {"installer": "memplex"})
     _write_json(
         plugin_dir / "memplex-agent.json",
-        {
-            "agent": "hermes",
-            "user_id": provider_config["user_id"],
-            "project_path": provider_config["project_path"],
-            "python": provider_config["python"],
-            "source_root": provider_config["source_root"],
-            "managed": managed,
-        },
+        _managed_identity_payload(
+            agent="hermes",
+            user_id=provider_config["user_id"],
+            project_path=provider_config["project_path"],
+            source_root=provider_config["source_root"],
+            host_root=provider_config["host_root"],
+            managed=managed,
+        ),
     )
     (plugin_dir / "memplex-agent.json").chmod(0o600)
     _write_json(plugin_dir / ".memplex-install-state.json", install_state)
@@ -2004,13 +2282,88 @@ def _write_hermes_provider_plugin(
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
-_IDENTITY = json.loads((_PLUGIN_DIR / "memplex-agent.json").read_text(encoding="utf-8"))
-_SOURCE_ROOT = str(_IDENTITY.get("source_root") or "")
-if _SOURCE_ROOT and _SOURCE_ROOT not in sys.path:
+_EXPECTED_HOST_ROOT = _PLUGIN_DIR.parents[1].resolve(strict=True)
+
+
+def _identity_error(detail: str) -> ValueError:
+    return ValueError(f"Memplex managed identity invalid; reinstall required: {detail}")
+
+
+def _object_without_duplicates(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise _identity_error(f"duplicate key {key!r}")
+        value[key] = item
+    return value
+
+
+def _load_identity():
+    try:
+        raw = (_PLUGIN_DIR / "memplex-agent.json").read_text(encoding="utf-8")
+        value = json.loads(raw, object_pairs_hook=_object_without_duplicates)
+    except ValueError as exc:
+        if "reinstall required" in str(exc):
+            raise
+        raise _identity_error("identity is not valid JSON") from exc
+    except (OSError, UnicodeError) as exc:
+        raise _identity_error("identity file is missing or unreadable") from exc
+    expected = {
+        "agent", "user_id", "project_path", "python", "source_root", "host_root", "managed"
+    }
+    if type(value) is not dict or set(value) != expected:
+        raise _identity_error("identity must contain exact keys")
+    for field in ("agent", "user_id", "project_path", "python", "source_root", "host_root"):
+        item = value[field]
+        if (
+            type(item) is not str
+            or not item
+            or item != item.strip()
+            or any(control in item for control in ("\\x00", "\\n", "\\r"))
+        ):
+            raise _identity_error(f"{field} must be canonical non-empty text")
+    if value["agent"] != "hermes":
+        raise _identity_error("agent must be hermes")
+    managed = value["managed"]
+    if type(managed) is not dict or set(managed) != {"by", "installer", "schema_version"}:
+        raise _identity_error("managed must contain exact ownership keys")
+    if managed["by"] != "memplex" or managed["installer"] != "memplex":
+        raise _identity_error("managed ownership is invalid")
+    if type(managed["schema_version"]) is not int or managed["schema_version"] != 1:
+        raise _identity_error("managed schema_version must be integer 1")
+    for field in ("project_path", "python", "source_root", "host_root"):
+        if not Path(value[field]).is_absolute():
+            raise _identity_error(f"{field} must be absolute")
+    python = Path(value["python"])
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise _identity_error("recorded Python interpreter is unavailable or not executable")
+    for field in ("source_root", "host_root"):
+        if not Path(value[field]).is_dir():
+            raise _identity_error(f"{field} directory is unavailable")
+    recorded_host_root = Path(value["host_root"])
+    try:
+        canonical_host_root = recorded_host_root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _identity_error("host_root binding cannot be resolved") from exc
+    if str(recorded_host_root) != str(canonical_host_root):
+        raise _identity_error("host_root must be a canonical path")
+    try:
+        same_host = os.path.samefile(canonical_host_root, _EXPECTED_HOST_ROOT)
+    except OSError as exc:
+        raise _identity_error("host_root binding cannot be compared") from exc
+    if not same_host:
+        raise _identity_error("host_root does not match the actual installation root")
+    return value
+
+
+_IDENTITY = _load_identity()
+_SOURCE_ROOT = _IDENTITY["source_root"]
+if _SOURCE_ROOT not in sys.path:
     sys.path.insert(0, _SOURCE_ROOT)
 
 from memplex.adapters.hermes_memory_provider import MemplexMemoryProvider
@@ -2124,7 +2477,7 @@ def _package_version() -> str:
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
         except Exception:
-            pass
+            logger.debug("pyproject version read failed", exc_info=True)
 
     from importlib.metadata import version as pkg_version
 

@@ -36,6 +36,7 @@ class TaskInfo:
     max_retries: int = 3
     next_attempt_at: Optional[datetime] = None
     lease_until: Optional[datetime] = None
+    lease_id: Optional[str] = None
     last_error_code: Optional[str] = None
 
 

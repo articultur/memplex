@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from memplex.backup import BackupIntegrityError, BackupManifest, verify_backup_artifact
-from memplex.storage.migrations import PostgresMigrationRunner
+from memplex.storage.migrations import PostgresMigrationRunner, discover_migrations
 from memplex.storage.postgres_backup import (
     PostgresBackupExecutor,
     PostgresClientTools,
@@ -27,6 +27,10 @@ def _pgserver_tools() -> PostgresClientTools:
         pg_dump_version="16.2",
         pg_restore_version="16.2",
     )
+
+
+def _latest_migration_version() -> int:
+    return discover_migrations()[-1].version
 
 
 def test_real_postgres_backup_contains_business_sync_and_migration_catalogue(
@@ -73,7 +77,7 @@ def test_real_postgres_backup_contains_business_sync_and_migration_catalogue(
 
     assert manifest.schema == target.schema
     assert manifest.database == target.database
-    assert manifest.migration_version == 5
+    assert manifest.migration_version == _latest_migration_version()
     assert verify_backup_artifact(artifact, key).verified is True
     listed = subprocess.run(
         (str(tools.pg_restore), "--list", str(artifact / "payload.dump")),
@@ -160,7 +164,7 @@ def test_real_postgres_backup_restore_roundtrip_requires_absent_same_schema(
         )
         assert cursor.fetchone() == ("Restore Function",)
         cursor.execute("SELECT MAX(version) FROM memplex_schema_migrations")
-        assert cursor.fetchone() == (5,)
+        assert cursor.fetchone() == (_latest_migration_version(),)
         cursor.close()
     finally:
         connection.close()

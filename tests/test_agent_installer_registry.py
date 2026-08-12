@@ -9,6 +9,7 @@ behaviour for known/unknown agents.
 
 import json
 import os
+import sys
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
@@ -52,6 +53,96 @@ def test_registry_needs_identity_flag_matches_signatures():
     assert _INSTALLERS["claude-code"].needs_identity is True
     assert _INSTALLERS["openclaw"].needs_identity is True
     assert _INSTALLERS["hermes"].needs_identity is True
+
+
+def test_managed_identity_loader_enforces_the_exact_lifecycle_contract(tmp_path):
+    """Any schema widening or weak coercion would let a launcher change principal."""
+
+    host_root = tmp_path / "host"
+    source_root = tmp_path / "source"
+    host_root.mkdir()
+    source_root.mkdir()
+    identity_path = tmp_path / "memplex-agent.json"
+    valid = {
+        "agent": "openclaw",
+        "user_id": "alice",
+        "project_path": str((tmp_path / "workspace").resolve()),
+        "python": sys.executable,
+        "source_root": str(source_root.resolve()),
+        "host_root": str(host_root.resolve()),
+        "managed": {
+            "by": "memplex",
+            "installer": "memplex",
+            "schema_version": 1,
+        },
+    }
+    loader = getattr(agent_installer, "load_managed_identity", None)
+    assert callable(loader), "agent installer must expose the shared identity loader"
+
+    identity_path.write_text(json.dumps(valid), encoding="utf-8")
+    assert loader(
+        identity_path,
+        expected_agent="openclaw",
+        expected_host_root=host_root,
+    ) == valid
+
+    other_host = tmp_path / "other-host"
+    other_host.mkdir()
+    with pytest.raises(ValueError, match="host_root.*reinstall required|reinstall required.*host_root"):
+        loader(
+            identity_path,
+            expected_agent="openclaw",
+            expected_host_root=other_host,
+        )
+
+    host_alias = tmp_path / "host-alias"
+    host_alias.symlink_to(host_root, target_is_directory=True)
+    assert loader(
+        identity_path,
+        expected_agent="openclaw",
+        expected_host_root=host_alias,
+    ) == valid
+
+    invalid_payloads = []
+    for field in valid:
+        missing = dict(valid)
+        missing.pop(field)
+        invalid_payloads.append(json.dumps(missing))
+    invalid_payloads.extend(
+        [
+            json.dumps({**valid, "unexpected": True}),
+            json.dumps({**valid, "agent": "hermes"}),
+            json.dumps({**valid, "user_id": 7}),
+            json.dumps({**valid, "user_id": " alice "}),
+            json.dumps({**valid, "project_path": "relative/workspace"}),
+            json.dumps({**valid, "project_path": "/workspace\u0000suffix"}),
+            json.dumps({**valid, "python": str(tmp_path / "missing-python")}),
+            json.dumps({**valid, "source_root": str(tmp_path / "missing-source")}),
+            json.dumps({**valid, "host_root": str(tmp_path / "missing-host")}),
+            json.dumps({**valid, "managed": {**valid["managed"], "unexpected": True}}),
+            json.dumps({**valid, "managed": {"installer": "memplex"}}),
+            json.dumps({**valid, "managed": {**valid["managed"], "schema_version": True}}),
+            json.dumps(valid).replace(
+                '"agent": "openclaw"',
+                '"agent": "openclaw", "agent": "openclaw"',
+                1,
+            ),
+            json.dumps(valid).replace(
+                '"by": "memplex"',
+                '"by": "memplex", "by": "memplex"',
+                1,
+            ),
+        ]
+    )
+
+    for raw in invalid_payloads:
+        identity_path.write_text(raw, encoding="utf-8")
+        with pytest.raises(ValueError, match="reinstall required"):
+            loader(
+                identity_path,
+                expected_agent="openclaw",
+                expected_host_root=host_root,
+            )
 
 
 # ── Dispatch behaviour ───────────────────────────────────────────────
@@ -177,6 +268,44 @@ def test_all_host_failure_restores_exact_preexisting_managed_state(tmp_path):
 
     assert _snapshot_tree(target) == before
     assert _snapshot_tree(marketplace_referent) == referent_before
+
+
+def test_all_host_second_uninstall_failure_restores_exact_preuninstall_state(tmp_path, monkeypatch):
+    """A second-host uninstall failure restores the first host and untouched hosts exactly."""
+
+    target = tmp_path / "agents"
+    target.mkdir()
+    install_agent(
+        "all",
+        target_dir=target,
+        user_id="alice",
+        project_path=tmp_path / "workspace",
+    )
+    config_path = target / "config.toml"
+    config_referent = tmp_path / "codex-config-referent.toml"
+    config_path.rename(config_referent)
+    config_path.symlink_to(config_referent)
+    config_referent.chmod(0o640)
+    before = _snapshot_tree(target)
+    referent_before = _snapshot_tree(config_referent)
+
+    def fail_claude_uninstall(*_args, **_kwargs):
+        raise OSError("injected claude uninstall failure")
+
+    monkeypatch.setitem(
+        agent_installer._INSTALLERS,
+        "claude-code",
+        AgentInstallerSpec(
+            install=agent_installer._INSTALLERS["claude-code"].install,
+            uninstall=fail_claude_uninstall,
+            needs_identity=True,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="Failed to uninstall claude-code"):
+        uninstall_agent("all", target_dir=target)
+
+    assert _snapshot_tree(target) == before
+    assert _snapshot_tree(config_referent) == referent_before
 
 
 def test_install_snapshot_restores_a_dangling_symbolic_link(tmp_path):

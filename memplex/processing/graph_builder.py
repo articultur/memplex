@@ -373,7 +373,7 @@ class GraphBuilder:
                 if f.name == name:
                     return f.id
         except Exception:
-            pass
+            logger.debug("graph name lookup failed for %r", name, exc_info=True)
         return None
 
     def _get_all_funcs(self) -> List[Function]:

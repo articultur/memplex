@@ -65,6 +65,7 @@ _SYNC_STATE_KEYS = {
     "inbox",
     "batches",
     "cursors",
+    "inbound_cursors",
     "snapshots",
     "snapshot_items",
 }
@@ -80,6 +81,7 @@ _EMPTY_SYNC_STATE = {
     "inbox": [],
     "batches": [],
     "cursors": [],
+    "inbound_cursors": [],
     "snapshots": [],
     "snapshot_items": [],
 }
@@ -372,7 +374,13 @@ def _empty_sync_state() -> dict[str, Any]:
 def _validate_sync_state(payload: Any, *, label: str) -> None:
     if type(payload) is not dict:
         raise LiteStorageIntegrityError(f"invalid Lite {label} sync payload")
-    _require_exact_keys(payload, _SYNC_STATE_KEYS, label=f"{label} sync payload")
+    # Pre-separation v2 pairs did not have ``inbound_cursors``.  Accept that
+    # one exact historical shape so LiteMemoryStore can upgrade it under the
+    # pair journal; every other missing or future field still fails closed.
+    legacy_keys = _SYNC_STATE_KEYS - {"inbound_cursors"}
+    payload_keys = set(payload)
+    if payload_keys != _SYNC_STATE_KEYS and payload_keys != legacy_keys:
+        raise LiteStorageIntegrityError(f"invalid Lite {label} sync payload schema")
     tenant_binding = payload["tenant_binding"]
     if tenant_binding is not None:
         _require_str(tenant_binding, label=f"{label} tenant_binding")
@@ -391,6 +399,11 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
     inbox = _validate_sync_list_exact_items(payload["inbox"], element_keys=_SYNC_INBOX_KEYS, label="inbox")
     batches = _validate_sync_list_exact_items(payload["batches"], element_keys=_SYNC_BATCH_KEYS, label="batches")
     cursors = _validate_sync_list_exact_items(payload["cursors"], element_keys=_SYNC_CURSOR_KEYS, label="cursors")
+    inbound_cursors = _validate_sync_list_exact_items(
+        payload.get("inbound_cursors", []),
+        element_keys=_SYNC_CURSOR_KEYS,
+        label="inbound cursors",
+    )
     snapshots = _validate_sync_list_exact_items(payload["snapshots"], element_keys=_SYNC_SNAPSHOT_KEYS, label="snapshots")
     snapshot_items = _validate_sync_list_exact_items(payload["snapshot_items"], element_keys=_SYNC_SNAPSHOT_ITEM_KEYS, label="snapshot_items")
 
@@ -585,6 +598,21 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
         key = (item["remote_id"], item["consumer_id"])
         if key in seen:
             raise LiteStorageIntegrityError("invalid Lite cursor duplicates")
+        seen.add(key)
+
+    seen.clear()
+    for item in inbound_cursors:
+        remote_id = _require_str(item["remote_id"], label="inbound cursor remote_id")
+        consumer_id = _require_str(
+            item["consumer_id"], label="inbound cursor consumer_id"
+        )
+        _require_generation(item["after_seq"], label="inbound cursor after_seq")
+        _require_aware_timestamp(
+            item["updated_at"], label="inbound cursor updated_at"
+        )
+        key = (remote_id, consumer_id)
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite inbound cursor duplicates")
         seen.add(key)
 
     seen.clear()

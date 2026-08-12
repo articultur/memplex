@@ -43,6 +43,7 @@ from memplex.sync_protocol import (
     SyncSnapshotAnchor,
     SyncSnapshotPage,
     SyncStatus,
+    SyncStreamItem,
     SyncVersion,
 )
 from memplex.sync_repository import (
@@ -337,6 +338,77 @@ def _batch() -> SyncBatch:
             ),
         ),
     )
+
+
+def _inbound_event(index: int, *, tenant_id: str = "tenant-sync") -> SyncEvent:
+    event_id = _event_id(index)
+    return SyncEvent(
+        1,
+        event_id,
+        "origin-a",
+        SyncNodeType.FUNCTION,
+        SyncEntityKey.node(f"inbound-{index}"),
+        SyncOperation.UPSERT,
+        _version(event_id),
+        SyncScope(
+            tenant_id,
+            "owner-a",
+            "workspace-sync",
+            "user",
+            None,
+            None,
+        ),
+        {"id": f"inbound-{index}"},
+    )
+
+
+def _cross_tenant_inbound_page() -> SyncPage:
+    return SyncPage(
+        (
+            SyncStreamItem(1, _inbound_event(801)),
+            SyncStreamItem(2, _inbound_event(802, tenant_id="tenant-other")),
+        ),
+        2,
+        2,
+        False,
+    )
+
+
+def _duplicate_inbound_page() -> SyncPage:
+    event = _inbound_event(803)
+    return SyncPage((SyncStreamItem(1, event), SyncStreamItem(2, event)), 2, 2, False)
+
+
+def _forged_inbound_page() -> SyncPage:
+    page = SyncPage(
+        (SyncStreamItem(1, _inbound_event(804)),),
+        1,
+        1,
+        False,
+    )
+    object.__setattr__(page, "next_after_seq", 0)
+    return page
+
+
+@pytest.mark.parametrize(
+    "page_factory",
+    [
+        _cross_tenant_inbound_page,
+        _duplicate_inbound_page,
+        _forged_inbound_page,
+    ],
+)
+def test_sync_apply_page_rejects_invalid_page_before_opening_transaction(
+    page_factory,
+) -> None:
+    cursor = _FakeCursor()
+    repo = _repo(cursor)
+
+    with pytest.raises(ValueError):
+        repo.sync_apply_page("remote-a", page_factory())
+
+    assert repo._store._pool_manager.transaction_calls == []
+    assert cursor.executed == []
 
 
 def test_sync_page_requires_exact_types_and_bounds() -> None:

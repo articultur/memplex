@@ -40,7 +40,11 @@ export MEMPLEX_STORAGE_PATH='postgresql://memplex_app@db.example/memplex'
 export MEMPLEX_STORAGE_MIGRATION_DSN='postgresql://memplex_migrator@db.example/memplex'
 ```
 
-若 `deployment.profile=production` 仍选择 Lite、缺少任一 DSN、YAML 解析失败、`PUBLIC` 获得
+生产启动会在建池/DDL 前要求两条 DSN 均为可解析、无前后空白的精确 PostgreSQL DSN，
+并拒绝相同 canonical 连接身份；连接后还会比较真实 `current_user/session_user`，即使使用不同
+connection options 伪装同一 role 也会 fail-closed。application 与 migration principal 必须完全分离。
+
+若 `deployment.profile=production` 仍选择 Lite、缺少/无效/复用任一 DSN、YAML 解析失败、`PUBLIC` 获得
 受管 schema 的任何权限，或
 `storage` 出现未知字段（例如 `migration_dns`），服务会在创建任何连接前拒绝启动。错误、
 readiness 证据与配置对象表示不会回显 DSN、密码或查询参数；应通过部署平台的 secret 注入
@@ -91,9 +95,76 @@ memplex --output json readiness --strict
 MEMPLEX_PRINCIPALS_JSON` 时为 `pass`；格式错误会作为不泄露配置内容的 `fail` 报告。
 这只证明 G002 的部署合同已满足；整体状态仍取决于其余全部机器门禁。
 
-G003 迁移/存储完整性与 G004 可靠同步/背压已经完成实现、真实 PostgreSQL/进程矩阵及独立审查，
-readiness 将这两个门禁报告为 `pass`。这只是已完成门禁的固定机器证据，不读取本地 unsigned 报告，
-也不会让默认配置或未完成的工业门禁变绿。
+G003 迁移/存储完整性与 G004 可靠同步/背压的工程验收不再被当作任意部署的静态 `pass`。
+两个门禁都必须提交当前部署的签名 evidence；缺失时为 `blocked`，报告存在但过期、篡改、
+gate 互换、key id 或下列任一绑定不一致时为 `fail`：
+
+```bash
+export MEMPLEX_DEPLOYMENT_ID='prod-cn-1-20260812'
+export MEMPLEX_SOURCE_SHA256='<64 lowercase hex>'
+export MEMPLEX_ARTIFACT_SHA256='<64 lowercase hex>'
+export MEMPLEX_TARGET_IDENTITY_SHA256='<64 lowercase hex>'
+export MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID='industrial-2026-08'
+export MEMPLEX_INDUSTRIAL_EVIDENCE_HMAC_KEY='<canonical-base64-32-byte-secret>'
+export MEMPLEX_G003_STORAGE_REPORT='/secure/evidence/g003-storage.json'
+export MEMPLEX_G004_SYNC_REPORT='/secure/evidence/g004-sync.json'
+```
+
+同一组 source、artifact、deployment 和 target identity 也是 G006/G008 当前部署验证的权威输入；
+readiness 不从 Git 工作树、文件路径或历史测试计数推断它们。G003/G004 evidence 自生成起最多有效
+15 分钟，必须由持有 attestation key 的受控验证流水线在独立 verifier 已通过后签发。本机 unsigned
+迁移诊断或 G004 原始 backlog JSON 不能直接关闭工业门禁。
+
+受控流水线可在独立 verifier 已经返回成功后，对其原始结果字节签名：
+
+```json
+{
+  "schema_version": 1,
+  "gate_id": "schema_migrations_atomicity",
+  "verifier_id": "memplex-g003-storage-integrity-v1",
+  "verifier_contract_sha256": "<current fixed contract sha256>",
+  "status": "passed",
+  "memplex_version": "<installed version>",
+  "source_sha256": "<same as MEMPLEX_SOURCE_SHA256>",
+  "artifact_sha256": "<same as MEMPLEX_ARTIFACT_SHA256>",
+  "deployment_id": "<same as MEMPLEX_DEPLOYMENT_ID>",
+  "target_identity_sha256": "<same as MEMPLEX_TARGET_IDENTITY_SHA256>",
+  "started_at": "2026-08-13T00:00:00.000000Z",
+  "completed_at": "2026-08-13T00:05:00.000000Z",
+  "checks": [
+    {"id": "least_privilege_application_acl", "status": "passed", "evidence_sha256": "<64 hex>"}
+  ]
+}
+```
+
+上例仅展示字段形状；`checks` 必须完整包含下述 gate 的全部固定检查，顺序、数量及 digest 都由
+签名工具严格验证，不能只提供示例中的一个元素。
+
+```bash
+python scripts/sign_industrial_gate_evidence.py \
+  --gate-id schema_migrations_atomicity \
+  --run-result /secure/results/g003-verifier.json \
+  --output "$MEMPLEX_G003_STORAGE_REPORT" \
+  --key-id "$MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID"
+
+python scripts/sign_industrial_gate_evidence.py \
+  --gate-id durable_sync_backpressure \
+  --run-result /secure/results/g004-verifier.json \
+  --output "$MEMPLEX_G004_SYNC_REPORT" \
+  --key-id "$MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID"
+```
+
+签名工具会先严格解析独立 verifier result：必须是 schema v1、`status=passed`、gate 与当前
+source/artifact/deployment/target/version 完全一致、固定 verifier contract digest 匹配、结果在 15 分钟内，
+且该 gate 的全部必需检查按固定顺序为 `passed` 并携带各自 evidence SHA-256；任意 failed、缺项、extra、
+未来 schema、重复 JSON key 或跨部署结果都不会被包装成通过证据。签名仍不替代 verifier 自身执行，持有
+attestation key 的流水线负责保证各 evidence digest 指向受控、不可变的原始运行产物。输入、输出及其祖先
+符号链接、非普通文件、超限结果或输入输出同 inode 都会 fail-closed，公开输出不含路径、摘要、部署身份或密钥。
+
+G003 固定检查为 migration plan/status/apply、storage crash atomicity、least-privilege application ACL、
+PostgreSQL storage regression 和 packaged migration discovery；G004 固定检查为 durable outbox/inbox、
+bounded pagination/backpressure、idempotent replay、typed tombstone propagation 和 PostgreSQL sync regression。
+verifier result 中的 `verifier_id` 与 `verifier_contract_sha256` 必须由当前脚本合同生成，不能由自由文本替代。
 
 G005 已提供签名 PostgreSQL 逻辑备份、无覆盖恢复、PITR 前提检查和实测 RPO/RTO 演练工具；但
 `backup_restore_dr` 默认仍为 `blocked`。只有同时配置一份通过 HMAC 验证的 PostgreSQL backup
@@ -127,7 +198,8 @@ memplex --output json operations alerts-check
 memplex --output json operations status
 ```
 
-生产进程应配置 canonical base64 32-byte HMAC key、非秘密 key id 与一个安全的 evidence 输出文件：
+生产进程应配置上述四项统一部署绑定、canonical base64 32-byte HMAC key、非秘密 key id 与一个
+安全的 evidence 输出文件：
 
 ```bash
 export MEMPLEX_OPERATIONS_HMAC_KEY='<canonical-base64-32-byte-secret>'
@@ -135,7 +207,8 @@ export MEMPLEX_G006_REPORT_OUTPUT='/secure/evidence/g006-operations.json'
 # YAML: operations.report_key_id: ops-2026-08
 ```
 
-进程完成一次有请求样本的真实窗口并优雅退出后，离线验证签名、阈值、shutdown drain 和告警规则 digest：
+进程完成至少 5 分钟、1000 个请求且含至少 128 个 latency samples 的真实窗口并优雅退出后，
+离线验证签名、当前部署绑定、key id、15 分钟 freshness、阈值、shutdown drain 和告警规则 digest：
 
 ```bash
 memplex --output json operations verify-report /secure/evidence/g006-operations.json
@@ -144,7 +217,8 @@ export MEMPLEX_G006_OPERATIONS_REPORT='/secure/evidence/g006-operations.json'
 memplex --output json readiness --strict
 ```
 
-没有报告时 `operations_slo=blocked`；报告存在但签名、阈值、drain 或 alert digest 无效时为 `fail`。
+没有报告时 `operations_slo=blocked`；报告存在但签名、freshness、样本、部署绑定、key id、阈值、
+drain 或 alert digest 无效时为 `fail`。
 详细响应步骤见 `docs/runbooks/production-operations.md`。G006 工程通过不替代 G007-G009 的部署证据。
 
 ## 可复现发布供应链证据（G007）
@@ -184,12 +258,18 @@ G008 验证器必须在隔离 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、OpenClaw prof
 
 ```bash
 export MEMPLEX_HOST_LIFECYCLE_HMAC_KEY='<64-hex-characters>'
+export MEMPLEX_HOST_LIFECYCLE_KEY_ID='g008-prod-2026-08'
 python scripts/verify_g008_host_lifecycle.py \
   --codex-cli /path/to/codex \
   --claude-cli /path/to/claude \
   --openclaw-cli /path/to/openclaw \
   --hermes-cli /isolated/hermes-venv/bin/hermes \
   --hermes-source-root /isolated/hermes-source \
+  --deployment-id "$MEMPLEX_DEPLOYMENT_ID" \
+  --source-sha256 "$MEMPLEX_SOURCE_SHA256" \
+  --artifact-sha256 "$MEMPLEX_ARTIFACT_SHA256" \
+  --target-identity-sha256 "$MEMPLEX_TARGET_IDENTITY_SHA256" \
+  --key-id "$MEMPLEX_HOST_LIFECYCLE_KEY_ID" \
   --evidence-output /secure/evidence/g008-hosts.json
 
 export MEMPLEX_G008_HOST_LIFECYCLE_REPORT=/secure/evidence/g008-hosts.json
@@ -200,8 +280,13 @@ export MEMPLEX_G008_HOST_LIFECYCLE_REPORT=/secure/evidence/g008-hosts.json
 evidence 自生成起仅有效 24 小时，并拒绝超过 5 分钟的未来时间；宿主升级、重启、配置
 变更或有效期届满后必须重新运行验证器。
 
-readiness 会重新验证签名、当前 Memplex 版本、四个宿主集合、全部生命周期检查、
-生成时间、当前打包 integration contract 摘要和固定 Hermes 来源。缺文件、弱 schema、篡改、旧版本、
+verifier 通过 JUnit 精确核对每个必需 node；任一 node skipped、xfailed、失败或未运行都拒绝签发。
+签发前 verifier 与 evidence 创建器会在执行该验证的宿主上重新读取每个实际 CLI，确认它是常规可执行
+文件且 SHA-256 与 proof 一致。每宿主 evidence 记录当时的 CLI 路径/二进制摘要/版本、隔离根摘要、
+required-node manifest 与 JUnit 摘要。部署侧 readiness 会重新验证签名、预期 key id、统一部署绑定、
+当前 Memplex 版本、四个宿主集合、proof schema、生成时间、当前打包 integration contract 摘要和固定
+Hermes 来源；它不会重新读取签发宿主的 `cli_path`，因此验证产物可以被安全地交付给另一台部署机器。
+缺文件、弱 schema、篡改、旧版本、
 旧插件摘要或缺少任一宿主都会使 `four_host_e2e` 保持 `blocked/fail`，且报告不会输出
 CLI 路径、临时 profile 或 HMAC key。G008 通过不能替代 G009；两者及其他门禁必须同时有效。
 
@@ -343,8 +428,9 @@ Lite/storage/CLI/readiness/sync 全套为 `368 passed`；运行时为 Python 3.1
 business lease high-watermark 不超过配置上限。
 
 pool 的 manager-authoritative token state-machine 已完成 fresh reviewer 审查；两个 PostgreSQL
-skip 是 pgvector extension 不可用的环境分支。这些已归档证据使
-`schema_migrations_atomicity` 为 `pass`，但不替代 G005–G009 的独立证据。
+skip 是 pgvector extension 不可用的环境分支。这些是工程归档与待签发 verifier result，不会单独使
+任一当前部署的 `schema_migrations_atomicity` 变为 `pass`；该门仍要求前述 15 分钟内、绑定当前
+source/artifact/deployment/target/key id 的签名 evidence。
 
 Lite 仍是单进程本地开发/测试存储，不是生产恢复方案；不得使用 Lite 文件、Lite journal 或
 Lite 测试结果替代 PostgreSQL 迁移、备份恢复和灾备演练证据。

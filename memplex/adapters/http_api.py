@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 # FastAPI is an optional dependency -- import lazily so the rest of
 # the adapter package remains importable without it.
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+    from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
     from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
     _FASTAPI_AVAILABLE = True
@@ -67,15 +69,38 @@ from memplex.auth import (
     local_development_context,
 )
 from memplex.operations import (
+    OperationsEvidenceError,
     OperationsMetrics,
+    OperationsReadinessBinding,
     RequestAdmission,
     create_operations_evidence,
     load_operations_signing_key,
     utc_timestamp_now,
     write_operations_report_atomic,
 )
+from memplex.readiness_evidence import (
+    ReadinessEvidenceError,
+    load_deployment_evidence_binding_from_environment,
+)
 
 _OPERATIONS_CONTROL_PATHS = frozenset({"/health/live", "/health/ready", "/metrics"})
+_UNAUTHENTICATED_UDS_ENV = "MEMPLEX_ALLOW_UNAUTHENTICATED_UDS"
+_FORWARDED_CLIENT_HEADERS = frozenset({"forwarded", "x-forwarded-for"})
+
+
+def _current_operations_readiness_binding(config: object) -> OperationsReadinessBinding:
+    """Adapt the shared explicit deployment binding to G006's report schema."""
+    operations = getattr(config, "operations")
+    deployment = load_deployment_evidence_binding_from_environment(
+        memplex_version=version("memplex")
+    )
+    return OperationsReadinessBinding(
+        deployment_id=deployment.deployment_id,
+        source_sha256=deployment.source_sha256,
+        artifact_sha256=deployment.artifact_sha256,
+        target_identity_sha256=deployment.target_identity_sha256,
+        expected_key_id=getattr(operations, "report_key_id"),
+    )
 
 
 def _get_service(request) -> "MemplexService":
@@ -415,7 +440,7 @@ def _auto_probe_redis(host: str = "localhost", port: int = 6379) -> Optional[str
             logger.debug("Auto-probe: Redis detected at %s:%s", host, port)
             return f"redis://{host}:{port}/0"
     except Exception:
-        pass
+        logger.debug("Redis auto-probe failed for %s:%s", host, port, exc_info=True)
     return None
 
 
@@ -441,7 +466,7 @@ def _start_redis_subscriber() -> None:
                         event = json.loads(message["data"])
                         _fanout_local(event)
                     except Exception:
-                        pass
+                        logger.debug("skipping malformed Redis SSE message", exc_info=True)
         except Exception as exc:
             logger.debug("Redis subscriber thread stopped: %s", exc)
 
@@ -520,6 +545,104 @@ def _check_bind_security(app: FastAPI) -> None:
         )
 
 
+def _is_remote_peer(host: Optional[str]) -> bool:
+    """Return whether a concrete IP peer is outside the loopback range.
+
+    This compatibility helper intentionally does not make a trust decision:
+    a missing or malformed peer is not *known* remote, but it is also not
+    eligible for unauthenticated development access.  See
+    :func:`_is_loopback_peer` for that stricter positive check.
+    """
+    if not host:
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_loopback_peer(host: Optional[str]) -> bool:
+    """Return ``True`` only for a syntactically valid loopback IP address."""
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _request_deployment_profile(request: Request) -> str:
+    """Read the normalized deployment profile stored by the app factory."""
+    deployment_profile = getattr(request.app.state, "deployment_profile", "development")
+    return str(deployment_profile).strip().lower()
+
+
+def _has_forwarded_client_headers(request: Request) -> bool:
+    """Whether an untrusted proxy/client-origin header was supplied."""
+    headers = getattr(request, "headers", {})
+    try:
+        return any(str(name).lower() in _FORWARDED_CLIENT_HEADERS for name in headers)
+    except TypeError:
+        return any(
+            getattr(headers, "get", lambda _name: None)(name) is not None
+            for name in _FORWARDED_CLIENT_HEADERS
+        )
+
+
+def _unauthenticated_uds_is_allowed(request: Request) -> bool:
+    """Allow UDS open access only through one explicit development opt-in."""
+    return (
+        _request_deployment_profile(request) == "development"
+        and os.environ.get(_UNAUTHENTICATED_UDS_ENV) == "1"
+    )
+
+
+def _require_maintenance_access(request: Request) -> AuthorizationContext:
+    """Restrict HTTP compaction to development maintenance principals."""
+    if _request_deployment_profile(request) != "development":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    context = _authorization(request)
+    if "maintenance" not in context.principal.roles:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return context
+
+
+def _safe_extracted_response(service: "MemplexService", extracted: object) -> dict:
+    """Serialize an extraction without echoing model-unsafe node content."""
+    payload = _dataclass_to_dict(extracted)
+    unsafe_ids: set[str] = set()
+    for field in ("functions", "facts", "preferences"):
+        nodes = list(getattr(extracted, field, []) or [])
+        safe_nodes = []
+        for node in nodes:
+            if service.is_safe_for_model(node):
+                safe_nodes.append(node)
+            else:
+                unsafe_ids.add(str(getattr(node, "id", "") or ""))
+        payload[field] = _dataclass_to_dict(safe_nodes)
+
+    graph = getattr(extracted, "graph", None)
+    if graph is not None and isinstance(payload.get("graph"), dict):
+        safe_graph_nodes = []
+        for node in list(getattr(graph, "nodes", []) or []):
+            if service.is_safe_for_model(node):
+                safe_graph_nodes.append(node)
+            else:
+                unsafe_ids.add(str(getattr(node, "id", "") or ""))
+        safe_edges = [
+            edge
+            for edge in list(getattr(graph, "edges", []) or [])
+            if str(getattr(edge, "source", "") or "") not in unsafe_ids
+            and str(getattr(edge, "target", "") or "") not in unsafe_ids
+            and service.is_safe_for_model(edge)
+        ]
+        payload["graph"]["nodes"] = _dataclass_to_dict(safe_graph_nodes)
+        payload["graph"]["edges"] = _dataclass_to_dict(safe_edges)
+    if unsafe_ids:
+        payload["withheld_unsafe"] = len(unsafe_ids)
+    return payload
+
+
 if _FASTAPI_AVAILABLE:
 
     def _require_auth(
@@ -573,11 +696,26 @@ if _FASTAPI_AVAILABLE:
         api_key = os.environ.get("MEMPLEX_API_KEY")
         bearer_token = os.environ.get("MEMPLEX_BEARER_TOKEN")
 
-        # No credentials configured → open access (local scenario).
+        # No credentials configured → access is granted only to a concrete
+        # loopback IP.  Forwarded client headers are never a substitute for
+        # transport authentication.  A missing/non-IP peer (including UDS)
+        # fails closed, except for the documented development-only UDS opt-in.
         if not api_key and not bearer_token:
-            context = local_development_context()
-            request.state.authorization = context
-            return context
+            client = request.client
+            peer = client.host if client is not None else None
+            if _request_deployment_profile(request) != "development":
+                raise HTTPException(status_code=403, detail="Authentication required")
+            if _has_forwarded_client_headers(request):
+                raise HTTPException(status_code=403, detail="Authentication required")
+            if _is_loopback_peer(peer):
+                context = local_development_context()
+                request.state.authorization = context
+                return context
+            if client is None and _unauthenticated_uds_is_allowed(request):
+                context = local_development_context()
+                request.state.authorization = context
+                return context
+            raise HTTPException(status_code=403, detail="Authentication required")
 
         # Validate the X-API-Key header against a configured API key.
         if api_key is not None and x_api_key is not None:
@@ -757,21 +895,35 @@ def create_app(config=None) -> "FastAPI":
             report_output = os.environ.get("MEMPLEX_G006_REPORT_OUTPUT")
             if report_output is not None:
                 try:
-                    report = create_operations_evidence(
-                        metrics_snapshot=operations_metrics.snapshot(),
-                        shutdown_result={
-                            "request_drained": fully_drained,
-                            "deadline_exceeded": deadline_exceeded,
-                        },
-                        config=config,
-                        report_id=str(uuid.uuid4()),
-                        window_started_at=operations_window_started_at,
-                        window_ended_at=utc_timestamp_now(),
-                        signing_key=load_operations_signing_key(),
-                    )
-                    write_operations_report_atomic(Path(report_output), report)
-                except Exception:
-                    logger.warning("operations_report_write_failed")
+                    readiness_binding = _current_operations_readiness_binding(config)
+                except (
+                    AttributeError,
+                    OperationsEvidenceError,
+                    PackageNotFoundError,
+                    ReadinessEvidenceError,
+                    TypeError,
+                ):
+                    logger.warning("operations_report_deployment_binding_invalid")
+                else:
+                    try:
+                        window_ended_at = utc_timestamp_now()
+                        report = create_operations_evidence(
+                            metrics_snapshot=operations_metrics.snapshot(),
+                            shutdown_result={
+                                "request_drained": fully_drained,
+                                "deadline_exceeded": deadline_exceeded,
+                            },
+                            config=config,
+                            report_id=str(uuid.uuid4()),
+                            window_started_at=operations_window_started_at,
+                            window_ended_at=window_ended_at,
+                            generated_at=utc_timestamp_now(),
+                            readiness_binding=readiness_binding,
+                            signing_key=load_operations_signing_key(),
+                        )
+                        write_operations_report_atomic(Path(report_output), report)
+                    except Exception:
+                        logger.warning("operations_report_write_failed")
             logger.info("Memplex HTTP API stopped")
 
     app = FastAPI(
@@ -782,6 +934,7 @@ def create_app(config=None) -> "FastAPI":
         lifespan=_lifespan,
     )
     app.state.principal_registry = principal_registry
+    app.state.deployment_profile = profile
     app.state.operations_admission = operations_admission
     app.state.operations_metrics = operations_metrics
 
@@ -873,7 +1026,8 @@ def create_app(config=None) -> "FastAPI":
         context = _authorization(request)
         result = svc.write(source, authorization=context)
         # Notify SSE subscribers that new memories are available.
-        func_ids = [f.id for f in getattr(result, "functions", [])]
+        safe_payload = _safe_extracted_response(svc, result)
+        func_ids = [item["id"] for item in safe_payload.get("functions", [])]
         _broadcast_event(
             {
                 "type": "write",
@@ -881,7 +1035,7 @@ def create_app(config=None) -> "FastAPI":
                 "tenant_id": context.principal.tenant_id,
             }
         )
-        return JSONResponse(_dataclass_to_dict(result))
+        return JSONResponse(safe_payload)
 
     @app.get("/memories", summary="Query memories")
     async def query_memories(
@@ -948,19 +1102,33 @@ def create_app(config=None) -> "FastAPI":
         return JSONResponse(_dataclass_to_dict(func))
 
     @app.patch("/memories/{memory_id}", summary="Update a memory field")
-    async def update_memory(request: Request, memory_id: str, body: dict) -> JSONResponse:
+    async def update_memory(
+        request: Request, memory_id: str, body: Any = Body(...)
+    ) -> JSONResponse:
         """Update a visible Function field without exposing foreign IDs."""
         svc = _get_service(request)
+        context = _authorization(request)
+        if type(body) is not dict:
+            raise HTTPException(status_code=422, detail="Invalid update request")
+        role = body.get("role")
+        new_value = body.get("new_value")
+        if type(role) is not str or type(new_value) is not str:
+            raise HTTPException(status_code=422, detail="Invalid update request")
         try:
             result = svc.update_memory(
                 memory_id,
-                body["role"],
-                body["new_value"],
-                authorization=_authorization(request),
+                role,
+                new_value,
+                authorization=context,
             )
-        except (KeyError, MemoryNotFoundError):
+        except MemoryNotFoundError:
             raise HTTPException(status_code=404, detail="Memory not found") from None
-        return JSONResponse(_dataclass_to_dict(result))
+        payload = _dataclass_to_dict(result)
+        if svc.get(memory_id, authorization=context) is None:
+            payload["old_value"] = None
+            payload["new_value"] = None
+            payload["withheld_unsafe"] = True
+        return JSONResponse(payload)
 
     @app.get("/memories/{memory_id}/timeline", summary="Get memory timeline")
     async def get_timeline(request: Request, memory_id: str) -> JSONResponse:
@@ -1090,6 +1258,7 @@ def create_app(config=None) -> "FastAPI":
 
             {"scope": "project" | "session" | "global"}
         """
+        _require_maintenance_access(request)
         svc = _get_service(request)
         scope = "project"
         if body:
@@ -1189,7 +1358,8 @@ def create_app(config=None) -> "FastAPI":
         )
 
         tenant_id, remote_id, consumer_id = _sync_bindings(context)
-        store = _get_service(request)._store_for(context)
+        svc = _get_service(request)
+        store = svc._store_for(context)
         page = store.sync_page(
             remote_id,
             consumer_id,
@@ -1302,7 +1472,8 @@ def create_app(config=None) -> "FastAPI":
         if total > config.sync.max_batch_events:
             raise HTTPException(status_code=422, detail="invalid_sync_batch")
 
-        store = _get_service(request)._store_for(context)
+        svc = _get_service(request)
+        store = svc._store_for(context)
         _, remote_id, _ = _sync_bindings(context)
         parsed: list[tuple[str, SyncNodeType, object]] = []
         by_type = {
@@ -1322,6 +1493,8 @@ def create_app(config=None) -> "FastAPI":
                     parsed.append((key, node_type, node))
         except (IdentityClaimError, KeyError, TypeError, ValueError):
             raise HTTPException(status_code=422, detail="Invalid memory payload") from None
+
+        svc.scan_nodes_before_persistence(node for _, _, node in parsed)
 
         observations = {
             item.id: item
@@ -1442,7 +1615,9 @@ def create_app(config=None) -> "FastAPI":
                 event.scope.tenant_id != tenant_id for event in envelope.batch.events
             ):
                 raise SyncBatchRejected("invalid ingress identity")
-            store = _get_service(request)._store_for(context)
+            svc = _get_service(request)
+            svc.scan_sync_events_before_persistence(envelope.batch.events)
+            store = svc._store_for(context)
             result = store.sync_apply_batch(envelope.batch)
         except SyncBackpressureError:
             raise HTTPException(status_code=429, detail="sync_backpressure") from None
@@ -1735,6 +1910,10 @@ def create_app(config=None) -> "FastAPI":
         except (IdentityClaimError, TypeError, ValueError, KeyError):
             # Do not disclose which item, identity field, or tenant failed.
             raise HTTPException(status_code=422, detail="Invalid memory payload") from None
+
+        svc.scan_nodes_before_persistence(
+            node for nodes in parsed.values() for node in nodes
+        )
 
         def existing_node(node):
             if getattr(node, "memory_type", "") != "observation":

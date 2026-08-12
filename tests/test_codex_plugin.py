@@ -13,6 +13,7 @@ import pytest
 
 from memplex.adapters.agent_installer import install_agent
 from memplex.adapters.agent_runtime import AgentMemoryRuntime
+from memplex.adapters.runtime_status import read_runtime_status, runtime_status_path
 from memplex.config import MemplexConfig
 from memplex.service import MemplexService
 
@@ -67,7 +68,9 @@ def test_codex_real_cli_discovers_plugin_in_isolated_home(tmp_path):
 
 
 def _plugin_root(tmp_path, *, user_id="alice", project_path=None):
-    root = tmp_path / "plugin"
+    host_root = tmp_path / "codex-home"
+    host_root.mkdir(parents=True, exist_ok=True)
+    root = host_root / "plugins" / "marketplaces" / "memplex" / "plugin"
     root.mkdir(parents=True)
     (root / "memplex-agent.json").write_text(
         json.dumps(
@@ -75,7 +78,14 @@ def _plugin_root(tmp_path, *, user_id="alice", project_path=None):
                 "agent": "codex",
                 "user_id": user_id,
                 "project_path": str(project_path or tmp_path),
-                "managed": {"by": "memplex", "schema_version": 1},
+                "python": sys.executable,
+                "source_root": str(Path(__file__).resolve().parent.parent),
+                "host_root": str(host_root),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
             }
         )
     )
@@ -126,6 +136,81 @@ def test_codex_managed_identity_cannot_be_overridden_by_hook_payload(
     assert identity["user_id"] == "managed-alice"
     assert identity["project_path"] == str(workspace.resolve())
     assert identity["session_id"] == "host-session"
+
+
+def test_codex_real_recall_failure_persists_degraded_host_runtime_state(tmp_path, monkeypatch):
+    """A swallowed Codex hook failure must remain visible to agent status."""
+    from memplex.adapters import codex_plugin
+
+    class BrokenRuntime:
+        def before_prompt(self, _query):
+            raise RuntimeError("Bearer codex-secret-must-not-persist")
+
+    class Service:
+        def stop(self):
+            return None
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(codex_plugin, "_runtime", lambda _identity: (BrokenRuntime(), Service()))
+    with pytest.raises(RuntimeError, match="codex-secret"):
+        codex_plugin._handle_recall(
+            "UserPromptSubmit",
+            {"session_id": "status-session", "prompt": "remember status"},
+        )
+
+    assert read_runtime_status(runtime_status_path(tmp_path), agent="codex") == {
+        "reason": "runtime_operation_failed",
+        "state": "degraded",
+    }
+
+    class HealthyRuntime:
+        def before_prompt(self, _query):
+            return type("Recalled", (), {"context": ""})()
+
+    monkeypatch.setattr(codex_plugin, "_runtime", lambda _identity: (HealthyRuntime(), Service()))
+    assert codex_plugin._handle_recall(
+        "UserPromptSubmit",
+        {"session_id": "status-session", "prompt": "remember status"},
+    ) == {}
+    assert read_runtime_status(runtime_status_path(tmp_path), agent="codex") == {
+        "reason": None,
+        "state": "healthy",
+    }
+
+
+def test_codex_runtime_status_uses_managed_identity_host_root(tmp_path, monkeypatch):
+    """A non-default managed root wins over a polluted process CODEX_HOME."""
+    from memplex.adapters import codex_plugin
+
+    plugin_root = _plugin_root(tmp_path)
+    managed_root = tmp_path / "codex-home"
+    polluted_root = tmp_path / "polluted-codex-home"
+    monkeypatch.setenv("PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.setenv("CODEX_HOME", str(polluted_root))
+
+    assert codex_plugin._runtime_status_path() == runtime_status_path(managed_root)
+
+
+def test_codex_adapter_rejects_identity_for_another_install_root(tmp_path, monkeypatch):
+    """The Python adapter independently binds identity to the plugin install path."""
+
+    from memplex.adapters import codex_plugin
+
+    host_root = tmp_path / "host-a"
+    other_root = tmp_path / "host-b"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other_root.mkdir()
+    install_agent("codex", target_dir=host_root, user_id="alice", project_path=workspace)
+    plugin_root = host_root / "plugins" / "marketplaces" / "memplex" / "plugin"
+    identity_path = plugin_root / "memplex-agent.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["host_root"] = str(other_root.resolve())
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    monkeypatch.setenv("PLUGIN_ROOT", str(plugin_root))
+
+    with pytest.raises(ValueError, match="host_root.*reinstall required|reinstall required.*host_root"):
+        codex_plugin._identity_config()
 
 
 def test_codex_mcp_launcher_forces_managed_scope_and_preserves_host_session(

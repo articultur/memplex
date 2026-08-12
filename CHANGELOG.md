@@ -6,6 +6,66 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Real-PostgreSQL integration suite now runs in CI: a dedicated
+  `test-postgres` job (Python 3.12 + `pgserver`) exercises
+  `test_postgres_integration.py`, `test_postgres_backup_integration.py`, and
+  `test_sync_postgres_integration.py` against a real PostgreSQL, so the
+  flagship backend is no longer silently skipped in CI. Added a `pgtest`
+  optional extra for the self-contained `pgserver` binary.
+- Dependency upper bounds added to every runtime extra (`pyyaml<7`,
+  `numpy<3`, `fastapi<1`, `openai<3`, etc.) to bound supply-chain drift; the
+  lockfile remains the reproducible source of truth.
+- `ruff` capped to `<0.16`: ruff 0.16 broadened default rule selection and
+  reported ~1.8k pre-existing violations; the codebase is lint-clean on the
+  0.15 line, which is now the locked dev version.
+- `httpx` added to the `dev` extra — `starlette`'s `TestClient` requires it
+  and a clean `uv sync --extra dev` was silently missing it.
+
+### Security
+- Request-time loopback enforcement: `_require_auth` now refuses
+  unauthenticated requests from non-loopback peers even when the startup
+  bind guard was bypassed (defense-in-depth via `_is_remote_peer`).
+
+### Refactor
+- Extracted the authorization / ACL responsibility out of `MemplexService`
+  into a new `memplex/authorization.py` module (`AuthorizationGate` +
+  `_TypedNodeLookup`). All tenancy / workspace / user / session visibility
+  logic (`_require_authorization`, `_is_node_visible`,
+  `_filter_authorized_results`, and friends) now lives in one cohesive,
+  independently-tested collaborator; the service keeps thin delegating
+  wrappers for API stability. `service.py` shrank from 2311 to ~2148 lines.
+- Closed the Lite/PostgreSQL sync-repository lockstep hazard: both backends
+  now inherit a shared `AbstractSyncRepository` ABC (`memplex/sync_repository.py`)
+  whose 17 abstract methods are enforced at instantiation, so the two can no
+  longer silently drift. A contract test pins the shared method set in CI.
+- Split the 2615-line `memplex/storage/pool.py`: the
+  `PostgresStorageResources` / `PostgresSyncStorageResources` classes moved to
+  a new `memplex/storage/postgres_resources.py` (re-exported from `pool` for
+  import-path and monkeypatch stability). `pool.py` is now ~1774 lines.
+  Monkeypatched symbols (`PostgresPoolManager`, `_new_migration_runner`) are
+  resolved through the live `pool` module so the existing test patches keep
+  working unchanged.
+- Split the 3815-line `memplex/storage/migrations/runner.py` into three cohesive
+  sub-modules, all re-exported from `runner` for import-path and monkeypatch
+  stability: the pure catalogue-verification cluster (46 helpers + 11 schema
+  constants + `_normalise_sql`) → `catalogue_checks.py`; the ACL-contract
+  verifiers (`_verify_application_acl` / `_verify_ingress_acl` /
+  `_verify_acl_contracts`) → `acl_verification.py`; the observed-state ledger
+  functions (`_read_ledger_if_present` / `_validate_ledger` /
+  `_plan_from_observed_state` / `_validate_legacy_belongs_to_edges`) →
+  `ledger_state.py`. `runner.py` is now ~2008 lines (was 3815). The sub-modules
+  borrow schema constants/data classes from `runner` via ordered circular
+  imports (resolved because `runner` defines them before its end-of-file
+  re-exports); the test suite's `monkeypatch.setattr(runner, ...)` patches keep
+  working because `PostgresMigrationRunner` resolves bare names against the
+  `runner` module global at call time.
+- Extracted injection-scan state and the read-side injection filter out of
+  `MemplexService` into `memplex/llm/injection_guard.py`
+  (`InjectionScanCounter`, `drop_injection_suspected`), reducing the service's
+  responsibilities. Six fail-soft `except ...: pass` sites now log at debug
+  instead of swallowing silently.
+
 ### Added
 - G002 生产 readiness 合同：`principal_tenant_acl` 仅在 `production + postgres +`
   可解析的非空 `MEMPLEX_PRINCIPALS_JSON` 时通过；非法 registry 以不泄露凭据内容的

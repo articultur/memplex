@@ -1692,6 +1692,11 @@ class LiteMemoryStore:
                 # decode that guards all normal publication has succeeded.
                 decoded = self._decode_pair(pair)
                 schema_version = pair.memory.get("schema_version")
+                needs_inbound_cursor_upgrade = (
+                    schema_version == 2
+                    and type(pair.memory.get("sync")) is dict
+                    and "inbound_cursors" not in pair.memory["sync"]
+                )
                 if (
                     pair.transaction_id == "legacy"
                     or schema_version == 1
@@ -1699,6 +1704,21 @@ class LiteMemoryStore:
                 ):
                     target = self._canonical_historical_pair(
                         decoded, pair.generation + 1, uuid.uuid4().hex
+                    )
+                    self._decode_pair(target)
+                    pair = self._durability.commit_locked(pair, target)
+                elif needs_inbound_cursor_upgrade:
+                    # Cursor direction was not persisted by early v2 pairs.
+                    # Existing rows are deliberately retained as outbound
+                    # retention pins (the only lossless interpretation); a
+                    # new, empty inbound namespace is added atomically.
+                    target_memory = copy.deepcopy(pair.memory)
+                    target_memory["sync"]["inbound_cursors"] = []
+                    target = LitePair(
+                        memory=target_memory,
+                        changelog=copy.deepcopy(pair.changelog),
+                        generation=pair.generation + 1,
+                        transaction_id=uuid.uuid4().hex,
                     )
                     self._decode_pair(target)
                     pair = self._durability.commit_locked(pair, target)
@@ -1825,6 +1845,7 @@ class LiteMemoryStore:
         loaded_sync_state = copy.deepcopy(
             raw.get("sync", durability_module._empty_sync_state())
         )
+        loaded_sync_state.setdefault("inbound_cursors", [])
         tenant_binding = loaded_sync_state["tenant_binding"]
         if tenant_binding is not None:
             loaded_nodes = (

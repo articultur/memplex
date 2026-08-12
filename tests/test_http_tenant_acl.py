@@ -53,7 +53,7 @@ def tenant_http(tmp_path, monkeypatch):
     config.storage.backend = "lite"
     config.storage.path = str(tmp_path / "store")
     config.llm.query_enhancement = False
-    with TestClient(create_app(config)) as client:
+    with TestClient(create_app(config), client=("127.0.0.1", 50000)) as client:
         yield client
 
 

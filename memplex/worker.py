@@ -38,12 +38,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from memplex.compaction import CompactionPipeline, CompactionScope
 from memplex.models import BackgroundTask, TaskInfo, TaskStatus, WorkerDrainResult
+from memplex.task_repository import TaskRepository, WorkerQueueFull
 
 logger = logging.getLogger(__name__)
-
-
-class WorkerQueueFull(RuntimeError):
-    """Raised when durable non-terminal worker admission is exhausted."""
 
 
 class TaskStoreIntegrityError(RuntimeError):
@@ -85,7 +82,7 @@ def _normalise_json_value(value: Any) -> Any:
 # ── TaskStore: lightweight JSON persistence ────────────────────────────
 
 
-class TaskStore:
+class TaskStore(TaskRepository):
     """Persist task state to a single JSON file.
 
     File format::
@@ -230,7 +227,7 @@ class TaskStore:
             candidate[info.task_id] = self._info_to_dict(info)
             self._tasks = self._save_candidate(candidate)
 
-    def admit_pending(self, info: TaskInfo, *, capacity: int) -> None:
+    def admit_pending(self, info: TaskInfo, *, capacity: int) -> TaskInfo:
         """Atomically reserve durable capacity and persist one new pending task."""
         if type(capacity) is not int:
             raise TypeError("capacity must be an exact int")
@@ -251,19 +248,21 @@ class TaskStore:
             candidate = copy.deepcopy(self._tasks)
             candidate[info.task_id] = self._info_to_dict(info)
             self._tasks = self._save_candidate(candidate)
+            return copy.deepcopy(self._dict_to_info(self._tasks[info.task_id]))
 
     def replay_failed_atomic(
         self,
         task_id: str,
         *,
         capacity: int,
-        now: datetime,
+        now: datetime | None = None,
     ) -> Optional[TaskInfo]:
         """Atomically reserve capacity while resetting one durable dead letter."""
         if type(capacity) is not int:
             raise TypeError("capacity must be an exact int")
         if capacity <= 0:
             raise ValueError("capacity must be positive")
+        effective_now = now or datetime.now(timezone.utc)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -284,21 +283,28 @@ class TaskStore:
             info.error = None
             info.last_error_code = None
             info.lease_until = None
-            info.next_attempt_at = now
+            info.lease_id = None
+            info.next_attempt_at = effective_now
             candidate = copy.deepcopy(self._tasks)
             candidate[task_id] = self._info_to_dict(info)
             self._tasks = self._save_candidate(candidate)
             return copy.deepcopy(info)
 
-    def delete(self, task_id: str) -> None:
+    def cancel_pending(self, task_id: str) -> bool:
+        """Atomically cancel only a task that has not been leased."""
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
-            if task_id not in self._tasks:
-                return
+            data = self._tasks.get(task_id)
+            if data is None or data.get("status") != TaskStatus.PENDING.value:
+                return False
+            info = self._dict_to_info(copy.deepcopy(data))
+            info.status = TaskStatus.CANCELLED
+            info.next_attempt_at = None
             candidate = copy.deepcopy(self._tasks)
-            del candidate[task_id]
+            candidate[task_id] = self._info_to_dict(info)
             self._tasks = self._save_candidate(candidate)
+            return True
 
     def get(self, task_id: str) -> Optional[TaskInfo]:
         """Retrieve a TaskInfo by ID, or ``None``."""
@@ -325,7 +331,10 @@ class TaskStore:
     def count_by_status(self, *statuses: TaskStatus) -> int:
         return len(self.list_by_status(*statuses))
 
-    def due_task_ids(self, now: datetime, *, limit: int) -> list[str]:
+    def due_task_ids(
+        self, now: datetime | None = None, *, limit: int
+    ) -> list[str]:
+        effective_now = now or datetime.now(timezone.utc)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -337,18 +346,27 @@ class TaskStore:
                     lease_until = (
                         datetime.fromisoformat(lease_raw) if lease_raw else None
                     )
-                    if lease_until is not None and lease_until > now:
+                    if lease_until is not None and lease_until > effective_now:
                         continue
                 elif status is not TaskStatus.PENDING:
                     continue
                 due_raw = data.get("next_attempt_at")
-                due_at = datetime.fromisoformat(due_raw) if due_raw else now
-                if due_at <= now:
+                due_at = datetime.fromisoformat(due_raw) if due_raw else effective_now
+                if due_at <= effective_now:
                     due.append((due_at, task_id))
             due.sort(key=lambda item: (item[0], item[1]))
             return [task_id for _due_at, task_id in due[:limit]]
 
-    def claim(self, task_id: str, now: datetime, *, lease_seconds: int) -> Optional[TaskInfo]:
+    def claim(
+        self,
+        task_id: str,
+        now: datetime | None = None,
+        *,
+        lease_seconds: int,
+    ) -> Optional[TaskInfo]:
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive exact int")
+        effective_now = now or datetime.now(timezone.utc)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -359,20 +377,126 @@ class TaskStore:
             if status is TaskStatus.RUNNING:
                 lease_raw = data.get("lease_until")
                 lease_until = datetime.fromisoformat(lease_raw) if lease_raw else None
-                if lease_until is not None and lease_until > now:
+                if lease_until is not None and lease_until > effective_now:
                     return None
             elif status is not TaskStatus.PENDING:
                 return None
             due_raw = data.get("next_attempt_at")
-            if due_raw and datetime.fromisoformat(due_raw) > now:
+            if due_raw and datetime.fromisoformat(due_raw) > effective_now:
                 return None
             info = self._dict_to_info(copy.deepcopy(data))
             info.status = TaskStatus.RUNNING
-            info.lease_until = now + timedelta(seconds=lease_seconds)
+            info.lease_id = _generate_uuid()
+            info.lease_until = effective_now + timedelta(seconds=lease_seconds)
+            info.next_attempt_at = None
             candidate = copy.deepcopy(self._tasks)
             candidate[task_id] = self._info_to_dict(info)
             self._tasks = self._save_candidate(candidate)
             return info
+
+    def claim_due(
+        self,
+        *,
+        limit: int,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> list[TaskInfo]:
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be a positive exact int")
+        effective_now = now or datetime.now(timezone.utc)
+        claimed: list[TaskInfo] = []
+        for task_id in self.due_task_ids(effective_now, limit=limit):
+            info = self.claim(
+                task_id,
+                effective_now,
+                lease_seconds=lease_seconds,
+            )
+            if info is not None:
+                claimed.append(info)
+        return claimed
+
+    @staticmethod
+    def _lease_matches(data: Dict[str, Any], lease_id: str, now: datetime) -> bool:
+        if (
+            data.get("status") != TaskStatus.RUNNING.value
+            or data.get("lease_id") != lease_id
+        ):
+            return False
+        lease_raw = data.get("lease_until")
+        return bool(lease_raw and datetime.fromisoformat(lease_raw) > now)
+
+    def complete(
+        self,
+        task_id: str,
+        lease_id: str,
+        result: Any,
+        *,
+        now: datetime | None = None,
+    ) -> TaskInfo | None:
+        if type(lease_id) is not str or not lease_id:
+            raise ValueError("lease_id must be a non-empty exact str")
+        effective_now = now or datetime.now(timezone.utc)
+        with self._lock, self._disk_lock():
+            self._assert_healthy()
+            self._tasks = self._read_tasks_file()
+            data = self._tasks.get(task_id)
+            if data is None or not self._lease_matches(data, lease_id, effective_now):
+                return None
+            info = self._dict_to_info(copy.deepcopy(data))
+            info.status = TaskStatus.COMPLETED
+            info.completed_at = effective_now
+            info.result = result
+            info.error = None
+            info.last_error_code = None
+            info.next_attempt_at = None
+            info.lease_until = None
+            info.lease_id = None
+            candidate = copy.deepcopy(self._tasks)
+            candidate[task_id] = self._info_to_dict(info)
+            self._tasks = self._save_candidate(candidate)
+            return copy.deepcopy(self._dict_to_info(self._tasks[task_id]))
+
+    def fail(
+        self,
+        task_id: str,
+        lease_id: str,
+        *,
+        error_code: str,
+        retry_delay_seconds: int,
+        now: datetime | None = None,
+    ) -> TaskInfo | None:
+        if type(lease_id) is not str or not lease_id:
+            raise ValueError("lease_id must be a non-empty exact str")
+        if type(error_code) is not str or not error_code:
+            raise ValueError("error_code must be a non-empty exact str")
+        if type(retry_delay_seconds) is not int or retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must be a non-negative exact int")
+        effective_now = now or datetime.now(timezone.utc)
+        with self._lock, self._disk_lock():
+            self._assert_healthy()
+            self._tasks = self._read_tasks_file()
+            data = self._tasks.get(task_id)
+            if data is None or not self._lease_matches(data, lease_id, effective_now):
+                return None
+            info = self._dict_to_info(copy.deepcopy(data))
+            info.retry_count += 1
+            info.result = None
+            info.error = error_code
+            info.last_error_code = error_code
+            info.lease_until = None
+            info.lease_id = None
+            if info.retry_count <= info.max_retries:
+                info.status = TaskStatus.PENDING
+                info.next_attempt_at = effective_now + timedelta(
+                    seconds=retry_delay_seconds
+                )
+            else:
+                info.status = TaskStatus.FAILED
+                info.next_attempt_at = None
+            candidate = copy.deepcopy(self._tasks)
+            candidate[task_id] = self._info_to_dict(info)
+            self._tasks = self._save_candidate(candidate)
+            return copy.deepcopy(self._dict_to_info(self._tasks[task_id]))
 
     def status_counts(self) -> dict[TaskStatus, int]:
         with self._lock, self._disk_lock():
@@ -402,6 +526,7 @@ class TaskStore:
                 info.next_attempt_at.isoformat() if info.next_attempt_at else None
             ),
             "lease_until": info.lease_until.isoformat() if info.lease_until else None,
+            "lease_id": info.lease_id,
             "last_error_code": info.last_error_code,
         }
 
@@ -419,7 +544,7 @@ class TaskStore:
             "retry_count",
             "max_retries",
         }
-        optional = {"next_attempt_at", "lease_until", "last_error_code"}
+        optional = {"next_attempt_at", "lease_until", "lease_id", "last_error_code"}
         if type(data) is not dict or not required <= set(data) <= required | optional:
             raise ValueError("invalid worker task record schema")
         if type(data["task_id"]) is not str or not data["task_id"]:
@@ -429,7 +554,7 @@ class TaskStore:
         for name in ("retry_count", "max_retries"):
             if type(data[name]) is not int or data[name] < 0:
                 raise ValueError("invalid worker task retry state")
-        for name in ("error", "last_error_code"):
+        for name in ("error", "lease_id", "last_error_code"):
             if data.get(name) is not None and type(data[name]) is not str:
                 raise ValueError("invalid worker task error state")
         return TaskInfo(
@@ -457,6 +582,7 @@ class TaskStore:
                 if data.get("lease_until")
                 else None
             ),
+            lease_id=data.get("lease_id"),
             last_error_code=data.get("last_error_code"),
         )
 
@@ -476,7 +602,7 @@ class BackgroundWorker:
 
     def __init__(
         self,
-        storage_path: Path = Path("~/.memplex/tasks.json").expanduser(),
+        storage_path: Path | None = None,
         compaction_pipeline: Optional["CompactionPipeline"] = None,
         store: Optional[Any] = None,
         engine: Optional[Any] = None,
@@ -488,6 +614,7 @@ class BackgroundWorker:
         max_attempts: int | None = None,
         lease_seconds: int | None = None,
         clock: Callable[[], datetime] | None = None,
+        task_repository: TaskRepository | None = None,
     ) -> None:
         worker_config = getattr(config, "worker", None)
         queue_capacity = (
@@ -518,7 +645,15 @@ class BackgroundWorker:
                 raise TypeError(f"{name} must be an exact int")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
-        self._task_store = TaskStore(storage_path)
+        if task_repository is not None and not isinstance(
+            task_repository, TaskRepository
+        ):
+            raise TypeError("task_repository must implement TaskRepository")
+        if task_repository is None:
+            storage_path = storage_path or Path("~/.memplex/tasks.json").expanduser()
+            self._task_store = TaskStore(storage_path)
+        else:
+            self._task_store = task_repository
         self._queue_capacity = queue_capacity
         self._claim_size = min(claim_size, queue_capacity)
         self._max_attempts = max_attempts
@@ -546,6 +681,11 @@ class BackgroundWorker:
     def queue_depth(self) -> int:
         """Return the number of tasks currently in the queue."""
         return self._queue.qsize()
+
+    @property
+    def task_repository(self) -> TaskRepository:
+        """Return the durable repository used by this worker instance."""
+        return self._task_store
 
     @property
     def last_compaction(self) -> Optional[datetime]:
@@ -655,10 +795,15 @@ class BackgroundWorker:
             self._task_store.admit_pending(info, capacity=self._queue_capacity)
             try:
                 self._queue.put_nowait(task_id)
-            except Full as exc:
-                self._task_store.delete(task_id)
-                raise WorkerQueueFull("worker_queue_full") from exc
-            self._queued_ids.add(task_id)
+            except Full:
+                # Durable admission is authoritative.  The in-process queue is
+                # only a wake-up hint and may legitimately be full while a
+                # peer has already claimed this task.  Reporting rejection (or
+                # deleting here) would create an accepted-but-reported-failed
+                # race across service instances.
+                pass
+            else:
+                self._queued_ids.add(task_id)
             if callback is not None:
                 self._callbacks[task_id] = callback
             self._wake.set()
@@ -678,14 +823,7 @@ class BackgroundWorker:
         Returns ``True`` if the task was successfully cancelled,
         ``False`` if it was already running/completed.
         """
-        info = self._task_store.get(task_id)
-        if info is None:
-            return False
-        if info.status in (TaskStatus.PENDING,):
-            info.status = TaskStatus.CANCELLED
-            self._task_store.save(info)
-            return True
-        return False
+        return self._task_store.cancel_pending(task_id)
 
     def replay_failed(self, task_id: str) -> bool:
         """Reset one durable dead letter to immediately due pending state."""
@@ -701,12 +839,13 @@ class BackgroundWorker:
                 return False
             try:
                 self._queue.put_nowait(task_id)
-            except Full as exc:
-                info.status = TaskStatus.FAILED
-                info.next_attempt_at = None
-                self._task_store.save(info)
-                raise WorkerQueueFull("worker_queue_full") from exc
-            self._queued_ids.add(task_id)
+            except Full:
+                # As above, replay is already durable and discoverable through
+                # ``due_task_ids``; a missing local hint must not turn success
+                # into a false rejection.
+                pass
+            else:
+                self._queued_ids.add(task_id)
             self._wake.set()
             return True
 
@@ -762,13 +901,14 @@ class BackgroundWorker:
             self._queued_ids.discard(task_id)
             self._active_task_id = task_id
         try:
-            info = self._task_store.claim(
-                task_id,
-                self._clock(),
+            claimed = self._task_store.claim_due(
+                limit=1,
                 lease_seconds=self._lease_seconds,
+                now=self._clock(),
             )
-            if info is None:
+            if not claimed:
                 return False
+            info = claimed[0]
             self._execute_claimed(info)
             return True
         finally:
@@ -798,40 +938,41 @@ class BackgroundWorker:
         task_id = info.task_id
         task_type = info.task_type
         payload = info.payload or {}
-        completed_result: Any = None
-        completed = False
+        lease_id = info.lease_id
+        if type(lease_id) is not str or not lease_id:
+            raise RuntimeError("claimed task is missing lease_id")
 
         try:
             completed_result = self._dispatch(task_type, payload)
-            info.status = TaskStatus.COMPLETED
-            info.result = completed_result
-            info.completed_at = self._clock()
-            info.lease_until = None
-            info.next_attempt_at = None
-            info.last_error_code = None
-            info.error = None
-            completed = True
 
         except BaseException:
-            info.retry_count += 1
-            info.result = None
-            info.lease_until = None
-            info.last_error_code = "task_failed"
-            info.error = "task_failed"
-            if info.retry_count <= info.max_retries:
-                info.status = TaskStatus.PENDING
-                delay = min(2**info.retry_count, 30)  # exponential backoff, max 30s
-                info.next_attempt_at = self._clock() + timedelta(seconds=delay)
+            delay = min(2 ** (info.retry_count + 1), 30)
+            failed = self._task_store.fail(
+                task_id,
+                lease_id,
+                error_code="task_failed",
+                retry_delay_seconds=delay,
+                now=self._clock(),
+            )
+            if failed is None:
+                logger.warning("worker_task_lease_lost")
+            elif failed.status is TaskStatus.PENDING:
                 logger.info("worker_task_retry_scheduled")
             else:
-                info.status = TaskStatus.FAILED
-                info.next_attempt_at = None
                 self._callbacks.pop(task_id, None)
                 logger.error("worker_task_dead_lettered")
+            self._wake.set()
+            return
 
-        self._task_store.save(info)
+        completed = self._task_store.complete(
+            task_id,
+            lease_id,
+            completed_result,
+            now=self._clock(),
+        )
         self._wake.set()
-        if not completed:
+        if completed is None:
+            logger.warning("worker_task_lease_lost")
             return
         self._completed_since_start += 1
         callback = self._callbacks.pop(task_id, None)

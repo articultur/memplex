@@ -23,6 +23,14 @@ def pg_server_dsn(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     receives its own schema below.  This keeps real-catalogue tests fast
     enough to run together without treating ``public`` as their scratchpad.
     """
+    external_dsn = os.environ.get("MEMPLEX_TEST_POSTGRES_DSN")
+    if external_dsn:
+        # CI supplies pgvector through a service container.  Retain the
+        # per-test schema fixture below, so an external server never turns
+        # function-scoped catalogue tests into shared-public-state tests.
+        yield external_dsn
+        return
+
     pgserver = pytest.importorskip(
         "pgserver", reason="pgserver not installed (use .venv-pgcheck)"
     )

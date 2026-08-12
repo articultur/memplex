@@ -10,12 +10,143 @@ import json
 import logging
 import math
 import os
+import shlex
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 logger = logging.getLogger(__name__)
+
+_POSTGRES_IDENTITY_FIELDS = (
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "service",
+)
+_POSTGRES_DSN_KEYS = frozenset(
+    {
+        "application_name",
+        "channel_binding",
+        "client_encoding",
+        "connect_timeout",
+        "dbname",
+        "fallback_application_name",
+        "gssencmode",
+        "host",
+        "hostaddr",
+        "keepalives",
+        "keepalives_count",
+        "keepalives_idle",
+        "keepalives_interval",
+        "krbsrvname",
+        "options",
+        "passfile",
+        "password",
+        "port",
+        "replication",
+        "requirepeer",
+        "requiressl",
+        "service",
+        "sslcert",
+        "sslcompression",
+        "sslcrl",
+        "sslcrldir",
+        "sslkey",
+        "sslmode",
+        "sslpassword",
+        "sslrootcert",
+        "sslsni",
+        "target_session_attrs",
+        "tcp_user_timeout",
+        "user",
+    }
+)
+
+
+def _parse_postgres_dsn_without_driver(value: str) -> dict[str, str]:
+    if value.startswith(("postgres://", "postgresql://")):
+        try:
+            parsed_url = urlsplit(value)
+            query_items = parse_qsl(
+                parsed_url.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+            parsed: dict[str, str] = {}
+            for key, item in query_items:
+                if key not in _POSTGRES_DSN_KEYS or key in parsed:
+                    raise ValueError
+                parsed[key] = item
+            if parsed_url.fragment:
+                raise ValueError
+            if parsed_url.username is not None:
+                if "user" in parsed:
+                    raise ValueError
+                parsed["user"] = unquote(parsed_url.username)
+            if parsed_url.password is not None:
+                if "password" in parsed:
+                    raise ValueError
+                parsed["password"] = unquote(parsed_url.password)
+            if parsed_url.hostname is not None:
+                if "host" in parsed:
+                    raise ValueError
+                parsed["host"] = parsed_url.hostname
+            if parsed_url.port is not None:
+                if "port" in parsed:
+                    raise ValueError
+                parsed["port"] = str(parsed_url.port)
+            if parsed_url.path not in {"", "/"}:
+                if "dbname" in parsed:
+                    raise ValueError
+                parsed["dbname"] = unquote(parsed_url.path[1:])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("PostgreSQL DSN is invalid") from exc
+    else:
+        try:
+            tokens = shlex.split(value, posix=True)
+        except ValueError as exc:
+            raise ValueError("PostgreSQL DSN is invalid") from exc
+        parsed = {}
+        for token in tokens:
+            if "=" not in token:
+                raise ValueError("PostgreSQL DSN is invalid")
+            key, item = token.split("=", 1)
+            if not key or key not in _POSTGRES_DSN_KEYS or key in parsed:
+                raise ValueError("PostgreSQL DSN is invalid")
+            parsed[key] = item
+    if not parsed or any("\x00" in item for item in parsed.values()):
+        raise ValueError("PostgreSQL DSN is invalid")
+    return parsed
+
+
+def postgres_dsn_identity(value: object) -> tuple[str | None, ...]:
+    """Return a secret-free canonical PostgreSQL connection identity.
+
+    Production validation uses libpq's parser rather than accepting any
+    non-empty string. Passwords and non-identity connection options are
+    deliberately excluded from the result and from every error message.
+    """
+
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError("PostgreSQL DSN must be a non-empty exact string")
+    try:
+        from psycopg2.extensions import parse_dsn  # type: ignore
+    except ImportError:
+        parsed = _parse_postgres_dsn_without_driver(value)
+    else:
+        try:
+            parsed = parse_dsn(value)
+        except Exception as exc:
+            raise ValueError("PostgreSQL DSN is invalid") from exc
+        if type(parsed) is not dict:
+            raise ValueError("PostgreSQL DSN is invalid")
+    identity = dict(parsed)
+    if identity.get("host") and not identity.get("port"):
+        identity["port"] = "5432"
+    return tuple(identity.get(field) for field in _POSTGRES_IDENTITY_FIELDS)
 
 
 def validate_sync_remote_url(
@@ -844,6 +975,18 @@ def validate_deployment_contract(config: MemplexConfig) -> None:
             raise ValueError("production postgres storage requires a non-empty application DSN")
         if type(config.storage.migration_dsn) is not str or not config.storage.migration_dsn.strip():
             raise ValueError("production postgres storage requires a non-empty migration DSN")
+        try:
+            application_identity = postgres_dsn_identity(config.storage.path)
+        except ValueError as exc:
+            raise ValueError("production postgres application DSN is invalid") from exc
+        try:
+            migration_identity = postgres_dsn_identity(config.storage.migration_dsn)
+        except ValueError as exc:
+            raise ValueError("production postgres migration DSN is invalid") from exc
+        if application_identity == migration_identity:
+            raise ValueError(
+                "production postgres application and migration identities must be distinct"
+            )
     if config.sync.enabled and backend == "postgres":
         if (
             type(config.storage.migration_dsn) is not str

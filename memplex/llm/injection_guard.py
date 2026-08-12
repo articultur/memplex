@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -83,6 +85,8 @@ class IndirectInjectionGuard:
         "code": "MEDIUM",
         "wiki": "LOW",
     }
+    MAX_MODEL_VISIBLE_STRINGS = 4096
+    MAX_MODEL_VISIBLE_CHARS = 1_000_000
 
     @classmethod
     def scan(cls, content: str) -> bool:
@@ -93,16 +97,44 @@ class IndirectInjectionGuard:
         True if the content is suspected to contain an injection payload;
         the caller should discard or isolate the memory entry.
         """
-        for pattern in cls._compiled:
-            if pattern.search(content):
+        if not isinstance(content, str):
+            # The caller supplied data that cannot be scanned.  It must not
+            # enter a model context merely because a backend returned an
+            # unexpected type.
+            return True
+        try:
+            return any(pattern.search(content) for pattern in cls._compiled)
+        except Exception as exc:
+            logger.warning("injection scanner failed closed: %s", exc)
+            return True
+
+    @classmethod
+    def is_suspected(cls, node: object, *, fallback_text: str = "") -> bool:
+        """Apply the same risk decision to every typed memory node.
+
+        Function's historical ``attributes`` marker remains honoured, while
+        Fact, Preference, and Observation rely on their typed textual fields.
+        If a malformed node prevents field extraction, its result summary is
+        still scanned; only that uncertain node is withheld when no safe
+        fallback is available.
+        """
+        try:
+            attrs = getattr(node, "attributes", {}) or {}
+            if isinstance(attrs, dict) and attrs.get("memplex_injection_suspected") == "true":
                 return True
-        return False
+            return cls.scan(cls._extract_model_visible_text(node))
+        except Exception as exc:
+            logger.warning("injection node inspection failed: %s", exc)
+            if fallback_text:
+                return cls.scan(fallback_text)
+            return True
 
     @classmethod
     def wrap_for_context(
         cls,
         memories: list[SearchResult],
         store: object,
+        risk_registry: "InjectionRiskRegistry | None" = None,
     ) -> str:
         """Wrap recalled memories in protective tags for LLM context injection.
 
@@ -120,7 +152,15 @@ class IndirectInjectionGuard:
         """
         parts: list[str] = []
         for r in memories:
-            func = store.get(r.func_id) if store else None
+            if _result_is_injection_suspected(r, store, risk_registry=risk_registry):
+                continue
+            try:
+                func = store.get(r.func_id) if store else None
+            except Exception as exc:
+                # A safe summary must not turn a lookup hiccup into a leak;
+                # skip only this unresolved entry and continue with the rest.
+                logger.warning("context wrapper lookup failed for %s: %s", r.func_id, exc)
+                continue
             if not func:
                 continue
             source_type_val = (
@@ -140,27 +180,14 @@ class IndirectInjectionGuard:
         cls,
         memories: list[SearchResult],
         store: object,
+        risk_registry: "InjectionRiskRegistry | None" = None,
     ) -> str:
         """Filter out injection-suspected memories, then wrap the rest.
 
         Memories that trigger the injection scanner are logged as warnings
         and excluded from the output.
         """
-        safe: list[SearchResult] = []
-        for r in memories:
-            func = store.get(r.func_id) if store else None
-            if func:
-                memory_type = getattr(func, "memory_type", "function")
-                text = cls._extract_scan_text(func, memory_type)
-                if cls.scan(text):
-                    logger.warning(
-                        "Indirect injection detected in memory %s (type=%s), skipped.",
-                        r.func_id,
-                        memory_type,
-                    )
-                    continue
-            safe.append(r)
-        return cls.wrap_for_context(safe, store)
+        return cls.wrap_for_context(memories, store, risk_registry=risk_registry)
 
     @classmethod
     def _extract_scan_text(cls, func: object, memory_type: str) -> str:
@@ -204,3 +231,167 @@ class IndirectInjectionGuard:
             )
         # Unknown type: scan all string attributes
         return " ".join(str(v) for v in vars(func).values() if isinstance(v, str))
+
+    @classmethod
+    def _extract_model_visible_text(cls, node: object) -> str:
+        """Collect every bounded string that a typed-node API may serialize.
+
+        The historical field-specific extractor remains available for callers
+        that need that exact projection.  Security decisions use the complete
+        serialized surface so an attack cannot hide in ``name``, provenance,
+        source paragraphs, graph evidence, or a future typed string field.
+        """
+        try:
+            to_dict = getattr(node, "to_dict", None)
+            root = to_dict() if callable(to_dict) else vars(node)
+            strings: list[str] = []
+            total_chars = 0
+            seen: set[int] = set()
+
+            def visit(value: object, depth: int = 0) -> None:
+                nonlocal total_chars
+                if depth > 10:
+                    raise ValueError("model-visible node nesting exceeds scan limit")
+                if isinstance(value, str):
+                    if len(strings) >= cls.MAX_MODEL_VISIBLE_STRINGS:
+                        raise ValueError("model-visible node has too many strings")
+                    total_chars += len(value)
+                    if total_chars > cls.MAX_MODEL_VISIBLE_CHARS:
+                        raise ValueError("model-visible node text exceeds scan limit")
+                    strings.append(value)
+                    return
+                if value is None or isinstance(value, (bool, int, float, bytes, Enum)):
+                    return
+                identifier = id(value)
+                if identifier in seen:
+                    return
+                seen.add(identifier)
+                if isinstance(value, dict):
+                    if len(value) > cls.MAX_MODEL_VISIBLE_STRINGS:
+                        raise ValueError("model-visible mapping exceeds scan limit")
+                    for key, item in value.items():
+                        visit(key, depth + 1)
+                        visit(item, depth + 1)
+                    return
+                if isinstance(value, (list, tuple, set, frozenset)):
+                    if len(value) > cls.MAX_MODEL_VISIBLE_STRINGS:
+                        raise ValueError("model-visible collection exceeds scan limit")
+                    for item in value:
+                        visit(item, depth + 1)
+                    return
+                try:
+                    attributes = vars(value)
+                except TypeError:
+                    return
+                if len(attributes) > cls.MAX_MODEL_VISIBLE_STRINGS:
+                    raise ValueError("model-visible attributes exceed scan limit")
+                for key, item in attributes.items():
+                    visit(key, depth + 1)
+                    visit(item, depth + 1)
+
+            visit(root)
+            return "\n".join(strings)
+        except Exception as exc:
+            raise ValueError("model-visible node cannot be inspected safely") from exc
+
+
+class InjectionScanCounter:
+    """Date-bucketed counter for injection-suspected scan detections.
+
+    Only the current day's count is ever reported (the health endpoint), so
+    the counter prunes older date keys to stay bounded. Extracted from
+    ``MemplexService`` so the service does not own low-level counter state;
+    the service delegates to this collaborator.
+    """
+
+    __slots__ = ("_counts",)
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    def prune(self, today: str) -> None:
+        """Drop non-current date keys; cheap no-op when already current.
+
+        The map is keyed by ``YYYY-MM-DD`` and only today's count is ever
+        read, so older keys are dead weight.
+        """
+        if len(self._counts) > 1 or (self._counts and today not in self._counts):
+            self._counts = {k: v for k, v in self._counts.items() if k == today}
+
+    def increment(self, today: str) -> None:
+        """Record one injection-suspected detection on the current day."""
+        self._counts[today] = self._counts.get(today, 0) + 1
+
+    def count(self, today: str) -> int:
+        """Return the current day's detection count (0 when none recorded)."""
+        return self._counts.get(today, 0)
+
+
+class InjectionRiskRegistry:
+    """Bounded in-process cache of node ids already judged unsafe.
+
+    Typed models deliberately have no new serialized marker fields.  The
+    registry preserves a risk decision across read surfaces in one service
+    lifetime, while every read still re-scans durable node text after restart.
+    """
+
+    __slots__ = ("_ids", "_order")
+    MAX_ENTRIES = 4096
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+        self._order: deque[str] = deque()
+
+    def contains(self, node_id: str) -> bool:
+        return bool(node_id) and node_id in self._ids
+
+    def mark(self, node_id: str) -> bool:
+        """Remember *node_id* and return whether it was newly recorded."""
+        if not node_id or node_id in self._ids:
+            return False
+        if len(self._order) >= self.MAX_ENTRIES:
+            self._ids.discard(self._order.popleft())
+        self._order.append(node_id)
+        self._ids.add(node_id)
+        return True
+
+
+def _result_is_injection_suspected(
+    result: "SearchResult",
+    store: object,
+    *,
+    risk_registry: InjectionRiskRegistry | None = None,
+) -> bool:
+    """Return whether one retrieved result must be withheld from a model."""
+    if risk_registry is not None and risk_registry.contains(result.func_id):
+        return True
+    try:
+        node = store.get(result.func_id) if store else None
+    except Exception as exc:
+        logger.warning("injection filter: store.get failed for %s: %s", result.func_id, exc)
+        node = None
+    suspected = IndirectInjectionGuard.is_suspected(
+        node,
+        fallback_text=getattr(result, "summary", "") or "",
+    ) if node is not None else IndirectInjectionGuard.scan(getattr(result, "summary", "") or "")
+    if suspected and risk_registry is not None:
+        risk_registry.mark(result.func_id)
+    return suspected
+
+
+def drop_injection_suspected(
+    results: list["SearchResult"],
+    store: object,
+    *,
+    risk_registry: InjectionRiskRegistry | None = None,
+) -> list["SearchResult"]:
+    """Drop flagged or content-suspected results for every typed memory.
+
+    A failed lookup does not erase unrelated safe results: its already
+    retrieved summary is scanned and only a suspicious summary is withheld.
+    """
+    kept: list["SearchResult"] = []
+    for r in results:
+        if not _result_is_injection_suspected(r, store, risk_registry=risk_registry):
+            kept.append(r)
+    return kept

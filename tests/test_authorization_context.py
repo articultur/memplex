@@ -108,6 +108,12 @@ def test_production_service_requires_bound_authorization_context() -> None:
     config = MemplexConfig()
     config.deployment.profile = "production"
     service._config = config
+    # The service delegates to AuthorizationGate; construct it directly since
+    # __init__ is bypassed by object.__new__. Stores are not needed for the
+    # profile-only checks exercised here.
+    from memplex.authorization import AuthorizationGate
+
+    service._auth = AuthorizationGate(config, lambda: None, lambda: None)
 
     with pytest.raises(PermissionError, match="authorization context"):
         service._require_authorization(None)
@@ -122,6 +128,9 @@ def test_development_service_uses_explicit_local_context() -> None:
     config.deployment.profile = "development"
     service._config = config
     service.store = SimpleNamespace()
+    from memplex.authorization import AuthorizationGate
+
+    service._auth = AuthorizationGate(config, lambda: service.store, lambda: None)
 
     context = service._require_authorization(None)
 

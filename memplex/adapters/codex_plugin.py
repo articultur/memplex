@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from memplex.adapters.agent_runtime import AgentMemoryRuntime
+from memplex.adapters.managed_identity import (
+    derive_managed_host_root,
+    load_managed_identity,
+)
+from memplex.adapters.runtime_status import (
+    clear_runtime_status_on_success,
+    record_runtime_failure,
+    runtime_status_path,
+)
 from memplex.config import load_config
 from memplex.service import MemplexService
 
@@ -52,30 +61,18 @@ def _plugin_root() -> Path | None:
 def _identity_config() -> dict[str, Any]:
     root = _plugin_root()
     path = root / _IDENTITY_FILE if root else None
-    if path is None or not path.is_file():
+    if path is None:
         return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    managed = payload.get("managed", {})
-    if not isinstance(managed, dict) or not (
-        managed.get("by") == "memplex" or managed.get("installer") == "memplex"
-    ):
-        return {}
-    configured_agent = _safe_text(payload.get("agent"))
-    user_id = _safe_text(payload.get("user_id"))
-    project_path = _safe_text(payload.get("project_path"))
-    # The launcher only trusts the two scope-defining values from a record
-    # written for this host by the installer.  In particular, do not turn an
-    # arbitrary JSON file merely carrying a ``managed`` object into identity.
-    if (configured_agent and configured_agent != "codex") or not user_id or not project_path:
-        return {}
+    expected_host_root = derive_managed_host_root(root, expected_agent="codex")
+    payload = load_managed_identity(
+        path,
+        expected_agent="codex",
+        expected_host_root=expected_host_root,
+    )
     return {
-        "user_id": user_id,
-        "project_path": str(Path(project_path).expanduser().resolve(strict=False)),
+        "user_id": payload["user_id"],
+        "project_path": payload["project_path"],
+        "host_root": payload["host_root"],
     }
 
 
@@ -118,6 +115,34 @@ def _state_path(identity: dict[str, str]) -> Path:
     key = f"{identity['user_id']}\u0000{identity['project_path']}\u0000{identity['session_id']}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
     return root / "turns" / f"{digest}.json"
+
+
+def _runtime_status_path() -> Path:
+    """Keep hook health with the stable Codex host root, not per-turn data."""
+
+    configured = _identity_config()
+    root = Path(configured.get("host_root") or os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    return runtime_status_path(root)
+
+
+def _record_runtime_failure(operation: str, error: BaseException) -> None:
+    try:
+        record_runtime_failure(
+            _runtime_status_path(), agent="codex", operation=operation, error=error
+        )
+    except Exception:
+        # The original hook error remains authoritative and the hook must stay
+        # non-blocking even when the local status volume is unavailable.
+        pass
+
+
+def _clear_runtime_status(operation: str) -> None:
+    try:
+        clear_runtime_status_on_success(
+            _runtime_status_path(), agent="codex", operation=operation, completed=True
+        )
+    except Exception:
+        pass
 
 
 def _write_turn_state(identity: dict[str, str], prompt: str) -> None:
@@ -216,11 +241,17 @@ def _handle_recall(event: str, payload: dict[str, Any]) -> dict[str, Any]:
         return {}
     if event == "UserPromptSubmit":
         _write_turn_state(identity, query)
-    runtime, service = _runtime(identity)
     try:
-        return _context_output(event, runtime.before_prompt(query).context)
-    finally:
-        service.stop()
+        runtime, service = _runtime(identity)
+        try:
+            output = _context_output(event, runtime.before_prompt(query).context)
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("recall", exc)
+        raise
+    _clear_runtime_status("recall")
+    return output
 
 
 def _handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -233,15 +264,20 @@ def _handle_post_tool(payload: dict[str, Any]) -> dict[str, Any]:
     if not narrative:
         return {}
     identity = _identity(payload)
-    runtime, service = _runtime(identity)
     try:
-        runtime.after_response(
-            user_message=narrative,
-            assistant_message="Observed Codex tool use.",
-            metadata={"tool_name": tool_name or "unknown", "tool_input": _sanitize(tool_input)},
-        )
-    finally:
-        service.stop()
+        runtime, service = _runtime(identity)
+        try:
+            runtime.after_response(
+                user_message=narrative,
+                assistant_message="Observed Codex tool use.",
+                metadata={"tool_name": tool_name or "unknown", "tool_input": _sanitize(tool_input)},
+            )
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("capture", exc)
+        raise
+    _clear_runtime_status("capture")
     return {}
 
 
@@ -261,15 +297,20 @@ def _handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
         "session_id": _safe_text(turn.get("session_id")) or identity["session_id"],
         "project_path": _safe_text(turn.get("project_path")) or identity["project_path"],
     }
-    runtime, service = _runtime(capture_identity)
     try:
-        runtime.after_response(
-            user_message=_strip_private(prompt),
-            assistant_message=_strip_private(assistant),
-            metadata={"hook_event_name": "Stop"},
-        )
-    finally:
-        service.stop()
+        runtime, service = _runtime(capture_identity)
+        try:
+            runtime.after_response(
+                user_message=_strip_private(prompt),
+                assistant_message=_strip_private(assistant),
+                metadata={"hook_event_name": "Stop"},
+            )
+        finally:
+            service.stop()
+    except Exception as exc:
+        _record_runtime_failure("capture", exc)
+        raise
+    _clear_runtime_status("capture")
     try:
         path.unlink()
     except OSError:

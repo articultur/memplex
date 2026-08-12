@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
         SyncBatchResult,
         SyncCursorClaims,
         SyncDelivery,
+        SyncEvent,
         SyncPage,
         SyncReceipt,
         SyncSnapshotPage,
@@ -67,6 +69,68 @@ class SyncBatchRejected(ValueError):
 
 class SyncDeliveryBusy(RuntimeError):
     """投递仍由有效 lease 占用。"""
+
+
+def validate_incoming_page(
+    page: SyncPage, *, tenant_id: str
+) -> tuple[SyncEvent, ...]:
+    """在入站写入前验证一个完整的远端 changes page。
+
+    调用方必须在打开 mutation transaction 前调用本函数；它只读取 ``page``
+    并返回已验证事件。Lite 与 PostgreSQL 共享此入口，以保证跨租户、同页
+    ``(origin_node_id, event_id)`` 重复，以及伪造的 cursor/snapshot 连续性
+    都不会进入任一后端的持久化路径。
+    """
+    # Delayed import avoids the sync_protocol -> sync_repository exception
+    # dependency during module initialization.
+    from memplex.sync_protocol import SyncEvent as ProtocolSyncEvent
+    from memplex.sync_protocol import SyncPage as ProtocolSyncPage
+    from memplex.sync_protocol import SyncStreamItem
+
+    if type(tenant_id) is not str:
+        raise TypeError("tenant_id must be an exact str")
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    if type(page) is not ProtocolSyncPage:
+        raise TypeError("page must be an exact SyncPage")
+    if type(page.items) is not tuple:
+        raise TypeError("page items must be a tuple")
+    if type(page.snapshot_seq) is not int:
+        raise TypeError("page snapshot_seq must be an exact int")
+    if type(page.next_after_seq) is not int:
+        raise TypeError("page next_after_seq must be an exact int")
+    if type(page.has_more) is not bool:
+        raise TypeError("page has_more must be bool")
+    if page.snapshot_seq < 0 or page.next_after_seq < 0:
+        raise ValueError("page cursor sequences must be non-negative")
+
+    previous_seq = 0
+    identities: set[tuple[str, str]] = set()
+    events: list[SyncEvent] = []
+    for item in page.items:
+        if type(item) is not SyncStreamItem:
+            raise TypeError("page items must be exact SyncStreamItem")
+        if type(item.stream_seq) is not int:
+            raise TypeError("page stream_seq must be an exact int")
+        if type(item.event) is not ProtocolSyncEvent:
+            raise TypeError("page event must be an exact SyncEvent")
+        if item.stream_seq <= previous_seq or item.stream_seq > page.snapshot_seq:
+            raise ValueError("page stream items must be strictly ordered within snapshot")
+        if item.event.scope.tenant_id != tenant_id:
+            raise ValueError("page event tenant does not match repository tenant")
+        identity = (item.event.origin_node_id, item.event.event_id)
+        if identity in identities:
+            raise ValueError("page contains duplicate event identities")
+        identities.add(identity)
+        events.append(item.event)
+        previous_seq = item.stream_seq
+
+    if page.has_more:
+        if not page.items or page.next_after_seq != previous_seq:
+            raise ValueError("page cursor must continue from its final item")
+    elif page.next_after_seq != page.snapshot_seq:
+        raise ValueError("complete page cursor must advance to snapshot sequence")
+    return tuple(events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,4 +232,98 @@ class SyncRepository(Protocol):
 
     def sync_status(self) -> SyncStatus: ...
 
+    def sync_dispatch_status(self) -> SyncStatus: ...
+
+
+class AbstractSyncRepository(ABC):
+    """共享基类，用于两个具体的同步后端（Lite + PostgreSQL）。
+
+    The concrete ``LiteSyncRepository`` and ``PostgresSyncRepository``
+    implementations are kept in lockstep by hand: both must expose the same
+    atomic sync operations. Inheriting this base makes that contract
+    *enforced* -- Python rejects instantiation of any subclass that drops or
+    renames one of these methods, so the two backends can no longer silently
+    drift. Method signatures intentionally mirror the ``SyncRepository``
+    Protocol above.
+    """
+
+    @abstractmethod
+    def sync_page(
+        self,
+        remote_id: str,
+        consumer_id: str,
+        cursor: SyncCursorClaims | None,
+        limit: int,
+    ) -> SyncPage: ...
+
+    @abstractmethod
+    def sync_create_snapshot(
+        self,
+        remote_id: str,
+        consumer_id: str,
+        request_id: str,
+        limit: int,
+    ) -> SyncSnapshotPage: ...
+
+    @abstractmethod
+    def sync_snapshot_page(
+        self,
+        remote_id: str,
+        consumer_id: str,
+        cursor: SyncCursorClaims,
+        limit: int,
+    ) -> SyncSnapshotPage: ...
+
+    @abstractmethod
+    def sync_apply_batch(self, batch: SyncBatch) -> SyncBatchResult: ...
+
+    @abstractmethod
+    def sync_apply_page(self, remote_id: str, page: SyncPage) -> SyncApplyResult: ...
+
+    @abstractmethod
+    def sync_register_target(self, target_id: str, *, bootstrap: str = "future") -> None: ...
+
+    @abstractmethod
+    def sync_claim(
+        self,
+        target_id: str,
+        *,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[SyncDelivery]: ...
+
+    @abstractmethod
+    def sync_ack(self, delivery: SyncDelivery, receipt: SyncReceipt) -> None: ...
+
+    @abstractmethod
+    def sync_ack_batch(
+        self,
+        deliveries: list[SyncDelivery],
+        receipts: tuple[SyncReceipt, ...],
+    ) -> None: ...
+
+    @abstractmethod
+    def sync_fail(self, delivery: SyncDelivery, error_code: str, now: datetime) -> None: ...
+
+    @abstractmethod
+    def sync_dead_letter(
+        self, delivery: SyncDelivery, error_code: str, now: datetime
+    ) -> None: ...
+
+    @abstractmethod
+    def sync_replay_dead_letter(self, target_id: str, event_id: str) -> bool: ...
+
+    @abstractmethod
+    def sync_list_dead_letters(self, *, limit: int) -> list[SyncDeadLetterEntry]: ...
+
+    @abstractmethod
+    def sync_set_target_enabled(self, target_id: str, enabled: bool) -> None: ...
+
+    @abstractmethod
+    def sync_compact(self, now: datetime, *, limit: int) -> int: ...
+
+    @abstractmethod
+    def sync_status(self) -> SyncStatus: ...
+
+    @abstractmethod
     def sync_dispatch_status(self) -> SyncStatus: ...

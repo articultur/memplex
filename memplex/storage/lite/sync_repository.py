@@ -33,11 +33,13 @@ from memplex.sync_protocol import (
     SyncVersion,
 )
 from memplex.sync_repository import (
+    AbstractSyncRepository,
     SyncBackpressureError,
     SyncCapturePolicy,
     SyncCursorExpired,
     SyncDeadLetterEntry,
     SyncDeliveryBusy,
+    validate_incoming_page,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +47,7 @@ if TYPE_CHECKING:
     from memplex.storage.lite.store import LiteMemoryStore
 
 
-class LiteSyncRepository:
+class LiteSyncRepository(AbstractSyncRepository):
     """Operate the frozen v2 sync subtree through one Lite pair commit."""
 
     def __init__(
@@ -1309,13 +1311,27 @@ class LiteSyncRepository:
             raise TypeError("page must be an exact SyncPage")
         if remote_id == self._local_node_id:
             raise ValueError("remote_id must not identify this node")
-        with self._mutation():
+        with self._read():
+            tenant_id = self._state["tenant_binding"]
             if page.items:
-                self._bind_tenant(page.items[0].event.scope.tenant_id)
+                tenant_id = tenant_id or page.items[0].event.scope.tenant_id
+            # Reject a malformed or cross-tenant page before entering the
+            # mutation/persistence critical section. Empty pages carry no
+            # tenant identity, so the placeholder is structural-only.
+            validate_incoming_page(page, tenant_id=tenant_id or "unbound-lite")
+        with self._mutation():
+            tenant_id = self._state["tenant_binding"]
+            if page.items:
+                tenant_id = tenant_id or page.items[0].event.scope.tenant_id
+            # Revalidate against state reloaded under the writer lock: another
+            # process may have established the tenant binding after preflight.
+            events = validate_incoming_page(page, tenant_id=tenant_id or "unbound-lite")
+            if events:
+                self._bind_tenant(events[0].scope.tenant_id)
             cursor = next(
                 (
                     item
-                    for item in self._state["cursors"]
+                    for item in self._state["inbound_cursors"]
                     if item["remote_id"] == remote_id
                     and item["consumer_id"] == self._local_node_id
                 ),
@@ -1328,12 +1344,10 @@ class LiteSyncRepository:
                 raise ValueError("page partially overlaps confirmed progress")
             if page.next_after_seq <= confirmed:
                 return SyncApplyResult(0, 0, 0, confirmed)
-            receipts, applied, duplicate, conflict = self._apply_events(
-                tuple(item.event for item in page.items)
-            )
+            receipts, applied, duplicate, conflict = self._apply_events(events)
             del receipts
             if cursor is None:
-                self._state["cursors"].append(
+                self._state["inbound_cursors"].append(
                     {
                         "remote_id": remote_id,
                         "consumer_id": self._local_node_id,
@@ -1358,6 +1372,11 @@ class LiteSyncRepository:
             self._state["cursors"] = [
                 item
                 for item in self._state["cursors"]
+                if self._parse_time(item["updated_at"]) > consumer_cutoff
+            ]
+            self._state["inbound_cursors"] = [
+                item
+                for item in self._state["inbound_cursors"]
                 if self._parse_time(item["updated_at"]) > consumer_cutoff
             ]
             pins = [item["after_seq"] for item in self._state["cursors"]]

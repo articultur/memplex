@@ -7,10 +7,10 @@ central HTTP server. Other nodes pull those changes on demand via
 :meth:`pull_incremental` (exposed as ``memplex sync pull``).
 
 Conflict policy is last-write-wins by ``updated_at`` for all four memory
-node types (functions, facts, preferences, observations). Deletion
-tombstones currently cover Functions only; Fact/Preference deletions
-stay local to the node where they happened (documented limitation -- the
-tombstone sidecar records no typed-node entries).
+node types (functions, facts, preferences, observations). The legacy
+best-effort transport only has durable deletion semantics for Functions.
+Typed deletes therefore fail closed while that transport is active: a local
+delete is never presented as a remotely replicated one.
 
 Architecture::
 
@@ -355,10 +355,10 @@ class SyncableStore:
         self._scoped_local().increment_access_batch(func_ids)
 
     # ── Typed-node writes (Fact / Preference / Observation) ────────
-    # Same local-first + best-effort-push contract as add(): the local
-    # write always succeeds even when the remote is unreachable. Typed
-    # deletions (delete_fact / delete_preference) stay local -- tombstones
-    # cover Functions only (see module docstring).
+    # Same local-first + best-effort-push contract as add(). Unlike upserts,
+    # a typed delete cannot use this legacy transport: it has no durable
+    # tombstone/retry protocol. Refuse before the local mutation so callers
+    # never mistake a local-only delete for replicated state.
 
     def add_fact(self, fact) -> None:
         self._scoped_local().add_fact(fact)
@@ -373,13 +373,21 @@ class SyncableStore:
         self._push_typed_nodes(observations=[observation])
 
     def delete_fact(self, fact_id: str) -> None:
+        self._reject_legacy_typed_tombstone()
         self._scoped_local().delete_fact(fact_id)
 
     def delete_preference(self, preference_id: str) -> None:
+        self._reject_legacy_typed_tombstone()
         self._scoped_local().delete_preference(preference_id)
 
     def delete_observation(self, observation_id: str) -> None:
+        self._reject_legacy_typed_tombstone()
         self._scoped_local().delete_observation(observation_id)
+
+    def _reject_legacy_typed_tombstone(self) -> None:
+        """Reject typed deletes when the lossy legacy remote is active."""
+        if self._config.active:
+            raise RuntimeError("legacy_typed_tombstone_unsupported")
 
     # ── Push helpers (best-effort) ─────────────────────────────────
 
@@ -590,8 +598,9 @@ class SyncableStore:
 
         Applies Functions, Facts, Preferences and Observations with LWW
         (an incoming node wins only if newer than the local copy) and
-        replicates tombstones (deletes locally -- Functions only; typed
-        deletions do not propagate, see module docstring). Updates
+        replicates tombstones (Functions only). Typed deletes are rejected
+        before local mutation while the legacy transport is active, so this
+        pull path never has to reconcile a local-only typed deletion. Updates
         ``last_pull_at`` to the server's reported time for the next call.
 
         Returns a summary dict: ``{pulled, applied, rejected_older,

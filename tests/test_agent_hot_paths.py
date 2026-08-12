@@ -108,7 +108,9 @@ def test_codex_hot_path_installs_native_plugin_with_identity(tmp_path):
     assert identity["agent"] == "codex"
     assert identity["user_id"] == "alice"
     assert identity["project_path"] == str(workspace.resolve())
+    assert identity["python"] == sys.executable
     assert identity["source_root"] == str(PROJECT_ROOT)
+    assert identity["host_root"] == str(codex_home.resolve())
     assert identity["managed"]["by"] == "memplex"
     assert (cache_root / ".codex-plugin" / "plugin.json").exists()
     assert json.loads((cache_root / "memplex-agent.json").read_text()) == identity
@@ -503,10 +505,33 @@ def test_claude_hook_manifest_commands_use_configured_python(tmp_path):
     launcher = (PROJECT_ROOT / "memplex" / "_plugin" / "scripts" / "claude-hook.sh").read_text()
     assert "MEMPLEX_PYTHON" in launcher
 
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir()
+    plugin_root = claude_root / "plugins" / "marketplaces" / "articultur" / "plugin"
+    plugin_root.parent.mkdir(parents=True)
+    shutil.copytree(PROJECT_ROOT / "plugin", plugin_root)
+    (plugin_root / "memplex-agent.json").write_text(
+        json.dumps(
+            {
+                "agent": "claude-code",
+                "user_id": "manifest-test",
+                "project_path": str(PROJECT_ROOT),
+                "python": sys.executable,
+                "source_root": str(PROJECT_ROOT),
+                "host_root": str(claude_root),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     env = {
         **os.environ,
         "HOME": str(tmp_path / "home"),
-        "CLAUDE_PLUGIN_ROOT": str(PROJECT_ROOT / "memplex" / "_plugin"),
+        "CLAUDE_PLUGIN_ROOT": str(plugin_root),
         "MEMPLEX_PROJECT_ROOT": str(PROJECT_ROOT),
         "MEMPLEX_PYTHON": sys.executable,
         "MEMPLEX_STORAGE_BACKEND": "lite",
@@ -523,6 +548,251 @@ def test_claude_hook_manifest_commands_use_configured_python(tmp_path):
             env=env,
         )
         assert result.returncode == 0, f"{event}: {result.stderr}"
+
+
+@pytest.mark.parametrize(
+    "launcher,root_variable",
+    [
+        ("codex-plugin.sh", "PLUGIN_ROOT"),
+        ("claude-hook.sh", "CLAUDE_PLUGIN_ROOT"),
+        ("mcp-server.sh", "MEMPLEX_PLUGIN_ROOT"),
+    ],
+)
+def test_plugin_launchers_use_persisted_interpreter_and_fail_closed(tmp_path, launcher, root_variable):
+    """A recorded interpreter wins over PATH and an unavailable record is an error."""
+
+    host_root = tmp_path / "managed-host-root"
+    host_root.mkdir()
+    relative_plugin = (
+        Path("plugins/marketplaces/memplex/plugin")
+        if launcher == "codex-plugin.sh"
+        else Path("plugins/marketplaces/articultur/plugin")
+    )
+    plugin_root = host_root / relative_plugin
+    plugin_root.parent.mkdir(parents=True)
+    shutil.copytree(PROJECT_ROOT / "plugin", plugin_root)
+    recorded_python = tmp_path / "persistent-venv" / "bin" / "python"
+    marker = tmp_path / "recorded-interpreter-used"
+    recorded_python.parent.mkdir(parents=True)
+    recorded_python.write_text(
+        "#!/usr/bin/env bash\nprintf used > \"$MEMPLEX_TEST_INTERPRETER_MARKER\"\n",
+        encoding="utf-8",
+    )
+    recorded_python.chmod(0o755)
+    (plugin_root / "memplex-agent.json").write_text(
+        json.dumps(
+            {
+                "agent": "codex" if launcher == "codex-plugin.sh" else "claude-code",
+                "user_id": "launcher-test",
+                "project_path": str(tmp_path),
+                "python": str(recorded_python),
+                "source_root": str(PROJECT_ROOT),
+                "host_root": str(host_root),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    base_env = {
+        **os.environ,
+        "PATH": "/usr/bin:/bin",
+        root_variable: str(plugin_root),
+        "MEMPLEX_STORAGE_BACKEND": "lite",
+        "MEMPLEX_STORAGE_PATH": str(tmp_path / "memory"),
+        "MEMPLEX_TEST_INTERPRETER_MARKER": str(marker),
+    }
+    command = ["bash", str(plugin_root / "scripts" / launcher)]
+    if launcher == "codex-plugin.sh":
+        command.append("mcp")
+    elif launcher == "claude-hook.sh":
+        command.append("setup")
+    else:
+        command.append("setup")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env)
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "used"
+
+    recorded_python.unlink()
+    failed = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env)
+    assert failed.returncode != 0
+    assert "recorded Python interpreter is unavailable" in failed.stderr
+
+
+@pytest.mark.parametrize(
+    "launcher,root_variable,agent",
+    [
+        ("codex-plugin.sh", "PLUGIN_ROOT", "codex"),
+        ("claude-hook.sh", "CLAUDE_PLUGIN_ROOT", "claude-code"),
+        ("mcp-server.sh", "MEMPLEX_PLUGIN_ROOT", "claude-code"),
+    ],
+)
+@pytest.mark.parametrize(
+    "identity_text",
+    [
+        None,
+        '{"agent":"codex",',
+        '{"agent":"codex","agent":"codex"}',
+        '{"agent":"codex","unexpected":true}',
+        '{"agent":"codex","managed":{"by":"memplex"}}',
+    ],
+)
+def test_plugin_launchers_reject_missing_or_weak_installation_identity(
+    tmp_path, launcher, root_variable, agent, identity_text
+):
+    """Launchers must not reinterpret a damaged install through PATH fallback."""
+
+    plugin_root = tmp_path / "plugin"
+    shutil.copytree(PROJECT_ROOT / "plugin", plugin_root)
+    if identity_text is not None:
+        (plugin_root / "memplex-agent.json").write_text(identity_text, encoding="utf-8")
+    command = ["bash", str(plugin_root / "scripts" / launcher)]
+    command.extend(["mcp"] if agent == "codex" else ["setup"])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "PATH": "/usr/bin:/bin", root_variable: str(plugin_root)},
+    )
+
+    assert result.returncode != 0
+    assert "reinstall required" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "launcher,root_variable,agent,host_variable",
+    [
+        ("codex-plugin.sh", "PLUGIN_ROOT", "codex", "CODEX_HOME"),
+        ("claude-hook.sh", "CLAUDE_PLUGIN_ROOT", "claude-code", "CLAUDE_CONFIG_DIR"),
+        ("mcp-server.sh", "MEMPLEX_PLUGIN_ROOT", "claude-code", "CLAUDE_CONFIG_DIR"),
+    ],
+)
+def test_plugin_launchers_bind_runtime_to_identity_host_root(
+    tmp_path, launcher, root_variable, agent, host_variable
+):
+    host_root = tmp_path / "managed-host-root"
+    host_root.mkdir()
+    relative_plugin = (
+        Path("plugins/marketplaces/memplex/plugin")
+        if agent == "codex"
+        else Path("plugins/marketplaces/articultur/plugin")
+    )
+    plugin_root = host_root / relative_plugin
+    plugin_root.parent.mkdir(parents=True)
+    shutil.copytree(PROJECT_ROOT / "plugin", plugin_root)
+    observed_root = tmp_path / "observed-root"
+    recorded_python = tmp_path / "persistent-venv" / "bin" / "python"
+    recorded_python.parent.mkdir(parents=True)
+    recorded_python.write_text(
+        "#!/usr/bin/env bash\nprintf '%s' \"${" + host_variable + "}\" > \"$MEMPLEX_TEST_HOST_ROOT\"\n",
+        encoding="utf-8",
+    )
+    recorded_python.chmod(0o755)
+    (plugin_root / "memplex-agent.json").write_text(
+        json.dumps(
+            {
+                "agent": agent,
+                "user_id": "launcher-test",
+                "project_path": str(tmp_path),
+                "python": str(recorded_python),
+                "source_root": str(PROJECT_ROOT),
+                "host_root": str(host_root),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = ["bash", str(plugin_root / "scripts" / launcher)]
+    command.extend(["mcp"] if agent == "codex" else ["setup"])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            root_variable: str(plugin_root),
+            host_variable: str(tmp_path / "polluted-host-root"),
+            "MEMPLEX_TEST_HOST_ROOT": str(observed_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert observed_root.read_text(encoding="utf-8") == str(host_root)
+
+
+@pytest.mark.parametrize(
+    "launcher,root_variable,agent,relative_plugin",
+    [
+        (
+            "codex-plugin.sh",
+            "PLUGIN_ROOT",
+            "codex",
+            Path("plugins/marketplaces/memplex/plugin"),
+        ),
+        (
+            "claude-hook.sh",
+            "CLAUDE_PLUGIN_ROOT",
+            "claude-code",
+            Path("plugins/marketplaces/articultur/plugin"),
+        ),
+        (
+            "mcp-server.sh",
+            "MEMPLEX_PLUGIN_ROOT",
+            "claude-code",
+            Path("plugins/marketplaces/articultur/plugin"),
+        ),
+    ],
+)
+def test_plugin_launchers_reject_identity_for_another_host_root(
+    tmp_path, launcher, root_variable, agent, relative_plugin
+):
+    """Shell launchers derive host A from their installed location and reject host B."""
+
+    host_root = tmp_path / "host-a"
+    other_root = tmp_path / "host-b"
+    other_root.mkdir()
+    plugin_root = host_root / relative_plugin
+    plugin_root.parent.mkdir(parents=True)
+    shutil.copytree(PROJECT_ROOT / "plugin", plugin_root)
+    (plugin_root / "memplex-agent.json").write_text(
+        json.dumps(
+            {
+                "agent": agent,
+                "user_id": "launcher-test",
+                "project_path": str(tmp_path.resolve()),
+                "python": sys.executable,
+                "source_root": str(PROJECT_ROOT),
+                "host_root": str(other_root.resolve()),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = ["bash", str(plugin_root / "scripts" / launcher)]
+    command.extend(["mcp"] if agent == "codex" else ["setup"])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, root_variable: str(plugin_root)},
+    )
+
+    assert result.returncode != 0
+    assert "reinstall required" in result.stderr
 
 
 # Files that must stay byte-identical between the source plugin tree (plugin/)

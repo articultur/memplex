@@ -35,6 +35,7 @@ import json
 import os
 import sys
 from dataclasses import asdict
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -450,10 +451,15 @@ def cmd_operations(args: argparse.Namespace) -> int:
     from memplex.config import load_config
     from memplex.operations import (
         OperationsEvidenceError,
+        OperationsReadinessBinding,
         alert_rules_bytes,
         alert_rules_sha256,
         load_operations_report,
         load_operations_signing_key,
+    )
+    from memplex.readiness_evidence import (
+        ReadinessEvidenceError,
+        load_deployment_evidence_binding_from_environment,
     )
 
     action = getattr(args, "operations_command", None)
@@ -469,14 +475,21 @@ def cmd_operations(args: argparse.Namespace) -> int:
             return 0 if gate["status"] == "pass" else 1
         if action == "verify-report":
             report = load_operations_report(Path(args.report))
-            report.verify(load_operations_signing_key())
-            valid = (
-                report.alert_rules_sha256 == alert_rules_sha256()
-                and report.industrial_gate_closing
+            config = load_config(path=getattr(args, "config", None))
+            deployment = load_deployment_evidence_binding_from_environment(
+                memplex_version=version("memplex")
             )
+            binding = OperationsReadinessBinding(
+                deployment_id=deployment.deployment_id,
+                source_sha256=deployment.source_sha256,
+                artifact_sha256=deployment.artifact_sha256,
+                target_identity_sha256=deployment.target_identity_sha256,
+                expected_key_id=config.operations.report_key_id,
+            )
+            report.verify_readiness(load_operations_signing_key(), binding=binding)
             payload = {
                 "schema_version": 1,
-                "verified": valid,
+                "verified": True,
                 "report_id": report.report_id,
                 "key_id": report.key_id,
                 "request_count": report.request_count,
@@ -487,7 +500,7 @@ def cmd_operations(args: argparse.Namespace) -> int:
                 "industrial_gate_closing": report.industrial_gate_closing,
             }
             print(_fmt(payload, args.output))
-            return 0 if valid else 1
+            return 0
         if action == "alerts-check":
             content = alert_rules_bytes()
             count = content.count(b"      - alert:")
@@ -503,7 +516,7 @@ def cmd_operations(args: argparse.Namespace) -> int:
                 )
             )
             return 0 if count == 8 else 1
-    except (OperationsEvidenceError, OSError, ValueError, TypeError):
+    except (OperationsEvidenceError, ReadinessEvidenceError, OSError, ValueError, TypeError):
         print(_fmt({"error": "operations_evidence_invalid"}, args.output))
         return 1
     print(_fmt({"error": "operations_command_invalid"}, args.output))

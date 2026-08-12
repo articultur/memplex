@@ -35,16 +35,21 @@ from memplex.auth import (
     MemoryNotFoundError,
     PrincipalRegistry,
     bind_node_identity,
-    local_development_context,
     resolve_environment_authorization,
 )
+from memplex.authorization import AuthorizationGate, _TypedNodeLookup
 from memplex.compaction import CompactionPipeline
 from memplex.config import MemplexConfig, load_config, validate_deployment_contract
 from memplex.core import CoreEngine
 from memplex.intent import detect_memory_type as _detect_memory_type
 from memplex.intent import detect_scope_by_keywords
 from memplex.llm import LLMEnhancer
-from memplex.llm.injection_guard import IndirectInjectionGuard
+from memplex.llm.injection_guard import (
+    IndirectInjectionGuard,
+    InjectionRiskRegistry,
+    InjectionScanCounter,
+    drop_injection_suspected,
+)
 from memplex.llm.provider import create_provider
 from memplex.models import (
     CompactionResult,
@@ -105,42 +110,10 @@ def _package_version() -> str:
 # that ``from memplex.service import _detect_memory_type`` keeps working.
 # ``MemplexService._detect_memory_type`` (the bound staticmethod at the
 # bottom of this file) forwards to the same implementation.
-
-
-class _TypedNodeLookup:
-    """Store facade whose ``get`` also resolves Fact/Preference nodes.
-
-    ``MemoryStore.get`` only covers Functions; Fact/Preference nodes live
-    behind the optional typed APIs (``get_fact`` / ``get_preference``).
-    The injection guard (``filter_and_wrap`` / ``wrap_for_context``) takes
-    a store-like object with ``get`` -- wrapping the real store in this
-    facade keeps typed memories recallable into LLM context instead of
-    being silently dropped as unresolvable. Every other attribute is
-    delegated unchanged.
-    """
-
-    def __init__(self, store: Any) -> None:
-        self._store = store
-
-    def get(self, node_id: str) -> Any:
-        node = self._store.get(node_id)
-        if node is not None:
-            return node
-        for getter_name in ("get_fact", "get_preference", "get_observation"):
-            getter = getattr(self._store, getter_name, None)
-            if not callable(getter):
-                continue
-            try:
-                node = getter(node_id)
-            except Exception as exc:
-                logger.debug("typed-node lookup via %s failed for %s: %s", getter_name, node_id, exc)
-                node = None
-            if node is not None:
-                return node
-        return None
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._store, name)
+# ``_TypedNodeLookup`` and the authorization/ACL visibility logic are
+# imported from ``memplex.authorization`` above and re-exported here so
+# existing ``from memplex.service import _TypedNodeLookup`` imports keep
+# working.
 
 
 # ── MemplexService ──────────────────────────────────────────────────────
@@ -168,6 +141,13 @@ class MemplexService:
 
         self._config = config or load_config()
         cfg = self._config
+        # Authorization gate is constructed early because store construction
+        # (below) already needs the production-profile check. Stores are
+        # resolved lazily via providers so the gate always reads the service's
+        # current ``store`` / ``_feedback_store`` (never a stale snapshot).
+        self._auth = AuthorizationGate(
+            cfg, lambda: self.store, lambda: self._feedback_store
+        )
         validate_deployment_contract(cfg)
         self._lifecycle_condition = Condition(RLock())
         self._postgres_resource_close_state = "open"
@@ -362,6 +342,12 @@ class MemplexService:
         # ── Core engine (extraction pipeline) ──────────────────
         self._engine = CoreEngine(store=self.store)
 
+        # ── Authorization / ACL gate ────────────────────────────
+        # Owns tenancy/workspace/user/session visibility so the service no
+        # longer mixes ACL enforcement with memory orchestration. The gate
+        # resolves ``self.store`` / ``self._feedback_store`` lazily.
+        # (Constructed early in __init__; nothing to bind here.)
+
         # ── Compaction pipeline ─────────────────────────────────
         self._compaction = CompactionPipeline(
             store=self.store,
@@ -377,10 +363,20 @@ class MemplexService:
         worker_storage_path = (
             Path(cfg.storage.path).expanduser() / "tasks.json"
             if backend == "lite"
-            else Path("~/.memplex/tasks.json").expanduser()
+            else None
         )
+        task_repository = None
+        if backend == "postgres":
+            from memplex.storage.postgres_tasks import PostgresTaskRepository
+
+            if self._postgres_resources is None:  # pragma: no cover - construction invariant
+                raise RuntimeError("PostgreSQL task repository requires ready resources")
+            task_repository = PostgresTaskRepository(
+                ready_pool=self._postgres_resources.ready_pool
+            )
         self._worker = BackgroundWorker(
             storage_path=worker_storage_path,
+            task_repository=task_repository,
             compaction_pipeline=self._compaction,
             store=self.store,
             engine=self._engine,
@@ -403,7 +399,8 @@ class MemplexService:
         )
 
         # ── Injection scan tracking ─────────────────────────────
-        self._injection_scans_24h: Dict[str, int] = {}  # keyed by date string "YYYY-MM-DD"
+        self._injection_scans = InjectionScanCounter()
+        self._injection_risks = InjectionRiskRegistry()
 
     def _initialize_sync_dispatcher(self, cfg: MemplexConfig) -> None:
         """Bind configured peer identities to the durable repository."""
@@ -491,161 +488,62 @@ class MemplexService:
             self._postgres_resource_close_state = "closed"
             self._lifecycle_condition.notify_all()
 
+    # ── Authorization / ACL (delegated to AuthorizationGate) ────────
+    # All tenancy/workspace/user/session visibility logic lives in
+    # ``self._auth`` (memplex/authorization.py). These thin wrappers keep the
+    # service's internal call sites and the public ``service._store_for`` /
+    # ``service._require_authorization`` API stable while removing the logic
+    # from the service itself.
+
     def _require_authorization(
         self, context: Optional[AuthorizationContext]
     ) -> AuthorizationContext:
         """Require adapter-bound identity outside the local development profile."""
-        if context is not None:
-            if not isinstance(context, AuthorizationContext):
-                raise TypeError("authorization context must be an AuthorizationContext")
-            return context
-        profile = str(getattr(self._config.deployment, "profile", "development")).strip().lower()
-        if profile == "production":
-            raise PermissionError("authorization context is required in production")
-        return local_development_context()
+        return self._auth.require_authorization(context)
 
     def _is_production_profile(self) -> bool:
         """Whether this service is running under the production contract."""
-        return (
-            str(getattr(self._config.deployment, "profile", "development"))
-            .strip()
-            .lower()
-            == "production"
-        )
+        return self._auth.is_production()
 
     def _store_for(self, context: AuthorizationContext) -> Any:
-        """Return an immutable request-scoped storage facade when supported.
-
-        PostgreSQL stores enforce tenant predicates and RLS settings through
-        ``authorized(context)``.  The facade is intentionally allocated per
-        service call: keeping the current principal on ``self.store`` would
-        let concurrent requests overwrite one another.  Lite stores retain
-        their development-compatible API because they expose no such facade.
-        """
-        authorize = getattr(self.store, "authorized", None)
-        return authorize(context) if callable(authorize) else self.store
+        """Return an immutable request-scoped storage facade when supported."""
+        return self._auth.store_for(context)
 
     def _feedback_store_for(self, context: AuthorizationContext) -> FeedbackStore:
-        """Return the request-scoped feedback facade for production calls.
-
-        Historic Lite feedback files may contain records without tenant
-        columns.  Development preserves their read compatibility and relies
-        on the related memory's ACL check; production always uses the facade
-        and its tenant-first backend predicates.
-        """
-        if not self._is_production_profile():
-            return self._feedback_store
-        authorize = getattr(self._feedback_store, "authorized", None)
-        return authorize(context) if callable(authorize) else self._feedback_store
+        """Return the request-scoped feedback facade for production calls."""
+        return self._auth.feedback_store_for(context)
 
     def _typed_lookup_for(self, context: AuthorizationContext) -> _TypedNodeLookup:
         """Build a typed lookup over the same request-scoped storage facade."""
-        return _TypedNodeLookup(self._store_for(context))
+        return self._auth.typed_lookup_for(context)
 
     @staticmethod
     def _identity_value(node: Any, field_name: str, namespace_key: str) -> Optional[str]:
-        """Resolve a node identity field, accepting the stable namespace copy.
-
-        Identity is persisted both on ``MemoryNode`` and in its namespace so
-        existing serializer paths can retain it.  The typed field wins; the
-        namespace is only a compatibility projection.
-        """
-        value = getattr(node, field_name, None)
-        if value is None or not str(value).strip():
-            namespace = getattr(node, "namespace", {}) or {}
-            if isinstance(namespace, dict):
-                value = namespace.get(namespace_key)
-        if value is None:
-            return None
-        value = str(value).strip()
-        return value or None
+        """Resolve a node identity field, accepting the stable namespace copy."""
+        return AuthorizationGate.identity_value(node, field_name, namespace_key)
 
     @staticmethod
     def _is_local_development_context(context: AuthorizationContext) -> bool:
         """Whether *context* is the explicit compatibility trust boundary."""
-        principal = context.principal
-        return (
-            principal.tenant_id == "local"
-            and principal.subject_id == "local-development"
-            and "local-development" in principal.roles
-            and context.workspace_id == "local-development"
-            and context.provenance.get("trust_boundary") == "local-development"
-        )
+        return AuthorizationGate.is_local_development_context(context)
 
     def _is_node_visible(self, node: Any, context: AuthorizationContext) -> bool:
-        """Return whether *node* is in the authenticated caller's ACL scope.
-
-        An identity-less historic node is visible only through the explicit
-        local-development compatibility context.  Every explicit tenant
-        context is fail-closed before applying workspace, user, or session
-        visibility.
-        """
-        tenant_id = self._identity_value(node, "tenant_id", "memplex_tenant_id")
-        if tenant_id is None:
-            return self._is_local_development_context(context)
-        if tenant_id != context.principal.tenant_id:
-            return False
-
-        namespace = getattr(node, "namespace", {}) or {}
-        if not isinstance(namespace, dict):
-            namespace = {}
-        visibility = getattr(node, "visibility", None) or namespace.get("memplex_visibility")
-        visibility = str(visibility or "workspace").strip().lower()
-        subject_id = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
-        if subject_id is None:
-            owner = getattr(node, "owner", None)
-            subject_id = str(owner).strip() if owner is not None and str(owner).strip() else None
-        workspace_id = self._identity_value(node, "workspace_id", "memplex_workspace_id")
-
-        if visibility == "user":
-            return subject_id == context.principal.subject_id
-        if visibility == "workspace":
-            return workspace_id == context.workspace_id
-        if visibility == "session":
-            provenance = getattr(node, "provenance", {}) or {}
-            if not isinstance(provenance, dict):
-                provenance = {}
-            source_agent = (
-                provenance.get("agent_id")
-                or namespace.get("memplex_source_agent")
-                or namespace.get("memplex_agent")
-            )
-            return (
-                workspace_id == context.workspace_id
-                and subject_id == context.principal.subject_id
-                and getattr(node, "origin_session", None) == context.session_id
-                and source_agent == context.agent_id
-            )
-        return False
+        """Return whether *node* is in the authenticated caller's ACL scope."""
+        return self._auth.is_node_visible(node, context)
 
     def _visible_node(self, memory_id: str, context: AuthorizationContext) -> Any:
         """Load one node and hide inaccessible identifiers from callers."""
-        try:
-            node = self._typed_lookup_for(context).get(memory_id)
-        except Exception as exc:
-            logger.debug("authorized node lookup failed for %s: %s", memory_id, exc)
-            return None
-        if node is None or not self._is_node_visible(node, context):
-            return None
-        return node
+        return self._auth.visible_node(memory_id, context)
 
     def _require_visible_node(self, memory_id: str, context: AuthorizationContext) -> Any:
         """Return a visible node or raise the uniform opaque mutation error."""
-        node = self._visible_node(memory_id, context)
-        if node is None:
-            raise MemoryNotFoundError("Memory not found")
-        return node
+        return self._auth.require_visible_node(memory_id, context)
 
     def _filter_authorized_results(
         self, results: List[SearchResult], context: AuthorizationContext
     ) -> List[SearchResult]:
         """Drop inaccessible search candidates before any ranking side effect."""
-        kept: List[SearchResult] = []
-        for result in results:
-            node = self._visible_node(result.func_id, context)
-            if node is not None:
-                kept.append(result)
-        return kept
+        return self._auth.filter_authorized_results(results, context)
 
     @staticmethod
     def _bind_extracted_identity(
@@ -655,18 +553,7 @@ class MemplexService:
         visibility: str = "workspace",
     ) -> None:
         """Stamp every extraction product before any store operation begins."""
-        seen: set[int] = set()
-        for nodes in (
-            extracted.functions,
-            extracted.facts,
-            extracted.preferences,
-            getattr(extracted.graph, "nodes", []),
-        ):
-            for node in nodes:
-                if id(node) in seen:
-                    continue
-                seen.add(id(node))
-                bind_node_identity(node, context, visibility=visibility)
+        AuthorizationGate.bind_extracted_identity(extracted, context, visibility=visibility)
 
     # ── LLM initialisation ──────────────────────────────────────
 
@@ -713,6 +600,84 @@ class MemplexService:
     # in ``write()``) and the read path (``filter_and_wrap``). Keeping a
     # single copy prevents the two paths from drifting when a new memory
     # type is added.
+
+    def _mark_injection_suspected(self, nodes: Iterable[object]) -> None:
+        """Scan typed nodes before persistence and retain only internal risk state.
+
+        Functions keep their historical serialized marker for compatibility.
+        Fact, Preference, and Observation carry no protocol-polluting marker:
+        their bounded in-process registry entry is backed by mandatory typed
+        content scans at every model-facing read.
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._injection_scans.prune(today)
+        seen: set[int] = set()
+        for node in nodes:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if not IndirectInjectionGuard.is_suspected(node):
+                continue
+            node_id = str(getattr(node, "id", "") or "")
+            self._injection_risks.mark(node_id)
+            attrs = getattr(node, "attributes", None)
+            if isinstance(attrs, dict):
+                attrs["memplex_injection_suspected"] = "true"
+            self._injection_scans.increment(today)
+            logger.warning(
+                "Indirect injection suspected in memory %s (type=%s); retained but withheld from model reads.",
+                node_id or "?",
+                getattr(node, "memory_type", "unknown"),
+            )
+
+    def scan_nodes_before_persistence(self, nodes: Iterable[object]) -> None:
+        """Run the shared model-visible scan before any caller persists nodes."""
+        self._mark_injection_suspected(nodes)
+
+    def scan_sync_events_before_persistence(self, events: Iterable[object]) -> None:
+        """Decode typed sync upserts and register their risk before apply.
+
+        Repository implementations retain authority over canonical protocol
+        and LWW validation.  This service boundary only ensures that every
+        model-visible typed payload is assessed before the repository can
+        publish it.
+        """
+        from memplex.models import Fact, Function, Observation, Preference
+        from memplex.sync_protocol import SyncNodeType, SyncOperation
+
+        model_by_type = {
+            SyncNodeType.FUNCTION: Function,
+            SyncNodeType.FACT: Fact,
+            SyncNodeType.PREFERENCE: Preference,
+            SyncNodeType.OBSERVATION: Observation,
+        }
+        nodes: list[object] = []
+        for event in events:
+            if getattr(event, "operation", None) is not SyncOperation.UPSERT:
+                continue
+            node_type = getattr(event, "node_type", None)
+            model = model_by_type.get(node_type)
+            if model is None:
+                continue
+            raw = event.to_dict().get("payload")
+            if type(raw) is not dict:
+                raise TypeError("typed sync upsert payload must be an object")
+            nodes.append(model.from_dict(raw))
+        self._mark_injection_suspected(nodes)
+
+    def is_safe_for_model(self, node: object) -> bool:
+        """Return whether a loaded typed node may be serialized to a model."""
+        try:
+            node_id = str(getattr(node, "id", "") or "")
+        except Exception as exc:
+            logger.warning("injection node id inspection failed closed: %s", exc)
+            return False
+        if self._injection_risks.contains(node_id):
+            return False
+        suspected = IndirectInjectionGuard.is_suspected(node)
+        if suspected:
+            self._injection_risks.mark(node_id)
+        return not suspected
 
     # ════════════════════════════════════════════════════════════════
     #  Core query
@@ -761,7 +726,6 @@ class MemplexService:
             filters, budgets, and final injected candidates.
         """
         context = self._require_authorization(authorization)
-        store = self._store_for(context)
         store = self._store_for(context)
         # A compiled wiki index is not tenant-addressable.  On a scoped
         # backend, use its SQL/FTS path instead of producing global wiki
@@ -955,7 +919,11 @@ class MemplexService:
         # enforcement that previously only AgentMemoryRuntime applied.
         if results:
             before_injection = len(results)
-            results = self._drop_injection_suspected(results, store=store)
+            results = drop_injection_suspected(
+                results,
+                self._typed_lookup_for(context),
+                risk_registry=self._injection_risks,
+            )
             if trace is not None and len(results) != before_injection:
                 trace["stages"].append(
                     {
@@ -1284,37 +1252,22 @@ class MemplexService:
         # merge, or background work observes an extracted memory.
         self._bind_extracted_identity(extracted, context, visibility=visibility)
 
-        # 1b. Persist Fact / Preference nodes. Previously only Functions
+        # 1b. Scan all extracted typed nodes before any persistence path.
+        self.scan_nodes_before_persistence(
+            [*extracted.functions, *extracted.facts, *extracted.preferences]
+        )
+
+        # 1c. Persist Fact / Preference nodes. Previously only Functions
         #     were stored, so fact/preference-intent paragraphs (e.g.
         #     "I prefer ...") were extracted and then silently dropped,
         #     making them unrecallable. Duck-typed: backends without the
         #     optional typed APIs skip with a debug trace.
         self._persist_typed_nodes(extracted, store=store)
 
-        # 2. Flag indirect-injection-suspected functions at write time.
-        #    Memories are RETAINED (co-located legitimate content must not be
-        #    silently lost) but stamped ``memplex_injection_suspected=true``;
-        #    the LLM-facing read path (IndirectInjectionGuard.filter_and_wrap)
-        #    re-scans and omits them from injected context. Previously this
-        #    only logged "skipped" while neither skipping nor flagging.
+        # 2. Persist Functions and graph edges after the unified typed scan.
+        #    Functions retain the historical marker; other node types are
+        #    guarded by their typed content and bounded internal risk cache.
         if extracted.functions:
-            today = datetime.now().strftime("%Y-%m-%d")
-            self._prune_injection_scans(today)
-            for func in extracted.functions:
-                memory_type = getattr(func, "memory_type", "function")
-                scan_text = IndirectInjectionGuard._extract_scan_text(func, memory_type)
-                if IndirectInjectionGuard.scan(scan_text):
-                    logger.warning(
-                        "Indirect injection suspected in function %s (type=%s); "
-                        "retained but flagged, will be omitted at recall.",
-                        func.id,
-                        memory_type,
-                    )
-                    attrs = getattr(func, "attributes", None)
-                    if isinstance(attrs, dict):
-                        attrs["memplex_injection_suspected"] = "true"
-                    self._injection_scans_24h[today] = self._injection_scans_24h.get(today, 0) + 1
-
             store.merge(extracted.graph)
 
             # Invalidate graph builder cache so next write sees new data
@@ -1473,8 +1426,10 @@ class MemplexService:
         # surface for local tooling. Production never reaches this branch
         # because ``_require_authorization`` rejects absent credentials.
         if authorization is None and self._is_local_development_context(context):
-            return self._typed_lookup_for(context).get(memory_id)
-        return self._visible_node(memory_id, context)
+            node = self._typed_lookup_for(context).get(memory_id)
+        else:
+            node = self._visible_node(memory_id, context)
+        return node if node is None or self.is_safe_for_model(node) else None
 
     def get_timeline(
         self,
@@ -1519,13 +1474,14 @@ class MemplexService:
             return []
         try:
             observations = list(list_fn(limit=limit, category=category, owner=owner))
-            if authorization is None and self._is_local_development_context(context):
-                return observations
-            return [
+            visible = observations if (
+                authorization is None and self._is_local_development_context(context)
+            ) else [
                 observation
                 for observation in observations
                 if self._is_node_visible(observation, context)
             ]
+            return [observation for observation in visible if self.is_safe_for_model(observation)]
         except Exception as exc:
             logger.debug("list_observations failed: %s", exc)
             return []
@@ -1541,6 +1497,7 @@ class MemplexService:
 
         context = self._require_authorization(authorization)
         bind_node_identity(observation, context, visibility=visibility)
+        self.scan_nodes_before_persistence([observation])
         add = getattr(self._store_for(context), "add_observation", None)
         if not callable(add):
             raise NotImplementedError(
@@ -1579,15 +1536,19 @@ class MemplexService:
             raise MemoryNotFoundError("Memory not found")
 
         old_value = None
-        values = getattr(func, role, None)
-        if values is None:
+        if (
+            type(role) is not str
+            or type(new_value) is not str
+            or role not in {"trigger", "condition", "action", "benefit"}
+        ):
             return UpdateResult(
                 memory_id=memory_id,
-                role=role,
-                new_value=new_value,
+                role="",
+                new_value="",
                 success=False,
-                error=f"Unknown role: {role}",
+                error="Unknown role",
             )
+        values = getattr(func, role)
 
         if values:
             old_value = values[0].desc
@@ -1610,16 +1571,7 @@ class MemplexService:
         # Suspected payloads flag the Function (read path drops it) rather
         # than rejecting the update -- legitimate co-located edits must
         # not be silently lost.
-        if IndirectInjectionGuard.scan(new_value):
-            logger.warning(
-                "Indirect injection suspected in update_memory(%s, %s); "
-                "retained but flagged, will be omitted at recall.",
-                memory_id,
-                role,
-            )
-            attrs = getattr(func, "attributes", None)
-            if isinstance(attrs, dict):
-                attrs["memplex_injection_suspected"] = "true"
+        self.scan_nodes_before_persistence([func])
 
         # Lite uses explicit replacement so a detached snapshot is never
         # accidentally routed through the name-merge semantics.
@@ -1847,8 +1799,8 @@ class MemplexService:
         # Injection scans detected in last 24h (prune stale date keys so
         # the map cannot grow one entry per day forever).
         today = datetime.now().strftime("%Y-%m-%d")
-        self._prune_injection_scans(today)
-        injection_scans_detected_24h = self._injection_scans_24h.get(today, 0)
+        self._injection_scans.prune(today)
+        injection_scans_detected_24h = self._injection_scans.count(today)
 
         # Dead letters (failed tasks)
         dead_letters_pending = self._worker.dead_letters_pending()
@@ -2054,20 +2006,8 @@ class MemplexService:
         return IndirectInjectionGuard.filter_and_wrap(
             results,
             self._typed_lookup_for(context),
+            risk_registry=self._injection_risks,
         )
-
-    def _prune_injection_scans(self, today: str) -> None:
-        """Drop non-current date keys from ``_injection_scans_24h``.
-
-        The map is keyed by ``YYYY-MM-DD`` and only today's count is ever
-        read (health reporting), so older keys are dead weight.
-        """
-        if len(self._injection_scans_24h) > 1 or (
-            self._injection_scans_24h and today not in self._injection_scans_24h
-        ):
-            self._injection_scans_24h = {
-                k: v for k, v in self._injection_scans_24h.items() if k == today
-            }
 
     def _filter_by_owner(
         self,
@@ -2097,35 +2037,6 @@ class MemplexService:
                 continue
             if getattr(node, "owner", None) == owner:
                 kept.append(r)
-        return kept
-
-    def _drop_injection_suspected(
-        self, results: List[SearchResult], *, store: Any = None
-    ) -> List[SearchResult]:
-        """Drop results whose stored Function is flagged injection-suspected.
-
-        Read-side enforcement paired with the write-time flag in ``write()``.
-        A result is dropped when its Function's ``attributes`` map contains
-        ``memplex_injection_suspected == "true"``. Failures to look up the
-        Function (e.g. race with delete) keep the result rather than
-        silently dropping legitimate memory.
-        """
-        kept: List[SearchResult] = []
-        for r in results:
-            try:
-                func = (self.store if store is None else store).get(r.func_id)
-            except Exception as exc:
-                logger.debug(
-                    "injection filter: store.get failed for %s, keeping result: %s",
-                    r.func_id,
-                    exc,
-                )
-                func = None
-            if func is not None:
-                attrs = getattr(func, "attributes", {}) or {}
-                if attrs.get("memplex_injection_suspected") == "true":
-                    continue
-            kept.append(r)
         return kept
 
     def compact(self, scope: str = "project") -> CompactionResult:

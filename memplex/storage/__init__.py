@@ -144,6 +144,11 @@ def create_store(
             # never a reason to silently select a different directory.
             raise
         except Exception as exc:
+            if storage_path is not None:
+                # An explicit Lite location is an operator-selected state
+                # boundary.  A constructor failure must be observable rather
+                # than silently opening a second, unrelated default library.
+                raise
             logger.warning(
                 "Failed to create LiteMemoryStore at configured path %s (%s); "
                 "falling back to the default ~/.memplex location.",

@@ -255,6 +255,7 @@ def _provision_application_role(pg_dsn: str, role: str) -> None:
                 "memplex_sync_stream_state": "SELECT, INSERT, UPDATE",
                 "memplex_sync_snapshots": "SELECT, INSERT, UPDATE, DELETE",
                 "memplex_sync_snapshot_items": "SELECT, INSERT, DELETE",
+                "memplex_background_tasks": "SELECT, INSERT, UPDATE, DELETE",
             }
             for table, privileges in sync_acl.items():
                 cur.execute(
@@ -808,6 +809,32 @@ def test_resources_allow_least_privileged_application_role_in_production(migrati
         _drop_unprivileged_role(migration_dsn, role)
 
 
+def test_production_resources_reject_same_principal_hidden_by_distinct_dsns(
+    migration_dsn,
+):
+    """Different connection options cannot disguise one shared database role."""
+    application_dsn = psycopg2.extensions.make_dsn(
+        migration_dsn, application_name="memplex-application"
+    )
+    admin_dsn = psycopg2.extensions.make_dsn(
+        migration_dsn, application_name="memplex-migration"
+    )
+    resources = PostgresStorageResources(
+        dsn=application_dsn,
+        migration_dsn=admin_dsn,
+    )
+
+    with pytest.raises(MigrationIntegrityError, match="principals must be distinct"):
+        resources.ensure_ready(
+            VectorCapabilityRequest(dim=0, policy="disabled"),
+            "production",
+        )
+
+    assert resources.state == "FAULTED"
+    assert resources.business_lease_count == 0
+    assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
+
+
 def test_v5_application_acl_rejects_extra_inbox_write_privilege(migration_dsn):
     """The v5 application matrix is exact; an unnecessary inbox UPDATE is unsafe."""
     role = f"memplex_sync_acl_{uuid.uuid4().hex[:8]}"
@@ -1260,8 +1287,10 @@ def pgvector_available(pg_dsn):
         conn.commit()
         cur.close()
         return True
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if os.environ.get("MEMPLEX_REQUIRE_PGVECTOR") == "1":
+            pytest.fail(f"pgvector is required by this CI gate: {exc}")
         return False
     finally:
         conn.close()
@@ -1477,6 +1506,7 @@ _V5_SYNC_TABLES = (
     "memplex_sync_batches", "memplex_sync_targets", "memplex_sync_deliveries",
     "memplex_sync_cursors", "memplex_sync_stream_state", "memplex_sync_local_identity", "memplex_sync_ingress_principals", "memplex_sync_snapshots",
     "memplex_sync_snapshot_items",
+    "memplex_background_tasks",
 )
 
 
@@ -1750,7 +1780,7 @@ def test_migration_plan_and_dry_run_on_empty_schema_are_read_only(migration_dsn)
     plan = runner.plan()
     dry_run = runner.apply(dry_run=True)
 
-    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5]
+    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5, 6]
     assert dry_run == plan
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
@@ -1796,6 +1826,7 @@ def test_recognised_pre_g002_catalogue_upgrades_atomically(migration_dsn):
         (3, "executed"),
         (4, "executed"),
         (5, "executed"),
+        (6, "executed"),
     ]
     conn = psycopg2.connect(migration_dsn)
     try:
@@ -1824,7 +1855,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
     result = runner.apply()
@@ -1836,6 +1867,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
         (3, "executed"),
         (4, "executed"),
         (5, "executed"),
+        (6, "executed"),
     ]
     assert _migration_table_exists(migration_dsn, "feedback")
 
@@ -1861,9 +1893,9 @@ def test_v3_catalogue_upgrades_to_v4_with_function_and_virtual_edge_targets(migr
 
     plan = PostgresMigrationRunner(migration_dsn).plan()
     assert plan.current_version == 3
-    assert [migration.version for migration in plan.pending] == [4, 5]
+    assert [migration.version for migration in plan.pending] == [4, 5, 6]
     assert PostgresMigrationRunner(migration_dsn).apply().state == "ready"
-    assert _ledger_rows(migration_dsn)[-1] == (5, "executed")
+    assert _ledger_rows(migration_dsn)[-1] == (6, "executed")
     assert _admin_query(
         migration_dsn,
         "SELECT edge_type, target_function FROM memplex_edges ORDER BY edge_type",
@@ -1880,6 +1912,7 @@ def test_v4_upgrades_atomically_to_reliable_sync_v5(migration_dsn):
         (3, "executed"),
         (4, "executed"),
         (5, "executed"),
+        (6, "executed"),
     ]
     assert _admin_query(
         migration_dsn,
@@ -4374,7 +4407,7 @@ def test_0004_runner_reads_hidden_typed_domains_with_python_runtime_semantics(mi
             ("memplex_edges", True),
             ("memplex_functions", True),
         ]
-        assert _ledger_rows(migration_dsn)[-1] == (5, "executed")
+        assert _ledger_rows(migration_dsn)[-1] == (6, "executed")
     finally:
         _restore_v3_catalogue_owner_and_drop_role(migration_dsn, role, original_owner)
 
@@ -4616,7 +4649,7 @@ def test_0002_body_and_ledger_insert_rollback_together(migration_dsn, monkeypatc
             """
             INSERT INTO memplex_schema_migrations
                 (version, name, checksum, applied_at, execution_mode, baseline_fingerprint)
-            VALUES (6, 'future', 'forged', CURRENT_TIMESTAMP, 'executed', NULL)
+            VALUES ({future_version}, 'future', 'forged', CURRENT_TIMESTAMP, 'executed', NULL)
             """,
             "not continuous",
         ),
@@ -4625,7 +4658,8 @@ def test_0002_body_and_ledger_insert_rollback_together(migration_dsn, monkeypatc
 def test_ledger_gap_drift_and_future_versions_fail_closed(migration_dsn, tamper_sql, expected):
     """A syntactically valid ledger is still rejected when its history is not exact."""
     PostgresMigrationRunner(migration_dsn).apply()
-    _migration_execute(migration_dsn, tamper_sql)
+    future_version = discover_migrations()[-1].version + 1
+    _migration_execute(migration_dsn, tamper_sql.format(future_version=future_version))
 
     with pytest.raises(MigrationIntegrityError, match=expected):
         PostgresMigrationRunner(migration_dsn).plan()
@@ -4733,6 +4767,7 @@ def test_two_runners_converge_to_one_contiguous_ledger(migration_dsn):
         (3, "executed"),
         (4, "executed"),
         (5, "executed"),
+        (6, "executed"),
     ]
 
 
@@ -4752,6 +4787,7 @@ def test_second_apply_preserves_catalogue_ledger_modes_and_applied_at(migration_
         (3, "executed"),
         (4, "executed"),
         (5, "executed"),
+        (6, "executed"),
     ]
 
 
@@ -4944,7 +4980,7 @@ def test_exact_runtime_v1_catalogue_is_a_known_upgrade_baseline(migration_dsn, w
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
     assert runner.status() == plan
     assert runner.apply(dry_run=True) == plan
     assert runner.apply().state == "ready"
@@ -5073,7 +5109,7 @@ def test_runner_confines_a_quoted_target_schema_before_reading_ledger(pg_dsn):
         runner = PostgresMigrationRunner(pg_dsn, connection_factory=target_then_source_factory)
         plan = runner.plan()
         assert plan.current_version == 2
-        assert [migration.version for migration in plan.pending] == [3, 4, 5]
+        assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
         assert runner.apply().state == "ready"
         assert _migration_ledger_digest(pg_dsn, source_factory) == source_before
         assert PostgresMigrationRunner(pg_dsn, connection_factory=source_factory).status().state == "ready"

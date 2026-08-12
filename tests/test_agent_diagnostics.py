@@ -15,6 +15,7 @@ from memplex.adapters.agent_installer import (
     uninstall_agent,
 )
 from memplex.adapters.agent_runtime import get_agent_manifest
+from memplex.adapters.runtime_status import runtime_status_path
 from memplex.config import MemplexConfig
 from memplex.product import run_agent_diagnostics, run_doctor, scope_explain, scope_preview
 from memplex.service import MemplexService
@@ -72,6 +73,76 @@ def test_installation_diagnostics_detect_config_drift(tmp_path: Path):
     assert status["install_state"]["selected"] is False
     assert status["install_state"]["reinstall_needed"] is True
     assert "memory provider is not selected" in status["drift_reasons"]
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "openclaw", "hermes"])
+def test_installation_diagnostics_require_reinstall_for_damaged_identity(
+    tmp_path: Path, agent: str
+):
+    """A present but schema-widened identity is not a healthy managed install."""
+
+    root = tmp_path / agent
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install_agent(agent, target_dir=root, user_id="alice", project_path=workspace)
+    status = inspect_agent_installation(agent, target_dir=root)
+    identity_path = Path(status["paths"]["identity"])
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["unexpected"] = True
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+
+    damaged = inspect_agent_installation(agent, target_dir=root)
+
+    assert damaged["status"] != "healthy"
+    assert damaged["install_state"]["reinstall_needed"] is True
+    assert any("managed identity" in reason for reason in damaged["drift_reasons"])
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code", "openclaw", "hermes"])
+def test_installation_diagnostics_reject_identity_bound_to_another_host_root(
+    tmp_path: Path, agent: str
+):
+    """Identity from host B cannot make the inspected host A healthy."""
+
+    root = tmp_path / "host-a"
+    other_root = tmp_path / "host-b"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other_root.mkdir()
+    install_agent(agent, target_dir=root, user_id="alice", project_path=workspace)
+    status = inspect_agent_installation(agent, target_dir=root)
+    identity_path = Path(status["paths"]["identity"])
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["host_root"] = str(other_root.resolve())
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+
+    damaged = inspect_agent_installation(agent, target_dir=root)
+
+    assert damaged["status"] != "healthy"
+    assert damaged["install_state"]["reinstall_needed"] is True
+    assert any("host_root" in reason for reason in damaged["drift_reasons"])
+
+
+def test_installation_diagnostics_projects_unreadable_runtime_sidecar_as_degraded(tmp_path: Path):
+    """An unreadable runtime sidecar must not be reported as a healthy host."""
+
+    root = tmp_path / "codex"
+    install_agent(
+        "codex",
+        target_dir=root,
+        user_id="alice",
+        project_path=tmp_path,
+    )
+    runtime_status_path(root).write_text('{"state":"healthy"', encoding="utf-8")
+
+    status = inspect_agent_installation("codex", target_dir=root)
+
+    assert status["status"] == "degraded"
+    assert status["runtime_status"] == {
+        "reason": "state_unreadable",
+        "state": "degraded",
+    }
+    assert status["install_state"]["reinstall_needed"] is False
 
 
 def test_claude_uninstall_preserves_unmanaged_marketplace(tmp_path: Path):
