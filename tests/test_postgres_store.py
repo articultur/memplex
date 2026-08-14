@@ -124,7 +124,7 @@ class _MockCursor:
         if "set_config('memplex.tenant_id'" in sql:
             self._probe_tenant = params[0]
 
-    def fetchone(self):
+    def fetchone(self):  # noqa: C901  documented known debt
         if not self.executed:
             return self._fetchone_val
         sql, params = self.executed[-1]

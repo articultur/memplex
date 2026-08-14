@@ -142,15 +142,6 @@ line-length = 100
 # Intentionally assigned variable
 "memplex/service.py" = ["F841"]
 "tests/test_hooks.py" = ["E741"]
-# hand-rolled SQL-recording mock cursor (26): test fixture, not product code
-"tests/test_postgres_store.py" = ["C901"]
-# ── C901 known-debt freeze (do not extend this list; new >25 fails CI) ──
-# sync route registrars aggregate endpoint handlers: v1 (41) + legacy (52);
-# down from the original 1247-line create_app / complexity-102 single function.
-"memplex/adapters/http_api.py" = ["C901"]
-# _probe_application_access (50): sequential PG access probes; a 7-helper
-# extraction reached 26 but broke probe behavior and was reverted — open debt.
-"memplex/storage/pool.py" = ["C901"]
 
 [tool.ruff.lint.mccabe]
 # Complexity freeze-gate: 25 is the current ceiling; the per-file ignores

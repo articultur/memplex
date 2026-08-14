@@ -659,12 +659,6 @@ def _vector_extension_type(cur: Any) -> tuple[str, int] | None:
 # Re-export the split-out whole-catalogue snapshot reader so
 # schema_fingerprint's bare-name call and any external import path keep
 # resolving.
-from memplex.storage.migrations.catalogue_snapshot import (  # noqa: F401,E402
-    _catalog_snapshot,
-)
-
-
-
 # Re-export the split-out catalogue verification helpers and schema
 # constants so existing ``from ...runner import _matches_post_core`` /
 # ``runner._EDGE_TARGET_FUNCTION_EXPRESSION`` paths and bare-name
@@ -729,6 +723,9 @@ from memplex.storage.migrations.catalogue_checks import (  # noqa: F401
     _sync_table_signature,
     _variant_digest,
     _vector_parameter_digest,
+)
+from memplex.storage.migrations.catalogue_snapshot import (  # noqa: F401,E402
+    _catalog_snapshot,
 )
 
 

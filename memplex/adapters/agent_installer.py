@@ -368,20 +368,20 @@ def inspect_agent_installation(
 # Re-export the split-out install-transaction machinery so existing
 # imports and bare-name calls in this module keep resolving.
 from memplex.adapters.install_transaction import (  # noqa: F401,E402
-    _InstallSnapshot,
-    _agent_installation_paths,
     _agent_install_mutation_paths,
-    _missing_install_directories,
-    _remove_created_install_directories,
-    _required_paths_exist,
-    _path_lexists,
-    _remove_install_path,
-    _copy_install_snapshot,
-    _snapshot_install_paths,
-    _restore_concrete_install_path,
-    _restore_symlink_install_path,
-    _restore_install_snapshot,
+    _agent_installation_paths,
     _cleanup_snapshot_root,
+    _copy_install_snapshot,
+    _InstallSnapshot,
+    _missing_install_directories,
+    _path_lexists,
+    _remove_created_install_directories,
+    _remove_install_path,
+    _required_paths_exist,
+    _restore_concrete_install_path,
+    _restore_install_snapshot,
+    _restore_symlink_install_path,
+    _snapshot_install_paths,
 )
 
 
@@ -1549,9 +1549,9 @@ def _write_text_atomic(path: Path, text: str) -> None:
 
 # Re-export the split-out embedded asset writers.
 from memplex.adapters.agent_assets import (  # noqa: F401,E402
-    _write_openclaw_extension,
     _openclaw_plugin_javascript,
     _write_hermes_provider_plugin,
+    _write_openclaw_extension,
 )
 
 

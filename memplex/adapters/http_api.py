@@ -1171,7 +1171,7 @@ config,
 
 
 
-def _register_sync_v1_routes(app: "FastAPI", config) -> None:
+def _register_sync_v1_routes(app: "FastAPI", config) -> None:  # noqa: C901  documented known debt
     """Register the snapshot-stable /sync/v1 endpoints."""
     @app.post("/sync/v1/batches", summary="Apply one canonical atomic sync batch")
     async def sync_v1_batches(request: Request) -> JSONResponse:
@@ -1378,7 +1378,7 @@ def _register_sync_v1_routes(app: "FastAPI", config) -> None:
         )
 
 
-def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None:
+def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None:  # noqa: C901  documented known debt
     """Register the legacy /sync/changes + /sync/push adapter."""
     def _legacy_sync_v1_changes(
         request: Request,

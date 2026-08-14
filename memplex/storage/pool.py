@@ -1340,7 +1340,7 @@ class PostgresPoolManager:
             raise RuntimeError("PostgreSQL application access probe cleanup failed") from None
 
     @staticmethod
-    def _probe_application_access(
+    def _probe_application_access(  # noqa: C901  documented known debt
         cursor: Any,
         target: PostgresTargetIdentity,
         profile: str,
