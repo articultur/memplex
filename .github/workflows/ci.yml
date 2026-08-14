@@ -130,7 +130,11 @@ jobs:
             --no-emit-project \
             --format requirements-txt \
             --output-file /tmp/memplex-requirements.txt
-          uvx --from pip-audit==2.9.0 pip-audit --strict --requirement /tmp/memplex-requirements.txt
+          # PYSEC-2026-311 affects chromadb (optional ``vector`` extra);
+          # no fixed release exists upstream — tracked, ignored with cause.
+          uvx --from pip-audit==2.9.0 pip-audit --strict \
+            --ignore-vuln PYSEC-2026-311 \
+            --requirement /tmp/memplex-requirements.txt
 
   package-smoke:
     runs-on: ubuntu-latest
