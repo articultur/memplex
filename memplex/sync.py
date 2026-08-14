@@ -537,9 +537,12 @@ class SyncableStore:
         ``facts`` / ``preferences`` / ``observations`` keys.
         """
         try:
+            from memplex import sync_crypto
+
+            body = sync_crypto.encrypt_json_payload(payload)
             resp = self._requests().post(
                 f"{target}/sync/push",
-                json=payload,
+                json=body,
                 headers=self._auth_headers(),
                 timeout=10,
             )

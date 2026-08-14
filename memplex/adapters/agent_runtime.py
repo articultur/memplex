@@ -714,6 +714,15 @@ class AgentMemoryRuntime:
             max_tokens=self.token_budget,
         )
         context = self._format_context(result)
+        # Working-memory tier (opt-in): prepend live hot-context entries so
+        # the most recent turns are available before any retrieval result.
+        working_memory = getattr(self.service, "_working_memory", None)
+        if working_memory is not None:
+            limit = self.service._config.working_memory.inject_limit
+            hot = working_memory.recall_context(limit=limit)
+            if hot:
+                prefix = "[WORKING MEMORY]\n" + "\n".join(f"- {line}" for line in hot)
+                context = prefix + ("\n\n" + context if context else "")
         return RecalledContext(
             agent=self.agent,
             context=context,

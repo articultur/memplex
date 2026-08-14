@@ -301,12 +301,62 @@ def _generate_triviaqa_synthetic(path: Path) -> Path:
     return path
 
 
+
+def _generate_longmemeval_synthetic(path: Path) -> Path:
+    """Generate a deterministic synthetic LongMemEval-format question set.
+
+    Mirrors the official schema (question/question_type/answers/
+    question_date/session_history) so the loader and runner exercise the
+    real code path in CI without a network fetch.
+    """
+    questions = [
+        {
+            "question": "Which programming language did the user adopt for data analysis?",
+            "question_type": "single-hop-user",
+            "answers": ["Python"],
+            "question_date": "2025/3/12 10:00",
+            "evidence_session_ids": [0],
+            "session_history": [
+                {"role": "user", "content": "I finally switched all my data analysis work to Python."},
+                {"role": "assistant", "content": "Noted - Python is now your primary analysis language."},
+            ],
+        },
+        {
+            "question": "How many books did the user finish in March, combining both updates?",
+            "question_type": "multi-hop",
+            "answers": ["5"],
+            "question_date": "2025/4/1 9:00",
+            "evidence_session_ids": [0, 1],
+            "session_history": [
+                {"role": "user", "content": "I finished 2 books this March."},
+                {"role": "assistant", "content": "Two books logged for March."},
+                {"role": "user", "content": "Correction - I finished 3 more books late March."},
+                {"role": "assistant", "content": "Three additional books recorded."},
+            ],
+        },
+        {
+            "question": "What is the user's current preferred editor after the switch?",
+            "question_type": "knowledge-update",
+            "answers": ["Neovim"],
+            "question_date": "2025/5/2 15:30",
+            "evidence_session_ids": [1],
+            "session_history": [
+                {"role": "user", "content": "I used VS Code for years but I now prefer Neovim."},
+                {"role": "assistant", "content": "Preference updated to Neovim."},
+            ],
+        },
+    ]
+    path.write_text(json.dumps(questions, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("Generated %d synthetic LongMemEval samples at %s", len(questions), path)
+    return path
+
 _SYNTHETIC_GENERATORS: Dict[str, callable] = {
     "popqa": _generate_popqa_synthetic,
     "hotpotqa": _generate_hotpotqa_synthetic,
     "nq": _generate_nq_synthetic,
     "triviaqa": _generate_triviaqa_synthetic,
     "locomo": _generate_locomo_synthetic,
+    "longmemeval": _generate_longmemeval_synthetic,
 }
 
 
@@ -330,7 +380,7 @@ def download_dataset(
     Parameters
     ----------
     dataset_name:
-        One of: ``"locomo"``, ``"nq"``, ``"triviaqa"``, ``"popqa"``, ``"hotpotqa"``.
+        One of: ``"locomo"``, ``"longmemeval"``, ``"nq"``, ``"triviaqa"``, ``"popqa"``, ``"hotpotqa"``.
     output_dir:
         Directory to store the dataset file. Defaults to ``.memplex/benchmarks/data``.
     split:

@@ -145,6 +145,17 @@ class MemplexService:
         # (below) already needs the production-profile check. Stores are
         # resolved lazily via providers so the gate always reads the service's
         # current ``store`` / ``_feedback_store`` (never a stale snapshot).
+        from memplex.working_memory import WorkingMemory
+
+        self._working_memory = (
+            WorkingMemory(
+                max_entries=cfg.working_memory.max_entries,
+                default_ttl_seconds=cfg.working_memory.default_ttl_seconds,
+            )
+            if cfg.working_memory.enabled
+            else None
+        )
+
         self._auth = AuthorizationGate(
             cfg, lambda: self.store, lambda: self._feedback_store
         )
@@ -310,6 +321,7 @@ class MemplexService:
             embedding_service=self._embedding_service,
             weights=cfg.reranker.weights,
             storage=self.store,
+            recency_halflife_days=cfg.reranker.recency_halflife_days,
         )
 
         # ── Cross-encoder (stage 2, optional) ───────────────────
@@ -937,6 +949,7 @@ class MemplexService:
                     embedding_service=self._embedding_service,
                     weights=self._config.reranker.weights,
                     storage=store,
+                    recency_halflife_days=self._config.reranker.recency_halflife_days,
                 )
             )
             results = reranker.rerank(text, results, top_k * 2, query_vector)
@@ -1211,6 +1224,25 @@ class MemplexService:
     #  HyDE
     # ════════════════════════════════════════════════════════════════
 
+    def _augment_with_facts(self, content: str) -> str:
+        """Append retain()-style extracted facts to capture content (best-effort).
+
+        Runs :meth:`LLMEnhancer.factualize` in a worker thread (same
+        isolation pattern as ``_compute_hyde_vector``); failures or empty
+        results leave *content* unchanged.
+        """
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                facts = pool.submit(
+                    asyncio.run, self._llm.factualize(content)
+                ).result(timeout=10.0)
+        except Exception as exc:
+            logger.debug("factual capture failed, keeping original content: %s", exc)
+            return content
+        if not facts:
+            return content
+        return content + "\n\nExtracted facts:\n" + "\n".join(f"- {fact}" for fact in facts)
+
     def _compute_hyde_vector(self, text: str) -> Optional[Vector]:
         """Generate a HyDE (Hypothetical Document Embedding) vector.
 
@@ -1270,6 +1302,17 @@ class MemplexService:
         if getattr(source, "content", None):
             source.content = strip_private_tags(source.content)
 
+        # 0b. retain()-style factual capture (opt-in): when a real LLM is
+        # available and ``llm.factual_capture`` is enabled, self-contained
+        # temporally-normalised facts are appended to the document content
+        # so the rule-based extractor stores them verbatim as typed nodes.
+        if (
+            getattr(source, "content", None)
+            and self._llm is not None
+            and self._config.llm.factual_capture
+        ):
+            source.content = self._augment_with_facts(source.content)
+
         # 1. CoreEngine: full extraction pipeline.  PostgreSQL graph-edge
         # detection reads existing memories, so it receives the same scoped
         # facade as persistence instead of consulting the shared base store.
@@ -1284,6 +1327,19 @@ class MemplexService:
         self.scan_nodes_before_persistence(
             [*extracted.functions, *extracted.facts, *extracted.preferences]
         )
+
+        # 1b2. Working-memory tier (opt-in): typed captures also land in the
+        # TTL hot-context store for automatic injection on the next recall.
+        if self._working_memory is not None:
+            for node in [*extracted.facts, *extracted.preferences]:
+                content = getattr(node, "preference", None) or getattr(node, "context", None) or ""
+                key = getattr(node, "id", None)
+                if content and key:
+                    self._working_memory.add(str(key), str(content))
+            for func in extracted.functions:
+                name = getattr(func, "name", "")
+                if name:
+                    self._working_memory.add(f"fn:{func.id}", name)
 
         # 1c. Persist Fact / Preference nodes. Previously only Functions
         #     were stored, so fact/preference-intent paragraphs (e.g.

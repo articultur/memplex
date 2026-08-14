@@ -21,6 +21,10 @@ Memplex HTTP server with `MEMPLEX_REMOTE_URL`, and memories sync
 (write-push + on-demand pull) across machines. See
 [Multi-Node Sharing](#multi-node-sharing) below.
 
+Working-memory tier (opt-in): with `MEMPLEX_WORKING_MEMORY_ENABLED=true`,
+recent typed captures live in a TTL hot-context store and are prepended to
+every agent recall (`[WORKING MEMORY]` prefix) before retrieval runs.
+
 Background compaction is automatic: the Claude Code hook loop compacts on
 Stop, and writes on any path trigger compaction once the corpus crosses the
 configured warn threshold. `memplex compact` remains available for manual

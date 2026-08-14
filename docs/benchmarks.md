@@ -38,8 +38,8 @@ MEMPLEX_STORAGE_BACKEND=lite memplex benchmark run \
 
 - `--synthetic` skips HuggingFace downloads and generates data locally
   (cached files are bypassed, so regeneration is deterministic).
-- `--dataset all` covers all six concrete datasets: `locomo`, `nq`,
-  `triviaqa`, `popqa`, `hotpotqa`, `memory_benchmark`. The composite aliases
+- `--dataset all` covers all concrete datasets: `locomo`, `longmemeval`,
+  `nq`, `triviaqa`, `popqa`, `hotpotqa`, `memory_benchmark`. The composite aliases
   `nq_trivia` / `popqa_hotpot` run their two member datasets together.
 - Warm mode seeds each sample into a fresh `MemplexService` (default config)
   before querying, then the runner measures retrieval and, where applicable,
@@ -56,6 +56,23 @@ MEMPLEX_STORAGE_BACKEND=lite memplex benchmark run \
 | popqa | 5 | subject / relation / object triples |
 | hotpotqa | 3 | question + supporting facts (2-hop) |
 | memory_benchmark | 59 | 50 facts + 4 preferences + 5 observations, generated in code |
+
+### LongMemEval
+
+`longmemeval` loads the official LongMemEval question format
+(`question` / `question_type` / `answers` / `question_date` /
+`session_history`). Sessions are seeded as searchable Function records
+(the `memory_eval` recipe) and each question is scored by normalised
+answer-hit over the retrieved summaries, reported overall and per
+question type (`single-hop-user`, `single-hop-session`, `multi-hop`,
+`temporal-reasoning`, `knowledge-update`).
+
+Honest scoring note: **multi-hop aggregation questions are not
+retrieval-answerable** — they require computation over multiple memories
+(`2 + 3 = 5`), which substring retrieval cannot produce. Expect ~0 on
+that type in retrieval-only mode; use a generation model over retrieved
+context for it. The synthetic fallback corpus pins exactly this split
+(single-hop 1.0 / knowledge-update 1.0 / multi-hop 0.0).
 
 ### Caveats
 

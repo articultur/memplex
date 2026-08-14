@@ -56,6 +56,11 @@ pgtest = [
     "pgserver>=0.1.4,<1",
     "psycopg2-binary>=2.9,<3",
 ]
+# Shared-key AES-GCM payload encryption for sync transport
+# (MEMPLEX_SYNC_ENCRYPTION_KEY); see memplex/sync_crypto.py.
+sync-crypto = [
+    "cryptography>=42,<46",
+]
 all = [
     "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres]",
 ]

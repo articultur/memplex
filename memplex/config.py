@@ -221,12 +221,26 @@ class RerankerConfig:
             "raw_relevance": 0.25,
             "semantic_similarity": 0.30,
             "recency_decay": 0.15,
-            "source_authority": 0.15,
-            "frequency": 0.15,
+            "source_authority": 0.10,
+            "frequency": 0.10,
+            "confidence": 0.10,
         }
     )
+    # Exponential recency half-life in days: score = exp(-days / halflife).
+    # Default 60 (~0.61 at 30 days); Mnemosyne-style tunable knob.
+    recency_halflife_days: float = 60.0
     cross_encoder_enabled: bool = False
     cross_encoder_model: str = "BAAI/bge-reranker-v2-m3"
+
+
+@dataclass
+class WorkingMemoryConfig:
+    """Hot-context tier (memplex/working_memory.py), opt-in."""
+
+    enabled: bool = False
+    max_entries: int = 64
+    default_ttl_seconds: float = 900.0
+    inject_limit: int = 8
 
 
 @dataclass
@@ -292,6 +306,9 @@ class LLMConfig:
 
     query_enhancement: bool = True
     observation_compression: bool = True
+    # retain()-style factual capture on write (coreference resolution +
+    # temporal normalisation); requires a real LLM provider, off by default.
+    factual_capture: bool = False
     provider: str = "anthropic"
     anthropic_api_key: Optional[str] = None  # falls back to ANTHROPIC_API_KEY env var
     local_endpoint: Optional[str] = None
@@ -568,6 +585,7 @@ class MemplexConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
+    working_memory: WorkingMemoryConfig = field(default_factory=WorkingMemoryConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     wiki: WikiConfig = field(default_factory=WikiConfig)
@@ -609,6 +627,7 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     # RerankerConfig
     "reranker.cross_encoder_enabled": bool,
     "reranker.cross_encoder_model": str,
+    "reranker.recency_halflife_days": float,
     # CompactionConfig
     "compaction.dedup_threshold": float,
     "compaction.chunk_threshold": int,
@@ -634,6 +653,11 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     "retrieval.injection_scan_enabled": bool,
     # LLMConfig
     "llm.query_enhancement": bool,
+    "llm.factual_capture": bool,
+    "working_memory.enabled": bool,
+    "working_memory.max_entries": int,
+    "working_memory.default_ttl_seconds": float,
+    "working_memory.inject_limit": int,
     "llm.observation_compression": bool,
     "llm.provider": str,
     "llm.anthropic_api_key": str,

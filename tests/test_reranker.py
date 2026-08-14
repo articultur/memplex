@@ -117,6 +117,7 @@ def test_default_weights_sum_to_one():
         "recency_decay",
         "source_authority",
         "frequency",
+        "confidence",
     }
 
 
@@ -132,16 +133,18 @@ def test_rerank_respects_top_k_and_empty_input():
 
 def test_recency_decay_values():
     now = datetime.now(timezone.utc)
-    assert Reranker._recency_decay(None) == 0.5
-    assert Reranker._recency_decay("not-a-date") == 0.5
+    # _recency_decay is an instance method since the configurable half-life.
+    r = Reranker(_FakeEmbedder())
+    assert r._recency_decay(None) == 0.5
+    assert r._recency_decay("not-a-date") == 0.5
     # Today -> ~1.0
-    assert Reranker._recency_decay(now) > 0.99
+    assert r._recency_decay(now) > 0.99
     # exp(-30/60) ~= 0.607 (docstring previously claimed 0.5 -- regression)
     thirty_days = now - timedelta(days=30)
-    assert abs(Reranker._recency_decay(thirty_days) - 0.6065) < 0.01
+    assert abs(r._recency_decay(thirty_days) - 0.6065) < 0.01
     # ISO strings accepted; naive datetimes treated as UTC
-    assert Reranker._recency_decay(thirty_days.isoformat()) > 0.5
-    assert Reranker._recency_decay(thirty_days.replace(tzinfo=None)) > 0.5
+    assert r._recency_decay(thirty_days.isoformat()) > 0.5
+    assert r._recency_decay(thirty_days.replace(tzinfo=None)) > 0.5
 
 
 def test_recency_dimension_prefers_newer_result():

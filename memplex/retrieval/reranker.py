@@ -91,6 +91,7 @@ class Reranker:
         embedding_service: EmbeddingService,
         weights: Optional[Dict[str, float]] = None,
         storage: Optional["MemoryStore"] = None,
+        recency_halflife_days: float = 60.0,
     ) -> None:
         self.embedder = embedding_service
         self.storage = storage
@@ -98,9 +99,13 @@ class Reranker:
             "raw_relevance": 0.25,
             "semantic_similarity": 0.30,
             "recency_decay": 0.15,
-            "source_authority": 0.15,
-            "frequency": 0.15,
+            "source_authority": 0.10,
+            "frequency": 0.10,
+            "confidence": 0.10,
         }
+        # Exponential recency half-life in days (Mnemosyne-style knob):
+        # score = exp(-days_since_update / halflife).
+        self.recency_halflife_days = max(1e-6, float(recency_halflife_days))
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -159,6 +164,10 @@ class Reranker:
                     func = None
             frequency_score = self._frequency_score(func) if func else 0.5
 
+            # 6. Confidence: extraction-quality score persisted on the node
+            #    (Hindsight-style per-memory belief strength).
+            confidence_score = self._confidence_score(func)
+
             # Weighted sum
             final_score = (
                 raw_score * self.weights["raw_relevance"]
@@ -166,6 +175,7 @@ class Reranker:
                 + recency_score * self.weights["recency_decay"]
                 + source_weight * self.weights["source_authority"]
                 + frequency_score * self.weights["frequency"]
+                + confidence_score * self.weights.get("confidence", 0.0)
             )
 
             scored.append((final_score, r))
@@ -186,12 +196,12 @@ class Reranker:
             return embed_query(text)
         return self.embedder.embed(text)
 
-    @staticmethod
-    def _recency_decay(updated_at: Optional[datetime]) -> float:
-        """Exponential time decay.  ~0.61 at 30 days, range [0, 1].
+    def _recency_decay(self, updated_at: Optional[datetime]) -> float:
+        """Exponential time decay, range (0, 1], 0.5 at ``halflife * ln 2`` days.
 
-        Uses the same formula as the design spec:
-        ``min(1.0, exp(-days / 60))``  (0.5 is reached at ~41.6 days)
+        ``score = exp(-days_since_update / halflife)`` where the half-life is
+        configurable (``reranker.recency_halflife_days``, default 60 →
+        ~0.61 at 30 days).
         """
         if updated_at is None:
             return 0.5
@@ -202,7 +212,25 @@ class Reranker:
             except (ValueError, TypeError):
                 return 0.5
         days_since = max(0, (datetime.now(timezone.utc) - _ensure_aware(updated_at)).days)
-        return min(1.0, math.exp(-days_since / 60))
+        return min(1.0, math.exp(-days_since / self.recency_halflife_days))
+
+    @staticmethod
+    def _confidence_score(func: Optional["Function"]) -> float:
+        """Extraction-quality confidence persisted on the node, clamped [0, 1].
+
+        Falls back to a neutral 0.5 when the node (or its confidence field)
+        is unavailable, so the dimension never dominates by absence.
+        """
+        confidence = getattr(func, "confidence", None)
+        if confidence is None:
+            return 0.5
+        try:
+            value = float(confidence)
+        except (TypeError, ValueError):
+            return 0.5
+        if value != value:  # NaN guard
+            return 0.5
+        return min(1.0, max(0.0, value))
 
     def _source_weight(self, source_type: SourceType) -> float:
         """Authority weight by source type.

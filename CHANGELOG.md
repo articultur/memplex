@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **6-dimensional reranker**: new per-memory `confidence` dimension
+  (Hindsight-style belief strength, clamped/neutral-on-missing) and a
+  configurable exponential recency half-life
+  (`reranker.recency_halflife_days`, Mnemosyne-style; default 60 days
+  preserves the previous decay curve).
+- **LongMemEval benchmark** (`benchmarks/longmemeval.py`): official
+  question-format loader, session seeding via the memory_eval recipe,
+  per-question-type answer-hit scoring, deterministic synthetic fallback,
+  factory registration, and docs. Honest scoring note: multi-hop
+  aggregation questions are retrieval-unreachable and pinned at 0.
+- **Sync payload encryption** (`memplex/sync_crypto.py`, opt-in via
+  `MEMPLEX_SYNC_ENCRYPTION_KEY` + `memplex[sync-crypto]` extra):
+  AES-256-GCM envelopes on `/sync/push` and `/sync/v1/batches`, fail-closed
+  on tamper/wrong key, inert passthrough when unset. NOTE: this is
+  shared-key hop/at-rest protection, not Mnemosyne-style server-blind E2E —
+  the applying server holds the same key.
+- **Factual capture** (`LLMEnhancer.factualize`, `llm.factual_capture`):
+  retain()-style prompt pipeline resolving coreferences and normalising
+  relative time to absolute dates; appended to capture content on write
+  when a real LLM provider is configured. Off by default.
+- **Working-memory tier** (`memplex/working_memory.py`,
+  `working_memory.enabled`): TTL hot-context store (max-entries cap,
+  pin/unpin) that captures typed writes and prepends live entries to agent
+  recall as `[WORKING MEMORY]`. In-process and opt-in; durability paths
+  unchanged.
+
 ### Changed
 - C901 debt paydown: 7 of the 8 exempted functions refactored below the
   complexity-25 gate — including `_validate_sync_state` (60), split into

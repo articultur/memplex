@@ -1198,6 +1198,19 @@ def _register_sync_v1_routes(app: "FastAPI", config) -> None:  # noqa: C901  doc
                 raise HTTPException(status_code=413, detail="sync_batch_too_large")
             body.extend(chunk)
         raw = bytes(body)
+        # Shared-key payload encryption (opt-in): unwrap envelope bytes BEFORE
+        # canonical validation, so the digest is computed over the plaintext.
+        from memplex import sync_crypto
+
+        if sync_crypto.looks_encrypted(raw):
+            try:
+                raw = sync_crypto.decrypt_bytes(raw)
+            except sync_crypto.SyncCryptoError as exc:
+                raise HTTPException(
+                    status_code=400, detail="sync_encryption_invalid"
+                ) from exc
+            if len(raw) > config.sync.max_batch_bytes:
+                raise HTTPException(status_code=413, detail="sync_batch_too_large")
         try:
             envelope = validate_ingress_batch(raw, hashlib.sha256(raw).hexdigest())
             if len(envelope.batch.events) > config.sync.max_batch_events:
@@ -1709,6 +1722,17 @@ def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None: 
                 detail="sync_v1_upgrade_required",
                 headers={"Upgrade": "memplex-sync-v1"},
             )
+        # Shared-key payload encryption (opt-in): unwrap the envelope before
+        # any validation. Fail-closed — an undecryptable body is a 400.
+        from memplex import sync_crypto
+
+        if sync_crypto.is_encrypted_envelope(body):
+            try:
+                body = sync_crypto.decrypt_json_payload(body)
+            except sync_crypto.SyncCryptoError as exc:
+                raise HTTPException(
+                    status_code=400, detail="sync_encryption_invalid"
+                ) from exc
         if config.sync.enabled:
             return _legacy_sync_v1_push(request, _authorization(request), body)
         svc = _get_service(request)
