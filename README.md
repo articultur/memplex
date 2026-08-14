@@ -211,6 +211,8 @@ reproduction commands.
   contracts, ordered-circular-import rules, and the sync lockstep ABC.
 - [Mutation Testing](docs/mutation-testing.md): pilot baseline, how to run,
   and the equivalence argument for surviving mutants.
+- [Security Scan Triage](docs/security-triage.md): sealed deep-scan verdicts
+  per finding category, with rerun instructions.
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
 - [Benchmarks](docs/benchmarks.md): evaluation methodology, metric
