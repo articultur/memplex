@@ -338,6 +338,11 @@ function callBridge(action, event, context, config) {
         reject(new Error(`Memplex ${action} returned invalid JSON: ${String(error)}`));
       }
     });
+    // If the child exits before reading all of stdin (fast-fail paths), the
+    // pending write surfaces as an unhandled EPIPE 'error' event on some
+    // platforms and crashes the host — swallow it; the close handler above
+    // already carries the real outcome.
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({ config, event: event || {}, context: context || {} }));
   });
 }

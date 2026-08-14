@@ -64,12 +64,24 @@ def _build_wheel(tmp_path: Path) -> Path:
 
 def _install_wheel_in_isolated_venv(wheel: Path, tmp_path: Path) -> Path:
     environment = tmp_path / "installed"
-    # The pgserver runtime's uv-managed interpreter cannot be relocated into a
-    # macOS venv (its libpython rpath is absolute).  The local CPython 3.13 is
-    # relocatable; use it only to prove the built wheel installs in isolation.
-    bootstrap_python = shutil.which("python3.13")
+    # Prefer the relocatable system CPython 3.13 (macOS: the uv-managed
+    # interpreter has absolute libpython rpaths). On Linux CI images without
+    # a python3.13 on PATH, the system python3 (setup-python's matrix
+    # interpreter) is relocatable and works. Interpreters older than 3.11
+    # cannot install the wheel (requires-python >=3.11): skip, never fail.
+    bootstrap_python = None
+    for candidate in (shutil.which("python3.13"), shutil.which("python3"), sys.executable):
+        if candidate is None:
+            continue
+        probe = subprocess.run(
+            [candidate, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+            capture_output=True,
+        )
+        if probe.returncode == 0:
+            bootstrap_python = candidate
+            break
     if bootstrap_python is None:
-        raise RuntimeError("python3.13 is required to create the isolated wheel test environment")
+        pytest.skip("no relocatable Python >= 3.11 available for wheel isolation")
     subprocess.run(
         [bootstrap_python, "-m", "venv", "--without-pip", str(environment)],
         check=True,

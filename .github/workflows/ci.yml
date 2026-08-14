@@ -49,6 +49,12 @@ jobs:
       - name: Type-check PostgreSQL lifecycle boundary
         run: uv run mypy
       - name: Test
+        env:
+          # The install-matrix test discovers interpreters; on Linux images
+          # only the job's setup-python interpreter exists, so pin the matrix
+          # to it. (macOS images preinstall all versions; the dedicated
+          # release-install-matrix job passes its own full matrix.)
+          MEMPLEX_INSTALL_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: uv run pytest tests -v --cov=memplex --cov-report=term-missing --cov-fail-under=68
 
   test-postgres:
