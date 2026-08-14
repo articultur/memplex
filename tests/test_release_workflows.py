@@ -291,7 +291,7 @@ def test_release_has_no_long_lived_registry_secret_or_mutable_skip() -> None:
 
 def test_release_attests_artifacts_and_sbom() -> None:
     text = _text(RELEASE)
-    assert text.count("actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26") == 2
+    assert text.count("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6") == 2
     assert "release/release-sbom.cdx.json" in text
     assert "release/release-checksums.json" in text
     assert "release/release-manifest.json" in text
