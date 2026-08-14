@@ -8,6 +8,7 @@ build/
 
 # Memplex data
 .memplex/
+.memplex-data/
 
 # IDE
 .vscode/

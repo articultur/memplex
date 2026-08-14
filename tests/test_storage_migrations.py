@@ -64,12 +64,24 @@ def _build_wheel(tmp_path: Path) -> Path:
 
 def _install_wheel_in_isolated_venv(wheel: Path, tmp_path: Path) -> Path:
     environment = tmp_path / "installed"
-    # The pgserver runtime's uv-managed interpreter cannot be relocated into a
-    # macOS venv (its libpython rpath is absolute).  The local CPython 3.13 is
-    # relocatable; use it only to prove the built wheel installs in isolation.
-    bootstrap_python = shutil.which("python3.13")
+    # Prefer the relocatable system CPython 3.13 (macOS: the uv-managed
+    # interpreter has absolute libpython rpaths). On Linux CI images without
+    # a python3.13 on PATH, the system python3 (setup-python's matrix
+    # interpreter) is relocatable and works. Interpreters older than 3.11
+    # cannot install the wheel (requires-python >=3.11): skip, never fail.
+    bootstrap_python = None
+    for candidate in (shutil.which("python3.13"), shutil.which("python3"), sys.executable):
+        if candidate is None:
+            continue
+        probe = subprocess.run(
+            [candidate, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+            capture_output=True,
+        )
+        if probe.returncode == 0:
+            bootstrap_python = candidate
+            break
     if bootstrap_python is None:
-        raise RuntimeError("python3.13 is required to create the isolated wheel test environment")
+        pytest.skip("no relocatable Python >= 3.11 available for wheel isolation")
     subprocess.run(
         [bootstrap_python, "-m", "venv", "--without-pip", str(environment)],
         check=True,
@@ -117,7 +129,7 @@ def test_discover_migrations_from_built_wheel_contains_all_sql(tmp_path: Path) -
         "print([migration.version for migration in discover_migrations()])",
         tmp_path,
     )
-    assert result.stdout.strip() == "[1, 2, 3, 4, 5]"
+    assert result.stdout.strip() == "[1, 2, 3, 4, 5, 6]"
 
 
 @pytest.mark.parametrize(
@@ -453,7 +465,7 @@ def test_0004_pins_declarative_edge_function_integrity() -> None:
     """The new immutable resource carries only the reviewed FK/cascade design."""
     migrations = _migrations().discover_migrations()
     checksums = {migration.version: migration.checksum for migration in migrations}
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5]
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6]
     assert {version: checksums[version] for version in range(1, 5)} == {
         1: "b4ab57dd8545c0ca1573d83fc699c806f2c889bf2d42bea656971171e0fb6373",
         2: "8e932e605e4eb36f6ec410c5a589001133a2db29ba902ff34227ae0a223e9a16",
@@ -1484,7 +1496,9 @@ def test_apply_uses_the_fixed_signed_bigint_advisory_lock(
         runner_module,
         "schema_fingerprint",
             lambda _cur, **_kwargs: runner_module.SchemaFingerprint(
-            "post_g002_current", "fixture", "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5"
+            "post_g002_current",
+            "fixture",
+            "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6",
         ),
     )
     monkeypatch.setattr(runner, "_apply_plan_in_current_transaction", lambda *_args: None)

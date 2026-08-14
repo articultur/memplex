@@ -134,6 +134,53 @@ class LLMEnhancer:
 
         return self._rule_truncate(content, max_length)
 
+    # -- LLM Enhancement 5: Factual capture (retain-style) ----------------
+
+    async def factualize(self, text: str, max_facts: int = 8) -> list[str]:
+        """Extract self-contained, temporally-normalised facts from *text*.
+
+        Hindsight-``retain()``-style capture: resolves pronouns/coreferences
+        to explicit subjects, converts relative time expressions ("last
+        week", "yesterday") into absolute dates against *reference_date*,
+        and returns each fact as one standalone sentence. The prompt pins
+        JSON output; malformed results fall back to an empty list rather
+        than blocking the capture path.
+
+        With a rule-based provider (no LLM configured) this returns ``[]``;
+        callers keep their existing extraction as the source of truth.
+        """
+        from memplex.llm.providers.rule_based import RuleBasedProvider
+
+        if isinstance(self.llm, RuleBasedProvider) or not text.strip():
+            return []
+        try:
+            from memplex.llm.sanitizer import LLMPromptSanitizer
+
+            prompt = LLMPromptSanitizer.build_structured_prompt(
+                instruction=(
+                    "Extract at most "
+                    f"{max_facts} self-contained facts from the text. Rules: "
+                    "(1) resolve every pronoun or coreference to the explicit "
+                    "subject it refers to; (2) normalise relative time "
+                    "expressions to absolute ISO dates using the reference "
+                    "date; (3) each fact must be a single standalone sentence "
+                    "understandable without any other context; (4) skip "
+                    "opinions, filler, and questions."
+                ),
+                user_input=text,
+                output_schema={"facts": ["str"]},
+                max_length=self.config.max_input_length,
+            )
+            result = await self.llm.complete_json(prompt)
+            facts = result.get("facts", [])
+            if not isinstance(facts, list):
+                return []
+            cleaned = [str(f).strip() for f in facts if isinstance(f, str) and str(f).strip()]
+            return cleaned[:max_facts]
+        except Exception as exc:
+            logger.debug("Factual capture failed, returning no facts: %s", exc)
+            return []
+
     @staticmethod
     def _rule_truncate(content: str, max_length: int) -> str:
         """Rule-based fallback: keep head and tail halves with an omission marker."""

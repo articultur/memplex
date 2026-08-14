@@ -207,20 +207,43 @@ def test_worker_capacity_admission_is_atomic_across_processes(tmp_path, operatio
     assert TaskStore(path).count_by_status(TaskStatus.PENDING, TaskStatus.RUNNING) == 1
 
 
-def test_worker_queue_publication_failure_rolls_back_durable_candidate(
+def test_worker_queue_publication_failure_keeps_durable_admission(
     tmp_path, monkeypatch
 ):
     worker = BackgroundWorker(storage_path=tmp_path / "tasks.json")
+    worker._dispatch = lambda *_: {"status": "completed"}
+    put_nowait = worker._queue.put_nowait
 
     def _full(_task_id):
         raise Full
 
     monkeypatch.setattr(worker._queue, "put_nowait", _full)
-    with pytest.raises(WorkerQueueFull, match="worker_queue_full"):
-        worker.submit(BackgroundTask.BUILD_INDEX, {"n": 1})
+    task_id = worker.submit(BackgroundTask.BUILD_INDEX, {"n": 1})
 
-    assert worker.persisted_pending_count() == 0
+    assert worker.get_status(task_id) is TaskStatus.PENDING
+    assert worker.persisted_pending_count() == 1
     assert worker.queue_depth == 0
+    monkeypatch.setattr(worker._queue, "put_nowait", put_nowait)
+    assert worker.run_once() is True
+    assert worker.get_status(task_id) is TaskStatus.COMPLETED
+
+
+def test_worker_replay_queue_hint_failure_keeps_durable_replay(tmp_path, monkeypatch):
+    path = tmp_path / "tasks.json"
+    TaskStore(path).save(_info(tid="dead-hint", status=TaskStatus.FAILED))
+    worker = BackgroundWorker(storage_path=path)
+    worker._dispatch = lambda *_: {"status": "completed"}
+    put_nowait = worker._queue.put_nowait
+
+    def _full(_task_id):
+        raise Full
+
+    monkeypatch.setattr(worker._queue, "put_nowait", _full)
+    assert worker.replay_failed("dead-hint") is True
+    assert worker.get_status("dead-hint") is TaskStatus.PENDING
+    monkeypatch.setattr(worker._queue, "put_nowait", put_nowait)
+    assert worker.run_once() is True
+    assert worker.get_status("dead-hint") is TaskStatus.COMPLETED
 
 
 def test_worker_retry_survives_restart_without_timer(tmp_path):
@@ -274,14 +297,10 @@ def test_worker_does_not_publish_callback_when_completion_commit_fails(
         callback=lambda result: callbacks.append(result),
     )
     worker._dispatch = lambda *_: {"status": "completed"}
-    real_save = worker._task_store.save
+    def _fail_completed(task_id, lease_id, result, *, now=None):
+        raise TaskStoreIntegrityError("injected completion commit failure")
 
-    def _fail_completed(info):
-        if info.status is TaskStatus.COMPLETED:
-            raise TaskStoreIntegrityError("injected completion commit failure")
-        return real_save(info)
-
-    monkeypatch.setattr(worker._task_store, "save", _fail_completed)
+    monkeypatch.setattr(worker._task_store, "complete", _fail_completed)
     with pytest.raises(TaskStoreIntegrityError, match="completion commit failure"):
         worker.run_once()
 

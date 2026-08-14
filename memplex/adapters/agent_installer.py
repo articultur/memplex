@@ -20,6 +20,12 @@ from memplex.adapters._shared import get_plugin_source_dir as _get_plugin_source
 from memplex.adapters._shared import marketplace_json as _marketplace_json
 from memplex.adapters.agent_runtime import get_agent_manifest
 from memplex.adapters.jsonc_edit import remove_jsonc_path, set_jsonc_path
+from memplex.adapters.managed_identity import (
+    ManagedIdentityError,
+    load_managed_identity,
+    validate_managed_identity,
+)
+from memplex.adapters.runtime_status import read_runtime_status, runtime_status_path
 from memplex.adapters.yaml_edit import (
     remove_yaml_path,
     set_yaml_scalar_path,
@@ -127,10 +133,37 @@ def uninstall_agent(
 ) -> list[AgentInstallResult]:
     """Remove Memplex integration from one or all supported agent hosts."""
 
-    return [
-        _uninstall_one(name, target_dir=target_dir, dry_run=dry_run)
-        for name in _expand_agents(agent)
-    ]
+    names = _expand_agents(agent)
+    results: list[AgentInstallResult] = []
+    removed: list[str] = []
+    transaction: tuple[dict[Path, _InstallSnapshot], Path] | None = None
+    if len(names) > 1 and not dry_run:
+        mutation_paths: list[Path] = []
+        for name in names:
+            _, host_paths = _agent_install_mutation_paths(name, target_dir)
+            mutation_paths.extend(host_paths)
+        snapshots, snapshot_root = _snapshot_install_paths(dict.fromkeys(mutation_paths))
+        transaction = snapshots, snapshot_root
+    try:
+        for name in names:
+            result = _uninstall_one(name, target_dir=target_dir, dry_run=dry_run)
+            results.append(result)
+            removed.append(name)
+    except Exception as exc:
+        if transaction is not None:
+            snapshots, snapshot_root = transaction
+            rollback_errors = _restore_install_snapshot(snapshots, snapshot_root)
+            transaction = None
+            restored = ", ".join(removed) or "none completed"
+            detail = f" Rolled back uninstalled agents to exact preuninstall state: {restored}."
+            if rollback_errors:
+                detail += f" Rollback errors: {'; '.join(rollback_errors)}."
+            raise RuntimeError(f"Failed to uninstall {name}: {exc}.{detail}") from exc
+        raise
+    finally:
+        if transaction is not None:
+            _cleanup_snapshot_root(transaction[1])
+    return results
 
 
 def inspect_agent_installation(
@@ -153,6 +186,7 @@ def inspect_agent_installation(
     installed = False
     selected = False
     managed = False
+    identity_valid = False
     footprint = False
 
     if selected_host == "codex":
@@ -180,7 +214,13 @@ def inspect_agent_installation(
             or marketplace_root.exists()
             or any(path.exists() for path in required.values())
         )
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     elif selected_host == "claude-code":
         market_dir = paths["marketplace_root"]
         marker_path = paths["managed_marker"]
@@ -203,7 +243,13 @@ def inspect_agent_installation(
         marker = _safe_read_json(marker_path, drift_reasons)
         managed = _is_managed_payload(marker) and _is_managed_json_file(identity_path)
         footprint = market_dir.exists() or any(path.exists() for path in required.values())
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     elif selected_host == "openclaw":
         config_path = paths["config"]
         extension_dir = paths["plugin"]
@@ -235,7 +281,13 @@ def inspect_agent_installation(
             or bool(entry)
             or (isinstance(slots, dict) and slots.get("memory") == "memplex")
         )
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
     else:
         config_path = paths["config"]
         provider_path = paths["provider_config"]
@@ -262,7 +314,13 @@ def inspect_agent_installation(
         configured_visibility = str(provider.get("visibility", "workspace"))
         installed = _required_paths_exist(required, missing_paths)
         footprint = plugin_dir.exists() or provider_path.exists() or selected
-        identity = _installation_identity(identity_path)
+        identity, identity_valid = _installation_identity(
+            identity_path,
+            expected_agent=selected_host,
+            expected_host_root=root,
+            errors=drift_reasons,
+        )
+        managed = managed and identity_valid
 
     if footprint and not selected:
         drift_reasons.append("memory provider is not selected")
@@ -282,6 +340,10 @@ def inspect_agent_installation(
     else:
         status = "drifted"
 
+    runtime_status = read_runtime_status(runtime_status_path(root), agent=selected_host)
+    if status == "healthy" and runtime_status["state"] == "degraded":
+        status = "degraded"
+
     serialised_paths = {name: str(path) for name, path in paths.items()}
     return {
         "schema_version": 1,
@@ -298,309 +360,29 @@ def inspect_agent_installation(
         },
         "missing_paths": missing_paths,
         "drift_reasons": list(dict.fromkeys(drift_reasons)),
+        "runtime_status": runtime_status,
     }
 
 
-def _agent_installation_paths(
-    agent: str,
-    target_dir: str | Path | None,
-) -> tuple[Path, dict[str, Path]]:
-    specs = {
-        "codex": ("CODEX_HOME", ".codex"),
-        "claude-code": ("CLAUDE_CONFIG_DIR", ".claude"),
-        "openclaw": ("OPENCLAW_CONFIG_DIR", ".openclaw"),
-        "hermes": ("HERMES_CONFIG_DIR", ".hermes"),
-    }
-    env_name, default_name = specs[agent]
-    root = _target_dir(target_dir, env_name, default_name)
-    if agent == "codex":
-        marketplace_root = root / "plugins" / "marketplaces" / "memplex"
-        plugin = marketplace_root / "plugin"
-        return root, {
-            "root": root,
-            "config": root / "config.toml",
-            "marketplace_root": marketplace_root,
-            "marketplace_manifest": marketplace_root / ".agents" / "plugins" / "marketplace.json",
-            "plugin": plugin,
-            "plugin_cache": root / "plugins" / "cache" / "memplex" / "memplex" / _package_version(),
-            "managed_marker": marketplace_root / ".memplex-managed.json",
-            "identity": plugin / "memplex-agent.json",
-        }
-    if agent == "claude-code":
-        marketplace_root = root / "plugins" / "marketplaces" / "articultur"
-        plugin_cache_root = root / "plugins" / "cache" / "articultur" / "memplex"
-        return root, {
-            "root": root,
-            "config": root / "settings.json",
-            "known_marketplaces": root / "plugins" / "known_marketplaces.json",
-            "installed_plugins": root / "plugins" / "installed_plugins.json",
-            "marketplace_root": marketplace_root,
-            "marketplace_manifest": marketplace_root / ".claude-plugin" / "marketplace.json",
-            "plugin": marketplace_root / "plugin",
-            "plugin_cache_root": plugin_cache_root,
-            "plugin_cache": plugin_cache_root / _package_version(),
-            "managed_marker": marketplace_root / ".memplex-install-state.json",
-            "identity": marketplace_root / "plugin" / "memplex-agent.json",
-        }
-    if agent == "openclaw":
-        plugin = root / "extensions" / "memplex"
-        return root, {
-            "root": root,
-            "config": root / "openclaw.json",
-            "plugin": plugin,
-            "plugin_manifest": plugin / "openclaw.plugin.json",
-            "plugin_entry": plugin / "plugin.json",
-            "plugin_runtime": plugin / "index.js",
-            "managed_marker": plugin / ".memplex-install-state.json",
-            "identity": plugin / "memplex-agent.json",
-        }
-    plugin = root / "plugins" / "memplex"
-    return root, {
-        "root": root,
-        "config": root / "config.yaml",
-        "provider_config": root / "memplex.json",
-        "plugin": plugin,
-        "plugin_manifest": plugin / "plugin.yaml",
-        "plugin_bootstrap": plugin / "__init__.py",
-        "managed_marker": plugin / ".memplex-install-state.json",
-        "identity": plugin / "memplex-agent.json",
-    }
 
-
-def _agent_install_mutation_paths(
-    agent: str,
-    target_dir: str | Path | None,
-) -> tuple[Path, list[Path]]:
-    """Return the exact top-level paths a host installer may mutate."""
-
-    root, paths = _agent_installation_paths(agent, target_dir)
-    if agent == "codex":
-        return root, [
-            paths["config"],
-            paths["marketplace_root"],
-            root / "plugins" / "cache" / "memplex",
-        ]
-    if agent == "claude-code":
-        return root, [
-            paths["config"],
-            paths["known_marketplaces"],
-            paths["installed_plugins"],
-            paths["marketplace_root"],
-            paths["plugin_cache_root"],
-        ]
-    if agent == "openclaw":
-        return root, [paths["config"], paths["plugin"]]
-    return root, [
-        paths["config"],
-        paths["provider_config"],
-        root / "memory-providers" / "memplex.json",
-        root / "plugins" / "memory" / "memplex",
-        paths["plugin"],
-    ]
-
-
-def _missing_install_directories(root: Path, paths: Iterable[Path]) -> set[Path]:
-    """Record absent parent directories so rollback can remove empty residue."""
-
-    missing: set[Path] = set()
-    for path in paths:
-        parent = path.parent
-        while True:
-            if not parent.exists():
-                missing.add(parent)
-            if parent == root:
-                break
-            if root not in parent.parents:
-                break
-            parent = parent.parent
-    return missing
-
-
-def _remove_created_install_directories(paths: Iterable[Path]) -> list[str]:
-    """Remove only transaction-created directories that are now empty."""
-
-    errors: list[str] = []
-    for path in paths:
-        try:
-            path.rmdir()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            errors.append(f"{path}: {exc}")
-    return errors
-
-
-def _required_paths_exist(required: dict[str, Path], missing: list[str]) -> bool:
-    for name, path in required.items():
-        if not path.exists():
-            missing.append(name)
-    return not missing
-
-
-@dataclass
-class _InstallSnapshot:
-    target: Path
-    existed: bool
-    is_dir: bool
-    backup: Path | None
-    mode: int | None
-    is_symlink: bool = False
-    link_target: str | None = None
-    link_mode: int | None = None
-    referent: Path | None = None
-    referent_existed: bool = False
-
-
-def _path_lexists(path: Path) -> bool:
-    """Return true for regular paths and dangling symbolic links."""
-
-    return os.path.lexists(os.fspath(path))
-
-
-def _remove_install_path(path: Path) -> None:
-    """Remove one managed path without following a symbolic link."""
-
-    if not _path_lexists(path):
-        return
-    if path.is_symlink() or not path.is_dir():
-        path.unlink()
-    else:
-        shutil.rmtree(path)
-
-
-def _copy_install_snapshot(source: Path, backup: Path) -> tuple[bool, int]:
-    """Copy one concrete file/directory and return its type and full mode."""
-
-    mode = source.stat().st_mode & 0o7777
-    if source.is_dir():
-        shutil.copytree(source, backup, symlinks=True)
-        return True, mode
-    shutil.copy2(source, backup)
-    return False, mode
-
-
-def _snapshot_install_paths(paths: Iterable[Path]) -> tuple[dict[Path, _InstallSnapshot], Path]:
-    """Capture preinstall state for a list of candidate target paths."""
-
-    snapshot_root = Path(tempfile.mkdtemp(prefix="memplex-installer-backup-"))
-    snapshots: dict[Path, _InstallSnapshot] = {}
-    try:
-        for index, path in enumerate(paths):
-            if not _path_lexists(path):
-                snapshots[path] = _InstallSnapshot(
-                    target=path,
-                    existed=False,
-                    is_dir=False,
-                    backup=None,
-                    mode=None,
-                )
-                continue
-            backup = snapshot_root / f"{index}-{path.name}"
-            if path.is_symlink():
-                link_target = os.readlink(path)
-                raw_referent = Path(link_target)
-                referent = (
-                    raw_referent
-                    if raw_referent.is_absolute()
-                    else path.parent / raw_referent
-                ).absolute()
-                if referent == path.absolute() or referent.is_symlink():
-                    raise ValueError(
-                        f"Managed install path uses an unsupported cyclic or chained symlink: {path}"
-                    )
-                referent_existed = _path_lexists(referent)
-                if referent_existed:
-                    is_dir, mode = _copy_install_snapshot(referent, backup)
-                else:
-                    is_dir, mode = False, None
-                snapshots[path] = _InstallSnapshot(
-                    target=path,
-                    existed=True,
-                    is_dir=is_dir,
-                    backup=backup if referent_existed else None,
-                    mode=mode,
-                    is_symlink=True,
-                    link_target=link_target,
-                    link_mode=path.lstat().st_mode & 0o7777,
-                    referent=referent,
-                    referent_existed=referent_existed,
-                )
-                continue
-            is_dir, mode = _copy_install_snapshot(path, backup)
-            snapshots[path] = _InstallSnapshot(
-                target=path,
-                existed=True,
-                is_dir=is_dir,
-                backup=backup,
-                mode=mode,
-            )
-    except Exception:
-        _cleanup_snapshot_root(snapshot_root)
-        raise
-    return snapshots, snapshot_root
-
-
-def _restore_concrete_install_path(path: Path, state: _InstallSnapshot) -> None:
-    """Restore the concrete file/directory represented by a snapshot."""
-
-    if state.backup is None:
-        raise RuntimeError("missing backup for managed install path")
-    _remove_install_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if state.is_dir:
-        shutil.copytree(state.backup, path, symlinks=True)
-    else:
-        shutil.copy2(state.backup, path)
-    if state.mode is not None:
-        path.chmod(state.mode)
-
-
-def _restore_symlink_install_path(path: Path, state: _InstallSnapshot) -> None:
-    """Restore both a managed symlink and the concrete referent it exposed."""
-
-    if state.link_target is None or state.referent is None:
-        raise RuntimeError("missing symbolic-link snapshot metadata")
-    if state.referent_existed:
-        _restore_concrete_install_path(state.referent, state)
-    else:
-        _remove_install_path(state.referent)
-    _remove_install_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.symlink_to(state.link_target, target_is_directory=state.is_dir)
-    if state.link_mode is not None and hasattr(os, "lchmod"):
-        os.lchmod(path, state.link_mode)
-
-
-def _restore_install_snapshot(
-    snapshots: dict[Path, _InstallSnapshot],
-    snapshot_root: Path,
-) -> list[str]:
-    errors: list[str] = []
-    for path, state in snapshots.items():
-        try:
-            if state.existed:
-                if state.is_symlink:
-                    _restore_symlink_install_path(path, state)
-                else:
-                    _restore_concrete_install_path(path, state)
-            else:
-                _remove_install_path(path)
-        except Exception as exc:
-            errors.append(f"{path}: {exc}")
-    try:
-        shutil.rmtree(snapshot_root)
-    except Exception as exc:
-        errors.append(f"{snapshot_root}: {exc}")
-    return errors
-
-
-def _cleanup_snapshot_root(snapshot_root: Path) -> None:
-    try:
-        shutil.rmtree(snapshot_root)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        logger.warning("installer snapshot cleanup failed for %s: %s", snapshot_root, exc)
+# Re-export the split-out install-transaction machinery so existing
+# imports and bare-name calls in this module keep resolving.
+from memplex.adapters.install_transaction import (  # noqa: F401,E402
+    _agent_install_mutation_paths,
+    _agent_installation_paths,
+    _cleanup_snapshot_root,
+    _copy_install_snapshot,
+    _InstallSnapshot,
+    _missing_install_directories,
+    _path_lexists,
+    _remove_created_install_directories,
+    _remove_install_path,
+    _required_paths_exist,
+    _restore_concrete_install_path,
+    _restore_install_snapshot,
+    _restore_symlink_install_path,
+    _snapshot_install_paths,
+)
 
 
 def _safe_read_text(path: Path, errors: list[str]) -> str:
@@ -621,16 +403,31 @@ def _safe_read_json(path: Path, errors: list[str]) -> dict[str, Any]:
         return {}
 
 
-def _installation_identity(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"user_id": None, "project_path": None, "source": "runtime"}
-    errors: list[str] = []
-    payload = _safe_read_json(path, errors)
+def _installation_identity(
+    path: Path,
+    *,
+    expected_agent: str,
+    expected_host_root: Path,
+    errors: list[str],
+) -> tuple[dict[str, Any], bool]:
+    try:
+        payload = load_managed_identity(
+            path,
+            expected_agent=expected_agent,
+            expected_host_root=expected_host_root,
+        )
+    except ManagedIdentityError as exc:
+        errors.append(f"managed identity invalid: {exc}")
+        return {
+            "user_id": None,
+            "project_path": None,
+            "source": str(path) if path.exists() else "runtime",
+        }, False
     return {
-        "user_id": payload.get("user_id"),
-        "project_path": payload.get("project_path"),
+        "user_id": payload["user_id"],
+        "project_path": payload["project_path"],
         "source": str(path),
-    }
+    }, True
 
 
 def _expand_agents(agent: str) -> list[str]:
@@ -762,13 +559,14 @@ def _install_codex(
             }
             _write_json(
                 identity_path,
-                {
-                    "agent": "codex",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="codex",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             _write_json(
                 marker_path,
@@ -1005,25 +803,27 @@ def _install_claude_code(
             _write_json(marketplace_path, marketplace)
             _write_json(
                 identity_path,
-                {
-                    "agent": "claude-code",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="claude-code",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             identity_path.chmod(0o600)
             cache_identity = cache_target / "memplex-agent.json"
             _write_json(
                 cache_identity,
-                {
-                    "agent": "claude-code",
-                    "user_id": resolved_user_id,
-                    "project_path": resolved_project_path,
-                    "source_root": source_root,
-                    "managed": managed,
-                },
+                _managed_identity_payload(
+                    agent="claude-code",
+                    user_id=resolved_user_id,
+                    project_path=resolved_project_path,
+                    source_root=source_root,
+                    host_root=str(root.resolve()),
+                    managed=managed,
+                ),
             )
             cache_identity.chmod(0o600)
             _write_json(cache_marker, {"managed": managed, "version": _package_version()})
@@ -1276,6 +1076,7 @@ def _install_openclaw(
                 user_id=resolved_user_id,
                 project_path=resolved_project_path,
                 source_root=source_root,
+                host_root=str(root.resolve()),
                 install_state={
                     "managed": {"installer": "memplex"},
                     "originalText": original_text,
@@ -1476,6 +1277,7 @@ def _install_hermes(
         "project_path": resolved_project_path,
         "python": _python_command(),
         "source_root": source_root,
+        "host_root": str(root.resolve()),
         "prefetch": True,
         "top_k": 5,
         "token_budget": 1500,
@@ -1639,8 +1441,51 @@ def _resolved_project_path(project_path: str | Path | None) -> str:
     return str(Path(candidate).expanduser().resolve(strict=False))
 
 
+def _managed_identity_payload(
+    *,
+    agent: str,
+    user_id: str,
+    project_path: str,
+    source_root: str,
+    host_root: str,
+    managed: dict[str, Any],
+) -> dict[str, Any]:
+    return validate_managed_identity(
+        {
+            "agent": agent,
+            "user_id": user_id,
+            "project_path": project_path,
+            "python": _python_command(),
+            "source_root": source_root,
+            "host_root": host_root,
+            "managed": managed,
+        },
+        expected_agent=agent,
+        expected_host_root=host_root,
+    )
+
+
 def _python_command() -> str:
-    return os.environ.get("MEMPLEX_PYTHON", sys.executable or "python")
+    """Return the absolute interpreter recorded in managed host integrations.
+
+    A launcher must not later resolve a different interpreter from PATH: its
+    dependencies and Memplex version belong to the persistent environment
+    chosen at installation time.
+    """
+
+    configured = os.environ.get("MEMPLEX_PYTHON") or sys.executable
+    if not configured:
+        raise RuntimeError("Memplex installer could not determine a Python interpreter")
+    interpreter = Path(configured).expanduser()
+    if not interpreter.is_absolute():
+        raise ValueError(
+            "MEMPLEX_PYTHON must be an absolute path so managed launchers do not use PATH"
+        )
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise ValueError(
+            "MEMPLEX_PYTHON must identify an existing executable file for managed launchers"
+        )
+    return str(interpreter)
 
 
 def _mcp_command() -> list[str]:
@@ -1701,327 +1546,13 @@ def _write_text_atomic(path: Path, text: str) -> None:
     temporary.replace(path)
 
 
-def _write_openclaw_extension(
-    extension_dir: Path,
-    *,
-    user_id: str,
-    project_path: str,
-    source_root: str,
-    install_state: dict[str, Any],
-) -> None:
-    if extension_dir.exists():
-        shutil.rmtree(extension_dir)
-    extension_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "id": "memplex",
-        "name": "Memplex",
-        "version": _package_version(),
-        "description": "Memplex long-term memory for OpenClaw agents",
-        "kind": "memory",
-        "activation": {"onStartup": True},
-        "contracts": {
-            "tools": ["memory_recall", "memory_store"],
-        },
-        "configSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "userId": {"type": "string", "minLength": 1},
-                "projectPath": {"type": "string", "minLength": 1},
-                "python": {"type": "string", "minLength": 1},
-                "sourceRoot": {"type": "string", "minLength": 1},
-                "autoRecall": {"type": "boolean", "default": True},
-                "autoCapture": {"type": "boolean", "default": True},
-                "topK": {"type": "integer", "minimum": 1, "maximum": 50},
-                "tokenBudget": {
-                    "type": "integer",
-                    "minimum": 64,
-                    "maximum": 32000,
-                },
-                "timeoutMs": {
-                    "type": "integer",
-                    "minimum": 500,
-                    "maximum": 60000,
-                },
-                "visibility": {
-                    "type": "string",
-                    "enum": ["session", "workspace", "user"],
-                    "default": "workspace",
-                },
-                "managed": {
-                    "type": "object",
-                    "additionalProperties": True,
-                },
-            },
-        },
-    }
-    _write_json(extension_dir / "openclaw.plugin.json", manifest)
-    _write_json(extension_dir / "plugin.json", manifest)
-    _write_json(
-        extension_dir / "package.json",
-        {
-            "name": "@memplex/openclaw-plugin",
-            "version": _package_version(),
-            "description": "Native OpenClaw lifecycle bridge for Memplex",
-            "type": "module",
-            "private": True,
-            "main": "./index.js",
-            "peerDependencies": {"openclaw": ">=2026.5.17"},
-            "openclaw": {"extensions": ["./index.js"]},
-        },
-    )
-    managed = {
-        "by": "memplex",
-        "installer": "memplex",
-        "schema_version": 1,
-    }
-    _write_json(
-        extension_dir / "memplex-agent.json",
-        {
-            "agent": "openclaw",
-            "user_id": user_id,
-            "project_path": project_path,
-            "python": _python_command(),
-            "source_root": source_root,
-            "managed": managed,
-        },
-    )
-    install_state_path = extension_dir / ".memplex-install-state.json"
-    _write_json(install_state_path, install_state)
-    install_state_path.chmod(0o600)
-    (extension_dir / "index.js").write_text(_openclaw_plugin_javascript())
 
-
-def _openclaw_plugin_javascript() -> str:
-    return r"""import { readFileSync } from "node:fs";
-import { spawn } from "node:child_process";
-import { delimiter } from "node:path";
-
-const identity = JSON.parse(readFileSync(new URL("./memplex-agent.json", import.meta.url), "utf8"));
-
-function effectiveConfig(pluginConfig) {
-  return {
-    autoRecall: true,
-    autoCapture: true,
-    topK: 5,
-    tokenBudget: 1500,
-    timeoutMs: 10000,
-    visibility: "workspace",
-    ...(pluginConfig || {}),
-    // Identity fields come from the installer-managed file.  Keep this
-    // assignment after host configuration so an OpenClaw config can tune
-    // behavior but cannot move memories into another principal/workspace.
-    userId: identity.user_id,
-    projectPath: identity.project_path,
-    python: identity.python,
-    sourceRoot: identity.source_root,
-  };
-}
-
-function bridgeEnv(config) {
-  const pythonPath = [config.sourceRoot, process.env.PYTHONPATH].filter(Boolean).join(delimiter);
-  return {
-    ...process.env,
-    PYTHONPATH: pythonPath,
-    MEMPLEX_USER_ID: config.userId,
-    MEMPLEX_PROJECT_ROOT: config.projectPath,
-  };
-}
-
-function callBridge(action, event, context, config) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(config.python || "python3", ["-m", "memplex.adapters.openclaw_plugin", action], {
-      env: bridgeEnv(config),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`Memplex ${action} timed out after ${config.timeoutMs}ms`));
-    }, config.timeoutMs || 10000);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `Memplex ${action} exited with code ${code}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout || "{}"));
-      } catch (error) {
-        reject(new Error(`Memplex ${action} returned invalid JSON: ${String(error)}`));
-      }
-    });
-    child.stdin.end(JSON.stringify({ config, event: event || {}, context: context || {} }));
-  });
-}
-
-function textResult(result) {
-  return {
-    content: [{ type: "text", text: JSON.stringify(result) }],
-    details: result,
-  };
-}
-
-export default {
-  id: "memplex",
-  name: "Memplex",
-  description: "Shared long-term memory for OpenClaw",
-  kind: "memory",
-  register(api) {
-    const config = effectiveConfig(api.pluginConfig);
-    const log = api.logger || console;
-
-    api.on("before_prompt_build", async (event, context) => {
-      if (config.autoRecall === false || !event?.prompt?.trim()) return;
-      try {
-        const result = await callBridge("recall", event, context, config);
-        if (result.prependContext) return { prependContext: result.prependContext };
-      } catch (error) {
-        log.warn?.(`memplex: recall skipped: ${String(error)}`);
-      }
-    });
-
-    api.on("agent_end", async (event, context) => {
-      if (config.autoCapture === false || event?.success === false) return;
-      try {
-        await callBridge("capture", event, context, config);
-      } catch (error) {
-        log.warn?.(`memplex: capture skipped: ${String(error)}`);
-      }
-    });
-
-    api.on("session_end", async (event, context) => {
-      try {
-        await callBridge("session-end", event, context, config);
-      } catch (error) {
-        log.debug?.(`memplex: session cleanup skipped: ${String(error)}`);
-      }
-    });
-
-    api.registerTool((toolContext) => ({
-      name: "memory_recall",
-      label: "Memplex Recall",
-      description: "Recall shared Memplex memories for the active workspace.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: { query: { type: "string", minLength: 1 } },
-        required: ["query"],
-      },
-      async execute(_toolCallId, params) {
-        const result = await callBridge(
-          "search",
-          { query: params.query },
-          toolContext || {},
-          config,
-        );
-        return textResult(result);
-      },
-    }), { name: "memory_recall" });
-
-    api.registerTool((toolContext) => ({
-      name: "memory_store",
-      label: "Memplex Store",
-      description: "Store a durable memory in the active Memplex workspace.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: { content: { type: "string", minLength: 1 } },
-        required: ["content"],
-      },
-      async execute(_toolCallId, params) {
-        const result = await callBridge(
-          "store",
-          { content: params.content },
-          toolContext || {},
-          config,
-        );
-        return textResult(result);
-      },
-    }), { name: "memory_store" });
-  },
-};
-"""
-
-
-def _write_hermes_provider_plugin(
-    plugin_dir: Path,
-    provider_config: dict[str, Any],
-    *,
-    install_state: dict[str, Any],
-) -> None:
-    if plugin_dir.exists():
-        shutil.rmtree(plugin_dir)
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    (plugin_dir / "plugin.yaml").write_text(
-        "\n".join(
-            [
-                "name: memplex",
-                f"version: {_package_version()}",
-                'description: "Memplex local long-term memory provider"',
-                "hooks:",
-                "  - sync_turn",
-                "  - on_pre_compress",
-                "  - on_session_end",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    managed = provider_config.get("managed", {"installer": "memplex"})
-    _write_json(
-        plugin_dir / "memplex-agent.json",
-        {
-            "agent": "hermes",
-            "user_id": provider_config["user_id"],
-            "project_path": provider_config["project_path"],
-            "python": provider_config["python"],
-            "source_root": provider_config["source_root"],
-            "managed": managed,
-        },
-    )
-    (plugin_dir / "memplex-agent.json").chmod(0o600)
-    _write_json(plugin_dir / ".memplex-install-state.json", install_state)
-    (plugin_dir / ".memplex-install-state.json").chmod(0o600)
-    (plugin_dir / "README.md").write_text(
-        "# Memplex Memory Provider\n\n"
-        "Hermes Agent 原生 MemoryProvider：共享 Codex、Claude Code 与 OpenClaw "
-        "的本地 Memplex 记忆，并在压缩、会话结束和退出前冲刷已接收写入。\n",
-        encoding="utf-8",
-    )
-    (plugin_dir / "__init__.py").write_text(
-        '''"""Hermes MemoryProvider bootstrap for Memplex."""
-
-from __future__ import annotations
-
-import json
-import sys
-from pathlib import Path
-
-_PLUGIN_DIR = Path(__file__).resolve().parent
-_IDENTITY = json.loads((_PLUGIN_DIR / "memplex-agent.json").read_text(encoding="utf-8"))
-_SOURCE_ROOT = str(_IDENTITY.get("source_root") or "")
-if _SOURCE_ROOT and _SOURCE_ROOT not in sys.path:
-    sys.path.insert(0, _SOURCE_ROOT)
-
-from memplex.adapters.hermes_memory_provider import MemplexMemoryProvider
-from memplex.adapters.hermes_memory_provider import register as _register
-
-
-def register(ctx) -> None:
-    _register(ctx, identity=_IDENTITY)
-''',
-        encoding="utf-8",
-    )
+# Re-export the split-out embedded asset writers.
+from memplex.adapters.agent_assets import (  # noqa: F401,E402
+    _openclaw_plugin_javascript,
+    _write_hermes_provider_plugin,
+    _write_openclaw_extension,
+)
 
 
 def _strip_jsonc(text: str) -> str:
@@ -2124,7 +1655,7 @@ def _package_version() -> str:
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
         except Exception:
-            pass
+            logger.debug("pyproject version read failed", exc_info=True)
 
     from importlib.metadata import version as pkg_version
 

@@ -3,16 +3,16 @@ submit_feedback / get_pending_reviews, health."""
 
 import json
 import os
+from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from pathlib import Path
-
 import pytest
 
+from memplex.authorization import AuthorizationGate
 from memplex.config import MemplexConfig
 from memplex.models import (
     BackgroundTask,
@@ -459,6 +459,12 @@ def _patch_store_factories(monkeypatch, tmp_path, store, *, sync: bool = False):
 
     monkeypatch.setattr("memplex.service.create_store", fake_create_store)
     monkeypatch.setattr("memplex.service.create_feedback_store", fake_create_feedback_store)
+    monkeypatch.setattr(
+        "memplex.storage.postgres_tasks.PostgresTaskRepository",
+        lambda *, ready_pool: __import__(
+            "memplex.worker", fromlist=["TaskStore"]
+        ).TaskStore(tmp_path / "postgres-tasks.json"),
+    )
     resources = Mock()
     resources.ready_pool = object()
     created["resources"] = resources
@@ -633,6 +639,7 @@ class TestPostgresBackendSelection:
         service = object.__new__(MemplexService)
         service._config = cfg
         service.store = Store()
+        service._auth = AuthorizationGate(cfg, lambda: service.store, lambda: None)
 
         with pytest.raises(
             PermissionError,
@@ -693,6 +700,7 @@ class TestPostgresBackendSelection:
         service = object.__new__(MemplexService)
         service._config = cfg
         service.store = Store()
+        service._auth = AuthorizationGate(cfg, lambda: service.store, lambda: None)
 
         service._initialize_sync_dispatcher(cfg)
 
@@ -792,6 +800,39 @@ class TestPostgresBackendSelection:
         assert feedback["backend"] == "postgres"
         assert feedback["dsn"] == "postgresql://localhost/memplex"
         assert isinstance(svc.store, _FakePGStore)
+
+    def test_postgres_backend_injects_the_shared_durable_task_repository(
+        self, monkeypatch, tmp_path
+    ):
+        """PostgreSQL service must never fall back to ~/.memplex/tasks.json."""
+        created, _feedback = _patch_store_factories(
+            monkeypatch, tmp_path, _FakePGStore(tmp_path / "pg")
+        )
+        issued_seal = object()
+        created["resources"].ready_pool = issued_seal
+        captured: dict[str, object] = {}
+
+        class FakePostgresTaskRepository:
+            def __init__(self, *, ready_pool):
+                captured["ready_pool"] = ready_pool
+
+        worker_factory = Mock()
+        monkeypatch.setattr("memplex.service.BackgroundWorker", worker_factory)
+        monkeypatch.setattr(
+            "memplex.storage.postgres_tasks.PostgresTaskRepository", FakePostgresTaskRepository
+        )
+        cfg = MemplexConfig()
+        cfg.storage.backend = "postgres"
+        cfg.storage.path = "postgresql://localhost/memplex"
+
+        MemplexService(config=cfg)
+
+        assert captured["ready_pool"] is issued_seal
+        assert worker_factory.call_args.kwargs["storage_path"] is None
+        assert isinstance(
+            worker_factory.call_args.kwargs["task_repository"],
+            FakePostgresTaskRepository,
+        )
 
     def test_sync_postgres_backend_constructs_sync_resources_with_three_dsns_and_injector(
         self, monkeypatch, tmp_path
@@ -1328,10 +1369,12 @@ class TestHealthSemantics:
         from datetime import datetime
 
         today = datetime.now().strftime("%Y-%m-%d")
-        service._injection_scans_24h = {"2020-01-01": 5, today: 2}
+        # InjectionScanCounter is the service's delegated collaborator; seed its
+        # internal map with a stale date plus today to exercise pruning.
+        service._injection_scans._counts = {"2020-01-01": 5, today: 2}
         health = service.health()
         assert health["injection_scans_detected_24h"] == 2
-        assert set(service._injection_scans_24h) == {today}
+        assert set(service._injection_scans._counts) == {today}
 
 
 class TestStopFlushesSyncPush:

@@ -13,6 +13,7 @@ from memplex.operations import (
     OperationsEvidenceError,
     OperationsEvidenceReport,
     OperationsMetrics,
+    OperationsReadinessBinding,
     RequestAdmission,
     RuntimeLifecycle,
     load_operations_signing_key,
@@ -23,13 +24,26 @@ def _key() -> bytes:
     return b"o" * 32
 
 
+def _binding() -> OperationsReadinessBinding:
+    return OperationsReadinessBinding(
+        deployment_id="00000000-0000-4000-8000-000000000001",
+        source_sha256="1" * 64,
+        artifact_sha256="2" * 64,
+        target_identity_sha256="3" * 64,
+        expected_key_id="ops-2026-08",
+    )
+
+
 def _report() -> OperationsEvidenceReport:
     return OperationsEvidenceReport.create(
         report_id="018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
+        generated_at="2026-08-11T12:05:01.000000Z",
         window_started_at="2026-08-11T12:00:00.000000Z",
         window_ended_at="2026-08-11T12:05:00.000000Z",
+        readiness_binding=_binding(),
         request_count=1000,
         successful_requests=999,
+        latency_sample_count=128,
         availability=0.999,
         error_rate=0.001,
         p95_latency_ms=120.5,

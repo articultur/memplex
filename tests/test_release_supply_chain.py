@@ -126,7 +126,7 @@ def test_release_member_allowlist_accepts_public_runtime_assets() -> None:
     validate_release_member_names(
         (
             "memplex/__init__.py",
-            "memplex/storage/migrations/0005_reliable_sync.sql",
+            "memplex/storage/migrations/0006_background_tasks.sql",
             "memplex/_plugin/.codex-plugin/plugin.json",
             "npm/memplex/install-agent.sh",
             "docs/production-readiness.md",

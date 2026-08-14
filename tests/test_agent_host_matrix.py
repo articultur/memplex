@@ -456,7 +456,8 @@ def _recall_with_hermes(
 
 
 def _prepare_codex_root(tmp_path: Path, workspace: Path, *, user: str) -> tuple[Path, Path]:
-    root = tmp_path / "codex-plugin"
+    host_root = tmp_path / "codex-home"
+    root = host_root / "plugins" / "marketplaces" / "memplex" / "plugin"
     root.mkdir(parents=True, exist_ok=True)
     (root / "memplex-agent.json").write_text(
         json.dumps(
@@ -464,7 +465,14 @@ def _prepare_codex_root(tmp_path: Path, workspace: Path, *, user: str) -> tuple[
                 "agent": "codex",
                 "user_id": user,
                 "project_path": str(workspace),
-                "managed": {"by": "memplex", "schema_version": 1},
+                "python": sys.executable,
+                "source_root": str(_REPO_ROOT),
+                "host_root": str(host_root),
+                "managed": {
+                    "by": "memplex",
+                    "installer": "memplex",
+                    "schema_version": 1,
+                },
             }
         ),
         encoding="utf-8",

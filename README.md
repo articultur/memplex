@@ -21,6 +21,10 @@ Memplex HTTP server with `MEMPLEX_REMOTE_URL`, and memories sync
 (write-push + on-demand pull) across machines. See
 [Multi-Node Sharing](#multi-node-sharing) below.
 
+Working-memory tier (opt-in): with `MEMPLEX_WORKING_MEMORY_ENABLED=true`,
+recent typed captures live in a TTL hot-context store and are prepended to
+every agent recall (`[WORKING MEMORY]` prefix) before retrieval runs.
+
 Background compaction is automatic: the Claude Code hook loop compacts on
 Stop, and writes on any path trigger compaction once the corpus crosses the
 configured warn threshold. `memplex compact` remains available for manual
@@ -207,6 +211,12 @@ reproduction commands.
   recall explain, scope, inbox, corpus, policy, report, uninstall, and
   troubleshoot.
 - [Explainer](docs/explainer.md): what Memplex is and how the memory loop works.
+- [Architecture](docs/architecture.md): module map, split-module re-export
+  contracts, ordered-circular-import rules, and the sync lockstep ABC.
+- [Mutation Testing](docs/mutation-testing.md): pilot baseline, how to run,
+  and the equivalence argument for surviving mutants.
+- [Security Scan Triage](docs/security-triage.md): sealed deep-scan verdicts
+  per finding category, with rerun instructions.
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
 - [Benchmarks](docs/benchmarks.md): evaluation methodology, metric

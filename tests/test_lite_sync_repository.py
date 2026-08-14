@@ -505,6 +505,108 @@ def test_apply_page_advances_cursor_atomically_and_compaction_honours_delivery(
     assert store.sync_compact(datetime(2030, 1, 1, tzinfo=timezone.utc), limit=10) == 1
 
 
+def test_sparse_remote_page_applies_atomically_replays_after_reopen_and_does_not_pin_compaction(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, retention_min_seconds=1)
+    first = _remote_event(
+        "sparse-first", occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
+    )
+    second = _remote_event(
+        "sparse-second", occurred_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+    )
+    page = SyncPage(
+        (SyncStreamItem(3, first), SyncStreamItem(8, second)), 8, 8, False
+    )
+
+    applied = store.sync_apply_page("remote-a", page)
+
+    assert (applied.applied, applied.cursor_advanced) == (2, 8)
+    reopened = _store(tmp_path, retention_min_seconds=1)
+    assert {node.id for node in reopened.list_functions()} >= {
+        "sparse-first",
+        "sparse-second",
+    }
+    persisted_sync = reopened._durability.load_authoritative().memory["sync"]
+    assert persisted_sync["cursors"] == []
+    assert persisted_sync["inbound_cursors"][0]["after_seq"] == 8
+    assert reopened.sync_apply_page("remote-a", page).to_dict() == {
+        "applied": 0,
+        "duplicate": 0,
+        "conflict": 0,
+        "cursor_advanced": 8,
+    }
+    assert reopened.sync_compact(datetime(2030, 1, 1, tzinfo=timezone.utc), limit=10) == 2
+
+
+def test_outbound_cursor_remote_id_cannot_impersonate_inbound_namespace(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, retention_min_seconds=1)
+    reserved_looking_remote = "\x00memplex-inbound:peer-target"
+    store.sync_page(reserved_looking_remote, "consumer-a", None, 10)
+    store.add(_function("locally-unconfirmed"), _source())
+
+    # The outbound consumer is still at sequence zero, so the local outbox
+    # event must remain pinned regardless of the remote identifier text.
+    assert store.sync_compact(
+        datetime.now(timezone.utc) + timedelta(seconds=2), limit=10
+    ) == 0
+    state = store._durability.load_authoritative().memory["sync"]
+    assert state["cursors"][0]["remote_id"] == reserved_looking_remote
+    assert state["inbound_cursors"] == []
+
+
+@pytest.mark.parametrize("invalid", ("cross_tenant", "duplicate_identity"))
+def test_invalid_inbound_page_is_rejected_before_any_lite_pair_write(
+    tmp_path: Path, invalid: str
+) -> None:
+    store = _store(tmp_path)
+    store.add(_function("existing"), _source())
+    before_memory = (tmp_path / "memory.json").read_bytes()
+    before_changelog = (tmp_path / "changelog.json").read_bytes()
+    first = _remote_event(
+        "incoming-first", occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
+    )
+    if invalid == "cross_tenant":
+        second = _remote_event(
+            "incoming-second", occurred_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+        )
+        second = SyncEvent(
+            1,
+            second.event_id,
+            second.origin_node_id,
+            second.node_type,
+            second.entity_key,
+            second.operation,
+            second.version,
+            SyncScope(
+                "tenant-b",
+                second.scope.owner_subject_id,
+                second.scope.workspace_id,
+                second.scope.visibility,
+                second.scope.agent_id,
+                second.scope.session_id,
+            ),
+            second.to_dict()["payload"],
+        )
+    else:
+        second = first
+    page = SyncPage(
+        (SyncStreamItem(3, first), SyncStreamItem(8, second)), 8, 8, False
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="page (event tenant does not match repository tenant|contains duplicate event identities)",
+    ):
+        store.sync_apply_page("remote-a", page)
+
+    assert (tmp_path / "memory.json").read_bytes() == before_memory
+    assert (tmp_path / "changelog.json").read_bytes() == before_changelog
+    assert _store(tmp_path).get("incoming-first") is None
+
+
 def test_all_local_node_types_edges_and_tombstones_share_capture_commit(
     tmp_path: Path,
 ) -> None:

@@ -29,15 +29,17 @@ from memplex.sync_protocol import (
     SyncVersion,
 )
 from memplex.sync_repository import (
+    AbstractSyncRepository,
     SyncBackpressureError,
     SyncCapturePolicy,
     SyncCursorExpired,
     SyncDeadLetterEntry,
     SyncDeliveryBusy,
+    validate_incoming_page,
 )
 
 
-class PostgresSyncRepository:
+class PostgresSyncRepository(AbstractSyncRepository):
     """Sync repository implemented on top of PostgreSQL durable tables."""
 
     def __init__(
@@ -975,14 +977,7 @@ class PostgresSyncRepository:
             raise ValueError("remote_id must not identify this node")
         context = self._authorization_context()
         tenant_id = context.principal.tenant_id
-        events = tuple(item.event for item in page.items)
-        if any(event.scope.tenant_id != tenant_id for event in events):
-            raise ValueError("page event tenant does not match authorization context")
-        event_identities = tuple(
-            (event.origin_node_id, event.event_id) for event in events
-        )
-        if len(set(event_identities)) != len(event_identities):
-            raise ValueError("page contains duplicate event identities")
+        events = validate_incoming_page(page, tenant_id=tenant_id)
         with self._pool.transaction(self._store._bind_transaction_scope, context) as (_, cur):
             self._bind_sync_scope(cur, context, remote_id, self._local_node_id)
             self._lock_retention(cur, tenant_id)

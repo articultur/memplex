@@ -123,6 +123,66 @@ def test_entity_key_rejects_noncanonical_or_future_values(value: str) -> None:
         SyncEntityKey.parse(value)
 
 
+def _unused_bit_base64url_alias(value: str) -> str:
+    """Return a distinct base64url spelling for the same decoded bytes."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    remainder = len(value) % 4
+    assert remainder in {2, 3}
+    unused_bits = 4 if remainder == 2 else 2
+    last_value = alphabet.index(value[-1])
+    alias_value = (last_value & ~((1 << unused_bits) - 1)) | 1
+    return value[:-1] + alphabet[alias_value]
+
+
+def test_protocol_codecs_reject_base64url_padding_and_unused_bit_aliases() -> None:
+    entity = SyncEntityKey.node("a")
+    version = SyncVersion.create(NOW, "node-a", EVENT_A)
+    codec = SyncCursorCodec("active", "a" * 32)
+    claims = SyncCursorClaims(
+        1, "active", "tenant-a", "remote-a", "consumer-a", 0, 0,
+        None, None, NOW, NOW + timedelta(seconds=60),
+    )
+    token = codec.encode(claims)
+    payload, signature = token.split(".")
+
+    assert SyncEntityKey.parse(str(entity)) == entity
+    assert SyncVersion.parse(str(version)) == version
+    assert codec.decode(
+        token,
+        tenant_binding="tenant-a",
+        remote_binding="remote-a",
+        consumer_binding="consumer-a",
+        now=NOW,
+    ) == claims
+
+    version_payload = str(version).split(":", maxsplit=1)[1]
+    for malformed_entity in (
+        f"{entity}=",
+        f"node:v1:{_unused_bit_base64url_alias('YQ')}",
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            SyncEntityKey.parse(malformed_entity)
+    for malformed_version in (
+        f"v1:{version_payload}=",
+        f"v1:{_unused_bit_base64url_alias(version_payload)}",
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            SyncVersion.parse(malformed_version)
+    for malformed_cursor in (
+        f"{payload}=.{signature}",
+        f"{payload}.{signature}=",
+        f"{payload}.{_unused_bit_base64url_alias(signature)}",
+    ):
+        with pytest.raises(SyncCursorExpired, match="^invalid_cursor$"):
+            codec.decode(
+                malformed_cursor,
+                tenant_binding="tenant-a",
+                remote_binding="remote-a",
+                consumer_binding="consumer-a",
+                now=NOW,
+            )
+
+
 def test_entity_key_rejects_weak_values_and_size_overflow() -> None:
     with pytest.raises(TypeError):
         SyncEntityKey.node(True)  # type: ignore[arg-type]

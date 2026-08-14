@@ -65,6 +65,7 @@ _SYNC_STATE_KEYS = {
     "inbox",
     "batches",
     "cursors",
+    "inbound_cursors",
     "snapshots",
     "snapshot_items",
 }
@@ -80,6 +81,7 @@ _EMPTY_SYNC_STATE = {
     "inbox": [],
     "batches": [],
     "cursors": [],
+    "inbound_cursors": [],
     "snapshots": [],
     "snapshot_items": [],
 }
@@ -369,36 +371,18 @@ def _empty_sync_state() -> dict[str, Any]:
     return {key: (list(value) if isinstance(value, list) else value) for key, value in _EMPTY_SYNC_STATE.items()}
 
 
-def _validate_sync_state(payload: Any, *, label: str) -> None:
-    if type(payload) is not dict:
-        raise LiteStorageIntegrityError(f"invalid Lite {label} sync payload")
-    _require_exact_keys(payload, _SYNC_STATE_KEYS, label=f"{label} sync payload")
-    tenant_binding = payload["tenant_binding"]
-    if tenant_binding is not None:
-        _require_str(tenant_binding, label=f"{label} tenant_binding")
-    _require_generation(payload["next_stream_seq"], label=f"{label} next_stream_seq")
-    if payload["next_stream_seq"] < 1:
-        raise LiteStorageIntegrityError(f"invalid Lite {label} next_stream_seq")
-    _require_generation(payload["retention_floor"], label=f"{label} retention_floor")
-    _require_generation(payload["compacted_through"], label=f"{label} compacted_through")
-    if payload["compacted_through"] != payload["retention_floor"]:
-        raise LiteStorageIntegrityError(f"invalid Lite {label} compacted_through")
 
-    outbox = _validate_sync_list_exact_items(payload["outbox"], element_keys=_SYNC_OUTBOX_KEYS, label="outbox")
-    entity_versions = _validate_sync_list_exact_items(payload["entity_versions"], element_keys=_SYNC_ENTITY_VERSION_KEYS, label="entity_versions")
-    targets = _validate_sync_list_exact_items(payload["targets"], element_keys=_SYNC_TARGET_KEYS, label="targets")
-    deliveries = _validate_sync_list_exact_items(payload["deliveries"], element_keys=_SYNC_DELIVERY_KEYS, label="deliveries")
-    inbox = _validate_sync_list_exact_items(payload["inbox"], element_keys=_SYNC_INBOX_KEYS, label="inbox")
-    batches = _validate_sync_list_exact_items(payload["batches"], element_keys=_SYNC_BATCH_KEYS, label="batches")
-    cursors = _validate_sync_list_exact_items(payload["cursors"], element_keys=_SYNC_CURSOR_KEYS, label="cursors")
-    snapshots = _validate_sync_list_exact_items(payload["snapshots"], element_keys=_SYNC_SNAPSHOT_KEYS, label="snapshots")
-    snapshot_items = _validate_sync_list_exact_items(payload["snapshot_items"], element_keys=_SYNC_SNAPSHOT_ITEM_KEYS, label="snapshot_items")
-
-    seen: set[Any] = set()
-    seen_event_ids: set[str] = set()
-    outbox_sequences: set[int] = set()
-    previous_stream_seq = 0
-    for item in outbox:
+def _validate_sync_outbox_items(
+    items: list,
+    *,
+    label: str,
+    tenant_binding: Any,
+    seen_event_ids: set,
+    outbox_sequences: set,
+    previous_stream_seq: int,
+) -> int:
+    """Validate outbox events in stream order; returns the last stream_seq."""
+    for item in items:
         event_id = _require_uuid(item["event_id"], label="outbox event_id")
         stream_seq = _require_generation(item["stream_seq"], label="outbox stream_seq")
         if stream_seq < 1 or stream_seq <= previous_stream_seq:
@@ -461,6 +445,55 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
             raise LiteStorageIntegrityError("invalid Lite outbox duplicates")
         seen_event_ids.add(event_id)
         outbox_sequences.add(stream_seq)
+    return previous_stream_seq
+
+def _validate_sync_state(payload: Any, *, label: str) -> None:
+    if type(payload) is not dict:
+        raise LiteStorageIntegrityError(f"invalid Lite {label} sync payload")
+    # Pre-separation v2 pairs did not have ``inbound_cursors``.  Accept that
+    # one exact historical shape so LiteMemoryStore can upgrade it under the
+    # pair journal; every other missing or future field still fails closed.
+    legacy_keys = _SYNC_STATE_KEYS - {"inbound_cursors"}
+    payload_keys = set(payload)
+    if payload_keys != _SYNC_STATE_KEYS and payload_keys != legacy_keys:
+        raise LiteStorageIntegrityError(f"invalid Lite {label} sync payload schema")
+    tenant_binding = payload["tenant_binding"]
+    if tenant_binding is not None:
+        _require_str(tenant_binding, label=f"{label} tenant_binding")
+    _require_generation(payload["next_stream_seq"], label=f"{label} next_stream_seq")
+    if payload["next_stream_seq"] < 1:
+        raise LiteStorageIntegrityError(f"invalid Lite {label} next_stream_seq")
+    _require_generation(payload["retention_floor"], label=f"{label} retention_floor")
+    _require_generation(payload["compacted_through"], label=f"{label} compacted_through")
+    if payload["compacted_through"] != payload["retention_floor"]:
+        raise LiteStorageIntegrityError(f"invalid Lite {label} compacted_through")
+
+    outbox = _validate_sync_list_exact_items(payload["outbox"], element_keys=_SYNC_OUTBOX_KEYS, label="outbox")
+    entity_versions = _validate_sync_list_exact_items(payload["entity_versions"], element_keys=_SYNC_ENTITY_VERSION_KEYS, label="entity_versions")
+    targets = _validate_sync_list_exact_items(payload["targets"], element_keys=_SYNC_TARGET_KEYS, label="targets")
+    deliveries = _validate_sync_list_exact_items(payload["deliveries"], element_keys=_SYNC_DELIVERY_KEYS, label="deliveries")
+    inbox = _validate_sync_list_exact_items(payload["inbox"], element_keys=_SYNC_INBOX_KEYS, label="inbox")
+    batches = _validate_sync_list_exact_items(payload["batches"], element_keys=_SYNC_BATCH_KEYS, label="batches")
+    cursors = _validate_sync_list_exact_items(payload["cursors"], element_keys=_SYNC_CURSOR_KEYS, label="cursors")
+    inbound_cursors = _validate_sync_list_exact_items(
+        payload.get("inbound_cursors", []),
+        element_keys=_SYNC_CURSOR_KEYS,
+        label="inbound cursors",
+    )
+    snapshots = _validate_sync_list_exact_items(payload["snapshots"], element_keys=_SYNC_SNAPSHOT_KEYS, label="snapshots")
+    snapshot_items = _validate_sync_list_exact_items(payload["snapshot_items"], element_keys=_SYNC_SNAPSHOT_ITEM_KEYS, label="snapshot_items")
+
+    seen_event_ids: set[str] = set()
+    outbox_sequences: set[int] = set()
+    previous_stream_seq = 0
+    previous_stream_seq = _validate_sync_outbox_items(
+        outbox,
+        label=label,
+        tenant_binding=tenant_binding,
+        seen_event_ids=seen_event_ids,
+        outbox_sequences=outbox_sequences,
+        previous_stream_seq=previous_stream_seq,
+    )
 
     if outbox_sequences and payload["next_stream_seq"] <= max(outbox_sequences):
         raise LiteStorageIntegrityError("invalid Lite next_stream_seq")
@@ -470,173 +503,40 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
     if outbox_sequences != expected_sequences:
         raise LiteStorageIntegrityError("invalid Lite outbox sequence continuity")
 
-    seen.clear()
-    for item in entity_versions:
-        node_type = _require_node_type(item["node_type"], label="entity version node_type")
-        entity_key = _require_str(item["entity_key"], label="entity version entity_key")
-        try:
-            parsed_entity_key = SyncEntityKey.parse(entity_key)
-        except (TypeError, ValueError) as exc:
-            raise LiteStorageIntegrityError("invalid Lite entity version entity_key") from exc
-        if (node_type == "edge") != (parsed_entity_key.kind == "edge"):
-            raise LiteStorageIntegrityError("invalid Lite entity version entity_key")
-        event_id = _require_uuid(item["event_id"], label="entity version event_id")
-        version_key = _require_str(item["version_key"], label="entity version version_key")
-        try:
-            parsed_version = SyncVersion.parse(version_key)
-        except (TypeError, ValueError) as exc:
-            raise LiteStorageIntegrityError("invalid Lite entity version version_key") from exc
-        if parsed_version.event_id != event_id:
-            raise LiteStorageIntegrityError("invalid Lite entity version version_key")
-        if type(item["deleted"]) is not bool:
-            raise LiteStorageIntegrityError("invalid Lite entity version deleted")
-        if type(item["last_stream_seq"]) is not int or item["last_stream_seq"] < 1:
-            raise LiteStorageIntegrityError("invalid Lite entity version last_stream_seq")
-        key = (node_type, entity_key)
-        if key in seen:
-            raise LiteStorageIntegrityError("invalid Lite entity version duplicates")
-        seen.add(key)
+    _validate_sync_entity_versions_items(entity_versions,
+        label=label)
 
-    seen.clear()
-    target_ids: set[str] = set()
-    for item in targets:
-        target_id = _require_str(item["target_id"], label="target target_id")
-        _require_str(item["remote_node_id"], label="target remote_node_id")
-        _require_generation(item["bootstrap_seq"], label="sync target bootstrap_seq")
-        if item["bootstrap_seq"] >= payload["next_stream_seq"]:
-            raise LiteStorageIntegrityError("invalid Lite sync target bootstrap_seq")
-        if type(item["enabled"]) is not bool:
-            raise LiteStorageIntegrityError("invalid Lite sync target")
-        if target_id in seen:
-            raise LiteStorageIntegrityError("invalid Lite sync target duplicates")
-        seen.add(target_id)
-        target_ids.add(target_id)
+    target_ids = _validate_sync_targets_items(targets,
+        payload=payload,
+        label=label)
 
-    seen.clear()
-    for item in deliveries:
-        if type(item["state"]) is not str or item["state"] not in {"pending", "leased", "delivered", "dead_letter"}:
-            raise LiteStorageIntegrityError("invalid Lite delivery state")
-        target_id = _require_str(item["target_id"], label="delivery target_id")
-        if target_id not in target_ids:
-            raise LiteStorageIntegrityError("invalid Lite delivery target")
-        _require_generation(item["stream_seq"], label="delivery stream_seq")
-        if item["stream_seq"] < 1 or item["stream_seq"] not in outbox_sequences:
-            raise LiteStorageIntegrityError("invalid Lite delivery stream_seq")
-        if type(item["attempt_count"]) is not int or item["attempt_count"] < 0:
-            raise LiteStorageIntegrityError("invalid Lite delivery attempt_count")
-        _require_optional_string(item["lease_owner"], label="delivery lease_owner")
-        if item["lease_until"] is not None:
-            _require_aware_timestamp(item["lease_until"], label="delivery lease_until")
-        _require_optional_string(item["last_error_code"], label="delivery last_error_code")
-        _require_aware_timestamp(item["next_attempt_at"], label="delivery next_attempt_at")
-        if item["state"] == "leased":
-            if item["lease_owner"] is None or item["lease_until"] is None:
-                raise LiteStorageIntegrityError("invalid Lite leased delivery")
-        elif item["lease_owner"] is not None or item["lease_until"] is not None:
-            raise LiteStorageIntegrityError("invalid Lite delivery lease state")
-        key = (item["target_id"], item["stream_seq"])
-        if key in seen:
-            raise LiteStorageIntegrityError("invalid Lite delivery duplicates")
-        seen.add(key)
+    _validate_sync_deliveries_items(deliveries,
+        label=label,
+        outbox_sequences=outbox_sequences,
+        target_ids=target_ids)
 
-    seen.clear()
-    for item in inbox:
-        _require_str(item["origin_node_id"], label="inbox origin_node_id")
-        _require_uuid(item["event_id"], label="inbox event_id")
-        if type(item["outcome"]) is not str or item["outcome"] not in {
-            "accepted",
-            "duplicate",
-            "rejected_conflict",
-        }:
-            raise LiteStorageIntegrityError("invalid Lite inbox outcome")
-        if item["applied_stream_seq"] is not None and (type(item["applied_stream_seq"]) is not int or item["applied_stream_seq"] < 0):
-            raise LiteStorageIntegrityError("invalid Lite inbox applied_stream_seq")
-        key = (item["origin_node_id"], item["event_id"])
-        if key in seen:
-            raise LiteStorageIntegrityError("invalid Lite inbox duplicates")
-        seen.add(key)
+    _validate_sync_inbox_items(inbox,
+        label=label)
 
-    seen.clear()
-    for item in batches:
-        batch_id = _require_uuid(item["batch_id"], label="batch batch_id")
-        if type(item["request_sha256"]) is not str or len(item["request_sha256"]) != 64 or not all(ch in "0123456789abcdef" for ch in item["request_sha256"]):
-            raise LiteStorageIntegrityError("invalid Lite batch request_sha256")
-        _require_canonical_batch_result(
-            item["response"], label="batch response", batch_id=batch_id
-        )
-        if item["response"]["request_digest"] != item["request_sha256"]:
-            raise LiteStorageIntegrityError("invalid Lite batch response digest")
-        _require_aware_timestamp(item["created_at"], label="batch created_at")
-        if batch_id in seen:
-            raise LiteStorageIntegrityError("invalid Lite batch duplicates")
-        seen.add(batch_id)
+    _validate_sync_batches_items(batches,
+        label=label)
 
-    seen.clear()
-    for item in cursors:
-        _require_str(item["remote_id"], label="cursor remote_id")
-        _require_str(item["consumer_id"], label="cursor consumer_id")
-        _require_generation(item["after_seq"], label="cursor after_seq")
-        _require_aware_timestamp(item["updated_at"], label="cursor updated_at")
-        if (
-            item["after_seq"] < payload["retention_floor"]
-            or item["after_seq"] >= payload["next_stream_seq"]
-        ):
-            raise LiteStorageIntegrityError("invalid Lite cursor after_seq")
-        key = (item["remote_id"], item["consumer_id"])
-        if key in seen:
-            raise LiteStorageIntegrityError("invalid Lite cursor duplicates")
-        seen.add(key)
+    _validate_sync_cursors_items(cursors,
+        payload=payload,
+        label=label)
 
-    seen.clear()
-    snapshot_ids: set[str] = set()
-    snapshot_requests: set[tuple[str, str, str]] = set()
-    for item in snapshots:
-        snapshot_id = _require_uuid(item["snapshot_id"], label="snapshot snapshot_id")
-        remote_id = _require_str(item["remote_id"], label="snapshot remote_id")
-        consumer_id = _require_str(item["consumer_id"], label="snapshot consumer_id")
-        request_id = _require_str(item["request_id"], label="snapshot request_id")
-        _require_generation(item["resume_seq"], label="snapshot resume_seq")
-        if (
-            item["resume_seq"] < payload["retention_floor"]
-            or item["resume_seq"] >= payload["next_stream_seq"]
-        ):
-            raise LiteStorageIntegrityError("invalid Lite snapshot resume_seq")
-        _require_aware_timestamp(item["expires_at"], label="snapshot expires_at")
-        request_key = (remote_id, consumer_id, request_id)
-        if snapshot_id in seen or request_key in snapshot_requests:
-            raise LiteStorageIntegrityError("invalid Lite snapshot duplicates")
-        seen.add(snapshot_id)
-        snapshot_ids.add(snapshot_id)
-        snapshot_requests.add(request_key)
+    _validate_sync_inbound_cursors_items(inbound_cursors,
+        label=label)
 
-    seen.clear()
-    for item in snapshot_items:
-        snapshot_id = _require_uuid(item["snapshot_id"], label="snapshot item snapshot_id")
-        if snapshot_id not in snapshot_ids:
-            raise LiteStorageIntegrityError("invalid Lite snapshot item snapshot_id")
-        node_type = _require_node_type(item["node_type"], label="snapshot item node_type")
-        entity_key = _require_str(item["entity_key"], label="snapshot item entity_key")
-        try:
-            parsed_entity_key = SyncEntityKey.parse(entity_key)
-        except (TypeError, ValueError) as exc:
-            raise LiteStorageIntegrityError("invalid Lite snapshot item entity_key") from exc
-        if (node_type == "edge") != (parsed_entity_key.kind == "edge"):
-            raise LiteStorageIntegrityError("invalid Lite snapshot item entity_key")
-        _require_canonical_sync_event(item["event"], label="snapshot item event")
-        if (
-            tenant_binding is None
-            or item["event"]["scope"]["tenant_id"] != tenant_binding
-        ):
-            raise LiteStorageIntegrityError("invalid Lite snapshot item tenant binding")
-        if (
-            item["event"]["node_type"] != node_type
-            or item["event"]["entity_key"] != entity_key
-        ):
-            raise LiteStorageIntegrityError("invalid Lite snapshot item event identity")
-        key = (item["snapshot_id"], item["node_type"], item["entity_key"])
-        if key in seen:
-            raise LiteStorageIntegrityError("invalid Lite snapshot item duplicates")
-        seen.add(key)
+    snapshot_ids, snapshot_requests = _validate_sync_snapshots_items(snapshots,
+        payload=payload,
+        label=label)
+
+    _validate_sync_snapshot_items_items(snapshot_items,
+        label=label,
+        tenant_binding=tenant_binding,
+        snapshot_ids=snapshot_ids,
+    )
 
 
 def _require_format_version(value: Any, *, label: str) -> None:
@@ -1051,3 +951,241 @@ class LiteDurability:
         _fsync_dir(self._memory_path.parent)
         self.after_final_parent_dir_fsync()
         return target
+
+def _validate_sync_entity_versions_items(items: list, *,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        node_type = _require_node_type(item["node_type"], label="entity version node_type")
+        entity_key = _require_str(item["entity_key"], label="entity version entity_key")
+        try:
+            parsed_entity_key = SyncEntityKey.parse(entity_key)
+        except (TypeError, ValueError) as exc:
+            raise LiteStorageIntegrityError("invalid Lite entity version entity_key") from exc
+        if (node_type == "edge") != (parsed_entity_key.kind == "edge"):
+            raise LiteStorageIntegrityError("invalid Lite entity version entity_key")
+        event_id = _require_uuid(item["event_id"], label="entity version event_id")
+        version_key = _require_str(item["version_key"], label="entity version version_key")
+        try:
+            parsed_version = SyncVersion.parse(version_key)
+        except (TypeError, ValueError) as exc:
+            raise LiteStorageIntegrityError("invalid Lite entity version version_key") from exc
+        if parsed_version.event_id != event_id:
+            raise LiteStorageIntegrityError("invalid Lite entity version version_key")
+        if type(item["deleted"]) is not bool:
+            raise LiteStorageIntegrityError("invalid Lite entity version deleted")
+        if type(item["last_stream_seq"]) is not int or item["last_stream_seq"] < 1:
+            raise LiteStorageIntegrityError("invalid Lite entity version last_stream_seq")
+        key = (node_type, entity_key)
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite entity version duplicates")
+        seen.add(key)
+
+
+def _validate_sync_targets_items(items: list, *,
+    payload: Any,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    target_ids: set[str] = set()
+    seen: set[Any] = set()
+    target_ids: set[str] = set()
+    for item in items:
+        target_id = _require_str(item["target_id"], label="target target_id")
+        _require_str(item["remote_node_id"], label="target remote_node_id")
+        _require_generation(item["bootstrap_seq"], label="sync target bootstrap_seq")
+        if item["bootstrap_seq"] >= payload["next_stream_seq"]:
+            raise LiteStorageIntegrityError("invalid Lite sync target bootstrap_seq")
+        if type(item["enabled"]) is not bool:
+            raise LiteStorageIntegrityError("invalid Lite sync target")
+        if target_id in seen:
+            raise LiteStorageIntegrityError("invalid Lite sync target duplicates")
+        seen.add(target_id)
+        target_ids.add(target_id)
+    return target_ids
+
+
+def _validate_sync_deliveries_items(items: list, *,
+    label: Any,
+    outbox_sequences: Any,
+    target_ids: set,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        if type(item["state"]) is not str or item["state"] not in {"pending", "leased", "delivered", "dead_letter"}:
+            raise LiteStorageIntegrityError("invalid Lite delivery state")
+        target_id = _require_str(item["target_id"], label="delivery target_id")
+        if target_id not in target_ids:
+            raise LiteStorageIntegrityError("invalid Lite delivery target")
+        _require_generation(item["stream_seq"], label="delivery stream_seq")
+        if item["stream_seq"] < 1 or item["stream_seq"] not in outbox_sequences:
+            raise LiteStorageIntegrityError("invalid Lite delivery stream_seq")
+        if type(item["attempt_count"]) is not int or item["attempt_count"] < 0:
+            raise LiteStorageIntegrityError("invalid Lite delivery attempt_count")
+        _require_optional_string(item["lease_owner"], label="delivery lease_owner")
+        if item["lease_until"] is not None:
+            _require_aware_timestamp(item["lease_until"], label="delivery lease_until")
+        _require_optional_string(item["last_error_code"], label="delivery last_error_code")
+        _require_aware_timestamp(item["next_attempt_at"], label="delivery next_attempt_at")
+        if item["state"] == "leased":
+            if item["lease_owner"] is None or item["lease_until"] is None:
+                raise LiteStorageIntegrityError("invalid Lite leased delivery")
+        elif item["lease_owner"] is not None or item["lease_until"] is not None:
+            raise LiteStorageIntegrityError("invalid Lite delivery lease state")
+        key = (item["target_id"], item["stream_seq"])
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite delivery duplicates")
+        seen.add(key)
+
+
+def _validate_sync_inbox_items(items: list, *,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        _require_str(item["origin_node_id"], label="inbox origin_node_id")
+        _require_uuid(item["event_id"], label="inbox event_id")
+        if type(item["outcome"]) is not str or item["outcome"] not in {
+            "accepted",
+            "duplicate",
+            "rejected_conflict",
+        }:
+            raise LiteStorageIntegrityError("invalid Lite inbox outcome")
+        if item["applied_stream_seq"] is not None and (type(item["applied_stream_seq"]) is not int or item["applied_stream_seq"] < 0):
+            raise LiteStorageIntegrityError("invalid Lite inbox applied_stream_seq")
+        key = (item["origin_node_id"], item["event_id"])
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite inbox duplicates")
+        seen.add(key)
+
+
+def _validate_sync_batches_items(items: list, *,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        batch_id = _require_uuid(item["batch_id"], label="batch batch_id")
+        if type(item["request_sha256"]) is not str or len(item["request_sha256"]) != 64 or not all(ch in "0123456789abcdef" for ch in item["request_sha256"]):
+            raise LiteStorageIntegrityError("invalid Lite batch request_sha256")
+        _require_canonical_batch_result(
+            item["response"], label="batch response", batch_id=batch_id
+        )
+        if item["response"]["request_digest"] != item["request_sha256"]:
+            raise LiteStorageIntegrityError("invalid Lite batch response digest")
+        _require_aware_timestamp(item["created_at"], label="batch created_at")
+        if batch_id in seen:
+            raise LiteStorageIntegrityError("invalid Lite batch duplicates")
+        seen.add(batch_id)
+
+
+def _validate_sync_cursors_items(items: list, *,
+    payload: Any,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        _require_str(item["remote_id"], label="cursor remote_id")
+        _require_str(item["consumer_id"], label="cursor consumer_id")
+        _require_generation(item["after_seq"], label="cursor after_seq")
+        _require_aware_timestamp(item["updated_at"], label="cursor updated_at")
+        if (
+            item["after_seq"] < payload["retention_floor"]
+            or item["after_seq"] >= payload["next_stream_seq"]
+        ):
+            raise LiteStorageIntegrityError("invalid Lite cursor after_seq")
+        key = (item["remote_id"], item["consumer_id"])
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite cursor duplicates")
+        seen.add(key)
+
+
+def _validate_sync_inbound_cursors_items(items: list, *,
+    label: Any,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        remote_id = _require_str(item["remote_id"], label="inbound cursor remote_id")
+        consumer_id = _require_str(
+            item["consumer_id"], label="inbound cursor consumer_id"
+        )
+        _require_generation(item["after_seq"], label="inbound cursor after_seq")
+        _require_aware_timestamp(
+            item["updated_at"], label="inbound cursor updated_at"
+        )
+        key = (remote_id, consumer_id)
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite inbound cursor duplicates")
+        seen.add(key)
+
+
+def _validate_sync_snapshots_items(items: list, *,
+    payload: Any,
+    label: Any,
+) -> tuple[set, set]:
+    """Validate every item of the sync collection."""
+    snapshot_ids: set[str] = set()
+    snapshot_requests: set[tuple[str, str, str]] = set()
+    seen: set[Any] = set()
+    for item in items:
+        snapshot_id = _require_uuid(item["snapshot_id"], label="snapshot snapshot_id")
+        remote_id = _require_str(item["remote_id"], label="snapshot remote_id")
+        consumer_id = _require_str(item["consumer_id"], label="snapshot consumer_id")
+        request_id = _require_str(item["request_id"], label="snapshot request_id")
+        _require_generation(item["resume_seq"], label="snapshot resume_seq")
+        if (
+            item["resume_seq"] < payload["retention_floor"]
+            or item["resume_seq"] >= payload["next_stream_seq"]
+        ):
+            raise LiteStorageIntegrityError("invalid Lite snapshot resume_seq")
+        _require_aware_timestamp(item["expires_at"], label="snapshot expires_at")
+        request_key = (remote_id, consumer_id, request_id)
+        if snapshot_id in seen or request_key in snapshot_requests:
+            raise LiteStorageIntegrityError("invalid Lite snapshot duplicates")
+        seen.add(snapshot_id)
+        snapshot_ids.add(snapshot_id)
+        snapshot_requests.add(request_key)
+    return snapshot_ids, snapshot_requests
+
+
+def _validate_sync_snapshot_items_items(items: list, *,
+    label: Any,
+    tenant_binding: Any,
+    snapshot_ids: set,
+) -> None:
+    """Validate every item of the sync collection."""
+    seen: set[Any] = set()
+    for item in items:
+        snapshot_id = _require_uuid(item["snapshot_id"], label="snapshot item snapshot_id")
+        if snapshot_id not in snapshot_ids:
+            raise LiteStorageIntegrityError("invalid Lite snapshot item snapshot_id")
+        node_type = _require_node_type(item["node_type"], label="snapshot item node_type")
+        entity_key = _require_str(item["entity_key"], label="snapshot item entity_key")
+        try:
+            parsed_entity_key = SyncEntityKey.parse(entity_key)
+        except (TypeError, ValueError) as exc:
+            raise LiteStorageIntegrityError("invalid Lite snapshot item entity_key") from exc
+        if (node_type == "edge") != (parsed_entity_key.kind == "edge"):
+            raise LiteStorageIntegrityError("invalid Lite snapshot item entity_key")
+        _require_canonical_sync_event(item["event"], label="snapshot item event")
+        if (
+            tenant_binding is None
+            or item["event"]["scope"]["tenant_id"] != tenant_binding
+        ):
+            raise LiteStorageIntegrityError("invalid Lite snapshot item tenant binding")
+        if (
+            item["event"]["node_type"] != node_type
+            or item["event"]["entity_key"] != entity_key
+        ):
+            raise LiteStorageIntegrityError("invalid Lite snapshot item event identity")
+        key = (item["snapshot_id"], item["node_type"], item["entity_key"])
+        if key in seen:
+            raise LiteStorageIntegrityError("invalid Lite snapshot item duplicates")
+        seen.add(key)
+

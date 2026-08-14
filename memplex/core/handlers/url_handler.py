@@ -256,5 +256,5 @@ class URLHandler:
                 os.unlink(path)
                 return True
         except Exception:
-            pass
+            logger.debug("temp file cleanup failed for %s", path, exc_info=True)
         return False

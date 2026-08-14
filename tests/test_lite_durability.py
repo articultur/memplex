@@ -162,6 +162,7 @@ def _valid_nonempty_sync_state() -> dict:
                 "updated_at": "2026-01-01T00:00:00+00:00",
             }
         ],
+        "inbound_cursors": [],
         "snapshots": [
             {
                 "snapshot_id": snapshot_id,
@@ -421,6 +422,7 @@ def test_empty_pair_uses_schema_v2_with_empty_sync(tmp_path: Path) -> None:
         "inbox": [],
         "batches": [],
         "cursors": [],
+        "inbound_cursors": [],
         "snapshots": [],
         "snapshot_items": [],
     }
@@ -466,6 +468,7 @@ def test_nonempty_legacy_pair_is_canonicalized_before_v2_adoption(tmp_path: Path
         "inbox": [],
         "batches": [],
         "cursors": [],
+        "inbound_cursors": [],
         "snapshots": [],
         "snapshot_items": [],
     }
@@ -511,6 +514,7 @@ def test_schema_v1_envelope_is_canonicalized_to_schema_v2_with_empty_sync(tmp_pa
         "inbox": [],
         "batches": [],
         "cursors": [],
+        "inbound_cursors": [],
         "snapshots": [],
         "snapshot_items": [],
     }
@@ -910,6 +914,27 @@ def test_schema_v2_accepts_complete_canonical_nonempty_sync_state(tmp_path: Path
     reopened = LiteMemoryStore(path)
 
     assert reopened._durability.load_authoritative().memory["sync"] == _valid_nonempty_sync_state()
+
+
+def test_schema_v2_without_inbound_cursor_namespace_upgrades_atomically_and_keeps_old_pin(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "memory.json"
+    store = LiteMemoryStore(path)
+    store.add(_tenant_function("seed"), _source())
+    historical = _valid_nonempty_sync_state()
+    historical.pop("inbound_cursors")
+    _write_sync_state(path, historical)
+    before = json.loads(path.read_text(encoding="utf-8"))
+
+    reopened = LiteMemoryStore(path)
+    upgraded = reopened._durability.load_authoritative()
+
+    assert upgraded.generation == before["generation"] + 1
+    assert upgraded.memory["sync"]["inbound_cursors"] == []
+    # Direction was not encoded historically.  Keeping the ambiguous row as
+    # an outbound retention pin is conservative and prevents data loss.
+    assert upgraded.memory["sync"]["cursors"] == historical["cursors"]
 
 
 def test_schema_v2_rejects_business_state_outside_sync_tenant_binding(
@@ -1784,10 +1809,10 @@ def test_invalid_authoritative_envelope_is_integrity_error_and_factory_never_fal
     assert changelog_path.read_bytes() == changelog_before
 
 
-def test_factory_file_path_would_trigger_generic_default_fallback_hermetically(
+def test_factory_explicit_lite_path_never_falls_back_after_constructor_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """回归证明：factory 参数是目录，旧的 ``memory.json`` 传法会误走默认回退。"""
+    """显式 Lite 路径的任意构造异常必须原样终止，不能触及默认库。"""
     import memplex.storage as storage_module
 
     calls: list[Path | None] = []
@@ -1802,10 +1827,10 @@ def test_factory_file_path_would_trigger_generic_default_fallback_hermetically(
     monkeypatch.setattr(storage_module, "LiteMemoryStore", SentinelStore)
     configured_file = tmp_path / "memory.json"
 
-    with pytest.raises(AssertionError, match="不得访问默认"):
+    with pytest.raises(OSError, match="模拟配置目录不可用"):
         storage_module.create_store("lite", path=str(configured_file))
 
-    assert calls == [configured_file / "memory.json", None]
+    assert calls == [configured_file / "memory.json"]
 
 
 def test_factory_integrity_error_uses_configured_directory_without_default_fallback(

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=83.0", "wheel"]  # PYSEC-2026-3447
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,59 +7,113 @@ name = "memplex"
 version = "3.3.0"
 description = "Memplex - Memory Complex: multi-agent knowledge graph memory system with 3-layer retrieval"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-    "pyyaml>=6.0",
-    "numpy>=1.24.0",
-    "requests>=2.28.0",
+    "pyyaml>=6.0,<7",
+    "numpy>=1.24.0,<3",
+    "requests>=2.28.0,<3",
 ]
 
 [project.optional-dependencies]
 embedding = [
-    "sentence-transformers>=2.0",
+    "sentence-transformers>=2.0,<6",
 ]
 extractors = [
-    "pdfplumber>=0.9.0",
-    "python-docx>=0.8.11",
-    "Pillow>=9.0",
-    "pytesseract>=0.3.10",
+    "pdfplumber>=0.9.0,<1",
+    "python-docx>=0.8.11,<2",
+    "Pillow>=9.0,<13",
+    "pytesseract>=0.3.10,<1",
 ]
 vector = [
-    "chromadb>=0.4.0",
-    "sentence-transformers>=2.0",
+    "chromadb>=0.4.0,<2",
+    "sentence-transformers>=2.0,<6",
 ]
 local-onnx = [
-    "onnxruntime>=1.17.0",
-    "tokenizers>=0.15.0",
+    "onnxruntime>=1.17.0,<2",
+    "tokenizers>=0.15.0,<1",
 ]
 graph = [
-    "networkx>=3.0",
-    "python-louvain>=0.16",
+    "networkx>=3.0,<4",
+    "python-louvain>=0.16,<1",
 ]
 http = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "fastapi>=0.100.0,<1",
+    "uvicorn>=0.23.0,<1",
 ]
 llm = [
-    "anthropic>=0.30.0",
-    "openai>=1.0.0",
+    "anthropic>=0.30.0,<1",
+    "openai>=1.0.0,<3",
 ]
 postgres = [
-    "psycopg2-binary>=2.9",
+    "psycopg2-binary>=2.9,<3",
+]
+# CI-only: real-PostgreSQL integration tests via a self-contained
+# ``pgserver`` binary (no system Postgres required). Kept out of ``dev`` so the
+# fast cross-platform test matrix stays lean; exercised by the dedicated
+# ``test-postgres`` CI job.
+pgtest = [
+    "pgserver>=0.1.4,<1",
+    "psycopg2-binary>=2.9,<3",
+]
+# Shared-key AES-GCM payload encryption for sync transport
+# (MEMPLEX_SYNC_ENCRYPTION_KEY); see memplex/sync_crypto.py.
+sync-crypto = [
+    # >=50 clears PYSEC-2026-35/3552/3553/3554/2141 + GHSA-537c-gmf6-5ccf
+    "cryptography>=50,<52",
 ]
 all = [
     "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres]",
 ]
 dev = [
-    "pytest>=7.0",
+    "build>=1.2,<2",
+    # ``python -m build --no-isolation`` is an explicit release/package-data
+    # contract in the test suite, so the selected backend must exist in the
+    # locked development environment rather than arriving from ambient tools.
+    "setuptools>=83,<84",  # PYSEC-2026-3447
+    "wheel>=0.48,<1",  # pair with setuptools 83 (dependabot PR pending)
+    "mypy>=1.13,<2",
+    "pytest>=9.0.3,<10",  # PYSEC-2026-1845
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
-    "ruff>=0.1.0",
+    # ruff 0.16 broadened default rule selection; the codebase is lint-clean on
+    # the 0.15 line. Cap until the codebase is migrated to the newer defaults.
+    "ruff>=0.1.0,<0.16",
     # HTTP adapter deps so test_sync / test_http_api run under a plain dev install
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
+    "fastapi>=0.100.0,<1",
+    "uvicorn>=0.23.0,<1",
+    "httpx>=0.24.0,<1",
+    # Architecture-contract gate (CI: lint-imports) and complexity freeze.
+    "import-linter>=2.13,<3",
+    # Mutation-testing pilot runner (scripts/mutation_pilot.sh).
+    "cosmic-ray>=8,<9",
 ]
+
+[tool.mypy]
+# Keep the first type gate focused on the typed PostgreSQL lifecycle boundary:
+# pool readiness, durable task persistence, and the public task repository.
+# Imported dependencies stay opaque until their own contracts are admitted to
+# the gate, so this check stays both actionable and bounded.
+files = [
+    "memplex/storage/postgres_resources.py",
+    "memplex/storage/postgres_tasks.py",
+    "memplex/task_repository.py",
+    # Layer-neutral serializer + the authorization ACL gate + the frozen
+    # sync ingress validator: fully-typed leaf modules admitted to the gate.
+    "memplex/serialization.py",
+    "memplex/authorization.py",
+    "memplex/sync_ingress.py",
+    "memplex/sync_repository.py",
+    "memplex/privacy.py",
+    "memplex/query_explainer.py",
+    "memplex/intent.py",
+    "memplex/backup.py",
+    "memplex/compaction.py",
+]
+python_version = "3.11"
+follow_imports = "skip"
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [project.scripts]
 memplex = "memplex:main"
@@ -95,7 +149,45 @@ line-length = 100
 "memplex/service.py" = ["F841"]
 "tests/test_hooks.py" = ["E741"]
 
+[tool.ruff.lint.mccabe]
+# Complexity freeze-gate: 25 is the current ceiling; the per-file ignores
+# above pin existing known-debt functions so any NEW violation fails CI.
+max-complexity = 25
+
+[tool.importlinter]
+root_package = "memplex"
+
+[[tool.importlinter.contracts]]
+# Deliberate carve-outs (documented): memplex.service (SSE subscriber bridge)
+# and memplex.product (readiness surface) import adapters by design.
+name = "Domain and storage layers never import host adapters"
+type = "forbidden"
+source_modules = [
+    "memplex.core",
+    "memplex.models",
+    "memplex.storage",
+    "memplex.authorization",
+    "memplex.compaction",
+    "memplex.llm",
+    "memplex.processing",
+    "memplex.retrieval",
+    "memplex.wiki",
+    "memplex.sync",
+    "memplex.sync_repository",
+    "memplex.sync_protocol",
+    "memplex.sync_dispatcher",
+    "memplex.sync_ingress",
+    "memplex.privacy",
+    "memplex.intent",
+    "memplex.backup",
+    "memplex.query_explainer",
+    "memplex.serialization",
+]
+forbidden_modules = ["memplex.adapters"]
+
 [tool.ruff.lint]
+# C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.
+extend-select = ["C901"]
 ignore = [
     # Re-export pattern: imports used by downstream modules
     "F401",
@@ -104,3 +196,17 @@ ignore = [
     # Intentionally assigned-but-unused variables in benchmark stubs
     "F841",
 ]
+
+
+[cosmic-ray]
+# Mutation-testing pilot on the frozen sync ingress validator. cosmic-ray
+# mutates the module IN PLACE (restoring afterwards), so results are real:
+# baseline = 75 killed / 35 survived / 1 incompetent of 111 mutants (~68%
+# kill rate) on 2026-08-14. The 35 survivors are the test-strength backlog.
+module-path = "memplex/sync_ingress.py"
+timeout = 30
+test-command = "pytest tests/test_sync_ingress.py -x -q --no-header -p no:cacheprovider"
+
+[cosmic-ray.distributor]
+name = "local"
+

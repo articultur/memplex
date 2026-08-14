@@ -567,7 +567,12 @@ class MCPServer:
             )
         except MemoryNotFoundError as exc:
             raise PermissionError("Memory not found or inaccessible") from exc
-        return _dataclass_to_dict(result)
+        payload = _dataclass_to_dict(result)
+        if runtime.get_accessible_memory(args["memory_id"]) is None:
+            payload["old_value"] = None
+            payload["new_value"] = None
+            payload["withheld_unsafe"] = True
+        return payload
 
     def _tool_memory_delete(self, args: dict) -> dict:
         """Delete a memory."""
@@ -707,6 +712,11 @@ class MCPServer:
             scanned += len(batch)
             for obs in batch:
                 if not runtime.can_access_node(obs):
+                    continue
+                # Observation payloads are model-visible here just like
+                # query and memory_get results.  Run the service-owned typed
+                # injection decision before constructing any serialized text.
+                if not self._service.is_safe_for_model(obs):
                     continue
                 summary = obs.context or obs.event or ""
                 if not query or query in f"{obs.event}\n{summary}".lower():

@@ -18,6 +18,7 @@ import yaml
 
 from memplex.adapters.agent_installer import install_agent, uninstall_agent
 from memplex.adapters.agent_runtime import AgentMemoryRuntime, get_agent_manifest
+from memplex.adapters.runtime_status import read_runtime_status, runtime_status_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -72,7 +73,10 @@ def test_hermes_manifest_pins_immutable_official_memory_provider_source():
     }
 
 
-def test_hermes_official_cli_discovers_installed_provider_in_isolated_home(tmp_path):
+def test_hermes_official_cli_discovers_installed_provider_in_isolated_home(
+    tmp_path,
+    monkeypatch,
+):
     cli_value = os.environ.get("MEMPLEX_G008_HERMES_CLI")
     source_value = os.environ.get("MEMPLEX_G008_HERMES_SOURCE_ROOT")
     if not cli_value or not source_value:
@@ -91,18 +95,34 @@ def test_hermes_official_cli_discovers_installed_provider_in_isolated_home(tmp_p
     assert version_result.returncode == 0, version_result.stderr
     assert "Hermes Agent v0.20.0 (2026.8.3)" in version_result.stdout
 
-    hermes_home, _, _ = _install(tmp_path)
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    isolated_home = tmp_path / "homes" / "hermes"
+    isolated_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HERMES_CONFIG_DIR", str(hermes_home))
     status = subprocess.run(
         [str(cli), "memory", "status"],
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "HERMES_HOME": str(hermes_home)},
+        env=os.environ.copy(),
     )
     assert status.returncode == 0, status.stderr
     assert "Provider:  memplex" in status.stdout
     assert "Plugin:    installed" in status.stdout
     assert "Status:    available" in status.stdout
+
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_g008_lifecycle_test")
+    provider = module.MemplexMemoryProvider(
+        service_factory=_ServiceProbe,
+        runtime_factory=lambda **kwargs: _RuntimeProbe(**kwargs),
+    )
+    try:
+        provider.initialize("g008-hermes-session")
+        assert provider.prefetch("g008 lifecycle probe") == "echo:g008 lifecycle probe"
+    finally:
+        provider.shutdown()
 
 
 def _install(
@@ -209,6 +229,7 @@ def test_hermes_install_selects_official_provider_and_materializes_bootstrap(tmp
     assert provider["project_path"] == str(workspace.resolve())
     assert provider["tools"] == ["memplex_search", "memplex_conclude"]
     assert identity["source_root"] == str(PROJECT_ROOT)
+    assert identity["host_root"] == str(hermes_home.resolve())
     assert not (hermes_home / "memory-providers" / "memplex.json").exists()
     bootstrap = (plugin_dir / "__init__.py").read_text(encoding="utf-8")
     assert "memplex.adapters.hermes_memory_provider" in bootstrap
@@ -312,6 +333,187 @@ def test_hermes_bootstrap_registers_subclass_of_official_abc(tmp_path):
     uninstall_agent("hermes", target_dir=hermes_home)
 
 
+def test_hermes_bootstrap_rejects_duplicate_identity_before_touching_sys_path(tmp_path):
+    """A damaged identity must not be allowed to inject source_root into sys.path."""
+
+    _, _, plugin_dir = _install(tmp_path)
+    identity_path = plugin_dir / "memplex-agent.json"
+    raw = identity_path.read_text(encoding="utf-8").replace(
+        '"agent": "hermes"',
+        '"agent": "hermes", "agent": "hermes"',
+        1,
+    )
+    identity_path.write_text(raw, encoding="utf-8")
+    runner = """
+import importlib.util
+import os
+import sys
+spec = importlib.util.spec_from_file_location("damaged_hermes", os.environ["MEMPLEX_PLUGIN_ENTRY"])
+module = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(module)
+except Exception as exc:
+    print(int(os.environ["MEMPLEX_SOURCE_ROOT"] in sys.path))
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(7)
+raise SystemExit(0)
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", runner],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            **os.environ,
+            "MEMPLEX_PLUGIN_ENTRY": str(plugin_dir / "__init__.py"),
+            "MEMPLEX_SOURCE_ROOT": str(PROJECT_ROOT),
+        },
+    )
+
+    assert result.returncode == 7
+    assert result.stdout.strip() == "0"
+    assert "reinstall required" in result.stderr
+
+
+def test_hermes_bootstrap_rejects_identity_for_another_host_before_sys_path(tmp_path):
+    """Hermes derives host A from its plugin path before trusting identity source_root."""
+
+    _, _, plugin_dir = _install(tmp_path)
+    other_root = tmp_path / "other-hermes"
+    other_root.mkdir()
+    identity_path = plugin_dir / "memplex-agent.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["host_root"] = str(other_root.resolve())
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                "import importlib.util,os;"
+                "p=os.environ['MEMPLEX_PLUGIN_ENTRY'];"
+                "s=importlib.util.spec_from_file_location('mismatch_hermes',p);"
+                "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(plugin_dir / "__init__.py")},
+    )
+
+    assert result.returncode != 0
+    assert "host_root" in result.stderr
+    assert "reinstall required" in result.stderr
+
+
+def test_hermes_provider_rejects_damaged_managed_identity(tmp_path):
+    """Direct provider construction cannot bypass the bootstrap identity gate."""
+
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_provider_identity_test")
+    identity = json.loads((plugin_dir / "memplex-agent.json").read_text(encoding="utf-8"))
+    identity["unexpected"] = True
+    provider = module.MemplexMemoryProvider(identity=identity, service_factory=_ServiceProbe)
+
+    with pytest.raises(ValueError, match="reinstall required"):
+        provider.initialize("identity-session", hermes_home=str(hermes_home))
+
+
+def test_hermes_provider_rejects_identity_for_another_requested_home(tmp_path):
+    """Direct provider construction cannot redirect lifecycle state into host B."""
+
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    other_root = tmp_path / "other-hermes"
+    other_root.mkdir()
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_provider_host_binding_test")
+    identity = json.loads((plugin_dir / "memplex-agent.json").read_text(encoding="utf-8"))
+    identity["host_root"] = str(other_root.resolve())
+    provider = module.MemplexMemoryProvider(identity=identity, service_factory=_ServiceProbe)
+
+    with pytest.raises(ValueError, match="host_root.*reinstall required|reinstall required.*host_root"):
+        provider.initialize("identity-session", hermes_home=str(hermes_home))
+
+
+@pytest.mark.parametrize(
+    "configured_environment",
+    [
+        ("HERMES_CONFIG_DIR",),
+        ("HERMES_HOME",),
+        ("HERMES_CONFIG_DIR", "HERMES_HOME"),
+    ],
+)
+def test_hermes_provider_without_kwargs_uses_configured_environment_root(
+    tmp_path,
+    monkeypatch,
+    configured_environment,
+):
+    """Official initialize(session_id) must bind to the isolated Hermes root."""
+
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    isolated_home = tmp_path / "homes" / "hermes"
+    isolated_home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.delenv("HERMES_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    for name in configured_environment:
+        monkeypatch.setenv(name, str(hermes_home))
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_environment_root_test")
+    provider = module.MemplexMemoryProvider(
+        service_factory=_ServiceProbe,
+        runtime_factory=lambda **kwargs: _RuntimeProbe(**kwargs),
+    )
+
+    try:
+        provider.initialize("environment-session")
+        assert provider.prefetch("environment probe") == "echo:environment probe"
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_provider_without_kwargs_rejects_conflicting_environment_roots(
+    tmp_path,
+    monkeypatch,
+):
+    """Two different Hermes roots cannot silently select one managed identity."""
+
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    other_home = tmp_path / "other-hermes"
+    other_home.mkdir()
+    monkeypatch.setenv("HERMES_CONFIG_DIR", str(hermes_home))
+    monkeypatch.setenv("HERMES_HOME", str(other_home))
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_environment_conflict_test")
+    provider = module.MemplexMemoryProvider(service_factory=_ServiceProbe)
+
+    with pytest.raises(ValueError, match="HERMES_CONFIG_DIR.*HERMES_HOME.*conflict"):
+        provider.initialize("conflict-session")
+
+
+def test_hermes_provider_explicit_home_precedes_conflicting_environment_roots(
+    tmp_path,
+    monkeypatch,
+):
+    """The official explicit lifecycle argument remains the highest-priority root."""
+
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    other_home = tmp_path / "other-hermes"
+    other_home.mkdir()
+    monkeypatch.setenv("HERMES_CONFIG_DIR", str(other_home))
+    monkeypatch.setenv("HERMES_HOME", str(other_home))
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_explicit_root_test")
+    provider = module.MemplexMemoryProvider(
+        service_factory=_ServiceProbe,
+        runtime_factory=lambda **kwargs: _RuntimeProbe(**kwargs),
+    )
+
+    try:
+        provider.initialize("explicit-session", hermes_home=str(hermes_home))
+        assert provider.prefetch("explicit probe") == "echo:explicit probe"
+    finally:
+        provider.shutdown()
+
+
 def test_hermes_lifecycle_orders_sync_prefetch_and_deduplicates_finalizers(tmp_path):
     hermes_home, _, plugin_dir = _install(tmp_path)
     module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_lifecycle_test")
@@ -347,6 +549,31 @@ def test_hermes_lifecycle_orders_sync_prefetch_and_deduplicates_finalizers(tmp_p
 
     provider.shutdown()
     assert service.stopped is True
+    uninstall_agent("hermes", target_dir=hermes_home)
+
+
+def test_hermes_real_prefetch_failure_persists_degraded_host_runtime_state(tmp_path):
+    """A provider failure must be persisted even when Hermes surfaces its exception."""
+    hermes_home, _, plugin_dir = _install(tmp_path)
+    module, _ = _load_plugin(plugin_dir, tmp_path, "hermes_runtime_status_test")
+
+    class BrokenRuntime(_RuntimeProbe):
+        def before_prompt(self, _query: str):
+            raise RuntimeError("Bearer hermes-secret-must-not-persist")
+
+    provider = module.MemplexMemoryProvider(
+        service_factory=_ServiceProbe,
+        runtime_factory=lambda **_: BrokenRuntime(),
+    )
+    provider.initialize("status-session", hermes_home=str(hermes_home))
+    with pytest.raises(RuntimeError, match="hermes-secret"):
+        provider.prefetch("remember status")
+
+    assert read_runtime_status(runtime_status_path(hermes_home), agent="hermes") == {
+        "reason": "runtime_operation_failed",
+        "state": "degraded",
+    }
+    provider.shutdown()
     uninstall_agent("hermes", target_dir=hermes_home)
 
 

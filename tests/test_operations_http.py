@@ -28,10 +28,22 @@ def _config(tmp_path) -> MemplexConfig:
     return config
 
 
+def _set_deployment_binding(monkeypatch) -> dict[str, str]:
+    binding = {
+        "MEMPLEX_DEPLOYMENT_ID": "00000000-0000-4000-8000-000000000001",
+        "MEMPLEX_SOURCE_SHA256": "1" * 64,
+        "MEMPLEX_ARTIFACT_SHA256": "2" * 64,
+        "MEMPLEX_TARGET_IDENTITY_SHA256": "3" * 64,
+    }
+    for name, value in binding.items():
+        monkeypatch.setenv(name, value)
+    return binding
+
+
 def test_probe_routes_are_fixed_and_do_not_require_business_auth(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("MEMPLEX_API_KEY", "super-secret-token")
     app = create_app(_config(tmp_path))
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         live = client.get("/health/live")
         ready = client.get("/health/ready")
         business = client.get("/stats")
@@ -54,7 +66,7 @@ def test_probe_routes_are_fixed_and_do_not_require_business_auth(tmp_path, monke
 def test_draining_rejects_new_business_and_keeps_liveness(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("MEMPLEX_API_KEY", raising=False)
     app = create_app(_config(tmp_path))
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         app.state.operations_admission.start_draining()
         app.state.memplex_service.begin_draining()
         assert client.get("/health/live").status_code == 200
@@ -72,7 +84,7 @@ def test_draining_rejects_new_business_and_keeps_liveness(tmp_path, monkeypatch)
 
 def test_health_diagnostic_never_exposes_storage_path(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("MEMPLEX_API_KEY", raising=False)
-    with TestClient(create_app(_config(tmp_path))) as client:
+    with TestClient(create_app(_config(tmp_path)), client=("127.0.0.1", 50000)) as client:
         response = client.get("/health")
     assert response.status_code == 200
     assert "storage_path" not in response.json()
@@ -82,7 +94,7 @@ def test_health_diagnostic_never_exposes_storage_path(tmp_path, monkeypatch) -> 
 def test_metrics_use_fixed_labels_and_do_not_run_health_scan(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("MEMPLEX_API_KEY", raising=False)
     app = create_app(_config(tmp_path))
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         service = app.state.memplex_service
         monkeypatch.setattr(
             service,
@@ -101,7 +113,7 @@ def test_metrics_use_fixed_labels_and_do_not_run_health_scan(tmp_path, monkeypat
     assert str(tmp_path) not in response.text
 
 
-def test_lifespan_writes_signed_measured_report_after_clean_drain(
+def test_lifespan_writes_report_with_explicit_deployment_binding(
     tmp_path, monkeypatch
 ) -> None:
     key = b"o" * 32
@@ -110,9 +122,10 @@ def test_lifespan_writes_signed_measured_report_after_clean_drain(
         "MEMPLEX_OPERATIONS_HMAC_KEY", base64.b64encode(key).decode("ascii")
     )
     monkeypatch.setenv("MEMPLEX_G006_REPORT_OUTPUT", str(output))
+    binding = _set_deployment_binding(monkeypatch)
     config = _config(tmp_path)
     config.operations.report_key_id = "ops-key"
-    with TestClient(create_app(config)) as client:
+    with TestClient(create_app(config), client=("127.0.0.1", 50000)) as client:
         assert client.get("/stats").status_code == 200
 
     report = load_operations_report(output)
@@ -120,7 +133,42 @@ def test_lifespan_writes_signed_measured_report_after_clean_drain(
     assert report.request_count == 1
     assert report.successful_requests == 1
     assert report.shutdown_drained is True
-    assert report.industrial_gate_closing is True
+    assert report.generated_at >= report.window_ended_at
+    assert report.deployment_id == binding["MEMPLEX_DEPLOYMENT_ID"]
+    assert report.source_sha256 == binding["MEMPLEX_SOURCE_SHA256"]
+    assert report.artifact_sha256 == binding["MEMPLEX_ARTIFACT_SHA256"]
+    assert report.target_identity_sha256 == binding["MEMPLEX_TARGET_IDENTITY_SHA256"]
+    assert report.industrial_gate_closing is False
+
+
+@pytest.mark.parametrize("source_sha256", [None, "not-a-digest"])
+def test_lifespan_refuses_missing_or_invalid_deployment_binding_without_leakage(
+    tmp_path, monkeypatch, source_sha256
+) -> None:
+    key = b"o" * 32
+    output = tmp_path / "operations-evidence.json"
+    private_deployment = "private-production-deployment"
+    monkeypatch.setenv(
+        "MEMPLEX_OPERATIONS_HMAC_KEY", base64.b64encode(key).decode("ascii")
+    )
+    monkeypatch.setenv("MEMPLEX_G006_REPORT_OUTPUT", str(output))
+    monkeypatch.setenv("MEMPLEX_DEPLOYMENT_ID", private_deployment)
+    if source_sha256 is not None:
+        monkeypatch.setenv("MEMPLEX_SOURCE_SHA256", source_sha256)
+    monkeypatch.setenv("MEMPLEX_ARTIFACT_SHA256", "2" * 64)
+    monkeypatch.setenv("MEMPLEX_TARGET_IDENTITY_SHA256", "3" * 64)
+    warnings: list[str] = []
+    monkeypatch.setattr(http_api.logger, "warning", warnings.append)
+    config = _config(tmp_path)
+    config.operations.report_key_id = "ops-key"
+
+    with TestClient(create_app(config), client=("127.0.0.1", 50000)) as client:
+        assert client.get("/stats").status_code == 200
+
+    assert not output.exists()
+    assert warnings == ["operations_report_deployment_binding_invalid"]
+    assert private_deployment not in warnings
+    assert source_sha256 not in warnings
 
 
 def test_handler_failure_releases_admission_and_metrics_counters(
@@ -133,7 +181,11 @@ def test_handler_failure_releases_admission_and_metrics_counters(
     def _boom():
         raise RuntimeError("private-handler-detail")
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(
+        app,
+        raise_server_exceptions=False,
+        client=("127.0.0.1", 50000),
+    ) as client:
         response = client.get("/_operations_test_boom")
         assert response.status_code == 500
         assert app.state.operations_admission.active == 0
@@ -154,7 +206,7 @@ def test_active_request_finishes_while_new_business_is_rejected_during_drain(
         release.wait(timeout=2)
         return {"status": "finished"}
 
-    with TestClient(app) as client:
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
         result: dict[str, object] = {}
 
         def request() -> None:

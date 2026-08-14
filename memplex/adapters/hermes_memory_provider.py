@@ -24,6 +24,15 @@ from typing import Any, Callable, Dict, List, Optional
 from agent.memory_provider import MemoryProvider
 
 from memplex.adapters.agent_runtime import AgentMemoryRuntime
+from memplex.adapters.managed_identity import (
+    load_managed_identity,
+    validate_managed_identity,
+)
+from memplex.adapters.runtime_status import (
+    clear_runtime_status_on_success,
+    record_runtime_failure,
+    runtime_status_path,
+)
 from memplex.config import load_config
 from memplex.service import MemplexService
 
@@ -117,19 +126,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _validated_managed_identity(identity: dict[str, Any]) -> dict[str, str]:
-    managed = identity.get("managed")
-    if not isinstance(managed, dict) or not (
-        managed.get("by") == "memplex" or managed.get("installer") == "memplex"
-    ):
-        return {}
-    user_id = str(identity.get("user_id") or "").strip()
-    project_path = str(identity.get("project_path") or "").strip()
-    if not user_id or not project_path:
-        return {}
-    return {"user_id": user_id, "project_path": project_path}
-
-
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
@@ -140,6 +136,28 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     )
     temporary.chmod(mode)
     temporary.replace(path)
+
+
+def _requested_hermes_home(kwargs: dict[str, Any]) -> Path:
+    explicit = kwargs.get("hermes_home")
+    if explicit not in (None, ""):
+        return Path(explicit).expanduser().resolve(strict=False)
+
+    config_dir = os.environ.get("HERMES_CONFIG_DIR")
+    hermes_home = os.environ.get("HERMES_HOME")
+    if config_dir and hermes_home:
+        config_path = Path(config_dir).expanduser().resolve(strict=False)
+        home_path = Path(hermes_home).expanduser().resolve(strict=False)
+        try:
+            same_root = os.path.samefile(config_path, home_path)
+        except OSError:
+            same_root = config_path == home_path
+        if not same_root:
+            raise ValueError("HERMES_CONFIG_DIR and HERMES_HOME conflict")
+        return config_path
+
+    selected = config_dir or hermes_home or Path.home() / ".hermes"
+    return Path(selected).expanduser().resolve(strict=False)
 
 
 class MemplexMemoryProvider(MemoryProvider):
@@ -201,11 +219,21 @@ class MemplexMemoryProvider(MemoryProvider):
             self.shutdown()
         self._closed = False
         self._session_id = str(session_id or "default")
-        self._hermes_home = str(
-            Path(kwargs.get("hermes_home") or Path.home() / ".hermes")
-            .expanduser()
-            .resolve(strict=False)
-        )
+        requested_hermes_home = _requested_hermes_home(kwargs)
+        if self._identity:
+            managed_identity = validate_managed_identity(
+                self._identity,
+                expected_agent="hermes",
+                expected_host_root=requested_hermes_home,
+            )
+        else:
+            managed_identity = load_managed_identity(
+                requested_hermes_home / "plugins" / "memplex" / "memplex-agent.json",
+                expected_agent="hermes",
+                expected_host_root=requested_hermes_home,
+            )
+        self._identity = managed_identity
+        self._hermes_home = managed_identity["host_root"]
         self._platform = str(kwargs.get("platform") or "cli")
         self._agent_context = str(kwargs.get("agent_context") or "primary")
         self._agent_identity = str(kwargs.get("agent_identity") or "")
@@ -239,9 +267,12 @@ class MemplexMemoryProvider(MemoryProvider):
         )
         if dynamic_project:
             config["project_path"] = dynamic_project
-        managed_identity = _validated_managed_identity(self._identity)
-        if managed_identity:
-            config.update(managed_identity)
+        config.update(
+            {
+                "user_id": managed_identity["user_id"],
+                "project_path": managed_identity["project_path"],
+            }
+        )
         user_id = str(config.get("user_id") or "").strip()
         if not user_id or user_id == "default":
             raise ValueError("Hermes Memplex provider requires a non-default user_id")
@@ -290,12 +321,37 @@ class MemplexMemoryProvider(MemoryProvider):
             "memory access is useful."
         )
 
+    def _runtime_status_path(self) -> Path:
+        return runtime_status_path(self._hermes_home)
+
+    def _record_runtime_failure(self, operation: str, error: BaseException) -> None:
+        try:
+            record_runtime_failure(
+                self._runtime_status_path(), agent="hermes", operation=operation, error=error
+            )
+        except Exception:
+            pass
+
+    def _clear_runtime_status(self, operation: str) -> None:
+        try:
+            clear_runtime_status_on_success(
+                self._runtime_status_path(), agent="hermes", operation=operation, completed=True
+            )
+        except Exception:
+            pass
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         cleaned = _clean_text(query)
         if not cleaned:
             return ""
         self._select_session(session_id)
-        return self._ensure_runtime().before_prompt(cleaned).context
+        try:
+            context = self._ensure_runtime().before_prompt(cleaned).context
+        except Exception as exc:
+            self._record_runtime_failure("prefetch", exc)
+            raise
+        self._clear_runtime_status("prefetch")
+        return context
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         cleaned = _clean_text(query)
@@ -608,10 +664,15 @@ class MemplexMemoryProvider(MemoryProvider):
                         metadata=item.metadata,
                     )
                     self._mark_captured(item.turn_key)
+                    self._clear_runtime_status("capture")
                 elif item.kind == "prefetch":
                     self._runtime_for_session(item.session_id).prefetch(item.query)
+                    self._clear_runtime_status("prefetch")
             except Exception as exc:
                 item.error = exc
+                self._record_runtime_failure(
+                    "capture" if item.kind == "capture" else "prefetch", exc
+                )
                 if item.turn_key:
                     with self._capture_lock:
                         self._queued_turns.discard(item.turn_key)
@@ -657,8 +718,10 @@ class MemplexMemoryProvider(MemoryProvider):
                 metadata=self._metadata(hook, hermes_messages=_clean_value(messages)),
             )
             self._mark_captured(turn_key)
+            self._clear_runtime_status("capture")
             return True
         except Exception as exc:
+            self._record_runtime_failure("capture", exc)
             with self._capture_lock:
                 self._queued_turns.discard(turn_key)
             logger.warning("Memplex Hermes %s capture failed: %s", hook, exc)

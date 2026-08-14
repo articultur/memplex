@@ -31,10 +31,16 @@ _REPORT_KEYS = frozenset(
     {
         "schema_version",
         "report_id",
+        "generated_at",
         "window_started_at",
         "window_ended_at",
+        "deployment_id",
+        "source_sha256",
+        "artifact_sha256",
+        "target_identity_sha256",
         "request_count",
         "successful_requests",
+        "latency_sample_count",
         "availability",
         "error_rate",
         "p95_latency_ms",
@@ -48,6 +54,18 @@ _REPORT_KEYS = frozenset(
         "key_id",
         "signature",
     }
+)
+
+MINIMUM_OBSERVATION_WINDOW_SECONDS = 300
+MINIMUM_REQUEST_SAMPLES = 1_000
+MINIMUM_LATENCY_SAMPLES = 128
+MAXIMUM_EVIDENCE_AGE_SECONDS = 900
+_MAXIMUM_REPORT_BYTES = 128 * 1024
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+_REPORT_READ_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 )
 
 
@@ -92,6 +110,27 @@ def _require_timestamp(value: object) -> str:
     return raw
 
 
+def _timestamp_datetime(value: object) -> datetime:
+    timestamp = _require_timestamp(value)
+    try:
+        return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise OperationsEvidenceError("operations_report_invalid") from exc
+
+
+def _require_sha256(value: object) -> str:
+    digest = _require_string(value)
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise OperationsEvidenceError("operations_report_invalid")
+    return digest
+
+
 def _require_nonnegative_int(value: object) -> int:
     if type(value) is not int or value < 0:
         raise OperationsEvidenceError("operations_report_invalid")
@@ -107,13 +146,37 @@ def _require_finite_float(value: object, *, minimum: float, maximum: float | Non
 
 
 @dataclass(frozen=True, slots=True)
+class OperationsReadinessBinding:
+    """Immutable identity that ties an SLO report to one deployment target."""
+
+    deployment_id: str
+    source_sha256: str
+    artifact_sha256: str
+    target_identity_sha256: str
+    expected_key_id: str
+
+    def __post_init__(self) -> None:
+        _require_string(self.deployment_id)
+        _require_sha256(self.source_sha256)
+        _require_sha256(self.artifact_sha256)
+        _require_sha256(self.target_identity_sha256)
+        _require_string(self.expected_key_id)
+
+
+@dataclass(frozen=True, slots=True)
 class OperationsEvidenceReport:
     schema_version: int
     report_id: str
+    generated_at: str
     window_started_at: str
     window_ended_at: str
+    deployment_id: str
+    source_sha256: str
+    artifact_sha256: str
+    target_identity_sha256: str
     request_count: int
     successful_requests: int
+    latency_sample_count: int
     availability: float
     error_rate: float
     p95_latency_ms: float
@@ -132,10 +195,13 @@ class OperationsEvidenceReport:
         cls,
         *,
         report_id: str,
+        generated_at: str,
         window_started_at: str,
         window_ended_at: str,
+        readiness_binding: OperationsReadinessBinding,
         request_count: int,
         successful_requests: int,
+        latency_sample_count: int,
         availability: float,
         error_rate: float,
         p95_latency_ms: float,
@@ -148,33 +214,50 @@ class OperationsEvidenceReport:
         key_id: str,
         signing_key: bytes,
     ) -> "OperationsEvidenceReport":
+        started = _timestamp_datetime(window_started_at)
+        ended = _timestamp_datetime(window_ended_at)
+        generated = _timestamp_datetime(generated_at)
+        if ended <= started or generated < ended:
+            raise OperationsEvidenceError("operations_report_invalid")
+        if not isinstance(readiness_binding, OperationsReadinessBinding):
+            raise OperationsEvidenceError("operations_report_invalid")
+        if _require_string(key_id) != readiness_binding.expected_key_id:
+            raise OperationsEvidenceError("operations_report_invalid")
         gate = (
             shutdown_drained
             and not shutdown_deadline_exceeded
             and availability + 1e-12 >= availability_target
             and error_rate <= error_rate_target + 1e-12
             and p95_latency_ms <= p95_latency_target_ms
-            and request_count > 0
+            and request_count >= MINIMUM_REQUEST_SAMPLES
+            and latency_sample_count >= MINIMUM_LATENCY_SAMPLES
+            and (ended - started).total_seconds() >= MINIMUM_OBSERVATION_WINDOW_SECONDS
         )
         unsigned = cls(
-            1,
-            report_id,
-            window_started_at,
-            window_ended_at,
-            request_count,
-            successful_requests,
-            availability,
-            error_rate,
-            p95_latency_ms,
-            availability_target,
-            error_rate_target,
-            p95_latency_target_ms,
-            shutdown_drained,
-            shutdown_deadline_exceeded,
-            alert_rules_sha256,
-            gate,
-            key_id,
-            "0" * 64,
+            schema_version=2,
+            report_id=report_id,
+            generated_at=generated_at,
+            window_started_at=window_started_at,
+            window_ended_at=window_ended_at,
+            deployment_id=readiness_binding.deployment_id,
+            source_sha256=readiness_binding.source_sha256,
+            artifact_sha256=readiness_binding.artifact_sha256,
+            target_identity_sha256=readiness_binding.target_identity_sha256,
+            request_count=request_count,
+            successful_requests=successful_requests,
+            latency_sample_count=latency_sample_count,
+            availability=availability,
+            error_rate=error_rate,
+            p95_latency_ms=p95_latency_ms,
+            availability_target=availability_target,
+            error_rate_target=error_rate_target,
+            p95_latency_target_ms=p95_latency_target_ms,
+            shutdown_drained=shutdown_drained,
+            shutdown_deadline_exceeded=shutdown_deadline_exceeded,
+            alert_rules_sha256=alert_rules_sha256,
+            industrial_gate_closing=gate,
+            key_id=key_id,
+            signature="0" * 64,
         )
         validated = cls.from_dict(unsigned.to_dict())
         signature = hmac.new(
@@ -189,18 +272,29 @@ class OperationsEvidenceReport:
         try:
             if type(raw) is not dict or set(raw) != _REPORT_KEYS:
                 raise OperationsEvidenceError("operations_report_invalid")
-            if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+            if type(raw["schema_version"]) is not int or raw["schema_version"] != 2:
                 raise OperationsEvidenceError("operations_report_invalid")
             report_id = _require_string(raw["report_id"])
             if str(uuid.UUID(report_id)) != report_id:
                 raise OperationsEvidenceError("operations_report_invalid")
+            generated_at = _require_timestamp(raw["generated_at"])
             started = _require_timestamp(raw["window_started_at"])
             ended = _require_timestamp(raw["window_ended_at"])
-            if ended <= started:
+            started_at = _timestamp_datetime(started)
+            ended_at = _timestamp_datetime(ended)
+            generated = _timestamp_datetime(generated_at)
+            if ended_at <= started_at or generated < ended_at:
                 raise OperationsEvidenceError("operations_report_invalid")
+            deployment_id = _require_string(raw["deployment_id"])
+            source_sha256 = _require_sha256(raw["source_sha256"])
+            artifact_sha256 = _require_sha256(raw["artifact_sha256"])
+            target_identity_sha256 = _require_sha256(raw["target_identity_sha256"])
             request_count = _require_nonnegative_int(raw["request_count"])
             successful = _require_nonnegative_int(raw["successful_requests"])
             if successful > request_count:
+                raise OperationsEvidenceError("operations_report_invalid")
+            latency_sample_count = _require_nonnegative_int(raw["latency_sample_count"])
+            if latency_sample_count > request_count:
                 raise OperationsEvidenceError("operations_report_invalid")
             availability = _require_finite_float(raw["availability"], minimum=0.0, maximum=1.0)
             error_rate = _require_finite_float(raw["error_rate"], minimum=0.0, maximum=1.0)
@@ -221,46 +315,52 @@ class OperationsEvidenceReport:
             gate = raw["industrial_gate_closing"]
             if type(drained) is not bool or type(exceeded) is not bool or type(gate) is not bool:
                 raise OperationsEvidenceError("operations_report_invalid")
-            digest = _require_string(raw["alert_rules_sha256"])
+            digest = _require_sha256(raw["alert_rules_sha256"])
             signature = _require_string(raw["signature"])
             if (
-                len(digest) != 64
-                or digest != digest.lower()
-                or any(char not in "0123456789abcdef" for char in digest)
-                or len(signature) != 64
+                len(signature) != 64
                 or signature != signature.lower()
                 or any(char not in "0123456789abcdef" for char in signature)
             ):
                 raise OperationsEvidenceError("operations_report_invalid")
             expected_gate = (
-                request_count > 0
+                request_count >= MINIMUM_REQUEST_SAMPLES
+                and latency_sample_count >= MINIMUM_LATENCY_SAMPLES
                 and drained
                 and not exceeded
                 and availability + 1e-12 >= availability_target
                 and error_rate <= error_target + 1e-12
                 and p95 <= p95_target
+                and (ended_at - started_at).total_seconds()
+                >= MINIMUM_OBSERVATION_WINDOW_SECONDS
             )
             if gate is not expected_gate:
                 raise OperationsEvidenceError("operations_report_invalid")
             return cls(
-                1,
-                report_id,
-                started,
-                ended,
-                request_count,
-                successful,
-                availability,
-                error_rate,
-                p95,
-                availability_target,
-                error_target,
-                p95_target,
-                drained,
-                exceeded,
-                digest,
-                gate,
-                _require_string(raw["key_id"]),
-                signature,
+                schema_version=2,
+                report_id=report_id,
+                generated_at=generated_at,
+                window_started_at=started,
+                window_ended_at=ended,
+                deployment_id=deployment_id,
+                source_sha256=source_sha256,
+                artifact_sha256=artifact_sha256,
+                target_identity_sha256=target_identity_sha256,
+                request_count=request_count,
+                successful_requests=successful,
+                latency_sample_count=latency_sample_count,
+                availability=availability,
+                error_rate=error_rate,
+                p95_latency_ms=p95,
+                availability_target=availability_target,
+                error_rate_target=error_target,
+                p95_latency_target_ms=p95_target,
+                shutdown_drained=drained,
+                shutdown_deadline_exceeded=exceeded,
+                alert_rules_sha256=digest,
+                industrial_gate_closing=gate,
+                key_id=_require_string(raw["key_id"]),
+                signature=signature,
             )
         except OperationsEvidenceError:
             raise
@@ -302,6 +402,65 @@ class OperationsEvidenceReport:
         if not hmac.compare_digest(expected, self.signature):
             raise OperationsEvidenceError("operations_report_signature_invalid")
 
+    def verify_readiness(
+        self,
+        signing_key: bytes,
+        *,
+        binding: OperationsReadinessBinding,
+        now: str | datetime | None = None,
+        max_age_seconds: int = MAXIMUM_EVIDENCE_AGE_SECONDS,
+        min_window_seconds: int = MINIMUM_OBSERVATION_WINDOW_SECONDS,
+        min_request_count: int = MINIMUM_REQUEST_SAMPLES,
+        expected_alert_rules_sha256: str | None = None,
+    ) -> None:
+        """Verify signature and all deployment-scoped G006 readiness invariants."""
+        try:
+            if not isinstance(binding, OperationsReadinessBinding):
+                raise OperationsEvidenceError("operations_report_invalid")
+            for value in (max_age_seconds, min_window_seconds, min_request_count):
+                if type(value) is not int or value <= 0:
+                    raise OperationsEvidenceError("operations_report_invalid")
+            if now is None:
+                observed_now = datetime.now(timezone.utc)
+            elif type(now) is str:
+                observed_now = _timestamp_datetime(now)
+            elif isinstance(now, datetime) and now.tzinfo is not None:
+                observed_now = now.astimezone(timezone.utc)
+            else:
+                raise OperationsEvidenceError("operations_report_invalid")
+            self.verify(signing_key)
+            if (
+                self.deployment_id != binding.deployment_id
+                or self.source_sha256 != binding.source_sha256
+                or self.artifact_sha256 != binding.artifact_sha256
+                or self.target_identity_sha256 != binding.target_identity_sha256
+                or self.key_id != binding.expected_key_id
+                or self.alert_rules_sha256
+                != (expected_alert_rules_sha256 or alert_rules_sha256())
+                or not self.industrial_gate_closing
+                or not self.shutdown_drained
+                or self.shutdown_deadline_exceeded
+                or self.request_count < min_request_count
+                or self.latency_sample_count < MINIMUM_LATENCY_SAMPLES
+            ):
+                raise OperationsEvidenceError("operations_report_invalid")
+            started = _timestamp_datetime(self.window_started_at)
+            ended = _timestamp_datetime(self.window_ended_at)
+            generated = _timestamp_datetime(self.generated_at)
+            if (
+                (ended - started).total_seconds() < min_window_seconds
+                or ended > generated
+                or generated > observed_now
+                or (generated - ended).total_seconds() > max_age_seconds
+                or (observed_now - ended).total_seconds() > max_age_seconds
+                or (observed_now - generated).total_seconds() > max_age_seconds
+            ):
+                raise OperationsEvidenceError("operations_report_invalid")
+        except OperationsEvidenceError:
+            raise
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise OperationsEvidenceError("operations_report_invalid") from exc
+
 
 def _require_key(value: object) -> bytes:
     if type(value) is not bytes or len(value) != 32:
@@ -324,16 +483,101 @@ def load_operations_signing_key() -> bytes:
         raise OperationsEvidenceError("operations_signing_key_invalid") from exc
 
 
-def load_operations_report(path: Path) -> OperationsEvidenceReport:
-    """Load one report without exposing its path or parser details."""
+def _open_pinned_parent(path: Path, *, error_message: str) -> int:
+    directory_fd = -1
     try:
-        if not isinstance(path, Path):
+        parent = path.parent
+        if parent.is_absolute():
+            directory_fd = os.open(os.sep, _DIRECTORY_OPEN_FLAGS)
+            components = parent.parts[1:]
+        else:
+            directory_fd = os.open(".", _DIRECTORY_OPEN_FLAGS)
+            components = parent.parts
+        for component in components:
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                raise OperationsEvidenceError(error_message)
+            next_fd = os.open(
+                component,
+                _DIRECTORY_OPEN_FLAGS,
+                dir_fd=directory_fd,
+            )
+            previous_fd = directory_fd
+            directory_fd = next_fd
+            os.close(previous_fd)
+        return directory_fd
+    except OperationsEvidenceError:
+        if directory_fd >= 0:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        raise
+    except (OSError, OverflowError, TypeError, ValueError) as exc:
+        if directory_fd >= 0:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        raise OperationsEvidenceError(error_message) from exc
+
+
+def load_operations_report(path: Path) -> OperationsEvidenceReport:
+    """Load one bounded regular report through pinned, no-follow descriptors."""
+    directory_fd = -1
+    report_fd = -1
+    try:
+        if (
+            not isinstance(path, Path)
+            or not path.name
+            or path.name in {".", ".."}
+        ):
             raise OperationsEvidenceError("operations_report_invalid")
-        return OperationsEvidenceReport.from_json(path.read_bytes())
+        directory_fd = _open_pinned_parent(
+            path,
+            error_message="operations_report_invalid",
+        )
+        report_fd = os.open(
+            path.name,
+            _REPORT_READ_FLAGS,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(report_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size < 0
+            or metadata.st_size > _MAXIMUM_REPORT_BYTES
+        ):
+            raise OperationsEvidenceError("operations_report_invalid")
+        chunks: list[bytes] = []
+        remaining = metadata.st_size
+        while remaining:
+            chunk = os.read(report_fd, min(65_536, remaining))
+            if not chunk:
+                raise OperationsEvidenceError("operations_report_invalid")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(report_fd, 1):
+            raise OperationsEvidenceError("operations_report_invalid")
+        if os.fstat(report_fd).st_size != metadata.st_size:
+            raise OperationsEvidenceError("operations_report_invalid")
+        return OperationsEvidenceReport.from_json(b"".join(chunks))
     except OperationsEvidenceError:
         raise
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, OverflowError, TypeError, ValueError) as exc:
         raise OperationsEvidenceError("operations_report_invalid") from exc
+    finally:
+        if report_fd >= 0:
+            try:
+                os.close(report_fd)
+            except OSError:
+                pass
+        if directory_fd >= 0:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
 def alert_rules_bytes() -> bytes:
@@ -360,6 +604,8 @@ def create_operations_evidence(
     report_id: str,
     window_started_at: str,
     window_ended_at: str,
+    generated_at: str,
+    readiness_binding: OperationsReadinessBinding,
     signing_key: bytes,
 ) -> OperationsEvidenceReport:
     """Build signed evidence from bounded metrics and a completed drain."""
@@ -367,12 +613,19 @@ def create_operations_evidence(
         operations = getattr(config, "operations")
         request_count = metrics_snapshot["request_count"]
         successful_requests = metrics_snapshot["successful_requests"]
+        latency_sample_count = metrics_snapshot["latency_sample_count"]
         p95_latency_ms = metrics_snapshot["p95_latency_ms"]
-        if type(request_count) is not int or type(successful_requests) is not int:
+        if (
+            type(request_count) is not int
+            or type(successful_requests) is not int
+            or type(latency_sample_count) is not int
+        ):
             raise OperationsEvidenceError("operations_evidence_input_invalid")
         if type(p95_latency_ms) not in {int, float}:
             raise OperationsEvidenceError("operations_evidence_input_invalid")
         if request_count <= 0 or successful_requests < 0 or successful_requests > request_count:
+            raise OperationsEvidenceError("operations_evidence_input_invalid")
+        if latency_sample_count < 0 or latency_sample_count > request_count:
             raise OperationsEvidenceError("operations_evidence_input_invalid")
         availability = float(successful_requests / request_count)
         error_rate = float(1.0 - availability)
@@ -382,10 +635,13 @@ def create_operations_evidence(
             raise OperationsEvidenceError("operations_evidence_input_invalid")
         return OperationsEvidenceReport.create(
             report_id=report_id,
+            generated_at=generated_at,
             window_started_at=window_started_at,
             window_ended_at=window_ended_at,
+            readiness_binding=readiness_binding,
             request_count=request_count,
             successful_requests=successful_requests,
+            latency_sample_count=latency_sample_count,
             availability=availability,
             error_rate=error_rate,
             p95_latency_ms=float(p95_latency_ms),
@@ -414,27 +670,15 @@ def write_operations_report_atomic(
     """Atomically replace one report through a pinned parent directory fd."""
     if not isinstance(path, Path) or not path.name or path.name in {".", ".."}:
         raise OperationsEvidenceError("operations_report_output_invalid")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = -1
     temp_name = ".%s.%s.tmp" % (path.name, uuid.uuid4().hex)
     temp_created = False
     try:
-        parent = path.parent
-        if parent.is_absolute():
-            directory_fd = os.open(os.sep, directory_flags)
-            components = parent.parts[1:]
-        else:
-            directory_fd = os.open(".", directory_flags)
-            components = parent.parts
-        for component in components:
-            if component in {"", "."}:
-                continue
-            if component == "..":
-                raise OperationsEvidenceError("operations_report_output_invalid")
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
+        directory_fd = _open_pinned_parent(
+            path,
+            error_message="operations_report_output_invalid",
+        )
         try:
             existing = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:

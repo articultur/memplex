@@ -11,16 +11,12 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from hashlib import sha256
 from threading import Condition, RLock
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
-from memplex.auth import AuthorizationContext, local_development_context
-from memplex.storage.inbound import InboundSyncExecutor
+from memplex.auth import AuthorizationContext
 from memplex.storage.migrations import (
-    ApplicationAclContract,
-    IngressAclContract,
     MigrationIntegrityError,
     PostgresApplicationPrincipal,
     PostgresMigrationRunner,
@@ -1344,7 +1340,7 @@ class PostgresPoolManager:
             raise RuntimeError("PostgreSQL application access probe cleanup failed") from None
 
     @staticmethod
-    def _probe_application_access(
+    def _probe_application_access(  # noqa: C901  documented known debt
         cursor: Any,
         target: PostgresTargetIdentity,
         profile: str,
@@ -1405,6 +1401,7 @@ class PostgresPoolManager:
             ("memplex_sync_stream_state", "SELECT,INSERT,UPDATE"),
             ("memplex_sync_snapshots", "SELECT,INSERT,UPDATE,DELETE"),
             ("memplex_sync_snapshot_items", "SELECT,INSERT,DELETE"),
+            ("memplex_background_tasks", "SELECT,INSERT,UPDATE,DELETE"),
         )
         cursor.execute(
             """
@@ -1450,6 +1447,139 @@ class PostgresPoolManager:
             )
             if cursor.fetchone() != (False,):
                 raise PermissionError("application role can configure local sync identity")
+        PostgresPoolManager._probe_verify_production_principal(
+            cursor, profile, schema, tables,
+        )
+        PostgresPoolManager._probe_verify_vector_capability(
+            cursor, profile, schema, vector_dim,
+        )
+
+        token = uuid4().hex
+        tenant = "memplex-readiness-" + token
+        subject = "subject-" + token
+        workspace = "workspace-" + token
+        agent = "agent-" + token
+        session = "session-" + token
+        function_a = "readiness-a-" + token
+        function_b = "readiness-b-" + token
+        cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+        cursor.execute("SELECT set_config('memplex.subject_id', %s, true)", (subject,))
+        cursor.execute("SELECT set_config('memplex.workspace_id', %s, true)", (workspace,))
+        cursor.execute("SELECT set_config('memplex.agent_id', %s, true)", (agent,))
+        cursor.execute("SELECT set_config('memplex.session_id', %s, true)", (session,))
+        PostgresPoolManager._probe_verify_background_task_crud(cursor, token)
+        remote = "remote-" + token
+        consumer = "consumer-" + token
+        cursor.execute("SELECT set_config('memplex.verified_remote_node_id', %s, true)", (remote,))
+        cursor.execute("SELECT set_config('memplex.consumer_id', %s, true)", (consumer,))
+        cursor.execute("SELECT memplex_sync_assert_delivery_quota(%s, 0)", (tenant,))
+        cursor.execute("SAVEPOINT memplex_probe_sync_v5")
+        event_id = PostgresPoolManager._probe_publish_sync_event(
+            cursor, profile, tenant, subject, workspace, agent, session,
+            token, remote, consumer,
+        )
+        metadata = (tenant, subject, workspace, "workspace", agent, session)
+        payload = '{"id":"readiness","name":"readiness"}'
+        payload_b = '{"id":"readiness-b","name":"readiness-b"}'
+        insert_function = """
+            INSERT INTO memplex_functions
+              (tenant_id, id, data, updated_at, owner_subject, workspace,
+               visibility, source_agent, source_session)
+            VALUES (%s, %s, %s::jsonb, now(), %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        cursor.execute(insert_function, (metadata[0], function_a, payload, *metadata[1:]))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("function insert was not visible")
+        cursor.execute(insert_function, (metadata[0], function_b, payload_b, *metadata[1:]))
+        if cursor.fetchone() != (function_b,):
+            raise PermissionError("function insert was not visible")
+        cursor.execute(
+            "UPDATE memplex_functions SET updated_at = now() WHERE tenant_id=%s AND id=%s RETURNING id",
+            (tenant, function_a),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("function update was not visible")
+        cursor.execute(
+            "INSERT INTO memplex_edges (tenant_id, source, target, edge_type, weight, evidence, created_at, owner_subject, workspace, visibility, source_agent, source_session) VALUES (%s,%s,%s,'RELATED_TO',1,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING source",
+            (tenant, function_a, function_b, "{}", *metadata[1:]),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge insert was not visible")
+        cursor.execute(
+            "SELECT source FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO'",
+            (tenant, function_a, function_b),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge select was not visible")
+        cursor.execute("UPDATE memplex_edges SET weight=2 WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge update was not visible")
+        cursor.execute("DELETE FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge delete was not visible")
+        # A development superuser is permitted as a convenience and bypasses
+        # RLS by PostgreSQL design.  Production rejected it above, so only
+        # production uses this as isolation evidence.
+        rejected = PostgresPoolManager._probe_verify_function_rls(
+            cursor, profile, tenant, function_a, insert_function, metadata, payload,
+        )
+        for table, stamp in (("memplex_observations", "created_at"), ("memplex_facts", "updated_at"), ("memplex_preferences", "updated_at")):
+            record_id = table + "-" + token
+            cursor.execute(
+                f"INSERT INTO {table} (tenant_id,id,data,{stamp},owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING id",
+                (tenant, record_id, payload, *metadata[1:]),
+            )
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} insert was not visible")
+            cursor.execute(f"SELECT id FROM {table} WHERE tenant_id=%s AND id=%s", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} select was not visible")
+            cursor.execute(f"UPDATE {table} SET {stamp}=now() WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} update was not visible")
+            cursor.execute(f"DELETE FROM {table} WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} delete was not visible")
+        changelog_id = -int(token[:12], 16)
+        cursor.execute(
+            "INSERT INTO memplex_changelog (tenant_id,id,func_id,ts,event_type,description,source,actor,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s,now(),'readiness','readiness','readiness','readiness',%s,%s,%s,%s,%s) RETURNING id",
+            (tenant, changelog_id, function_a, *metadata[1:]),
+        )
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog insert was not visible")
+        cursor.execute("SELECT id FROM memplex_changelog WHERE tenant_id=%s AND id=%s", (tenant, changelog_id))
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog select was not visible")
+        cursor.execute("DELETE FROM memplex_changelog WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, changelog_id))
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog delete was not visible")
+        feedback_id = "feedback-" + token
+        cursor.execute(
+            "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',0,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
+            (feedback_id, tenant, subject, workspace, '{"agent_id":"' + agent + '","session_id":"' + session + '"}'),
+        )
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback insert was not visible")
+        cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback select was not visible")
+        cursor.execute("UPDATE feedback SET reason='readiness' WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback update was not visible")
+        rejected = PostgresPoolManager._probe_verify_feedback_rls(
+            cursor, profile, tenant, subject, agent, session, workspace, feedback_id,
+        )
+        cursor.execute("DELETE FROM feedback WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback delete was not visible")
+        cursor.execute("DELETE FROM memplex_functions WHERE tenant_id=%s AND id IN (%s,%s) RETURNING id", (tenant, function_a, function_b))
+        if len(cursor.fetchall()) != 2:
+            raise PermissionError("function delete was not visible")
+
+    @staticmethod
+    def _probe_verify_production_principal(cursor, profile: str, schema, tables) -> None:
+        """Production-only principal/ownership audit over the managed catalogue."""
         if profile == "production":
             cursor.execute(
                 """
@@ -1476,6 +1606,11 @@ class PostgresPoolManager:
             row = cursor.fetchone()
             if row is None or len(row) != 5 or not all(row):
                 raise PermissionError("production application principal is unsafe")
+
+
+    @staticmethod
+    def _probe_verify_vector_capability(cursor, profile: str, schema, vector_dim) -> None:
+        """The negotiated pgvector capability matches the requested dimension."""
         if vector_dim:
             cursor.execute(
                 """
@@ -1515,25 +1650,69 @@ class PostgresPoolManager:
             if cursor.fetchone() is None:
                 raise PermissionError("vector capability probe failed")
 
-        token = uuid4().hex
-        tenant = "memplex-readiness-" + token
-        subject = "subject-" + token
-        workspace = "workspace-" + token
-        agent = "agent-" + token
-        session = "session-" + token
-        function_a = "readiness-a-" + token
-        function_b = "readiness-b-" + token
-        cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        cursor.execute("SELECT set_config('memplex.subject_id', %s, true)", (subject,))
-        cursor.execute("SELECT set_config('memplex.workspace_id', %s, true)", (workspace,))
-        cursor.execute("SELECT set_config('memplex.agent_id', %s, true)", (agent,))
-        cursor.execute("SELECT set_config('memplex.session_id', %s, true)", (session,))
-        remote = "remote-" + token
-        consumer = "consumer-" + token
-        cursor.execute("SELECT set_config('memplex.verified_remote_node_id', %s, true)", (remote,))
-        cursor.execute("SELECT set_config('memplex.consumer_id', %s, true)", (consumer,))
-        cursor.execute("SELECT memplex_sync_assert_delivery_quota(%s, 0)", (tenant,))
-        cursor.execute("SAVEPOINT memplex_probe_sync_v5")
+
+    @staticmethod
+    def _probe_verify_feedback_rls(cursor, profile: str, tenant, subject, agent, session, workspace, feedback_id) -> bool:
+        """Cross-tenant feedback RLS isolation under savepoint round-trip."""
+        if profile == "production":
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
+            cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
+            if cursor.fetchone() is not None:
+                raise PermissionError("feedback RLS isolation failed")
+            cursor.execute("SAVEPOINT memplex_probe_feedback_rls")
+            rejected = False
+            try:
+                cursor.execute(
+                    "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',1,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
+                    (
+                        feedback_id + "-rls",
+                        tenant,
+                        subject,
+                        workspace,
+                        '{"agent_id":"' + agent + '","session_id":"' + session + '"}',
+                    ),
+                )
+            except BaseException:
+                rejected = True
+            finally:
+                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_feedback_rls")
+                cursor.execute("RELEASE SAVEPOINT memplex_probe_feedback_rls")
+            if not rejected:
+                raise PermissionError("feedback RLS WITH CHECK isolation failed")
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+
+
+    @staticmethod
+    def _probe_verify_function_rls(cursor, profile: str, tenant, function_a, insert_function, metadata, payload) -> bool:
+        """Cross-tenant function RLS isolation under savepoint round-trip."""
+        if profile == "production":
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
+            cursor.execute("SELECT id FROM memplex_functions WHERE tenant_id=%s AND id=%s", (tenant, function_a))
+            if cursor.fetchone() is not None:
+                raise PermissionError("function RLS isolation failed")
+            cursor.execute("SAVEPOINT memplex_probe_function_rls")
+            rejected = False
+            try:
+                # The GUC deliberately names another tenant while the row
+                # carries our original tenant.  A successful INSERT would
+                # prove that WITH CHECK is not enforcing the RLS boundary.
+                cursor.execute(
+                    insert_function,
+                    (metadata[0], function_a + "-rls", payload, *metadata[1:]),
+                )
+            except BaseException:
+                rejected = True
+            finally:
+                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_function_rls")
+                cursor.execute("RELEASE SAVEPOINT memplex_probe_function_rls")
+            if not rejected:
+                raise PermissionError("function RLS WITH CHECK isolation failed")
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+
+
+    @staticmethod
+    def _probe_publish_sync_event(cursor, profile: str, tenant, subject, workspace, agent, session, token, remote, consumer) -> Any:
+        """Insert one sync-v5 outbox event under its savepoint and verify visibility."""
         try:
             event_id = "event-" + token
             cursor.execute(
@@ -1590,147 +1769,43 @@ class PostgresPoolManager:
         finally:
             cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_sync_v5")
             cursor.execute("RELEASE SAVEPOINT memplex_probe_sync_v5")
-        metadata = (tenant, subject, workspace, "workspace", agent, session)
-        payload = '{"id":"readiness","name":"readiness"}'
-        payload_b = '{"id":"readiness-b","name":"readiness-b"}'
-        insert_function = """
-            INSERT INTO memplex_functions
-              (tenant_id, id, data, updated_at, owner_subject, workspace,
-               visibility, source_agent, source_session)
-            VALUES (%s, %s, %s::jsonb, now(), %s, %s, %s, %s, %s)
-            RETURNING id
-        """
-        cursor.execute(insert_function, (metadata[0], function_a, payload, *metadata[1:]))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("function insert was not visible")
-        cursor.execute(insert_function, (metadata[0], function_b, payload_b, *metadata[1:]))
-        if cursor.fetchone() != (function_b,):
-            raise PermissionError("function insert was not visible")
+
+
+    @staticmethod
+    def _probe_verify_background_task_crud(cursor, token: str) -> None:
+        """Insert/update/select/delete one background task row as the probe role."""
+        task_id = "task-" + token
         cursor.execute(
-            "UPDATE memplex_functions SET updated_at = now() WHERE tenant_id=%s AND id=%s RETURNING id",
-            (tenant, function_a),
+            """
+            INSERT INTO memplex_background_tasks
+              (task_id, task_type, status, payload, max_retries, next_attempt_at)
+            VALUES (%s, 'build_index', 'pending', '{}'::jsonb, 1, clock_timestamp())
+            RETURNING task_id
+            """,
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("function update was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task insert was not visible")
         cursor.execute(
-            "INSERT INTO memplex_edges (tenant_id, source, target, edge_type, weight, evidence, created_at, owner_subject, workspace, visibility, source_agent, source_session) VALUES (%s,%s,%s,'RELATED_TO',1,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING source",
-            (tenant, function_a, function_b, "{}", *metadata[1:]),
+            "UPDATE memplex_background_tasks SET last_error_code='readiness' "
+            "WHERE task_id=%s RETURNING task_id",
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge insert was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task update was not visible")
         cursor.execute(
-            "SELECT source FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO'",
-            (tenant, function_a, function_b),
+            "SELECT task_id FROM memplex_background_tasks WHERE task_id=%s",
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge select was not visible")
-        cursor.execute("UPDATE memplex_edges SET weight=2 WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge update was not visible")
-        cursor.execute("DELETE FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge delete was not visible")
-        # A development superuser is permitted as a convenience and bypasses
-        # RLS by PostgreSQL design.  Production rejected it above, so only
-        # production uses this as isolation evidence.
-        if profile == "production":
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
-            cursor.execute("SELECT id FROM memplex_functions WHERE tenant_id=%s AND id=%s", (tenant, function_a))
-            if cursor.fetchone() is not None:
-                raise PermissionError("function RLS isolation failed")
-            cursor.execute("SAVEPOINT memplex_probe_function_rls")
-            rejected = False
-            try:
-                # The GUC deliberately names another tenant while the row
-                # carries our original tenant.  A successful INSERT would
-                # prove that WITH CHECK is not enforcing the RLS boundary.
-                cursor.execute(
-                    insert_function,
-                    (metadata[0], function_a + "-rls", payload, *metadata[1:]),
-                )
-            except BaseException:
-                rejected = True
-            finally:
-                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_function_rls")
-                cursor.execute("RELEASE SAVEPOINT memplex_probe_function_rls")
-            if not rejected:
-                raise PermissionError("function RLS WITH CHECK isolation failed")
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        for table, stamp in (("memplex_observations", "created_at"), ("memplex_facts", "updated_at"), ("memplex_preferences", "updated_at")):
-            record_id = table + "-" + token
-            cursor.execute(
-                f"INSERT INTO {table} (tenant_id,id,data,{stamp},owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING id",
-                (tenant, record_id, payload, *metadata[1:]),
-            )
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} insert was not visible")
-            cursor.execute(f"SELECT id FROM {table} WHERE tenant_id=%s AND id=%s", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} select was not visible")
-            cursor.execute(f"UPDATE {table} SET {stamp}=now() WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} update was not visible")
-            cursor.execute(f"DELETE FROM {table} WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} delete was not visible")
-        changelog_id = -int(token[:12], 16)
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task select was not visible")
         cursor.execute(
-            "INSERT INTO memplex_changelog (tenant_id,id,func_id,ts,event_type,description,source,actor,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s,now(),'readiness','readiness','readiness','readiness',%s,%s,%s,%s,%s) RETURNING id",
-            (tenant, changelog_id, function_a, *metadata[1:]),
+            "DELETE FROM memplex_background_tasks WHERE task_id=%s RETURNING task_id",
+            (task_id,),
         )
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog insert was not visible")
-        cursor.execute("SELECT id FROM memplex_changelog WHERE tenant_id=%s AND id=%s", (tenant, changelog_id))
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog select was not visible")
-        cursor.execute("DELETE FROM memplex_changelog WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, changelog_id))
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog delete was not visible")
-        feedback_id = "feedback-" + token
-        cursor.execute(
-            "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',0,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
-            (feedback_id, tenant, subject, workspace, '{"agent_id":"' + agent + '","session_id":"' + session + '"}'),
-        )
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback insert was not visible")
-        cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback select was not visible")
-        cursor.execute("UPDATE feedback SET reason='readiness' WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback update was not visible")
-        if profile == "production":
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
-            cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
-            if cursor.fetchone() is not None:
-                raise PermissionError("feedback RLS isolation failed")
-            cursor.execute("SAVEPOINT memplex_probe_feedback_rls")
-            rejected = False
-            try:
-                cursor.execute(
-                    "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',1,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
-                    (
-                        feedback_id + "-rls",
-                        tenant,
-                        subject,
-                        workspace,
-                        '{"agent_id":"' + agent + '","session_id":"' + session + '"}',
-                    ),
-                )
-            except BaseException:
-                rejected = True
-            finally:
-                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_feedback_rls")
-                cursor.execute("RELEASE SAVEPOINT memplex_probe_feedback_rls")
-            if not rejected:
-                raise PermissionError("feedback RLS WITH CHECK isolation failed")
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        cursor.execute("DELETE FROM feedback WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback delete was not visible")
-        cursor.execute("DELETE FROM memplex_functions WHERE tenant_id=%s AND id IN (%s,%s) RETURNING id", (tenant, function_a, function_b))
-        if len(cursor.fetchall()) != 2:
-            raise PermissionError("function delete was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task delete was not visible")
+
 
     def close(self, *, wait: bool = True) -> bool:
         with self._condition:
@@ -1762,854 +1837,13 @@ class PostgresPoolManager:
         return True
 
 
-class PostgresStorageResources:
-    """Service-owned migration/capability gate and shared business pool.
 
-    The condition-protected state machine makes readiness and shutdown
-    mutually exclusive.  A close request during initialization is terminal:
-    any staged raw pool is closed and no business seal can be published.
-    """
-
-    def __init__(
-        self,
-        dsn: str,
-        *,
-        migration_dsn: str | None = None,
-        pool_factory: Callable[..., Any] | None = None,
-        expected_target: PostgresTargetIdentity | None = None,
-        ingress_acl: IngressAclContract | None = None,
-    ) -> None:
-        if type(dsn) is not str or not dsn.strip():
-            raise TypeError("PostgreSQL application DSN must be a non-empty exact str")
-        if migration_dsn is not None and (
-            type(migration_dsn) is not str or not migration_dsn.strip()
-        ):
-            raise TypeError("PostgreSQL migration DSN must be a non-empty exact str")
-        if expected_target is not None:
-            _target_key(expected_target)
-        if ingress_acl is not None and type(ingress_acl) is not IngressAclContract:
-            raise TypeError("PostgreSQL ingress ACL must be an exact IngressAclContract")
-        self.dsn = dsn
-        self.migration_dsn = dsn if migration_dsn is None else migration_dsn
-        self._pool_factory = pool_factory
-        self._expected_target = expected_target
-        self._ingress_acl = ingress_acl
-        self._condition = Condition(RLock())
-        self._state = ResourceState.NEW
-        self._request: VectorCapabilityRequest | None = None
-        self._profile: str | None = None
-        self._pool_manager: PostgresPoolManager | None = None
-        self._ready_pool: ReadyPostgresPool | None = None
-        self._staged_raw_pool: Any | None = None
-        self._staged_manager: PostgresPoolManager | None = None
-        self._fault: BaseException | None = None
-        self._close_error: BaseException | None = None
-        self._close_in_progress = False
-        self.vector_capability_status: VectorCapabilityStatus | None = None
-
-    @property
-    def state(self) -> str:
-        with self._condition:
-            return self._state.value
-
-    @property
-    def ready_pool(self) -> ReadyPostgresPool:
-        with self._condition:
-            if self._state is not ResourceState.READY or self._ready_pool is None:
-                raise RuntimeError("PostgreSQL storage resources are not ready")
-            return self._ready_pool
-
-    @property
-    def pool_manager(self) -> PostgresPoolManager:
-        """Expose the manager for diagnostics; business stores require the seal."""
-        return self.ready_pool.manager
-
-    @property
-    def pool_created(self) -> bool:
-        with self._condition:
-            return self._ready_pool is not None
-
-    @property
-    def business_lease_count(self) -> int:
-        with self._condition:
-            manager = self._pool_manager
-        return 0 if manager is None else manager.business_lease_count
-
-    @property
-    def pool_max_connections(self) -> int:
-        """Return the configured business-pool ceiling without exposing DSNs."""
-        with self._condition:
-            manager = self._pool_manager
-        return 0 if manager is None else manager.max_connections
-
-    @property
-    def pool_high_watermark(self) -> int:
-        """Return historical validated lease demand without connection details."""
-        with self._condition:
-            manager = self._pool_manager
-        return 0 if manager is None else manager.business_lease_high_watermark
-
-    @staticmethod
-    def _profile_for(deployment_profile: str) -> str:
-        profile = str(deployment_profile).strip().lower()
-        if profile not in {"development", "production"}:
-            raise ValueError("PostgreSQL resources require development or production profile")
-        return profile
-
-    @staticmethod
-    def _validate_request_profile(
-        request: VectorCapabilityRequest, profile: str
-    ) -> None:
-        if request.dim == 0:
-            if request.policy != "disabled":
-                raise ValueError("vector dim=0 requires disabled policy")
-            return
-        expected_policy = "required" if profile == "production" else "best_effort"
-        if request.policy != expected_policy:
-            raise ValueError(
-                f"{profile} vector dim>0 requires {expected_policy} policy"
-            )
-
-    @staticmethod
-    def _validate_status(
-        request: VectorCapabilityRequest,
-        profile: str,
-        status: VectorCapabilityStatus,
-    ) -> int:
-        """Validate the runner result before any business pool exists."""
-        if type(request) is not VectorCapabilityRequest:
-            raise ValueError("vector capability request must be VectorCapabilityRequest")
-        if type(status) is not VectorCapabilityStatus:
-            raise ValueError("vector capability result must be VectorCapabilityStatus")
-        PostgresStorageResources._validate_request_profile(request, profile)
-        state = getattr(status, "state", None)
-        dim = getattr(status, "dim", None)
-        digest = getattr(status, "parameter_digest", None)
-        if request.policy == "disabled":
-            if state != "disabled" or dim != 0 or digest is not None:
-                raise ValueError("disabled vector status is inconsistent")
-            return 0
-        if state == "degraded":
-            if (
-                profile != "development"
-                or request.policy != "best_effort"
-                or dim != request.dim
-                or digest is not None
-            ):
-                raise ValueError("degraded vector status is inconsistent")
-            return 0
-        expected_digest = sha256(f"pgvector:{request.dim}".encode("ascii")).hexdigest()
-        if (
-            state != "ready"
-            or dim != request.dim
-            or digest != expected_digest
-        ):
-            raise ValueError("ready vector status digest is inconsistent")
-        return request.dim
-
-    def _same_request_locked(
-        self, request: VectorCapabilityRequest, profile: str
-    ) -> bool:
-        return self._request == request and self._profile == profile
-
-    def _closed_error_locked(self) -> RuntimeError:
-        return RuntimeError("PostgreSQL storage resources are closed")
-
-    def _fault_error_locked(self) -> RuntimeError:
-        error = self._fault
-        if error is None:
-            return RuntimeError("PostgreSQL storage resources are faulted")
-        failure = RuntimeError("PostgreSQL storage resources are faulted")
-        failure.__cause__ = error
-        return failure
-
-    def _revoke_ready_pool_locked(self) -> None:
-        """Invalidate the published construction capability before shutdown."""
-        _revoke_ready_pool_authority(self._ready_pool)
-
-    @staticmethod
-    def _close_staged(
-        manager: PostgresPoolManager | None, raw_pool: Any | None
-    ) -> BaseException | None:
-        try:
-            if manager is not None:
-                manager.close(wait=True)
-            elif raw_pool is not None:
-                raw_pool.closeall()
-        except BaseException as exc:
-            return exc
-        return None
-
-    def _finish_initialization_failure(
-        self,
-        error: BaseException,
-        manager: PostgresPoolManager | None,
-        raw_pool: Any | None,
-    ) -> None:
-        cleanup_error = self._close_staged(manager, raw_pool)
-        with self._condition:
-            self._revoke_ready_pool_locked()
-            self._staged_manager = None
-            self._staged_raw_pool = None
-            if cleanup_error is not None:
-                self._fault = cleanup_error
-                self._close_error = cleanup_error
-                self._state = ResourceState.FAULTED
-            elif self._state is ResourceState.CLOSING:
-                self._state = ResourceState.CLOSED
-            elif self._state is ResourceState.INITIALIZING:
-                self._fault = error
-                self._state = ResourceState.FAULTED
-            self._condition.notify_all()
-
-    def _on_pool_closed(self, close_error: BaseException | None) -> None:
-        """Advance the resource terminal state after manager auto-finalization."""
-        with self._condition:
-            self._revoke_ready_pool_locked()
-            if self._state is ResourceState.READY:
-                self._close_in_progress = False
-                self._fault = close_error or RuntimeError(
-                    "PostgreSQL pool was closed outside PostgresStorageResources"
-                )
-                self._close_error = self._fault
-                self._state = ResourceState.FAULTED
-                self._condition.notify_all()
-                return
-            if self._state is not ResourceState.CLOSING:
-                return
-            self._close_in_progress = False
-            if close_error is None:
-                self._state = ResourceState.CLOSED
-            else:
-                self._fault = close_error
-                self._close_error = close_error
-                self._state = ResourceState.FAULTED
-            self._condition.notify_all()
-
-    def _on_pool_fault(self, error: BaseException) -> None:
-        """Mirror a terminal manager fault into Resources and revoke its seal."""
-        manager: PostgresPoolManager | None = None
-        with self._condition:
-            if self._state not in {ResourceState.READY, ResourceState.CLOSING}:
-                return
-            self._revoke_ready_pool_locked()
-            self._fault = error
-            self._close_error = error
-            self._close_in_progress = False
-            self._state = ResourceState.FAULTED
-            manager = self._pool_manager
-            self._condition.notify_all()
-        if manager is not None:
-            try:
-                # A target/cleanup fault may occur before the caller obtains
-                # a lease.  Request non-waiting shutdown now; the in-flight
-                # borrower remains counted until it has returned its
-                # connection, then the manager performs the one closeall.
-                manager.close(wait=False)
-            except BaseException:
-                # The original pool fault remains the stable resource cause.
-                pass
-
-    def ensure_ready(
-        self,
-        request: VectorCapabilityRequest,
-        deployment_profile: str,
-    ) -> VectorCapabilityStatus:
-        if type(request) is not VectorCapabilityRequest:
-            raise ValueError("vector capability request must be VectorCapabilityRequest")
-        profile = self._profile_for(deployment_profile)
-        self._validate_request_profile(request, profile)
-        with self._condition:
-            if self._state is ResourceState.NEW:
-                self._request = request
-                self._profile = profile
-                self._state = ResourceState.INITIALIZING
-            elif self._state is ResourceState.INITIALIZING:
-                if not self._same_request_locked(request, profile):
-                    raise RuntimeError(
-                        "PostgreSQL storage resources are already initialized differently"
-                    )
-                while self._state is ResourceState.INITIALIZING:
-                    self._condition.wait()
-                if self._state is ResourceState.READY:
-                    assert self.vector_capability_status is not None
-                    return self.vector_capability_status
-                if self._state in {ResourceState.CLOSING, ResourceState.CLOSED}:
-                    raise self._closed_error_locked()
-                raise self._fault_error_locked()
-            elif self._state is ResourceState.READY:
-                if not self._same_request_locked(request, profile):
-                    raise RuntimeError(
-                        "PostgreSQL storage resources are already initialized differently"
-                    )
-                assert self.vector_capability_status is not None
-                return self.vector_capability_status
-            elif self._state in {ResourceState.CLOSING, ResourceState.CLOSED}:
-                raise self._closed_error_locked()
-            else:
-                raise self._fault_error_locked()
-
-        raw_pool: Any | None = None
-        manager: PostgresPoolManager | None = None
-        try:
-            application_runner = _new_migration_runner(self.dsn)
-            application_target = application_runner.inspect_target()
-            _target_key(application_target)
-            if (
-                self._expected_target is not None
-                and _target_key(application_target) != _target_key(self._expected_target)
-            ):
-                raise MigrationIntegrityError(
-                    "PostgreSQL application target does not match expected target"
-                )
-            application_principal = application_runner.inspect_application_principal(
-                expected_target=application_target
-            )
-            application_acl = ApplicationAclContract(application_principal.role)
-            migration_runner = _new_migration_runner(self.migration_dsn)
-            migration_target = migration_runner.inspect_target()
-            if _target_key(migration_target) != _target_key(application_target):
-                raise MigrationIntegrityError(
-                    "PostgreSQL migration target does not match application target"
-                )
-            if request.policy == "disabled":
-                apply_kwargs = {
-                    "expected_target": application_target,
-                    "application_acl": application_acl,
-                }
-                if self._ingress_acl is not None:
-                    apply_kwargs["ingress_acl"] = self._ingress_acl
-                migration_runner.apply(**apply_kwargs)
-            else:
-                # The mutator's return value is intentionally provisional.
-                # A distinct readonly connection below supplies the only
-                # status that may become a seal.
-                ensure_kwargs = {
-                    "expected_target": application_target,
-                    "application_acl": application_acl,
-                }
-                if self._ingress_acl is not None:
-                    ensure_kwargs["ingress_acl"] = self._ingress_acl
-                migration_runner.ensure_vector_capability(
-                    request,
-                    profile,
-                    **ensure_kwargs,
-                )
-            with self._condition:
-                if self._state is not ResourceState.INITIALIZING:
-                    raise self._closed_error_locked()
-            # Structural/ACL verification is deliberately completed before a
-            # candidate business pool exists.  An unverified catalogue must
-            # never cause a pool_factory side effect or leave a connection to
-            # clean up; only the final DML proof needs the future pool.
-            verifier = _new_migration_runner(self.migration_dsn)
-            verify_kwargs = {
-                "expected_target": application_target,
-                "application_acl": application_acl,
-            }
-            if self._ingress_acl is not None:
-                verify_kwargs["ingress_acl"] = self._ingress_acl
-            status = verifier.verify_storage_readiness(
-                request,
-                profile,
-                **verify_kwargs,
-            )
-            effective_dim = self._validate_status(request, profile, status)
-            kwargs: dict[str, Any] = {}
-            if self._pool_factory is not None:
-                raw_pool = self._pool_factory(1, 8, self.dsn)
-                with self._condition:
-                    self._staged_raw_pool = raw_pool
-                    if self._state is not ResourceState.INITIALIZING:
-                        raise self._closed_error_locked()
-                kwargs["pool"] = raw_pool
-            kwargs["on_closed"] = self._on_pool_closed
-            kwargs["on_fault"] = self._on_pool_fault
-            kwargs["expected_target"] = application_target
-            kwargs["expected_application_principal"] = application_principal
-            kwargs["deployment_profile"] = profile
-            manager = PostgresPoolManager(self.dsn, **kwargs)
-            manager.verify_target(application_target)
-            # Production and development both prove the application role can both
-            # read and write required business tables.
-            manager.verify_application_access(
-                target=application_target,
-                profile=profile,
-                vector_dim=effective_dim,
-            )
-            with self._condition:
-                self._staged_manager = manager
-                if self._state is not ResourceState.INITIALIZING:
-                    raise self._closed_error_locked()
-                seal = ReadyPostgresPool(
-                    manager=manager,
-                    request=request,
-                    status=status,
-                    effective_dim=effective_dim,
-                    target=application_target,
-                    issuer=_READY_POOL_ISSUER,
-                )
-                self._pool_manager = manager
-                self._ready_pool = seal
-                self.vector_capability_status = status
-                self._staged_manager = None
-                self._staged_raw_pool = None
-                self._state = ResourceState.READY
-                _publish_ready_pool_authority(seal)
-                self._condition.notify_all()
-                return status
-        except BaseException as exc:
-            self._finish_initialization_failure(
-                exc,
-                manager,
-                raw_pool,
-            )
-            raise
-
-    def close(self, *, wait: bool = True) -> bool:
-        manager: PostgresPoolManager | None = None
-        with self._condition:
-            if self._state is ResourceState.NEW:
-                self._state = ResourceState.CLOSED
-                self._condition.notify_all()
-                return True
-            if self._state is ResourceState.CLOSED:
-                return True
-            if self._state is ResourceState.FAULTED:
-                raise self._fault_error_locked()
-            if self._state is ResourceState.INITIALIZING:
-                self._state = ResourceState.CLOSING
-                self._condition.notify_all()
-                if not wait:
-                    return False
-                while self._state is ResourceState.CLOSING:
-                    self._condition.wait()
-                if self._state is ResourceState.CLOSED:
-                    return True
-                raise self._fault_error_locked()
-            if self._state is ResourceState.CLOSING and self._close_in_progress:
-                if not wait:
-                    return False
-                while self._state is ResourceState.CLOSING and self._close_in_progress:
-                    self._condition.wait()
-                if self._state is ResourceState.CLOSED:
-                    return True
-                if self._state is ResourceState.FAULTED:
-                    raise self._fault_error_locked()
-            if self._state is ResourceState.READY:
-                self._state = ResourceState.CLOSING
-                self._revoke_ready_pool_locked()
-            manager = self._pool_manager
-            if manager is None:
-                if not wait:
-                    return False
-                while self._state is ResourceState.CLOSING:
-                    self._condition.wait()
-                if self._state is ResourceState.CLOSED:
-                    return True
-                raise self._fault_error_locked()
-            self._close_in_progress = True
-
-        try:
-            result = manager.close(wait=wait)
-        except BaseException as exc:
-            with self._condition:
-                self._close_in_progress = False
-                self._close_error = exc
-                self._fault = exc
-                self._state = ResourceState.FAULTED
-                self._condition.notify_all()
-            raise
-        with self._condition:
-            self._close_in_progress = False
-            if self._state is ResourceState.FAULTED:
-                raise self._fault_error_locked()
-            if result:
-                self._state = ResourceState.CLOSED
-            self._condition.notify_all()
-        return result
-
-
-class PostgresSyncStorageResources:
-    """Coordinate independent product and inbound resources for sync ingress."""
-
-    def __init__(
-        self,
-        app_dsn: str,
-        migration_dsn: str,
-        inbound_dsn: str,
-    ) -> None:
-        if type(app_dsn) is not str:
-            raise TypeError("PostgreSQL application DSN must be a non-empty exact str")
-        if type(migration_dsn) is not str:
-            raise TypeError("PostgreSQL migration DSN must be a non-empty exact str")
-        if type(inbound_dsn) is not str:
-            raise TypeError("PostgreSQL inbound DSN must be a non-empty exact str")
-        app_dsn = app_dsn.strip()
-        migration_dsn = migration_dsn.strip()
-        inbound_dsn = inbound_dsn.strip()
-        if not app_dsn:
-            raise TypeError("PostgreSQL application DSN must be a non-empty exact str")
-        if not migration_dsn:
-            raise TypeError("PostgreSQL migration DSN must be a non-empty exact str")
-        if not inbound_dsn:
-            raise TypeError("PostgreSQL inbound DSN must be a non-empty exact str")
-        if app_dsn == migration_dsn or app_dsn == inbound_dsn or migration_dsn == inbound_dsn:
-            raise ValueError("PostgreSQL sync DSN values must be distinct")
-        self.app_dsn = app_dsn
-        self.migration_dsn = migration_dsn
-        self.inbound_dsn = inbound_dsn
-        self._condition = Condition(RLock())
-        self._state = ResourceState.NEW
-        self._request: VectorCapabilityRequest | None = None
-        self._profile: str | None = None
-        self._status: VectorCapabilityStatus | None = None
-        self._ready_pool: ReadyPostgresPool | None = None
-        self._executor = None
-        self._app_resources: PostgresStorageResources | None = None
-        self._inbound_manager: PostgresPoolManager | None = None
-        self._fault: BaseException | None = None
-        self._close_in_progress = False
-        self._close_error: BaseException | None = None
-
-    @property
-    def state(self) -> str:
-        with self._condition:
-            return self._state.value
-
-    @property
-    def ready_pool(self) -> ReadyPostgresPool:
-        with self._condition:
-            self._refresh_from_app_resource_fault()
-            if self._state is not ResourceState.READY or self._ready_pool is None:
-                raise RuntimeError("PostgreSQL sync resources are not ready")
-            return self._ready_pool
-
-    @property
-    def executor(self):
-        with self._condition:
-            self._refresh_from_app_resource_fault()
-            if self._state is not ResourceState.READY or self._executor is None:
-                raise RuntimeError("PostgreSQL sync resources are not ready")
-            return self._executor
-
-    @property
-    def status(self) -> VectorCapabilityStatus:
-        with self._condition:
-            self._refresh_from_app_resource_fault()
-            if self._state is not ResourceState.READY or self._status is None:
-                raise RuntimeError("PostgreSQL sync resources are not ready")
-            return self._status
-
-    def _same_request_locked(self, request: VectorCapabilityRequest, profile: str) -> bool:
-        return self._request == request and self._profile == profile
-
-    def _assert_inbound_authority(self) -> None:
-        """Reject a retained executor after either coordinated resource is revoked."""
-        with self._condition:
-            self._refresh_from_app_resource_fault()
-            if (
-                self._state is not ResourceState.READY
-                or self._executor is None
-                or self._inbound_manager is None
-            ):
-                raise RuntimeError("PostgreSQL sync resources are not ready")
-
-    def _closed_error_locked(self) -> RuntimeError:
-        return RuntimeError("PostgreSQL sync resources are closed")
-
-    def _fault_error_locked(self) -> RuntimeError:
-        error = self._fault or self._close_error
-        if error is None:
-            return RuntimeError("PostgreSQL sync resources are faulted")
-        failure = RuntimeError("PostgreSQL sync resources are faulted")
-        failure.__cause__ = error
-        return failure
-
-    def _close_staged_resources(
-        self,
-        app_resources: PostgresStorageResources | None,
-        inbound_manager: PostgresPoolManager | None,
-    ) -> BaseException | None:
-        close_error: BaseException | None = None
-        if inbound_manager is not None:
-            try:
-                inbound_manager.close(wait=True)
-            except BaseException as exc:  # noqa: BLE001
-                close_error = exc
-        if app_resources is not None:
-            try:
-                app_resources.close(wait=True)
-            except BaseException as exc:  # noqa: BLE001
-                if close_error is None:
-                    close_error = exc
-        return close_error
-
-    def _refresh_from_app_resource_fault(self) -> None:
-        if self._state is not ResourceState.READY or self._app_resources is None:
-            return
-        if self._app_resources.state == ResourceState.READY.value:
-            return
-
-        inbound_manager = self._inbound_manager
-        with self._condition:
-            self._ready_pool = None
-            self._executor = None
-            self._app_resources = None
-            self._inbound_manager = None
-            self._status = None
-            self._fault = RuntimeError("PostgreSQL sync resources are not ready")
-            self._close_error = self._fault
-            self._state = ResourceState.FAULTED
-            self._condition.notify_all()
-
-        if inbound_manager is not None:
-            try:
-                inbound_manager.close(wait=False)
-            except BaseException:
-                pass
-
-    def _set_fault_from_inbound(self, error: BaseException | None) -> None:
-        if error is None:
-            error = RuntimeError("PostgreSQL sync resources were revoked by inbound pool fault")
-        app_resources = None
-        with self._condition:
-            if self._state not in {ResourceState.READY, ResourceState.CLOSING}:
-                return
-            if self._state is ResourceState.CLOSING and self._close_in_progress:
-                return
-            self._ready_pool = None
-            self._executor = None
-            self._status = None
-            self._fault = error
-            self._close_error = error
-            self._state = ResourceState.FAULTED
-            app_resources = self._app_resources
-            self._app_resources = None
-            self._inbound_manager = None
-            self._condition.notify_all()
-        if app_resources is not None:
-            try:
-                app_resources.close(wait=False)
-            except BaseException:
-                pass
-
-    def _set_fault_from_inbound_closed(self, close_error: BaseException | None) -> None:
-        if close_error is not None:
-            self._set_fault_from_inbound(close_error)
-            return
-        app_resources = None
-        with self._condition:
-            if self._state is not ResourceState.READY or self._close_in_progress:
-                return
-            self._ready_pool = None
-            self._executor = None
-            self._status = None
-            app_resources = self._app_resources
-            self._app_resources = None
-            self._inbound_manager = None
-            self._fault = RuntimeError(
-                "PostgreSQL sync resources were revoked by inbound pool close"
-            )
-            self._close_error = self._fault
-            self._state = ResourceState.FAULTED
-            self._condition.notify_all()
-        if app_resources is not None:
-            try:
-                app_resources.close(wait=False)
-            except BaseException:
-                pass
-
-    def ensure_ready(
-        self,
-        request: VectorCapabilityRequest,
-        deployment_profile: str,
-    ) -> VectorCapabilityStatus:
-        if type(request) is not VectorCapabilityRequest:
-            raise ValueError("vector capability request must be a VectorCapabilityRequest")
-        profile = PostgresStorageResources._profile_for(deployment_profile)
-        PostgresStorageResources._validate_request_profile(request, profile)
-
-        with self._condition:
-            if self._state is ResourceState.NEW:
-                self._request = request
-                self._profile = profile
-                self._state = ResourceState.INITIALIZING
-            elif self._state is ResourceState.INITIALIZING:
-                if not self._same_request_locked(request, profile):
-                    raise RuntimeError(
-                        "PostgreSQL sync resources are already initialized differently"
-                    )
-                while self._state is ResourceState.INITIALIZING:
-                    self._condition.wait()
-                if self._state is ResourceState.READY:
-                    assert self._status is not None
-                    return self._status
-                if self._state in {ResourceState.CLOSING, ResourceState.CLOSED}:
-                    raise self._closed_error_locked()
-                raise self._fault_error_locked()
-            elif self._state is ResourceState.READY:
-                if not self._same_request_locked(request, profile):
-                    raise RuntimeError(
-                        "PostgreSQL sync resources are already initialized differently"
-                    )
-                assert self._status is not None
-                return self._status
-            elif self._state in {ResourceState.CLOSING, ResourceState.CLOSED}:
-                raise self._closed_error_locked()
-            else:
-                raise self._fault_error_locked()
-
-        staged_manager: PostgresPoolManager | None = None
-        staged_app_resources: PostgresStorageResources | None = None
-        status: VectorCapabilityStatus | None = None
-
-        try:
-            inbound_runner = _new_migration_runner(self.inbound_dsn)
-            inbound_target = inbound_runner.inspect_target()
-            _target_key(inbound_target)
-            inbound_principal = inbound_runner.inspect_application_principal(
-                expected_target=inbound_target
-            )
-
-            staged_app_resources = PostgresStorageResources(
-                self.app_dsn,
-                migration_dsn=self.migration_dsn,
-                ingress_acl=IngressAclContract(inbound_principal.role),
-            )
-            status = staged_app_resources.ensure_ready(request, profile)
-            app_target = staged_app_resources.ready_pool.target
-            if _target_key(app_target) != _target_key(inbound_target):
-                raise MigrationIntegrityError(
-                    "PostgreSQL inbound target does not match application target"
-                )
-
-            staged_manager = PostgresPoolManager(
-                self.inbound_dsn,
-                expected_target=inbound_target,
-                expected_application_principal=inbound_principal,
-                on_closed=self._set_fault_from_inbound_closed,
-                on_fault=self._set_fault_from_inbound,
-                deployment_profile="production",
-            )
-            staged_manager.verify_target(inbound_target)
-            if staged_manager.inspect_application_role() != inbound_principal:
-                raise MigrationIntegrityError(
-                    "PostgreSQL inbound principal is not direct login/session login"
-                )
-
-            def noop_bind(_cursor, _context):  # pylint: disable=unused-argument
-                return None
-
-            executor = InboundSyncExecutor(
-                lambda: staged_manager.transaction(noop_bind, local_development_context()),
-                authority_check=self._assert_inbound_authority,
-            )
-
-            with self._condition:
-                if self._state is not ResourceState.INITIALIZING:
-                    raise self._closed_error_locked()
-                self._ready_pool = staged_app_resources.ready_pool
-                self._executor = executor
-                self._app_resources = staged_app_resources
-                self._inbound_manager = staged_manager
-                self._status = status
-                self._state = ResourceState.READY
-                self._condition.notify_all()
-                return status
-        except BaseException as exc:
-            close_error = self._close_staged_resources(
-                staged_app_resources,
-                staged_manager,
-            )
-            with self._condition:
-                self._ready_pool = None
-                self._executor = None
-                self._app_resources = None
-                self._inbound_manager = None
-                self._status = None
-                if self._state is ResourceState.INITIALIZING:
-                    self._state = ResourceState.FAULTED
-                    self._fault = exc
-                    self._close_error = close_error or exc
-                elif self._state is ResourceState.CLOSING:
-                    if close_error is not None:
-                        self._state = ResourceState.FAULTED
-                        self._fault = close_error
-                        self._close_error = close_error
-                    else:
-                        self._state = ResourceState.CLOSED
-                self._condition.notify_all()
-            raise
-
-    def close(self, *, wait: bool = True) -> bool:
-        inbound_result = True
-        app_result = True
-        close_error: BaseException | None = None
-
-        with self._condition:
-            if self._state is ResourceState.NEW:
-                self._state = ResourceState.CLOSED
-                self._condition.notify_all()
-                return True
-            if self._state is ResourceState.CLOSED:
-                return True
-            if self._state is ResourceState.FAULTED:
-                raise self._fault_error_locked()
-            if self._state is ResourceState.INITIALIZING:
-                self._state = ResourceState.CLOSING
-                if not wait:
-                    return False
-                while self._state is ResourceState.CLOSING:
-                    self._condition.wait()
-                if self._state is ResourceState.CLOSED:
-                    return True
-                raise self._fault_error_locked()
-            if self._state is ResourceState.CLOSING and self._close_in_progress:
-                if not wait:
-                    return False
-                while self._state is ResourceState.CLOSING and self._close_in_progress:
-                    self._condition.wait()
-                if self._state is ResourceState.CLOSED:
-                    return True
-                if self._state is ResourceState.FAULTED:
-                    raise self._fault_error_locked()
-            if self._state is ResourceState.READY:
-                self._state = ResourceState.CLOSING
-            app_resources = self._app_resources
-            inbound_manager = self._inbound_manager
-            self._ready_pool = None
-            self._executor = None
-            self._status = None
-            self._close_in_progress = True
-
-        if inbound_manager is not None:
-            try:
-                inbound_result = inbound_manager.close(wait=wait)
-            except BaseException as exc:  # noqa: BLE001
-                close_error = exc
-        if app_resources is not None:
-            try:
-                app_result = app_resources.close(wait=wait)
-            except BaseException as exc:  # noqa: BLE001
-                if close_error is None:
-                    close_error = exc
-
-        result = bool(inbound_result and app_result)
-        if close_error is not None:
-            with self._condition:
-                self._close_in_progress = False
-                self._fault = close_error
-                self._close_error = close_error
-                self._state = ResourceState.FAULTED
-                self._condition.notify_all()
-            raise close_error
-
-        with self._condition:
-            self._close_in_progress = False
-            if result and self._state is ResourceState.CLOSING:
-                self._app_resources = None
-                self._inbound_manager = None
-                self._state = ResourceState.CLOSED
-            self._condition.notify_all()
-            return result
+# Re-export the split-out resource classes so existing
+# ``from memplex.storage.pool import PostgresStorageResources`` import paths
+# (and monkeypatches of ``pool.PostgresStorageResources`` /
+# ``pool.PostgresPoolManager``) keep working. Placed last so every symbol
+# ``postgres_resources`` needs from this module is already defined above.
+from memplex.storage.postgres_resources import (  # noqa: E402,F401
+    PostgresStorageResources,
+    PostgresSyncStorageResources,
+)

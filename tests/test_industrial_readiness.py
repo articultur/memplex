@@ -23,8 +23,21 @@ from memplex.capacity_chaos import (
     write_capacity_chaos_evidence,
 )
 from memplex.config import MemplexConfig
-from memplex.host_lifecycle import HostLifecycleEvidence, write_host_lifecycle_evidence
-from memplex.operations import create_operations_evidence
+from memplex.host_lifecycle import (
+    HostLifecycleBinding,
+    HostLifecycleEvidence,
+    HostLifecycleProof,
+    current_host_contract_digests,
+    required_host_node_results,
+    required_node_manifest_sha256,
+    write_host_lifecycle_evidence,
+)
+from memplex.operations import OperationsReadinessBinding, create_operations_evidence
+from memplex.readiness_evidence import (
+    DeploymentEvidenceBinding,
+    IndustrialGateEvidence,
+    write_industrial_gate_evidence,
+)
 from memplex.release import ReleaseEvidence, ReleaseManifest
 from memplex.service import MemplexService
 from memplex.storage import create_store
@@ -34,6 +47,27 @@ def _readiness_report(config: MemplexConfig) -> dict:
     reporter = getattr(product_module, "industrial_readiness_report", None)
     assert callable(reporter), "industrial readiness reporter is missing"
     return reporter(config)
+
+
+def _set_deployment_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    deployment_id: str = "g012-industrial-test",
+    source_sha256: str = "1" * 64,
+    artifact_sha256: str = "2" * 64,
+    target_identity_sha256: str = "3" * 64,
+) -> DeploymentEvidenceBinding:
+    monkeypatch.setenv("MEMPLEX_DEPLOYMENT_ID", deployment_id)
+    monkeypatch.setenv("MEMPLEX_SOURCE_SHA256", source_sha256)
+    monkeypatch.setenv("MEMPLEX_ARTIFACT_SHA256", artifact_sha256)
+    monkeypatch.setenv("MEMPLEX_TARGET_IDENTITY_SHA256", target_identity_sha256)
+    return DeploymentEvidenceBinding.from_values(
+        memplex_version="3.3.0",
+        source_sha256=source_sha256,
+        artifact_sha256=artifact_sha256,
+        deployment_id=deployment_id,
+        target_identity_sha256=target_identity_sha256,
+    )
 
 
 def test_default_deployment_contract_is_explicitly_development() -> None:
@@ -71,6 +105,49 @@ def test_production_profile_accepts_postgres_configuration() -> None:
     config.storage.migration_dsn = "postgresql://migrator@example.invalid/memplex"
 
     validator(config)
+
+
+@pytest.mark.parametrize(
+    ("application_dsn", "migration_dsn"),
+    [
+        ("not-a-dsn", "postgresql://migrator@example.invalid/memplex"),
+        ("postgresql://memplex@example.invalid/memplex", "not-a-dsn"),
+        (
+            " postgresql://memplex@example.invalid/memplex",
+            "postgresql://migrator@example.invalid/memplex",
+        ),
+        (
+            "postgresql://memplex@example.invalid/memplex",
+            "postgresql://migrator@example.invalid/memplex ",
+        ),
+        (
+            "postgresql://shared@example.invalid/memplex",
+            "postgresql://shared@example.invalid/memplex",
+        ),
+        (
+            "host=example.invalid dbname=memplex user=shared application_name=app",
+            "application_name=migration user=shared dbname=memplex host=example.invalid",
+        ),
+    ],
+)
+def test_production_profile_rejects_invalid_or_equivalent_postgres_identities(
+    application_dsn: str, migration_dsn: str
+) -> None:
+    config = MemplexConfig()
+    config.deployment.profile = "production"
+    config.storage.backend = "postgres"
+    config.storage.path = application_dsn
+    config.storage.migration_dsn = migration_dsn
+
+    with pytest.raises(ValueError, match="production postgres.*(invalid|distinct)"):
+        config_module.validate_deployment_contract(config)
+
+    gate = next(
+        item
+        for item in _readiness_report(config)["gates"]
+        if item["id"] == "production_storage"
+    )
+    assert gate["status"] == "fail"
 
 
 @pytest.mark.parametrize("field", ("path", "migration_dsn"))
@@ -133,7 +210,7 @@ def test_readiness_and_startup_share_canonical_deployment_values() -> None:
 
     assert config.deployment.profile == "production"
     assert config.storage.backend == "postgres"
-    assert report["summary"] == {"passed": 4, "failed": 1, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 2, "failed": 1, "blocked": 7, "total": 10}
     assert report["gates"][0]["evidence"] == "deployment.profile=production"
     assert report["gates"][1]["evidence"] == (
         "storage.backend=postgres; application and migration DSNs configured"
@@ -165,25 +242,63 @@ def test_industrial_readiness_report_fails_closed_until_every_gate_passes() -> N
         "production_profile",
         "production_storage",
         "principal_tenant_acl",
+        "schema_migrations_atomicity",
+        "durable_sync_backpressure",
         "backup_restore_dr",
         "operations_slo",
         "release_supply_chain",
         "four_host_e2e",
         "capacity_chaos",
     }
-    assert report["summary"] == {"passed": 2, "failed": 3, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 0, "failed": 3, "blocked": 7, "total": 10}
     migration_gate = next(
         gate for gate in report["gates"] if gate["id"] == "schema_migrations_atomicity"
     )
     sync_gate = next(
         gate for gate in report["gates"] if gate["id"] == "durable_sync_backpressure"
     )
-    assert migration_gate["status"] == "pass"
-    assert sync_gate["status"] == "pass"
-    assert sync_gate["evidence"] == (
-        "G004 durable sync/backpressure, fault matrix, 100001 backlog, "
-        "and dual fresh reviews passed"
+    assert migration_gate["status"] == "blocked"
+    assert sync_gate["status"] == "blocked"
+
+
+def test_g003_g004_require_current_signed_deployment_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = _set_deployment_binding(monkeypatch)
+    key = b"i" * 32
+    key_id = "industrial-2026-08"
+    monkeypatch.setenv(
+        "MEMPLEX_INDUSTRIAL_EVIDENCE_HMAC_KEY",
+        base64.b64encode(key).decode("ascii"),
     )
+    monkeypatch.setenv("MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID", key_id)
+    now = datetime.now(timezone.utc)
+    for gate_id, env_name in (
+        ("schema_migrations_atomicity", "MEMPLEX_G003_STORAGE_REPORT"),
+        ("durable_sync_backpressure", "MEMPLEX_G004_SYNC_REPORT"),
+    ):
+        report_path = tmp_path / f"{gate_id}.json"
+        write_industrial_gate_evidence(
+            report_path,
+            IndustrialGateEvidence.create(
+                gate_id=gate_id,
+                binding=binding,
+                run_result_sha256="4" * 64,
+                key_id=key_id,
+                signing_key=key,
+                generated_at=now,
+            ),
+        )
+        monkeypatch.setenv(env_name, str(report_path))
+
+    report = _readiness_report(MemplexConfig())
+    for gate_id in ("schema_migrations_atomicity", "durable_sync_backpressure"):
+        gate = next(item for item in report["gates"] if item["id"] == gate_id)
+        assert gate["status"] == "pass"
+        assert gate["evidence"] == "signed current deployment evidence verified"
+    rendered = json.dumps(report, sort_keys=True)
+    assert str(tmp_path) not in rendered
+    assert key.hex() not in rendered
 
 
 def test_capacity_chaos_gate_accepts_only_current_signed_passing_evidence(
@@ -343,17 +458,32 @@ def test_operations_slo_gate_accepts_only_signed_passing_measured_evidence(
     key = b"o" * 32
     config = MemplexConfig()
     config.operations.report_key_id = "ops-key"
+    binding = _set_deployment_binding(monkeypatch)
+    now = datetime.now(timezone.utc)
     report = create_operations_evidence(
         metrics_snapshot={
             "request_count": 1000,
             "successful_requests": 999,
+            "latency_sample_count": 128,
             "p95_latency_ms": 100.0,
         },
         shutdown_result={"request_drained": True, "deadline_exceeded": False},
         config=config,
         report_id="018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
-        window_started_at="2026-08-11T12:00:00.000000Z",
-        window_ended_at="2026-08-11T12:05:00.000000Z",
+        window_started_at=(now - timedelta(seconds=301)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+        window_ended_at=(now - timedelta(seconds=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        ),
+        generated_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        readiness_binding=OperationsReadinessBinding(
+            deployment_id=binding.deployment_id,
+            source_sha256=binding.source_sha256,
+            artifact_sha256=binding.artifact_sha256,
+            target_identity_sha256=binding.target_identity_sha256,
+            expected_key_id="ops-key",
+        ),
         signing_key=key,
     )
     path = tmp_path / "operations.json"
@@ -446,21 +576,56 @@ def test_four_host_gate_accepts_only_current_signed_matrix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = b"h" * 32
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    marker = isolated / "prestate"
+    marker.write_text("isolated", encoding="utf-8")
+    producer_cli = tmp_path / "producer-cli"
+    producer_cli.write_bytes(Path(sys.executable).resolve().read_bytes())
+    producer_cli.chmod(0o700)
+    cli_sha256 = sha256(producer_cli.read_bytes()).hexdigest()
+    isolated_sha256 = sha256(marker.read_bytes()).hexdigest()
+    contracts = current_host_contract_digests()
+    proofs = []
+    for host in ("claude-code", "codex", "hermes", "openclaw"):
+        results = required_host_node_results(host)
+        proofs.append(
+            HostLifecycleProof(
+                host=host,
+                cli_path=str(producer_cli),
+                cli_sha256=cli_sha256,
+                cli_version=sys.version,
+                contract_sha256=contracts[host],
+                isolated_root_sha256=isolated_sha256,
+                required_node_results=results,
+                required_node_manifest_sha256=required_node_manifest_sha256(results),
+                junit_sha256="4" * 64,
+            )
+        )
+    binding = HostLifecycleBinding(
+        deployment_id="g012-industrial-test",
+        source_sha256="1" * 64,
+        artifact_sha256="2" * 64,
+        target_identity_sha256="3" * 64,
+        expected_key_id="g008-local",
+    )
     evidence = HostLifecycleEvidence.create(
         memplex_version="3.3.0",
-        cli_versions={
-            "claude-code": "2.1.224",
-            "codex": "0.147.0-alpha.6.5",
-            "hermes": "0.20.0 (2026.8.3)",
-            "openclaw": "2026.7.1 (2d2ddc4)",
-        },
+        host_proofs=tuple(proofs),
+        binding=binding,
         key_id="g008-local",
         signing_key=key,
     )
     path = tmp_path / "hosts.json"
     write_host_lifecycle_evidence(path, evidence)
+    producer_cli.unlink()
     monkeypatch.setenv("MEMPLEX_G008_HOST_LIFECYCLE_REPORT", str(path))
     monkeypatch.setenv("MEMPLEX_HOST_LIFECYCLE_HMAC_KEY", key.hex())
+    monkeypatch.setenv("MEMPLEX_HOST_LIFECYCLE_KEY_ID", binding.expected_key_id)
+    monkeypatch.setenv("MEMPLEX_DEPLOYMENT_ID", binding.deployment_id)
+    monkeypatch.setenv("MEMPLEX_SOURCE_SHA256", binding.source_sha256)
+    monkeypatch.setenv("MEMPLEX_ARTIFACT_SHA256", binding.artifact_sha256)
+    monkeypatch.setenv("MEMPLEX_TARGET_IDENTITY_SHA256", binding.target_identity_sha256)
 
     readiness = _readiness_report(MemplexConfig())
     gate = next(item for item in readiness["gates"] if item["id"] == "four_host_e2e")
@@ -525,7 +690,7 @@ def test_principal_tenant_acl_gate_fails_when_production_registry_is_missing(
 
     assert gate["status"] == "fail"
     assert gate["evidence"] == "principal registry missing"
-    assert report["summary"] == {"passed": 4, "failed": 1, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 2, "failed": 1, "blocked": 7, "total": 10}
 
 
 def test_principal_tenant_acl_gate_passes_for_valid_production_registry(
@@ -559,7 +724,7 @@ def test_principal_tenant_acl_gate_passes_for_valid_production_registry(
 
     assert gate["status"] == "pass"
     assert gate["evidence"] == "principal registry configured"
-    assert report["summary"] == {"passed": 5, "failed": 0, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 3, "failed": 0, "blocked": 7, "total": 10}
     assert report["ready"] is False
     assert report["maturity"] == "developer_preview"
 
@@ -600,8 +765,18 @@ def test_all_independent_machine_gates_produce_industrial_ready(
     )
     monkeypatch.setattr(
         product_module,
+        "_schema_migrations_atomicity_gate",
+        lambda: passed("schema_migrations_atomicity", "storage", "verified"),
+    )
+    monkeypatch.setattr(
+        product_module,
+        "_durable_sync_backpressure_gate",
+        lambda: passed("durable_sync_backpressure", "sync", "verified"),
+    )
+    monkeypatch.setattr(
+        product_module,
         "_operations_slo_gate",
-        lambda: passed("operations_slo", "operations", "verified"),
+        lambda _config: passed("operations_slo", "operations", "verified"),
     )
     monkeypatch.setattr(
         product_module,
@@ -651,7 +826,7 @@ def test_principal_tenant_acl_gate_fails_closed_for_malformed_registry(
     assert gate["status"] == "fail"
     assert gate["evidence"] == "principal registry invalid"
     assert "not" not in gate["evidence"]
-    assert report["summary"] == {"passed": 4, "failed": 1, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 2, "failed": 1, "blocked": 7, "total": 10}
 
 
 def test_industrial_readiness_contract_never_lists_lite_as_production_supported() -> None:
@@ -684,8 +859,7 @@ def test_unsigned_local_migration_report_cannot_close_remaining_industrial_gates
     report = _readiness_report(config)
     gate = next(item for item in report["gates"] if item["id"] == "schema_migrations_atomicity")
 
-    assert gate["status"] == "pass"
-    assert "MEMPLEX_STORAGE_INTEGRITY_EVIDENCE" not in gate["evidence"]
+    assert gate["status"] == "blocked"
     assert report["ready"] is False
 
 
@@ -745,4 +919,4 @@ def test_readiness_cli_reports_g002_gate_but_strict_stays_closed(
     assert completed.returncode == 1, completed.stderr
     assert gate["status"] == "pass"
     assert report["ready"] is False
-    assert report["summary"] == {"passed": 5, "failed": 0, "blocked": 5, "total": 10}
+    assert report["summary"] == {"passed": 3, "failed": 0, "blocked": 7, "total": 10}

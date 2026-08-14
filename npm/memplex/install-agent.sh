@@ -215,6 +215,9 @@ done
 
 agent_supported "$AGENT" || die "unsupported agent: $AGENT"
 
+if [[ "$MEMPLEX_VENV_DIR" != /* ]]; then
+  MEMPLEX_VENV_DIR="$PWD/$MEMPLEX_VENV_DIR"
+fi
 MEMPLEX_PYTHON="$MEMPLEX_VENV_DIR/bin/python"
 export MEMPLEX_PYTHON
 

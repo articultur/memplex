@@ -11,6 +11,8 @@ import fnmatch
 import logging
 import os
 import tomllib
+from datetime import datetime, timedelta, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -60,21 +62,6 @@ SCOPE_DESCRIPTIONS: dict[str, str] = {
     "agent": "Agent-specific memory such as codex, claude-code, openclaw, or hermes.",
     "global": "Explicitly shared memory. Memplex does not promote data here implicitly.",
 }
-
-_INDUSTRIAL_COMPLETED_GATES: tuple[tuple[str, str, str], ...] = (
-    (
-        "schema_migrations_atomicity",
-        "Versioned migrations, atomic storage operations, and concurrency proof.",
-        "G003 versioned migrations, atomic storage, concurrency, least privilege, "
-        "wheel verification, and independent reviews passed",
-    ),
-    (
-        "durable_sync_backpressure",
-        "Durable outbox/inbox, gap-free cursors, idempotency, and bounded work.",
-        "G004 durable sync/backpressure, fault matrix, 100001 backlog, "
-        "and dual fresh reviews passed",
-    ),
-)
 
 _INDUSTRIAL_BLOCKED_GATES: tuple[tuple[str, str, str], ...] = (
     (
@@ -215,7 +202,89 @@ def _principal_tenant_acl_gate(profile: str, backend: str) -> dict[str, Any]:
     }
 
 
-def _operations_slo_gate() -> dict[str, Any]:
+def _deployment_evidence_binding():
+    from memplex.readiness_evidence import (
+        load_deployment_evidence_binding_from_environment,
+    )
+
+    return load_deployment_evidence_binding_from_environment(
+        memplex_version=version("memplex")
+    )
+
+
+def _signed_deployment_gate(
+    *,
+    gate_id: str,
+    requirement: str,
+    next_goal: str,
+    report_env: str,
+) -> dict[str, Any]:
+    report_value = os.environ.get(report_env)
+    key_value = os.environ.get("MEMPLEX_INDUSTRIAL_EVIDENCE_HMAC_KEY")
+    key_id_value = os.environ.get("MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID")
+    if report_value is None and key_value is None and key_id_value is None:
+        return _blocked_industrial_gate(gate_id, requirement, next_goal)
+    invalid = {
+        "id": gate_id,
+        "status": "fail",
+        "required": True,
+        "requirement": requirement,
+        "next_goal": next_goal,
+        "evidence": "signed current deployment evidence invalid",
+    }
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (report_value, key_value, key_id_value)
+    ):
+        return invalid
+    try:
+        from memplex.readiness_evidence import (
+            load_expected_key_id_from_environment,
+            load_signing_key_from_environment,
+            read_industrial_gate_evidence,
+        )
+
+        evidence = read_industrial_gate_evidence(Path(report_value))
+        evidence.verify(
+            expected_gate_id=gate_id,
+            expected_binding=_deployment_evidence_binding(),
+            expected_key_id=load_expected_key_id_from_environment(
+                "MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID"
+            ),
+            signing_key=load_signing_key_from_environment(
+                "MEMPLEX_INDUSTRIAL_EVIDENCE_HMAC_KEY"
+            ),
+            now=datetime.now(timezone.utc),
+            max_age=timedelta(minutes=15),
+        )
+    except Exception:
+        return invalid
+    return _completed_industrial_gate(
+        gate_id,
+        requirement,
+        "signed current deployment evidence verified",
+    )
+
+
+def _schema_migrations_atomicity_gate() -> dict[str, Any]:
+    return _signed_deployment_gate(
+        gate_id="schema_migrations_atomicity",
+        requirement="Versioned migrations, atomic storage operations, and concurrency proof.",
+        next_goal="G003",
+        report_env="MEMPLEX_G003_STORAGE_REPORT",
+    )
+
+
+def _durable_sync_backpressure_gate() -> dict[str, Any]:
+    return _signed_deployment_gate(
+        gate_id="durable_sync_backpressure",
+        requirement="Durable outbox/inbox, gap-free cursors, idempotency, and bounded work.",
+        next_goal="G004",
+        report_env="MEMPLEX_G004_SYNC_REPORT",
+    )
+
+
+def _operations_slo_gate(config: MemplexConfig) -> dict[str, Any]:
     requirement = "Fail-fast production entry, probes, telemetry, alerts, and SLO evidence."
     report_value = os.environ.get("MEMPLEX_G006_OPERATIONS_REPORT")
     if report_value is None:
@@ -232,18 +301,23 @@ def _operations_slo_gate() -> dict[str, Any]:
         return invalid
     try:
         from memplex.operations import (
-            alert_rules_sha256,
+            OperationsReadinessBinding,
             load_operations_report,
             load_operations_signing_key,
         )
 
         report = load_operations_report(Path(report_value))
-        report.verify(load_operations_signing_key())
-        if (
-            report.alert_rules_sha256 != alert_rules_sha256()
-            or not report.industrial_gate_closing
-        ):
-            return invalid
+        deployment = _deployment_evidence_binding()
+        report.verify_readiness(
+            load_operations_signing_key(),
+            binding=OperationsReadinessBinding(
+                deployment_id=deployment.deployment_id,
+                source_sha256=deployment.source_sha256,
+                artifact_sha256=deployment.artifact_sha256,
+                target_identity_sha256=deployment.target_identity_sha256,
+                expected_key_id=config.operations.report_key_id,
+            ),
+        )
     except Exception:
         return invalid
     return _completed_industrial_gate(
@@ -301,7 +375,8 @@ def _four_host_e2e_gate() -> dict[str, Any]:
     requirement = "Real Codex, Claude Code, OpenClaw, and Hermes lifecycle matrix."
     report_value = os.environ.get("MEMPLEX_G008_HOST_LIFECYCLE_REPORT")
     key_value = os.environ.get("MEMPLEX_HOST_LIFECYCLE_HMAC_KEY")
-    if report_value is None and key_value is None:
+    key_id_value = os.environ.get("MEMPLEX_HOST_LIFECYCLE_KEY_ID")
+    if report_value is None and key_value is None and key_id_value is None:
         return _blocked_industrial_gate("four_host_e2e", requirement, "G008")
     invalid = {
         "id": "four_host_e2e",
@@ -313,19 +388,36 @@ def _four_host_e2e_gate() -> dict[str, Any]:
     }
     if any(
         type(value) is not str or not value.strip()
-        for value in (report_value, key_value)
+        for value in (report_value, key_value, key_id_value)
     ):
         return invalid
     try:
-        from importlib.metadata import version
-
-        from memplex.host_lifecycle import read_host_lifecycle_evidence
+        from memplex.host_lifecycle import (
+            HostLifecycleBinding,
+            read_host_lifecycle_evidence,
+        )
+        from memplex.readiness_evidence import (
+            load_expected_key_id_from_environment,
+        )
 
         if len(key_value) != 64:
             return invalid
         signing_key = bytes.fromhex(key_value)
+        deployment = _deployment_evidence_binding()
         evidence = read_host_lifecycle_evidence(Path(report_value))
-        evidence.verify(signing_key, expected_version=version("memplex"))
+        evidence.verify(
+            signing_key,
+            expected_version=deployment.memplex_version,
+            expected_binding=HostLifecycleBinding(
+                deployment_id=deployment.deployment_id,
+                source_sha256=deployment.source_sha256,
+                artifact_sha256=deployment.artifact_sha256,
+                target_identity_sha256=deployment.target_identity_sha256,
+                expected_key_id=load_expected_key_id_from_environment(
+                    "MEMPLEX_HOST_LIFECYCLE_KEY_ID"
+                ),
+            ),
+        )
     except Exception:
         return invalid
     return _completed_industrial_gate(
@@ -380,14 +472,16 @@ def industrial_readiness_report(config: MemplexConfig) -> dict[str, Any]:
     """Return the fail-closed industrial readiness contract and gate state."""
 
     profile, backend = normalize_deployment_contract(config)
-    split_postgres_dsn_configured = (
-        profile == "production"
-        and backend == "postgres"
-        and type(config.storage.path) is str
-        and bool(config.storage.path.strip())
-        and type(config.storage.migration_dsn) is str
-        and bool(config.storage.migration_dsn.strip())
-    )
+    split_postgres_dsn_configured = False
+    if profile == "production" and backend == "postgres":
+        try:
+            from memplex.config import postgres_dsn_identity
+
+            application_identity = postgres_dsn_identity(config.storage.path)
+            migration_identity = postgres_dsn_identity(config.storage.migration_dsn)
+            split_postgres_dsn_configured = application_identity != migration_identity
+        except (ImportError, TypeError, ValueError):
+            split_postgres_dsn_configured = False
     storage_evidence = (
         "storage.backend=postgres; application and migration DSNs configured"
         if split_postgres_dsn_configured
@@ -408,13 +502,11 @@ def industrial_readiness_report(config: MemplexConfig) -> dict[str, Any]:
             "evidence": storage_evidence,
         },
         _principal_tenant_acl_gate(profile, backend),
+        _schema_migrations_atomicity_gate(),
+        _durable_sync_backpressure_gate(),
     ]
-    gates.extend(
-        _completed_industrial_gate(gate_id, requirement, evidence)
-        for gate_id, requirement, evidence in _INDUSTRIAL_COMPLETED_GATES
-    )
     gates.append(_backup_restore_dr_gate())
-    gates.append(_operations_slo_gate())
+    gates.append(_operations_slo_gate(config))
     gates.append(_release_supply_chain_gate())
     gates.append(_four_host_e2e_gate())
     gates.append(_capacity_chaos_gate())

@@ -147,7 +147,7 @@ def test_wheel_fresh_install_reinstall_assets_and_uninstall_are_isolated(
     )
     payload = json.loads(smoke.stdout)
     assert payload["version"] == "3.3.0"
-    assert payload["migrations"] == [1, 2, 3, 4, 5]
+    assert payload["migrations"] == [1, 2, 3, 4, 5, 6]
     assert payload["assets"] == {
         name: hashlib.sha256((PROJECT_ROOT / "memplex" / name).read_bytes()).hexdigest()
         for name in PACKAGED_ASSETS

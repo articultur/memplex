@@ -1107,12 +1107,11 @@ def test_fts5_incremental_removes_deleted_func(tmp_path):
     assert all(r.func_id != "del-inc-1" for r in store.vector_search("keepme", top_k=5))
 
 
-# ── create_store factory: warnings on silent fallbacks ───────────────
+# ── create_store factory: explicit path failures are fail-closed ─────
 
 
-def test_create_store_warns_when_configured_path_unusable(monkeypatch, caplog, tmp_path):
-    """Previously a bad configured path was silently swallowed and the
-    store fell back to ~/.memplex with no trace."""
+def test_create_store_rejects_when_configured_path_unusable(monkeypatch, caplog, tmp_path):
+    """显式路径失败不得把调用者切换到无关的默认 Lite 库。"""
     import memplex.storage as storage_mod
 
     class FlakyStore:
@@ -1122,9 +1121,9 @@ def test_create_store_warns_when_configured_path_unusable(monkeypatch, caplog, t
 
     monkeypatch.setattr(storage_mod, "LiteMemoryStore", FlakyStore)
     with caplog.at_level(logging.WARNING, logger="memplex.storage"):
-        store = storage_mod.create_store("lite", path=str(tmp_path / "nope"))
-    assert isinstance(store, FlakyStore)  # fallback instance (path=None)
-    assert any("falling back" in r.message for r in caplog.records)
+        with pytest.raises(PermissionError, match="denied"):
+            storage_mod.create_store("lite", path=str(tmp_path / "nope"))
+    assert not any("falling back" in r.message for r in caplog.records)
 
 
 def test_create_store_warns_for_unimplemented_standard_enterprise(caplog, tmp_path):

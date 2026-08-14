@@ -27,7 +27,7 @@ def _extras() -> dict:
 def test_project_metadata_declares_readme_and_mit_license():
     project = _pyproject()["project"]
     assert project["readme"] == "README.md"
-    assert project["license"]["text"] == "MIT"
+    assert project["license"] == "MIT"
 
 
 def test_postgres_extra_uses_psycopg2_not_asyncpg():

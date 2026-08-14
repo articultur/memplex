@@ -5,10 +5,9 @@ module name) and exist to keep ``cli.py``, ``mcp_server.py``, and
 ``agent_installer.py`` from drifting apart on three concerns that all
 three need:
 
-- :func:`dataclass_to_dict` -- recursive dataclass/dict/list serializer
-  for JSON-friendly output (``Enum`` leaves -> ``.value``, ``datetime``
-  -> isoformat). This is the canonical serializer for every adapter;
-  ``http_api`` imports it from here as ``_dataclass_to_dict``.
+- :func:`dataclass_to_dict` -- re-exported from the layer-neutral
+  ``memplex.serialization`` (the sync domain needs it too; the
+  import-linter contract forbids domain -> adapters imports).
 - :func:`get_plugin_source_dir` -- resolve the bundled ``_plugin/`` dir
   (or the dev-mode ``plugin/`` dir) relative to the memplex package.
 - :func:`marketplace_json` -- the Claude Code marketplace descriptor.
@@ -21,6 +20,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# ``dataclass_to_dict`` moved to the layer-neutral ``memplex.serialization``
+# leaf (the sync domain needs it too; the import-linter contract forbids
+# domain -> adapters imports). Re-exported here for import-path stability.
+from memplex.serialization import dataclass_to_dict
+
 # Hard trust-boundary limits shared by every model-facing adapter.  These
 # live outside any one host integration so Codex, Claude Code, OpenClaw and
 # Hermes cannot drift onto different operational budgets.
@@ -29,30 +33,6 @@ MAX_MODEL_TOKEN_BUDGET = 32_000
 MAX_MODEL_SEARCH_CANDIDATES = 500
 MAX_MODEL_COLLECTION_RESULTS = 1_000
 MAX_MODEL_SCAN_ITEMS = 1_000
-
-
-def dataclass_to_dict(obj):
-    """Recursively convert dataclasses to plain JSON-serializable values.
-
-    Handles ``Enum`` (-> .value), ``datetime`` (-> isoformat), ``list``,
-    ``dict``, and ``__dataclass_fields__`` containers. Any other leaf is
-    returned unchanged. This is the canonical serializer shared by all
-    adapters (CLI/MCP/HTTP) so Enum/datetime leaves are never a surprise.
-    """
-    from datetime import datetime
-    from enum import Enum
-
-    if isinstance(obj, Enum):
-        return obj.value
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if hasattr(obj, "__dataclass_fields__"):
-        return {f: dataclass_to_dict(getattr(obj, f)) for f in obj.__dataclass_fields__}
-    if isinstance(obj, (list, tuple)):
-        return [dataclass_to_dict(item) for item in obj]
-    if isinstance(obj, dict):
-        return {k: dataclass_to_dict(v) for k, v in obj.items()}
-    return obj
 
 
 def get_plugin_source_dir() -> Path:

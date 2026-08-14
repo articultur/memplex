@@ -44,6 +44,8 @@ logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 
+logger = logging.getLogger("memplex.hook-runner")
+
 # Output contract prefix for Claude Code hooks
 OUTPUT_CONTRACT = '{"continue":true,"suppressOutput":true}'
 
@@ -166,6 +168,13 @@ def _init_service():
 
 
 def _managed_identity() -> dict[str, Any]:
+    _ensure_memplex_importable()
+    from memplex.adapters.managed_identity import (
+        ManagedIdentityError,
+        derive_managed_host_root,
+        load_managed_identity,
+    )
+
     plugin_root = _find_plugin_root()
     claude_config = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
     marketplace_identity = (
@@ -173,36 +182,34 @@ def _managed_identity() -> dict[str, Any]:
     )
     plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA", "")
     plugin_data_identity = Path(plugin_data) / "memplex-agent.json" if plugin_data else None
-    candidates = [marketplace_identity]
+    candidates: list[tuple[Path, Path]] = []
     if plugin_root is not None:
-        candidates.append(plugin_root / "memplex-agent.json")
+        plugin_identity = plugin_root / "memplex-agent.json"
+        if plugin_identity.is_file():
+            candidates.append(
+                (
+                    plugin_identity,
+                    derive_managed_host_root(plugin_root, expected_agent="claude-code"),
+                )
+            )
     if plugin_data_identity is not None:
-        candidates.append(plugin_data_identity)
+        candidates.append((plugin_data_identity, claude_config))
+    candidates.append((marketplace_identity, claude_config))
 
-    for identity_path in dict.fromkeys(candidates):
+    for identity_path, expected_host_root in dict.fromkeys(candidates):
+        if not identity_path.is_file():
+            continue
         try:
-            identity = json.loads(identity_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(identity, dict):
-            continue
-        managed = identity.get("managed")
-        if isinstance(managed, dict) and (
-            managed.get("by") == "memplex" or managed.get("installer") == "memplex"
-        ):
-            configured_agent = str(identity.get("agent") or "").strip()
-            user_id = str(identity.get("user_id") or "").strip()
-            project_path = str(identity.get("project_path") or "").strip()
-            if (configured_agent and configured_agent != "claude-code") or not user_id or not project_path:
-                continue
-            identity = {
-                **identity,
-                "user_id": user_id,
-                "project_path": str(Path(project_path).expanduser().resolve(strict=False)),
-            }
-            if plugin_data_identity is not None and identity_path != plugin_data_identity:
-                _persist_plugin_data_identity(plugin_data_identity, identity)
-            return identity
+            identity = load_managed_identity(
+                identity_path,
+                expected_agent="claude-code",
+                expected_host_root=expected_host_root,
+            )
+        except ManagedIdentityError:
+            raise
+        if plugin_data_identity is not None and identity_path != plugin_data_identity:
+            _persist_plugin_data_identity(plugin_data_identity, identity)
+        return identity
     return {}
 
 
@@ -290,6 +297,36 @@ def _init_runtime(session_id: str = "", data: Optional[dict[str, Any]] = None):
     )
 
 
+def _runtime_status_path() -> Path:
+    """Use Claude's persistent host root rather than transient hook state."""
+
+    from memplex.adapters.runtime_status import runtime_status_path
+
+    return runtime_status_path(Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")))
+
+
+def _record_runtime_failure(operation: str, error: BaseException) -> None:
+    try:
+        from memplex.adapters.runtime_status import record_runtime_failure
+
+        record_runtime_failure(
+            _runtime_status_path(), agent="claude-code", operation=operation, error=error
+        )
+    except Exception:
+        pass
+
+
+def _clear_runtime_status(operation: str) -> None:
+    try:
+        from memplex.adapters.runtime_status import clear_runtime_status_on_success
+
+        clear_runtime_status_on_success(
+            _runtime_status_path(), agent="claude-code", operation=operation, completed=True
+        )
+    except Exception:
+        pass
+
+
 def _default_rate_file(data: Optional[dict[str, Any]] = None) -> Path:
     """Project-scoped rate-limit marker so concurrent projects don't throttle each other."""
     digest = hashlib.sha1(_project_path(data).encode("utf-8")).hexdigest()[:12]
@@ -356,7 +393,7 @@ def _package_version(memplex_module: Any) -> str:
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
     except Exception:
-        pass
+        logger.debug("pyproject version read failed", exc_info=True)
 
     try:
         from importlib.metadata import version as pkg_version
@@ -425,11 +462,13 @@ def cmd_session_start() -> None:
         data = _read_stdin_json()
         runtime = _init_runtime(data=data)
         recalled = runtime.before_prompt(_session_start_query(data))
+        _clear_runtime_status("recall")
         if recalled.context:
             _print_contract("[Memplex Context]\n" + recalled.context)
         else:
             _print_contract("[Memplex] No memories yet for this project.")
     except Exception as e:
+        _record_runtime_failure("recall", e)
         print(f"[Memplex] session-start: {e}", file=sys.stderr)
         _print_contract()
     sys.exit(0)
@@ -450,12 +489,14 @@ def cmd_prompt_submit() -> None:
             sys.exit(0)
 
         recalled = _init_runtime(data=data).before_prompt(prompt)
+        _clear_runtime_status("recall")
         if recalled.context:
             _print_contract("[Memplex] Related memories:\n" + recalled.context)
         else:
             _print_contract()
 
     except Exception as e:
+        _record_runtime_failure("recall", e)
         print(f"[Memplex] prompt-submit: {e}", file=sys.stderr)
         _print_contract()
     sys.exit(0)
@@ -481,12 +522,14 @@ def cmd_file_context() -> None:
         recalled = runtime.before_prompt(filename)
         if not recalled.context:
             recalled = runtime.before_prompt(f"file {filename} {file_path}")
+        _clear_runtime_status("recall")
         if recalled.context:
             _print_contract("[Memplex] Related to this file:\n" + recalled.context)
         else:
             _print_contract()
 
     except Exception as e:
+        _record_runtime_failure("recall", e)
         print(f"[Memplex] file-context: {e}", file=sys.stderr)
         _print_contract()
     sys.exit(0)
@@ -562,7 +605,9 @@ def cmd_observation(tool_name: str = "", session_id: str = "") -> None:
             assistant_message="Observed Claude Code tool use.",
             metadata={"tool_name": tool_name, "tool_input": _sanitize_payload(payload)},
         )
+        _clear_runtime_status("capture")
     except Exception as e:
+        _record_runtime_failure("capture", e)
         print(f"[Memplex] observation write skipped: {e}", file=sys.stderr)
 
     # Update rate limit timestamp + dedup key
@@ -602,6 +647,7 @@ def cmd_summarize() -> None:
         service = _init_service()
         compaction = service.compact(scope=os.environ.get("MEMPLEX_COMPACTION_SCOPE", "project"))
         stats = service.stats()
+        _clear_runtime_status("summarize")
 
         summary = (
             "[Memplex] Session complete. "
@@ -615,6 +661,7 @@ def cmd_summarize() -> None:
         print(summary)
         print(OUTPUT_CONTRACT)
     except Exception as e:
+        _record_runtime_failure("summarize", e)
         print(f"[Memplex] summarize: {e}", file=sys.stderr)
         _print_contract()
     finally:

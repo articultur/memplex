@@ -42,10 +42,72 @@ jobs:
         run: |
           uv lock --check
           uv sync --locked --extra dev
-      - name: Lint
+      - name: Lint (incl. C901 complexity freeze-gate)
         run: uv run ruff check memplex tests
+      - name: Architecture contract (domain never imports adapters)
+        run: uv run lint-imports
+      - name: Type-check PostgreSQL lifecycle boundary
+        run: uv run mypy
       - name: Test
+        env:
+          # The install-matrix test discovers interpreters; on Linux images
+          # only the job's setup-python interpreter exists, so pin the matrix
+          # to it. (macOS images preinstall all versions; the dedicated
+          # release-install-matrix job passes its own full matrix.)
+          MEMPLEX_INSTALL_MATRIX_PYTHON: ${{ matrix.python-version }}
         run: uv run pytest tests -v --cov=memplex --cov-report=term-missing --cov-fail-under=68
+
+  test-postgres:
+    # Exercises the flagship PostgreSQL backend against the pgvector service
+    # used in production-shaped CI.  The test fixture still creates a fresh
+    # schema per test, so service reuse cannot leak catalogue state.
+    runs-on: ubuntu-latest
+    env:
+      MEMPLEX_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/memplex
+      MEMPLEX_REQUIRE_PGVECTOR: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+        env:
+          POSTGRES_DB: memplex
+          POSTGRES_USER: postgres
+          # The integration suite creates ad-hoc LOGIN roles without
+          # passwords and connects as them (the local pgserver runner uses
+          # unix-socket trust). trust on the loopback-only, disposable CI
+          # container matches that contract; scram would reject every
+          # dynamically created role.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d memplex"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: '0.10.9'
+          enable-cache: false
+      - name: Verify lock and install PostgreSQL test environment
+        run: |
+          uv lock --check
+          uv sync --locked --extra dev --extra pgtest
+      - name: Run real-PostgreSQL integration suite
+        run: |
+          uv run pytest \
+            tests/test_ci_postgres_contract.py \
+            tests/test_postgres_integration.py \
+            tests/test_postgres_backup_integration.py \
+            tests/test_sync_postgres_integration.py \
+            tests/test_sync_repository_contract.py \
+            tests/test_postgres_store.py \
+            tests/test_g014_postgres_task_repository.py \
+            -v
 
   security:
     runs-on: ubuntu-latest
@@ -53,7 +115,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.13'
+          # 3.12 mirrors test-postgres: the audited lock includes the
+          # ``pgtest`` extra, and ``pgserver`` publishes no cp313 wheel —
+          # pip-audit's py3.13 venv cannot resolve it.
+          python-version: '3.12'
       - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
           version: '0.10.9'
@@ -61,8 +126,26 @@ jobs:
       - name: Audit the exact lock
         run: |
           uv lock --check
-          uv export --locked --extra dev --format requirements-txt --output-file /tmp/memplex-requirements.txt
-          uvx --from pip-audit==2.9.0 pip-audit --strict --requirement /tmp/memplex-requirements.txt
+          uv export --locked \
+            --extra all \
+            --extra embedding \
+            --extra extractors \
+            --extra vector \
+            --extra local-onnx \
+            --extra graph \
+            --extra http \
+            --extra llm \
+            --extra postgres \
+            --extra pgtest \
+            --extra dev \
+            --no-emit-project \
+            --format requirements-txt \
+            --output-file /tmp/memplex-requirements.txt
+          # PYSEC-2026-311 affects chromadb (optional ``vector`` extra);
+          # no fixed release exists upstream — tracked, ignored with cause.
+          uvx --from pip-audit==2.9.0 pip-audit --strict \
+            --ignore-vuln PYSEC-2026-311 \
+            --requirement /tmp/memplex-requirements.txt
 
   package-smoke:
     runs-on: ubuntu-latest
@@ -78,10 +161,11 @@ jobs:
         with:
           version: '0.10.9'
           enable-cache: false
-      - name: Build package smoke artifacts
-        run: |
-          uv build --out-dir "$RUNNER_TEMP/python-dist" .
-          npm pack --dry-run --json --ignore-scripts --prefix npm/memplex
+      - name: Build python distribution
+        run: uv build --out-dir "$RUNNER_TEMP/python-dist" .
+      - name: Smoke the npm package
+        working-directory: npm/memplex
+        run: npm pack --dry-run --json --ignore-scripts
 
   release-install-matrix:
     runs-on: ${{ matrix.os }}
