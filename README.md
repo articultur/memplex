@@ -207,6 +207,10 @@ reproduction commands.
   recall explain, scope, inbox, corpus, policy, report, uninstall, and
   troubleshoot.
 - [Explainer](docs/explainer.md): what Memplex is and how the memory loop works.
+- [Architecture](docs/architecture.md): module map, split-module re-export
+  contracts, ordered-circular-import rules, and the sync lockstep ABC.
+- [Mutation Testing](docs/mutation-testing.md): pilot baseline, how to run,
+  and the equivalence argument for surviving mutants.
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
 - [Benchmarks](docs/benchmarks.md): evaluation methodology, metric

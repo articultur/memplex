@@ -317,11 +317,23 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/storage/postgres_resources.py",
         "memplex/storage/postgres_tasks.py",
         "memplex/task_repository.py",
+        "memplex/serialization.py",
+        "memplex/authorization.py",
+        "memplex/sync_ingress.py",
+        "memplex/sync_repository.py",
+        "memplex/privacy.py",
+        "memplex/query_explainer.py",
+        "memplex/intent.py",
+        "memplex/backup.py",
+        "memplex/compaction.py",
     ]
 
     workflow = _workflow(CI)
     test_steps = json_steps(workflow["jobs"]["test"])
     assert "uv run mypy" in test_steps
+    # Complexity freeze-gate and hexagonal architecture contract.
+    assert "uv run ruff check memplex tests" in test_steps
+    assert "uv run lint-imports" in test_steps
 
     postgres_job = workflow["jobs"]["test-postgres"]
     assert postgres_job["services"]["postgres"]["image"] == (
@@ -333,7 +345,9 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
     postgres_steps = json_steps(postgres_job)
     for required_test in (
         "tests/test_ci_postgres_contract.py",
-        "tests/test_postgres_integration.py::TestPgvectorHybrid",
+        "tests/test_postgres_integration.py",
+        "tests/test_postgres_backup_integration.py",
+        "tests/test_sync_postgres_integration.py",
         "tests/test_sync_repository_contract.py",
         "tests/test_postgres_store.py",
         "tests/test_g014_postgres_task_repository.py",

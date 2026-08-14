@@ -130,6 +130,18 @@ def test_current_host_contract_digests_cover_each_real_launcher_adapter_and_shar
             "hermes",
             "openclaw",
         },
+        "memplex/adapters/install_transaction.py": {
+            "claude-code",
+            "codex",
+            "hermes",
+            "openclaw",
+        },
+        "memplex/adapters/agent_assets.py": {
+            "claude-code",
+            "codex",
+            "hermes",
+            "openclaw",
+        },
         "memplex/adapters/agent_runtime.py": {
             "claude-code",
             "codex",

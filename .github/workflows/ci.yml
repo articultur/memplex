@@ -42,8 +42,10 @@ jobs:
         run: |
           uv lock --check
           uv sync --locked --extra dev
-      - name: Lint
+      - name: Lint (incl. C901 complexity freeze-gate)
         run: uv run ruff check memplex tests
+      - name: Architecture contract (domain never imports adapters)
+        run: uv run lint-imports
       - name: Type-check PostgreSQL lifecycle boundary
         run: uv run mypy
       - name: Test
@@ -88,7 +90,9 @@ jobs:
         run: |
           uv run pytest \
             tests/test_ci_postgres_contract.py \
-            tests/test_postgres_integration.py::TestPgvectorHybrid \
+            tests/test_postgres_integration.py \
+            tests/test_postgres_backup_integration.py \
+            tests/test_sync_postgres_integration.py \
             tests/test_sync_repository_contract.py \
             tests/test_postgres_store.py \
             tests/test_g014_postgres_task_repository.py \

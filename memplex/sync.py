@@ -101,9 +101,11 @@ def _node_to_payload(node: Any) -> dict:
     to_dict = getattr(node, "to_dict", None)
     if callable(to_dict):
         return to_dict()
-    from memplex.adapters.http_api import _dataclass_to_dict
+    # Layer-neutral serializer: the domain must not import adapters
+    # (import-linter contract).
+    from memplex.serialization import dataclass_to_dict
 
-    return _dataclass_to_dict(node)
+    return dataclass_to_dict(node)
 
 
 # ── Remote sync configuration ────────────────────────────────────────

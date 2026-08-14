@@ -1728,6 +1728,48 @@ class LiteMemoryStore:
         except Exception as exc:
             raise LiteStorageIntegrityError("invalid Lite authoritative payload") from exc
 
+
+    @staticmethod
+    def _decode_typed_collections(raw: dict, legacy: bool) -> tuple[List[Observation], Dict[str, Fact], Dict[str, Preference]]:
+        """Decode + validate Observation/Fact/Preference collections in isolation."""
+        loaded_observations: List[Observation] = []
+        loaded_facts: Dict[str, Fact] = {}
+        loaded_preferences: Dict[str, Preference] = {}
+        for od in raw.get("observations", []):
+            _validate_raw_observation(od, legacy=legacy)
+            observation = Observation.from_dict(od)
+            _validate_node_for_read(observation)
+            for name in ("event", "context", "actor", "category"):
+                _require_exact_string(getattr(observation, name), f"Observation {name}")
+            _require_exact_string(observation.observed_at, "Observation observed_at", optional=True)
+            if any(existing.id == observation.id for existing in loaded_observations):
+                raise ValueError("duplicate Lite Observation id")
+            loaded_observations.append(observation)
+
+        # Older files (schema_version 1 without these keys) load as empty.
+        for fd in raw.get("facts", []):
+            _validate_raw_fact(fd, legacy=legacy)
+            fact = Fact.from_dict(fd)
+            _validate_node_for_read(fact)
+            for name in ("subject", "predicate", "object_"):
+                _require_exact_string(getattr(fact, name), f"Fact {name}")
+            _require_exact_string(fact.valid_until, "Fact valid_until", optional=True)
+            if fact.id in loaded_facts:
+                raise ValueError("duplicate Lite Fact id")
+            loaded_facts[fact.id] = fact
+
+        for pd in raw.get("preferences", []):
+            _validate_raw_preference(pd, legacy=legacy)
+            pref = Preference.from_dict(pd)
+            _validate_node_for_read(pref)
+            for name in ("aspect", "preference"):
+                _require_exact_string(getattr(pref, name), f"Preference {name}")
+            _require_exact_string(pref.subject_id, "Preference subject_id", optional=True)
+            if pref.id in loaded_preferences:
+                raise ValueError("duplicate Lite Preference id")
+            loaded_preferences[pref.id] = pref
+        return loaded_observations, loaded_facts, loaded_preferences
+
     def _decode_pair(self, pair: LitePair):
         """Fully deserialize a pair without touching published resident state."""
         raw = pair.memory
@@ -1739,11 +1781,11 @@ class LiteMemoryStore:
         loaded_name_index: Dict[str, str] = {}
         loaded_edges: List[GraphEdge] = []
         loaded_edge_keys: set[tuple[str, str, str]] = set()
+        legacy = pair.transaction_id == "legacy"
+        g002_historical = not legacy and _is_recognized_g002_enveloped_v1(raw)
         loaded_observations: List[Observation] = []
         loaded_facts: Dict[str, Fact] = {}
         loaded_preferences: Dict[str, Preference] = {}
-        legacy = pair.transaction_id == "legacy"
-        g002_historical = not legacy and _is_recognized_g002_enveloped_v1(raw)
 
         for fd in raw.get("functions", []):
             memory_type = fd.get("memory_type") if type(fd) is dict else None
@@ -1804,40 +1846,19 @@ class LiteMemoryStore:
             loaded_edge_keys.add(edge_key)
 
         validate_belongs_to_edges(loaded_functions.values(), loaded_edges)
-
-        for od in raw.get("observations", []):
-            _validate_raw_observation(od, legacy=legacy)
-            observation = Observation.from_dict(od)
-            _validate_node_for_read(observation)
-            for name in ("event", "context", "actor", "category"):
-                _require_exact_string(getattr(observation, name), f"Observation {name}")
-            _require_exact_string(observation.observed_at, "Observation observed_at", optional=True)
+        dec_obs, dec_facts, dec_prefs = self._decode_typed_collections(raw, legacy)
+        for observation in dec_obs:
             if any(existing.id == observation.id for existing in loaded_observations):
                 raise ValueError("duplicate Lite Observation id")
             loaded_observations.append(observation)
-
-        # Older files (schema_version 1 without these keys) load as empty.
-        for fd in raw.get("facts", []):
-            _validate_raw_fact(fd, legacy=legacy)
-            fact = Fact.from_dict(fd)
-            _validate_node_for_read(fact)
-            for name in ("subject", "predicate", "object_"):
-                _require_exact_string(getattr(fact, name), f"Fact {name}")
-            _require_exact_string(fact.valid_until, "Fact valid_until", optional=True)
-            if fact.id in loaded_facts:
+        for fact_id, fact in dec_facts.items():
+            if fact_id in loaded_facts:
                 raise ValueError("duplicate Lite Fact id")
-            loaded_facts[fact.id] = fact
-
-        for pd in raw.get("preferences", []):
-            _validate_raw_preference(pd, legacy=legacy)
-            pref = Preference.from_dict(pd)
-            _validate_node_for_read(pref)
-            for name in ("aspect", "preference"):
-                _require_exact_string(getattr(pref, name), f"Preference {name}")
-            _require_exact_string(pref.subject_id, "Preference subject_id", optional=True)
-            if pref.id in loaded_preferences:
+            loaded_facts[fact_id] = fact
+        for pref_id, pref in dec_prefs.items():
+            if pref_id in loaded_preferences:
                 raise ValueError("duplicate Lite Preference id")
-            loaded_preferences[pref.id] = pref
+            loaded_preferences[pref_id] = pref
 
         loaded_changelog = [
             self._changelog._deserialize_event(event) for event in pair.changelog

@@ -76,9 +76,11 @@ dev = [
     # HTTP adapter deps so test_sync / test_http_api run under a plain dev install
     "fastapi>=0.100.0,<1",
     "uvicorn>=0.23.0,<1",
-    # starlette's TestClient (used by the HTTP/sync/tenant-ACL test suites) is
-    # backed by httpx; without it the test modules fail at collection time.
     "httpx>=0.24.0,<1",
+    # Architecture-contract gate (CI: lint-imports) and complexity freeze.
+    "import-linter>=2.13,<3",
+    # Mutation-testing pilot runner (scripts/mutation_pilot.sh).
+    "cosmic-ray>=8,<9",
 ]
 
 [tool.mypy]
@@ -90,6 +92,17 @@ files = [
     "memplex/storage/postgres_resources.py",
     "memplex/storage/postgres_tasks.py",
     "memplex/task_repository.py",
+    # Layer-neutral serializer + the authorization ACL gate + the frozen
+    # sync ingress validator: fully-typed leaf modules admitted to the gate.
+    "memplex/serialization.py",
+    "memplex/authorization.py",
+    "memplex/sync_ingress.py",
+    "memplex/sync_repository.py",
+    "memplex/privacy.py",
+    "memplex/query_explainer.py",
+    "memplex/intent.py",
+    "memplex/backup.py",
+    "memplex/compaction.py",
 ]
 python_version = "3.11"
 follow_imports = "skip"
@@ -129,8 +142,55 @@ line-length = 100
 # Intentionally assigned variable
 "memplex/service.py" = ["F841"]
 "tests/test_hooks.py" = ["E741"]
+# hand-rolled SQL-recording mock cursor (26): test fixture, not product code
+"tests/test_postgres_store.py" = ["C901"]
+# ── C901 known-debt freeze (do not extend this list; new >25 fails CI) ──
+# sync route registrars aggregate endpoint handlers: v1 (41) + legacy (52);
+# down from the original 1247-line create_app / complexity-102 single function.
+"memplex/adapters/http_api.py" = ["C901"]
+# _probe_application_access (50): sequential PG access probes; a 7-helper
+# extraction reached 26 but broke probe behavior and was reverted — open debt.
+"memplex/storage/pool.py" = ["C901"]
+
+[tool.ruff.lint.mccabe]
+# Complexity freeze-gate: 25 is the current ceiling; the per-file ignores
+# above pin existing known-debt functions so any NEW violation fails CI.
+max-complexity = 25
+
+[tool.importlinter]
+root_package = "memplex"
+
+[[tool.importlinter.contracts]]
+# Deliberate carve-outs (documented): memplex.service (SSE subscriber bridge)
+# and memplex.product (readiness surface) import adapters by design.
+name = "Domain and storage layers never import host adapters"
+type = "forbidden"
+source_modules = [
+    "memplex.core",
+    "memplex.models",
+    "memplex.storage",
+    "memplex.authorization",
+    "memplex.compaction",
+    "memplex.llm",
+    "memplex.processing",
+    "memplex.retrieval",
+    "memplex.wiki",
+    "memplex.sync",
+    "memplex.sync_repository",
+    "memplex.sync_protocol",
+    "memplex.sync_dispatcher",
+    "memplex.sync_ingress",
+    "memplex.privacy",
+    "memplex.intent",
+    "memplex.backup",
+    "memplex.query_explainer",
+    "memplex.serialization",
+]
+forbidden_modules = ["memplex.adapters"]
 
 [tool.ruff.lint]
+# C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.
+extend-select = ["C901"]
 ignore = [
     # Re-export pattern: imports used by downstream modules
     "F401",
@@ -139,3 +199,17 @@ ignore = [
     # Intentionally assigned-but-unused variables in benchmark stubs
     "F841",
 ]
+
+
+[cosmic-ray]
+# Mutation-testing pilot on the frozen sync ingress validator. cosmic-ray
+# mutates the module IN PLACE (restoring afterwards), so results are real:
+# baseline = 75 killed / 35 survived / 1 incompetent of 111 mutants (~68%
+# kill rate) on 2026-08-14. The 35 survivors are the test-strength backlog.
+module-path = "memplex/sync_ingress.py"
+timeout = 30
+test-command = "pytest tests/test_sync_ingress.py -x -q --no-header -p no:cacheprovider"
+
+[cosmic-ray.distributor]
+name = "local"
+

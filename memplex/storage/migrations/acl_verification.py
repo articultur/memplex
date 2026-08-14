@@ -158,65 +158,8 @@ def _verify_application_acl(
         observed[name].add(str(privilege))
     if observed != tables:
         raise MigrationIntegrityError("application role table ACL is not least privilege")
-    for sequence_name in ("memplex_changelog_id_seq", "memplex_sync_outbox_stream_seq_seq"):
-        cur.execute(
-            """
-            SELECT c.relowner, a.grantee, a.privilege_type, a.is_grantable
-            FROM pg_catalog.pg_class c
-            JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-            CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
-            WHERE n.nspname=current_schema() AND c.relkind='S' AND c.relname=%s
-            """,
-            (sequence_name,),
-        )
-        application_sequence_acl = tuple(
-            (grantee, privilege, grantable)
-            for owner, grantee, privilege, grantable in cur.fetchall()
-            if int(grantee) != int(owner)
-        )
-        if application_sequence_acl != ((role_oid, "USAGE", False),):
-            raise MigrationIntegrityError("application role sequence ACL is not least privilege")
-    cur.execute(
-        """
-        SELECT procedure.proname, procedure.proowner, privilege.grantee,
-               privilege.privilege_type, privilege.is_grantable
-        FROM pg_catalog.pg_proc procedure
-        JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
-        CROSS JOIN LATERAL pg_catalog.aclexplode(procedure.proacl) privilege
-        WHERE namespace.nspname=current_schema() AND procedure.proname = ANY(%s)
-        ORDER BY procedure.proname, privilege.grantee, privilege.privilege_type
-        """,
-        (list(_SYNC_FUNCTIONS),),
-    )
-    observed_functions: dict[str, set[str]] = {name: set() for name in _SYNC_FUNCTIONS}
-    for name, owner, grantee, privilege, grantable in cur.fetchall():
-        if int(grantee) == int(owner):
-            continue
-        expected_app = str(name) in _APPLICATION_ACL_FUNCTIONS and int(grantee) == role_oid
-        expected_ingress = (
-            ingress_role is not None
-            and str(name) == "memplex_sync_apply_inbound"
-            and str(grantee) != "0"
-        )
-        if bool(grantable) or int(grantee) == 0 or str(privilege) != "EXECUTE":
-            raise MigrationIntegrityError("application role function ACL is not least privilege")
-        if expected_app:
-            observed_functions[str(name)].add(str(privilege))
-            continue
-        if expected_ingress:
-            cur.execute("SELECT oid FROM pg_catalog.pg_roles WHERE rolname=%s", (ingress_role,))
-            ingress_row = cur.fetchone()
-            if ingress_row is not None and int(grantee) == int(ingress_row[0]):
-                continue
-        raise MigrationIntegrityError("application role function ACL is not least privilege")
-    expected_functions = {
-        name: ({"EXECUTE"} if name in _APPLICATION_ACL_FUNCTIONS else set())
-        for name in _SYNC_FUNCTIONS
-    }
-    if observed_functions != expected_functions:
-        raise MigrationIntegrityError("application role function ACL is not least privilege")
-    return True
-
+    _verify_application_sequence_acls(cur, role_oid)
+    _verify_application_function_acls(cur, role_oid, ingress_role)
 def _verify_ingress_acl(
     cur: Any,
     contract: IngressAclContract,
@@ -231,25 +174,7 @@ def _verify_ingress_acl(
     """
     if type(contract) is not IngressAclContract:
         raise TypeError("ingress ACL contract must be exact IngressAclContract")
-    cur.execute(
-        "SELECT oid, rolcanlogin, rolsuper, rolbypassrls FROM pg_catalog.pg_roles WHERE rolname=%s",
-        (contract.role,),
-    )
-    row = cur.fetchone()
-    if row is None or not bool(row[1]) or bool(row[2]) or bool(row[3]):
-        raise MigrationIntegrityError("ingress role ACL is unsafe")
-    cur.execute(
-        """
-        SELECT EXISTS (
-            SELECT 1 FROM memplex_sync_ingress_principals
-            WHERE role_name=%s::name AND enabled
-        )
-        """,
-        (contract.role,),
-    )
-    if cur.fetchone() != (True,):
-        raise MigrationIntegrityError("ingress role is not owner-bound")
-    ingress_oid = int(row[0])
+    ingress_oid = _verify_ingress_role_safety(cur, contract.role)
     application_oid: int | None = None
     if application_role is not None:
         cur.execute("SELECT oid FROM pg_catalog.pg_roles WHERE rolname=%s", (application_role,))
@@ -258,37 +183,7 @@ def _verify_ingress_acl(
             raise MigrationIntegrityError("ingress role ACL is unsafe")
         application_oid = int(application_row[0])
     if profile == "production":
-        cur.execute(
-            """
-            WITH RECURSIVE reachable(oid) AS (
-                SELECT %s::oid
-                UNION
-                SELECT membership.roleid
-                FROM pg_catalog.pg_auth_members membership
-                JOIN reachable ON membership.member=reachable.oid
-            )
-            SELECT role.rolname, role.rolsuper, role.rolbypassrls,
-                   EXISTS (
-                       SELECT 1 FROM pg_catalog.pg_namespace namespace
-                       WHERE namespace.nspname=current_schema() AND namespace.nspowner=role.oid
-                   ) OR EXISTS (
-                       SELECT 1 FROM pg_catalog.pg_class relation
-                       JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
-                       WHERE namespace.nspname=current_schema()
-                         AND relation.relname=ANY(%s) AND relation.relowner=role.oid
-                   )
-            FROM reachable JOIN pg_catalog.pg_roles role ON role.oid=reachable.oid
-            """,
-            (ingress_oid, list(_MANAGED_TABLES)),
-        )
-        for role_name, is_super, bypass_rls, owns_managed in cur.fetchall():
-            if (
-                bool(is_super)
-                or bool(bypass_rls)
-                or bool(owns_managed)
-                or str(role_name) in {"pg_read_all_data", "pg_write_all_data"}
-            ):
-                raise MigrationIntegrityError("ingress role can SET ROLE to unsafe privilege")
+        _verify_ingress_production_roles(cur, ingress_oid)
     cur.execute(
         """
         SELECT n.nspowner, a.grantee, grantee_role.rolname, a.privilege_type, a.is_grantable
@@ -298,31 +193,8 @@ def _verify_ingress_acl(
         WHERE n.nspname=current_schema()
         """
     )
-    ingress_usage = False
-    for owner, grantee, grantee_name, privilege, grantable in cur.fetchall():
-        if grantee is None or int(grantee) == int(owner):
-            continue
-        if bool(grantable) or str(privilege) != "USAGE":
-            raise MigrationIntegrityError("ingress role schema ACL is unsafe")
-        if int(grantee) == ingress_oid:
-            ingress_usage = True
-            continue
-        if application_role is not None and grantee_name == application_role:
-            continue
-        raise MigrationIntegrityError("ingress role schema ACL is unsafe")
-    if not ingress_usage:
-        raise MigrationIntegrityError("ingress role schema ACL is unsafe")
-    for table in _MANAGED_TABLES:
-        cur.execute(
-            "SELECT has_table_privilege(%s::name, %s::regclass, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')",
-            (contract.role, table),
-        )
-        # The scoped runner's current schema is safer than composing an
-        # untrusted name; use to_regclass below when parameter_status is not
-        # populated by psycopg2.
-        value = cur.fetchone()
-        if value not in ((False,), None):
-            raise MigrationIntegrityError("ingress role has relation ACL")
+    _verify_ingress_schema_acls(cur, ingress_oid, application_role)
+    _verify_ingress_relation_acls(cur, contract.role)
     for sequence_name in ("memplex_changelog_id_seq", "memplex_sync_outbox_stream_seq_seq"):
         cur.execute(
             "SELECT has_sequence_privilege(%s::name, %s::regclass, 'USAGE,SELECT,UPDATE')",
@@ -461,3 +333,168 @@ def _verify_acl_contracts(
             application_role=application_acl.role if application_acl is not None else None,
         )
     return True
+
+def _verify_application_sequence_acls(cur: Any, role_oid: int) -> None:
+    """The application role holds exactly USAGE on the two managed sequences."""
+    for sequence_name in ("memplex_changelog_id_seq", "memplex_sync_outbox_stream_seq_seq"):
+        cur.execute(
+            """
+            SELECT c.relowner, a.grantee, a.privilege_type, a.is_grantable
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+            WHERE n.nspname=current_schema() AND c.relkind='S' AND c.relname=%s
+            """,
+            (sequence_name,),
+        )
+        application_sequence_acl = tuple(
+            (grantee, privilege, grantable)
+            for owner, grantee, privilege, grantable in cur.fetchall()
+            if int(grantee) != int(owner)
+        )
+        if application_sequence_acl != ((role_oid, "USAGE", False),):
+            raise MigrationIntegrityError("application role sequence ACL is not least privilege")
+
+
+def _verify_application_function_acls(
+    cur: Any, role_oid: int, ingress_role: str | None
+) -> bool:
+    """The application role holds exactly the required EXECUTE set."""
+    cur.execute(
+        """
+        SELECT procedure.proname, procedure.proowner, privilege.grantee,
+               privilege.privilege_type, privilege.is_grantable
+        FROM pg_catalog.pg_proc procedure
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid=procedure.pronamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(procedure.proacl) privilege
+        WHERE namespace.nspname=current_schema() AND procedure.proname = ANY(%s)
+        ORDER BY procedure.proname, privilege.grantee, privilege.privilege_type
+        """,
+        (list(_SYNC_FUNCTIONS),),
+    )
+    observed_functions: dict[str, set[str]] = {name: set() for name in _SYNC_FUNCTIONS}
+    for name, owner, grantee, privilege, grantable in cur.fetchall():
+        if int(grantee) == int(owner):
+            continue
+        expected_app = str(name) in _APPLICATION_ACL_FUNCTIONS and int(grantee) == role_oid
+        expected_ingress = (
+            ingress_role is not None
+            and str(name) == "memplex_sync_apply_inbound"
+            and str(grantee) != "0"
+        )
+        if bool(grantable) or int(grantee) == 0 or str(privilege) != "EXECUTE":
+            raise MigrationIntegrityError("application role function ACL is not least privilege")
+        if expected_app:
+            observed_functions[str(name)].add(str(privilege))
+            continue
+        if expected_ingress:
+            cur.execute("SELECT oid FROM pg_catalog.pg_roles WHERE rolname=%s", (ingress_role,))
+            ingress_row = cur.fetchone()
+            if ingress_row is not None and int(grantee) == int(ingress_row[0]):
+                continue
+        raise MigrationIntegrityError("application role function ACL is not least privilege")
+    expected_functions = {
+        name: ({"EXECUTE"} if name in _APPLICATION_ACL_FUNCTIONS else set())
+        for name in _SYNC_FUNCTIONS
+    }
+    if observed_functions != expected_functions:
+        raise MigrationIntegrityError("application role function ACL is not least privilege")
+    return True
+
+
+
+def _verify_ingress_production_roles(cur: Any, ingress_oid: int) -> None:
+    """No role may hold unsafe privilege over the managed schema in production."""
+    cur.execute(
+        """
+        WITH RECURSIVE reachable(oid) AS (
+            SELECT %s::oid
+            UNION
+            SELECT membership.roleid
+            FROM pg_catalog.pg_auth_members membership
+            JOIN reachable ON membership.member=reachable.oid
+        )
+        SELECT role.rolname, role.rolsuper, role.rolbypassrls,
+               EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_namespace namespace
+                   WHERE namespace.nspname=current_schema() AND namespace.nspowner=role.oid
+               ) OR EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_class relation
+                   JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+                   WHERE namespace.nspname=current_schema()
+                     AND relation.relname=ANY(%s) AND relation.relowner=role.oid
+               )
+        FROM reachable JOIN pg_catalog.pg_roles role ON role.oid=reachable.oid
+        """,
+        (ingress_oid, list(_MANAGED_TABLES)),
+    )
+    for role_name, is_super, bypass_rls, owns_managed in cur.fetchall():
+        if (
+            bool(is_super)
+            or bool(bypass_rls)
+            or bool(owns_managed)
+            or str(role_name) in {"pg_read_all_data", "pg_write_all_data"}
+        ):
+            raise MigrationIntegrityError("ingress role can SET ROLE to unsafe privilege")
+
+
+def _verify_ingress_schema_acls(
+    cur: Any, ingress_oid: int, application_role: str | None
+) -> None:
+    """Ingress USAGE is the only non-owner schema grant; application may not.
+
+    Passed ``None`` for ``application_role`` skips the application-name check.
+    """
+    ingress_usage = False
+    for owner, grantee, grantee_name, privilege, grantable in cur.fetchall():
+        if grantee is None or int(grantee) == int(owner):
+            continue
+        if bool(grantable) or str(privilege) != "USAGE":
+            raise MigrationIntegrityError("ingress role schema ACL is unsafe")
+        if int(grantee) == ingress_oid:
+            ingress_usage = True
+            continue
+        if application_role is not None and grantee_name == application_role:
+            continue
+        raise MigrationIntegrityError("ingress role schema ACL is unsafe")
+    if not ingress_usage:
+        raise MigrationIntegrityError("ingress role schema ACL is unsafe")
+
+
+def _verify_ingress_relation_acls(cur: Any, ingress_role: str) -> None:
+    """No managed relation carries an ingress-visible ACL entry."""
+    for table in _MANAGED_TABLES:
+        cur.execute(
+            "SELECT has_table_privilege(%s::name, %s::regclass, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')",
+            (ingress_role, table),
+        )
+        # The scoped runner's current schema is safer than composing an
+        # untrusted name; use to_regclass below when parameter_status is not
+        # populated by psycopg2.
+        value = cur.fetchone()
+        if value not in ((False,), None):
+            raise MigrationIntegrityError("ingress role has relation ACL")
+
+
+def _verify_ingress_role_safety(cur: Any, ingress_role: str) -> int:
+    """Role exists, can login, non-superuser, non-bypassrls, owner-bound."""
+    cur.execute(
+        "SELECT oid, rolcanlogin, rolsuper, rolbypassrls FROM pg_catalog.pg_roles WHERE rolname=%s",
+        (ingress_role,),
+    )
+    row = cur.fetchone()
+    ingress_oid = int(row[0]) if row is not None else -1
+    if row is None or not bool(row[1]) or bool(row[2]) or bool(row[3]):
+        raise MigrationIntegrityError("ingress role ACL is unsafe")
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM memplex_sync_ingress_principals
+            WHERE role_name=%s::name AND enabled
+        )
+        """,
+        (ingress_role,),
+    )
+    if cur.fetchone() != (True,):
+        raise MigrationIntegrityError("ingress role is not owner-bound")
+    return ingress_oid

@@ -393,12 +393,7 @@ class SyncConfig:
                 raise ValueError(f"sync.{name} must be positive")
         if self.page_size > self.max_page_size:
             raise ValueError("sync.page_size cannot exceed sync.max_page_size")
-        if self.max_batch_events > 1000:
-            raise ValueError("sync.max_batch_events cannot exceed protocol hard cap 1000")
-        if self.max_batch_bytes > 4 * 1024 * 1024:
-            raise ValueError("sync.max_batch_bytes cannot exceed protocol hard cap 4MiB")
-        if self.max_page_size > 1000:
-            raise ValueError("sync.max_page_size cannot exceed protocol hard cap 1000")
+        self._validate_protocol_hard_caps()
         for name in ("node_id", "cursor_signing_key_id", "cursor_signing_secret"):
             value = getattr(self, name)
             if type(value) is not str:
@@ -451,6 +446,15 @@ class SyncConfig:
                 raise ValueError("enabled sync requires a cursor signing key id")
             if len(self.cursor_signing_secret.encode("utf-8")) < 32:
                 raise ValueError("enabled sync requires a cursor signing secret of at least 32 bytes")
+
+    def _validate_protocol_hard_caps(self) -> None:
+        """Enforce the sync protocol's fixed wire-format ceilings."""
+        if self.max_batch_events > 1000:
+            raise ValueError("sync.max_batch_events cannot exceed protocol hard cap 1000")
+        if self.max_batch_bytes > 4 * 1024 * 1024:
+            raise ValueError("sync.max_batch_bytes cannot exceed protocol hard cap 4MiB")
+        if self.max_page_size > 1000:
+            raise ValueError("sync.max_page_size cannot exceed protocol hard cap 1000")
 
     def validate_remote_url(self, remote_url: str, *, profile: str = "development") -> str:
         """Validate a remote before a network client sees it.

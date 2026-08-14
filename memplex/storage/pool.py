@@ -1447,6 +1447,139 @@ class PostgresPoolManager:
             )
             if cursor.fetchone() != (False,):
                 raise PermissionError("application role can configure local sync identity")
+        PostgresPoolManager._probe_verify_production_principal(
+            cursor, profile, schema, tables,
+        )
+        PostgresPoolManager._probe_verify_vector_capability(
+            cursor, profile, schema, vector_dim,
+        )
+
+        token = uuid4().hex
+        tenant = "memplex-readiness-" + token
+        subject = "subject-" + token
+        workspace = "workspace-" + token
+        agent = "agent-" + token
+        session = "session-" + token
+        function_a = "readiness-a-" + token
+        function_b = "readiness-b-" + token
+        cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+        cursor.execute("SELECT set_config('memplex.subject_id', %s, true)", (subject,))
+        cursor.execute("SELECT set_config('memplex.workspace_id', %s, true)", (workspace,))
+        cursor.execute("SELECT set_config('memplex.agent_id', %s, true)", (agent,))
+        cursor.execute("SELECT set_config('memplex.session_id', %s, true)", (session,))
+        PostgresPoolManager._probe_verify_background_task_crud(cursor, token)
+        remote = "remote-" + token
+        consumer = "consumer-" + token
+        cursor.execute("SELECT set_config('memplex.verified_remote_node_id', %s, true)", (remote,))
+        cursor.execute("SELECT set_config('memplex.consumer_id', %s, true)", (consumer,))
+        cursor.execute("SELECT memplex_sync_assert_delivery_quota(%s, 0)", (tenant,))
+        cursor.execute("SAVEPOINT memplex_probe_sync_v5")
+        event_id = PostgresPoolManager._probe_publish_sync_event(
+            cursor, profile, tenant, subject, workspace, agent, session,
+            token, remote, consumer,
+        )
+        metadata = (tenant, subject, workspace, "workspace", agent, session)
+        payload = '{"id":"readiness","name":"readiness"}'
+        payload_b = '{"id":"readiness-b","name":"readiness-b"}'
+        insert_function = """
+            INSERT INTO memplex_functions
+              (tenant_id, id, data, updated_at, owner_subject, workspace,
+               visibility, source_agent, source_session)
+            VALUES (%s, %s, %s::jsonb, now(), %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        cursor.execute(insert_function, (metadata[0], function_a, payload, *metadata[1:]))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("function insert was not visible")
+        cursor.execute(insert_function, (metadata[0], function_b, payload_b, *metadata[1:]))
+        if cursor.fetchone() != (function_b,):
+            raise PermissionError("function insert was not visible")
+        cursor.execute(
+            "UPDATE memplex_functions SET updated_at = now() WHERE tenant_id=%s AND id=%s RETURNING id",
+            (tenant, function_a),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("function update was not visible")
+        cursor.execute(
+            "INSERT INTO memplex_edges (tenant_id, source, target, edge_type, weight, evidence, created_at, owner_subject, workspace, visibility, source_agent, source_session) VALUES (%s,%s,%s,'RELATED_TO',1,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING source",
+            (tenant, function_a, function_b, "{}", *metadata[1:]),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge insert was not visible")
+        cursor.execute(
+            "SELECT source FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO'",
+            (tenant, function_a, function_b),
+        )
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge select was not visible")
+        cursor.execute("UPDATE memplex_edges SET weight=2 WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge update was not visible")
+        cursor.execute("DELETE FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
+        if cursor.fetchone() != (function_a,):
+            raise PermissionError("edge delete was not visible")
+        # A development superuser is permitted as a convenience and bypasses
+        # RLS by PostgreSQL design.  Production rejected it above, so only
+        # production uses this as isolation evidence.
+        rejected = PostgresPoolManager._probe_verify_function_rls(
+            cursor, profile, tenant, function_a, insert_function, metadata, payload,
+        )
+        for table, stamp in (("memplex_observations", "created_at"), ("memplex_facts", "updated_at"), ("memplex_preferences", "updated_at")):
+            record_id = table + "-" + token
+            cursor.execute(
+                f"INSERT INTO {table} (tenant_id,id,data,{stamp},owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING id",
+                (tenant, record_id, payload, *metadata[1:]),
+            )
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} insert was not visible")
+            cursor.execute(f"SELECT id FROM {table} WHERE tenant_id=%s AND id=%s", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} select was not visible")
+            cursor.execute(f"UPDATE {table} SET {stamp}=now() WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} update was not visible")
+            cursor.execute(f"DELETE FROM {table} WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
+            if cursor.fetchone() != (record_id,):
+                raise PermissionError(f"{table} delete was not visible")
+        changelog_id = -int(token[:12], 16)
+        cursor.execute(
+            "INSERT INTO memplex_changelog (tenant_id,id,func_id,ts,event_type,description,source,actor,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s,now(),'readiness','readiness','readiness','readiness',%s,%s,%s,%s,%s) RETURNING id",
+            (tenant, changelog_id, function_a, *metadata[1:]),
+        )
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog insert was not visible")
+        cursor.execute("SELECT id FROM memplex_changelog WHERE tenant_id=%s AND id=%s", (tenant, changelog_id))
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog select was not visible")
+        cursor.execute("DELETE FROM memplex_changelog WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, changelog_id))
+        if cursor.fetchone() != (changelog_id,):
+            raise PermissionError("changelog delete was not visible")
+        feedback_id = "feedback-" + token
+        cursor.execute(
+            "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',0,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
+            (feedback_id, tenant, subject, workspace, '{"agent_id":"' + agent + '","session_id":"' + session + '"}'),
+        )
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback insert was not visible")
+        cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback select was not visible")
+        cursor.execute("UPDATE feedback SET reason='readiness' WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback update was not visible")
+        rejected = PostgresPoolManager._probe_verify_feedback_rls(
+            cursor, profile, tenant, subject, agent, session, workspace, feedback_id,
+        )
+        cursor.execute("DELETE FROM feedback WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
+        if cursor.fetchone() != (feedback_id,):
+            raise PermissionError("feedback delete was not visible")
+        cursor.execute("DELETE FROM memplex_functions WHERE tenant_id=%s AND id IN (%s,%s) RETURNING id", (tenant, function_a, function_b))
+        if len(cursor.fetchall()) != 2:
+            raise PermissionError("function delete was not visible")
+
+    @staticmethod
+    def _probe_verify_production_principal(cursor, profile: str, schema, tables) -> None:
+        """Production-only principal/ownership audit over the managed catalogue."""
         if profile == "production":
             cursor.execute(
                 """
@@ -1473,6 +1606,11 @@ class PostgresPoolManager:
             row = cursor.fetchone()
             if row is None or len(row) != 5 or not all(row):
                 raise PermissionError("production application principal is unsafe")
+
+
+    @staticmethod
+    def _probe_verify_vector_capability(cursor, profile: str, schema, vector_dim) -> None:
+        """The negotiated pgvector capability matches the requested dimension."""
         if vector_dim:
             cursor.execute(
                 """
@@ -1512,56 +1650,69 @@ class PostgresPoolManager:
             if cursor.fetchone() is None:
                 raise PermissionError("vector capability probe failed")
 
-        token = uuid4().hex
-        tenant = "memplex-readiness-" + token
-        subject = "subject-" + token
-        workspace = "workspace-" + token
-        agent = "agent-" + token
-        session = "session-" + token
-        function_a = "readiness-a-" + token
-        function_b = "readiness-b-" + token
-        cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        cursor.execute("SELECT set_config('memplex.subject_id', %s, true)", (subject,))
-        cursor.execute("SELECT set_config('memplex.workspace_id', %s, true)", (workspace,))
-        cursor.execute("SELECT set_config('memplex.agent_id', %s, true)", (agent,))
-        cursor.execute("SELECT set_config('memplex.session_id', %s, true)", (session,))
-        task_id = "task-" + token
-        cursor.execute(
-            """
-            INSERT INTO memplex_background_tasks
-              (task_id, task_type, status, payload, max_retries, next_attempt_at)
-            VALUES (%s, 'build_index', 'pending', '{}'::jsonb, 1, clock_timestamp())
-            RETURNING task_id
-            """,
-            (task_id,),
-        )
-        if cursor.fetchone() != (task_id,):
-            raise PermissionError("background task insert was not visible")
-        cursor.execute(
-            "UPDATE memplex_background_tasks SET last_error_code='readiness' "
-            "WHERE task_id=%s RETURNING task_id",
-            (task_id,),
-        )
-        if cursor.fetchone() != (task_id,):
-            raise PermissionError("background task update was not visible")
-        cursor.execute(
-            "SELECT task_id FROM memplex_background_tasks WHERE task_id=%s",
-            (task_id,),
-        )
-        if cursor.fetchone() != (task_id,):
-            raise PermissionError("background task select was not visible")
-        cursor.execute(
-            "DELETE FROM memplex_background_tasks WHERE task_id=%s RETURNING task_id",
-            (task_id,),
-        )
-        if cursor.fetchone() != (task_id,):
-            raise PermissionError("background task delete was not visible")
-        remote = "remote-" + token
-        consumer = "consumer-" + token
-        cursor.execute("SELECT set_config('memplex.verified_remote_node_id', %s, true)", (remote,))
-        cursor.execute("SELECT set_config('memplex.consumer_id', %s, true)", (consumer,))
-        cursor.execute("SELECT memplex_sync_assert_delivery_quota(%s, 0)", (tenant,))
-        cursor.execute("SAVEPOINT memplex_probe_sync_v5")
+
+    @staticmethod
+    def _probe_verify_feedback_rls(cursor, profile: str, tenant, subject, agent, session, workspace, feedback_id) -> bool:
+        """Cross-tenant feedback RLS isolation under savepoint round-trip."""
+        if profile == "production":
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
+            cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
+            if cursor.fetchone() is not None:
+                raise PermissionError("feedback RLS isolation failed")
+            cursor.execute("SAVEPOINT memplex_probe_feedback_rls")
+            rejected = False
+            try:
+                cursor.execute(
+                    "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',1,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
+                    (
+                        feedback_id + "-rls",
+                        tenant,
+                        subject,
+                        workspace,
+                        '{"agent_id":"' + agent + '","session_id":"' + session + '"}',
+                    ),
+                )
+            except BaseException:
+                rejected = True
+            finally:
+                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_feedback_rls")
+                cursor.execute("RELEASE SAVEPOINT memplex_probe_feedback_rls")
+            if not rejected:
+                raise PermissionError("feedback RLS WITH CHECK isolation failed")
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+
+
+    @staticmethod
+    def _probe_verify_function_rls(cursor, profile: str, tenant, function_a, insert_function, metadata, payload) -> bool:
+        """Cross-tenant function RLS isolation under savepoint round-trip."""
+        if profile == "production":
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
+            cursor.execute("SELECT id FROM memplex_functions WHERE tenant_id=%s AND id=%s", (tenant, function_a))
+            if cursor.fetchone() is not None:
+                raise PermissionError("function RLS isolation failed")
+            cursor.execute("SAVEPOINT memplex_probe_function_rls")
+            rejected = False
+            try:
+                # The GUC deliberately names another tenant while the row
+                # carries our original tenant.  A successful INSERT would
+                # prove that WITH CHECK is not enforcing the RLS boundary.
+                cursor.execute(
+                    insert_function,
+                    (metadata[0], function_a + "-rls", payload, *metadata[1:]),
+                )
+            except BaseException:
+                rejected = True
+            finally:
+                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_function_rls")
+                cursor.execute("RELEASE SAVEPOINT memplex_probe_function_rls")
+            if not rejected:
+                raise PermissionError("function RLS WITH CHECK isolation failed")
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
+
+
+    @staticmethod
+    def _probe_publish_sync_event(cursor, profile: str, tenant, subject, workspace, agent, session, token, remote, consumer) -> Any:
+        """Insert one sync-v5 outbox event under its savepoint and verify visibility."""
         try:
             event_id = "event-" + token
             cursor.execute(
@@ -1618,147 +1769,43 @@ class PostgresPoolManager:
         finally:
             cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_sync_v5")
             cursor.execute("RELEASE SAVEPOINT memplex_probe_sync_v5")
-        metadata = (tenant, subject, workspace, "workspace", agent, session)
-        payload = '{"id":"readiness","name":"readiness"}'
-        payload_b = '{"id":"readiness-b","name":"readiness-b"}'
-        insert_function = """
-            INSERT INTO memplex_functions
-              (tenant_id, id, data, updated_at, owner_subject, workspace,
-               visibility, source_agent, source_session)
-            VALUES (%s, %s, %s::jsonb, now(), %s, %s, %s, %s, %s)
-            RETURNING id
-        """
-        cursor.execute(insert_function, (metadata[0], function_a, payload, *metadata[1:]))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("function insert was not visible")
-        cursor.execute(insert_function, (metadata[0], function_b, payload_b, *metadata[1:]))
-        if cursor.fetchone() != (function_b,):
-            raise PermissionError("function insert was not visible")
+
+
+    @staticmethod
+    def _probe_verify_background_task_crud(cursor, token: str) -> None:
+        """Insert/update/select/delete one background task row as the probe role."""
+        task_id = "task-" + token
         cursor.execute(
-            "UPDATE memplex_functions SET updated_at = now() WHERE tenant_id=%s AND id=%s RETURNING id",
-            (tenant, function_a),
+            """
+            INSERT INTO memplex_background_tasks
+              (task_id, task_type, status, payload, max_retries, next_attempt_at)
+            VALUES (%s, 'build_index', 'pending', '{}'::jsonb, 1, clock_timestamp())
+            RETURNING task_id
+            """,
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("function update was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task insert was not visible")
         cursor.execute(
-            "INSERT INTO memplex_edges (tenant_id, source, target, edge_type, weight, evidence, created_at, owner_subject, workspace, visibility, source_agent, source_session) VALUES (%s,%s,%s,'RELATED_TO',1,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING source",
-            (tenant, function_a, function_b, "{}", *metadata[1:]),
+            "UPDATE memplex_background_tasks SET last_error_code='readiness' "
+            "WHERE task_id=%s RETURNING task_id",
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge insert was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task update was not visible")
         cursor.execute(
-            "SELECT source FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO'",
-            (tenant, function_a, function_b),
+            "SELECT task_id FROM memplex_background_tasks WHERE task_id=%s",
+            (task_id,),
         )
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge select was not visible")
-        cursor.execute("UPDATE memplex_edges SET weight=2 WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge update was not visible")
-        cursor.execute("DELETE FROM memplex_edges WHERE tenant_id=%s AND source=%s AND target=%s AND edge_type='RELATED_TO' RETURNING source", (tenant, function_a, function_b))
-        if cursor.fetchone() != (function_a,):
-            raise PermissionError("edge delete was not visible")
-        # A development superuser is permitted as a convenience and bypasses
-        # RLS by PostgreSQL design.  Production rejected it above, so only
-        # production uses this as isolation evidence.
-        if profile == "production":
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
-            cursor.execute("SELECT id FROM memplex_functions WHERE tenant_id=%s AND id=%s", (tenant, function_a))
-            if cursor.fetchone() is not None:
-                raise PermissionError("function RLS isolation failed")
-            cursor.execute("SAVEPOINT memplex_probe_function_rls")
-            rejected = False
-            try:
-                # The GUC deliberately names another tenant while the row
-                # carries our original tenant.  A successful INSERT would
-                # prove that WITH CHECK is not enforcing the RLS boundary.
-                cursor.execute(
-                    insert_function,
-                    (metadata[0], function_a + "-rls", payload, *metadata[1:]),
-                )
-            except BaseException:
-                rejected = True
-            finally:
-                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_function_rls")
-                cursor.execute("RELEASE SAVEPOINT memplex_probe_function_rls")
-            if not rejected:
-                raise PermissionError("function RLS WITH CHECK isolation failed")
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        for table, stamp in (("memplex_observations", "created_at"), ("memplex_facts", "updated_at"), ("memplex_preferences", "updated_at")):
-            record_id = table + "-" + token
-            cursor.execute(
-                f"INSERT INTO {table} (tenant_id,id,data,{stamp},owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s::jsonb,now(),%s,%s,%s,%s,%s) RETURNING id",
-                (tenant, record_id, payload, *metadata[1:]),
-            )
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} insert was not visible")
-            cursor.execute(f"SELECT id FROM {table} WHERE tenant_id=%s AND id=%s", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} select was not visible")
-            cursor.execute(f"UPDATE {table} SET {stamp}=now() WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} update was not visible")
-            cursor.execute(f"DELETE FROM {table} WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, record_id))
-            if cursor.fetchone() != (record_id,):
-                raise PermissionError(f"{table} delete was not visible")
-        changelog_id = -int(token[:12], 16)
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task select was not visible")
         cursor.execute(
-            "INSERT INTO memplex_changelog (tenant_id,id,func_id,ts,event_type,description,source,actor,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,%s,%s,now(),'readiness','readiness','readiness','readiness',%s,%s,%s,%s,%s) RETURNING id",
-            (tenant, changelog_id, function_a, *metadata[1:]),
+            "DELETE FROM memplex_background_tasks WHERE task_id=%s RETURNING task_id",
+            (task_id,),
         )
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog insert was not visible")
-        cursor.execute("SELECT id FROM memplex_changelog WHERE tenant_id=%s AND id=%s", (tenant, changelog_id))
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog select was not visible")
-        cursor.execute("DELETE FROM memplex_changelog WHERE tenant_id=%s AND id=%s RETURNING id", (tenant, changelog_id))
-        if cursor.fetchone() != (changelog_id,):
-            raise PermissionError("changelog delete was not visible")
-        feedback_id = "feedback-" + token
-        cursor.execute(
-            "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',0,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
-            (feedback_id, tenant, subject, workspace, '{"agent_id":"' + agent + '","session_id":"' + session + '"}'),
-        )
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback insert was not visible")
-        cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback select was not visible")
-        cursor.execute("UPDATE feedback SET reason='readiness' WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback update was not visible")
-        if profile == "production":
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
-            cursor.execute("SELECT memory_id FROM feedback WHERE tenant_id=%s AND memory_id=%s", (tenant, feedback_id))
-            if cursor.fetchone() is not None:
-                raise PermissionError("feedback RLS isolation failed")
-            cursor.execute("SAVEPOINT memplex_probe_feedback_rls")
-            rejected = False
-            try:
-                cursor.execute(
-                    "INSERT INTO feedback (memory_id,field_role,value_index,verdict,timestamp,tenant_id,owner_subject_id,workspace_id,visibility,provenance) VALUES (%s,'readiness',1,'correct',now(),%s,%s,%s,'workspace',%s::jsonb) RETURNING memory_id",
-                    (
-                        feedback_id + "-rls",
-                        tenant,
-                        subject,
-                        workspace,
-                        '{"agent_id":"' + agent + '","session_id":"' + session + '"}',
-                    ),
-                )
-            except BaseException:
-                rejected = True
-            finally:
-                cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_feedback_rls")
-                cursor.execute("RELEASE SAVEPOINT memplex_probe_feedback_rls")
-            if not rejected:
-                raise PermissionError("feedback RLS WITH CHECK isolation failed")
-            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant,))
-        cursor.execute("DELETE FROM feedback WHERE tenant_id=%s AND memory_id=%s RETURNING memory_id", (tenant, feedback_id))
-        if cursor.fetchone() != (feedback_id,):
-            raise PermissionError("feedback delete was not visible")
-        cursor.execute("DELETE FROM memplex_functions WHERE tenant_id=%s AND id IN (%s,%s) RETURNING id", (tenant, function_a, function_b))
-        if len(cursor.fetchall()) != 2:
-            raise PermissionError("function delete was not visible")
+        if cursor.fetchone() != (task_id,):
+            raise PermissionError("background task delete was not visible")
+
 
     def close(self, *, wait: bool = True) -> bool:
         with self._condition:

@@ -806,190 +806,9 @@ if _FASTAPI_AVAILABLE:
 # ── App factory ─────────────────────────────────────────────────────
 
 
-def create_app(config=None) -> "FastAPI":
-    """Build and return a FastAPI application.
 
-    Parameters
-    ----------
-    config:
-        A :class:`MemplexConfig` instance.  When ``None``, defaults are
-        loaded via :func:`load_config`.
-
-    Returns
-    -------
-    FastAPI
-        Configured application with lifecycle hooks.
-    """
-    if not _FASTAPI_AVAILABLE:
-        raise ImportError(
-            "FastAPI is required for the HTTP adapter. Install it with: pip install fastapi uvicorn"
-        )
-
-    from memplex.config import load_config
-    from memplex.logging_config import configure_logging, install_sensitive_data_filters
-    from memplex.service import MemplexService
-
-    # Configure logging once at app construction (the HTTP API is a
-    # long-running daemon surface; honour MEMPLEX_LOG_JSON for structured
-    # logs the same way the MCP server and CLI do).
-    configure_logging()
-
-    if config is None:
-        config = load_config()
-
-    operations_admission = RequestAdmission()
-    operations_metrics = OperationsMetrics()
-
-    try:
-        principal_registry = PrincipalRegistry.from_environment()
-    except PrincipalRegistryError as exc:
-        raise RuntimeError(f"Invalid principal registry: {exc}") from exc
-    deployment = getattr(config, "deployment", None)
-    profile = str(getattr(deployment, "profile", "development")).strip().lower()
-    if profile == "production" and principal_registry is None:
-        raise RuntimeError(
-            "production HTTP deployments require a principal registry "
-            "(MEMPLEX_PRINCIPALS_JSON); shared secrets are development-only"
-        )
-
-    # ── Lifecycle (lifespan replaces deprecated on_event) ──────
-    # Startup creates the MemplexService and starts its background
-    # worker; shutdown stops it. Keeping this as a closure over
-    # ``config`` mirrors the previous on_event behaviour.
-
-    @asynccontextmanager
-    async def _lifespan(app: "FastAPI"):
-        install_sensitive_data_filters()
-        operations_window_started_at = utc_timestamp_now()
-        svc = MemplexService(config=config)
-        svc.start()
-        app.state.memplex_service = svc
-        logger.info("Memplex HTTP API started (backend=%s)", config.storage.backend)
-        try:
-            yield
-        finally:
-            operations_admission.start_draining()
-            svc.begin_draining()
-            request_drained = operations_admission.wait_for_zero(
-                config.operations.request_drain_timeout_seconds
-            )
-            service_shutdown = svc.stop()
-            sync_shutdown = service_shutdown.get("sync")
-            worker_shutdown = service_shutdown.get("worker")
-            fully_drained = (
-                request_drained
-                and (sync_shutdown is None or bool(sync_shutdown.get("drained")))
-                and (worker_shutdown is None or bool(worker_shutdown.get("drained")))
-            )
-            deadline_exceeded = (
-                not fully_drained
-                or bool(sync_shutdown and sync_shutdown.get("deadline_exceeded"))
-                or bool(worker_shutdown and worker_shutdown.get("deadline_exceeded"))
-            )
-            if deadline_exceeded:
-                operations_metrics.record_shutdown_deadline_exceeded()
-            app.state.operations_shutdown = {
-                "request_drained": request_drained,
-                "deadline_exceeded": deadline_exceeded,
-            }
-            report_output = os.environ.get("MEMPLEX_G006_REPORT_OUTPUT")
-            if report_output is not None:
-                try:
-                    readiness_binding = _current_operations_readiness_binding(config)
-                except (
-                    AttributeError,
-                    OperationsEvidenceError,
-                    PackageNotFoundError,
-                    ReadinessEvidenceError,
-                    TypeError,
-                ):
-                    logger.warning("operations_report_deployment_binding_invalid")
-                else:
-                    try:
-                        window_ended_at = utc_timestamp_now()
-                        report = create_operations_evidence(
-                            metrics_snapshot=operations_metrics.snapshot(),
-                            shutdown_result={
-                                "request_drained": fully_drained,
-                                "deadline_exceeded": deadline_exceeded,
-                            },
-                            config=config,
-                            report_id=str(uuid.uuid4()),
-                            window_started_at=operations_window_started_at,
-                            window_ended_at=window_ended_at,
-                            generated_at=utc_timestamp_now(),
-                            readiness_binding=readiness_binding,
-                            signing_key=load_operations_signing_key(),
-                        )
-                        write_operations_report_atomic(Path(report_output), report)
-                    except Exception:
-                        logger.warning("operations_report_write_failed")
-            logger.info("Memplex HTTP API stopped")
-
-    app = FastAPI(
-        title="Memplex API",
-        version="0.1.0",
-        description="Multi-agent memory system REST API",
-        dependencies=[Depends(_require_auth), Depends(_rate_limit_dependency)],
-        lifespan=_lifespan,
-    )
-    app.state.principal_registry = principal_registry
-    app.state.deployment_profile = profile
-    app.state.operations_admission = operations_admission
-    app.state.operations_metrics = operations_metrics
-
-    @app.middleware("http")
-    async def _operations_admission_middleware(request: Request, call_next):
-        if request.url.path in _OPERATIONS_CONTROL_PATHS:
-            return await call_next(request)
-        if not operations_admission.begin():
-            return JSONResponse(
-                {"schema_version": 1, "status": "draining"},
-                status_code=503,
-            )
-        operations_metrics.begin_request()
-        started = time.perf_counter()
-        status_code = 500
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-            return response
-        finally:
-            try:
-                operations_metrics.finish_request(
-                    request.method,
-                    status_code,
-                    max(0.0, time.perf_counter() - started),
-                )
-            finally:
-                operations_admission.end()
-
-    # Refuse insecure binds (non-local host without auth) at construction
-    # time. Reads MEMPLEX_HOST / credentials from env; the ``app`` argument
-    # is kept for signature stability.
-    _check_bind_security(app)
-
-    # ── CORS (opt-in via env) ────────────────────────────────────
-    cors_origins = os.environ.get("MEMPLEX_CORS_ORIGINS", "")
-    if cors_origins:
-        try:
-            from fastapi.middleware.cors import CORSMiddleware
-
-            origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
-            app.add_middleware(
-                CORSMiddleware,
-                allow_origins=origins,
-                allow_credentials=True,
-                allow_methods=["*"],
-                allow_headers=["*"],
-            )
-        except Exception:
-            logger.warning("Failed to configure CORS middleware")
-
-    # ══════════════════════════════════════════════════════════════
-    #  Routes
-    # ══════════════════════════════════════════════════════════════
-
+def _register_memory_routes(app: "FastAPI", config, profile: str) -> None:
+    """Register the /memories* CRUD, feedback, and review routes."""
     @app.post("/memories", summary="Write a new memory")
     async def write_memory(request: Request, body: dict) -> JSONResponse:
         """Write new content into memory.
@@ -1225,6 +1044,10 @@ def create_app(config=None) -> "FastAPI":
             raise HTTPException(status_code=404, detail="Memory not found") from None
         return JSONResponse(result)
 
+
+
+def _register_health_routes(app: "FastAPI") -> None:
+    """Register health probes, stats, and manual compaction."""
     @app.get("/health", summary="Health check")
     async def health(
         request: Request,
@@ -1270,76 +1093,293 @@ def create_app(config=None) -> "FastAPI":
     #  Sync endpoints (multi-node sharing)
     # ════════════════════════════════════════════════════════════════
 
-    def _sync_bindings(context: AuthorizationContext) -> tuple[str, str, str]:
-        tenant_id = context.principal.tenant_id
-        remote_id = context.agent_id or context.principal.subject_id
-        consumer_id = (
-            context.principal.authentication_id or context.principal.subject_id
-        )
-        return tenant_id, remote_id, consumer_id
 
-    def _sync_cursor_codec():
-        from memplex.sync_protocol import SyncCursorCodec
 
-        return SyncCursorCodec(
-            config.sync.cursor_signing_key_id,
-            config.sync.cursor_signing_secret,
-            config.sync.cursor_previous_signing_keys,
-        )
 
-    def _encode_stream_cursor(
-        *,
-        tenant_id: str,
-        remote_id: str,
-        consumer_id: str,
-        after_seq: int,
-        snapshot_seq: int,
-    ) -> str:
-        from memplex.sync_protocol import SyncCursorClaims
 
-        now = datetime.now(timezone.utc)
-        claims = SyncCursorClaims(
-            1,
-            config.sync.cursor_signing_key_id,
-            tenant_id,
-            remote_id,
-            consumer_id,
-            after_seq,
-            snapshot_seq,
-            None,
-            None,
-            now,
-            now + timedelta(seconds=config.sync.cursor_ttl_seconds),
-        )
-        return _sync_cursor_codec().encode(claims)
+def _sync_bindings(context: AuthorizationContext) -> tuple[str, str, str]:
+    tenant_id = context.principal.tenant_id
+    remote_id = context.agent_id or context.principal.subject_id
+    consumer_id = (
+        context.principal.authentication_id or context.principal.subject_id
+    )
+    return tenant_id, remote_id, consumer_id
 
-    def _encode_snapshot_cursor(
-        *,
-        tenant_id: str,
-        remote_id: str,
-        consumer_id: str,
-        snapshot_id: str,
-        snapshot_seq: int,
+def _sync_cursor_codec(config):
+    from memplex.sync_protocol import SyncCursorCodec
+
+    return SyncCursorCodec(
+        config.sync.cursor_signing_key_id,
+        config.sync.cursor_signing_secret,
+        config.sync.cursor_previous_signing_keys,
+    )
+
+def _encode_stream_cursor(
+config,
+*,
+    tenant_id: str,
+    remote_id: str,
+    consumer_id: str,
+    after_seq: int,
+    snapshot_seq: int,
+) -> str:
+    from memplex.sync_protocol import SyncCursorClaims
+
+    now = datetime.now(timezone.utc)
+    claims = SyncCursorClaims(
+        1,
+        config.sync.cursor_signing_key_id,
+        tenant_id,
+        remote_id,
+        consumer_id,
+        after_seq,
+        snapshot_seq,
+        None,
+        None,
+        now,
+        now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+    )
+    return _sync_cursor_codec(config).encode(claims)
+
+def _encode_snapshot_cursor(
+config,
+*,
+    tenant_id: str,
+    remote_id: str,
+    consumer_id: str,
+    snapshot_id: str,
+    snapshot_seq: int,
+    snapshot_after,
+) -> str:
+    from memplex.sync_protocol import SyncCursorClaims
+
+    now = datetime.now(timezone.utc)
+    claims = SyncCursorClaims(
+        1,
+        config.sync.cursor_signing_key_id,
+        tenant_id,
+        remote_id,
+        consumer_id,
+        0,
+        snapshot_seq,
+        snapshot_id,
         snapshot_after,
-    ) -> str:
-        from memplex.sync_protocol import SyncCursorClaims
+        now,
+        now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+    )
+    return _sync_cursor_codec(config).encode(claims)
 
-        now = datetime.now(timezone.utc)
-        claims = SyncCursorClaims(
-            1,
-            config.sync.cursor_signing_key_id,
-            tenant_id,
-            remote_id,
-            consumer_id,
-            0,
-            snapshot_seq,
-            snapshot_id,
-            snapshot_after,
-            now,
-            now + timedelta(seconds=config.sync.cursor_ttl_seconds),
+
+
+def _register_sync_v1_routes(app: "FastAPI", config) -> None:
+    """Register the snapshot-stable /sync/v1 endpoints."""
+    @app.post("/sync/v1/batches", summary="Apply one canonical atomic sync batch")
+    async def sync_v1_batches(request: Request) -> JSONResponse:
+        from memplex.sync_ingress import validate_ingress_batch
+        from memplex.sync_repository import SyncBackpressureError, SyncBatchRejected
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="invalid_content_length"
+                ) from None
+            if declared_size > config.sync.max_batch_bytes:
+                raise HTTPException(
+                    status_code=413, detail="sync_batch_too_large"
+                )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > config.sync.max_batch_bytes:
+                raise HTTPException(status_code=413, detail="sync_batch_too_large")
+            body.extend(chunk)
+        raw = bytes(body)
+        try:
+            envelope = validate_ingress_batch(raw, hashlib.sha256(raw).hexdigest())
+            if len(envelope.batch.events) > config.sync.max_batch_events:
+                raise SyncBatchRejected("batch exceeds configured event limit")
+            context = _authorization(request)
+            tenant_id, remote_id, _ = _sync_bindings(context)
+            if envelope.batch.origin_node_id != remote_id or any(
+                event.scope.tenant_id != tenant_id for event in envelope.batch.events
+            ):
+                raise SyncBatchRejected("invalid ingress identity")
+            svc = _get_service(request)
+            svc.scan_sync_events_before_persistence(envelope.batch.events)
+            store = svc._store_for(context)
+            result = store.sync_apply_batch(envelope.batch)
+        except SyncBackpressureError:
+            raise HTTPException(status_code=429, detail="sync_backpressure") from None
+        except SyncBatchRejected:
+            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+        except (KeyError, TypeError, ValueError) as exc:
+            if str(exc) == "batch digest conflict":
+                raise HTTPException(status_code=409, detail="batch_conflict") from None
+            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+        except RuntimeError:
+            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
+        except Exception as exc:
+            sqlstate = _exception_sqlstate(exc)
+            if sqlstate == "23505":
+                raise HTTPException(status_code=409, detail="batch_conflict") from None
+            if sqlstate == "54000":
+                raise HTTPException(status_code=429, detail="sync_backpressure") from None
+            if sqlstate in {"22023", "23503", "23514", "42501"}:
+                raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
+            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
+        return JSONResponse(result.to_dict())
+
+    @app.get("/sync/v1/changes", summary="Read a snapshot-stable sync event page")
+    async def sync_v1_changes(
+        request: Request,
+        cursor: Optional[str] = Query(None),
+        limit: int = Query(500),
+    ) -> JSONResponse:
+        from memplex.sync_repository import SyncCursorExpired
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
+            raise HTTPException(status_code=422, detail="invalid_sync_limit")
+        context = _authorization(request)
+        tenant_id, remote_id, consumer_id = _sync_bindings(context)
+        claims = None
+        if cursor is not None:
+            try:
+                claims = _sync_cursor_codec(config).decode(
+                    cursor,
+                    tenant_binding=tenant_id,
+                    remote_binding=remote_id,
+                    consumer_binding=consumer_id,
+                )
+                if claims.snapshot_id is not None:
+                    raise SyncCursorExpired("invalid_cursor")
+            except (TypeError, ValueError, SyncCursorExpired):
+                raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        store = _get_service(request)._store_for(context)
+        try:
+            page = store.sync_page(remote_id, consumer_id, claims, limit)
+        except SyncCursorExpired as exc:
+            if str(exc) == "cursor_expired":
+                raise HTTPException(status_code=409, detail="cursor_expired") from None
+            raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        except Exception:
+            raise HTTPException(status_code=503, detail="sync_read_unavailable") from None
+        next_cursor = _encode_stream_cursor(
+            config,
+            tenant_id=tenant_id,
+            remote_id=remote_id,
+            consumer_id=consumer_id,
+            after_seq=page.next_after_seq,
+            snapshot_seq=page.snapshot_seq,
         )
-        return _sync_cursor_codec().encode(claims)
+        return JSONResponse(
+            {
+                "items": [
+                    {
+                        "stream_seq": item.stream_seq,
+                        "event": item.event.to_dict(),
+                    }
+                    for item in page.items
+                ],
+                "snapshot_seq": page.snapshot_seq,
+                "next_cursor": next_cursor,
+                "has_more": page.has_more,
+            }
+        )
 
+    @app.get("/sync/v1/snapshot", summary="Read an immutable sync snapshot")
+    async def sync_v1_snapshot(
+        request: Request,
+        request_id: Optional[str] = Query(None),
+        cursor: Optional[str] = Query(None),
+        limit: int = Query(500),
+    ) -> JSONResponse:
+        from memplex.sync_repository import SyncBackpressureError, SyncCursorExpired
+
+        if not config.sync.enabled:
+            raise HTTPException(status_code=404, detail="sync_not_enabled")
+        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
+            raise HTTPException(status_code=422, detail="invalid_sync_limit")
+        if (request_id is None) == (cursor is None):
+            raise HTTPException(status_code=422, detail="invalid_snapshot_request")
+        context = _authorization(request)
+        tenant_id, remote_id, consumer_id = _sync_bindings(context)
+        store = _get_service(request)._store_for(context)
+        try:
+            if cursor is None:
+                if type(request_id) is not str or not request_id:
+                    raise ValueError("request_id must be non-empty")
+                page = store.sync_create_snapshot(
+                    remote_id, consumer_id, request_id, limit
+                )
+            else:
+                claims = _sync_cursor_codec(config).decode(
+                    cursor,
+                    tenant_binding=tenant_id,
+                    remote_binding=remote_id,
+                    consumer_binding=consumer_id,
+                )
+                if claims.snapshot_id is None:
+                    raise SyncCursorExpired("invalid_cursor")
+                page = store.sync_snapshot_page(
+                    remote_id, consumer_id, claims, limit
+                )
+        except SyncBackpressureError as exc:
+            code = str(exc)
+            status = 413 if code == "snapshot_too_large" else 409
+            raise HTTPException(status_code=status, detail=code) from None
+        except SyncCursorExpired as exc:
+            if str(exc) == "snapshot_expired":
+                raise HTTPException(
+                    status_code=409, detail="snapshot_expired"
+                ) from None
+            raise HTTPException(status_code=400, detail="invalid_cursor") from None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="invalid_snapshot_request") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503, detail="sync_snapshot_unavailable"
+            ) from None
+
+        next_cursor = None
+        resume_cursor = None
+        if page.has_more:
+            next_cursor = _encode_snapshot_cursor(
+            config,
+                tenant_id=tenant_id,
+                remote_id=remote_id,
+                consumer_id=consumer_id,
+                snapshot_id=page.snapshot_id,
+                snapshot_seq=page.resume_seq,
+                snapshot_after=page.next_anchor,
+            )
+        else:
+            resume_cursor = _encode_stream_cursor(
+            config,
+                tenant_id=tenant_id,
+                remote_id=remote_id,
+                consumer_id=consumer_id,
+                after_seq=page.resume_seq,
+                snapshot_seq=page.resume_seq,
+            )
+        return JSONResponse(
+            {
+                "events": [event.to_dict() for event in page.events],
+                "snapshot_id": page.snapshot_id,
+                "next_cursor": next_cursor,
+                "resume_cursor": resume_cursor,
+                "has_more": page.has_more,
+            }
+        )
+
+
+def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None:
+    """Register the legacy /sync/changes + /sync/push adapter."""
     def _legacy_sync_v1_changes(
         request: Request,
         context: AuthorizationContext,
@@ -1580,207 +1620,6 @@ def create_app(config=None) -> "FastAPI":
             }
         )
 
-    @app.post("/sync/v1/batches", summary="Apply one canonical atomic sync batch")
-    async def sync_v1_batches(request: Request) -> JSONResponse:
-        from memplex.sync_ingress import validate_ingress_batch
-        from memplex.sync_repository import SyncBackpressureError, SyncBatchRejected
-
-        if not config.sync.enabled:
-            raise HTTPException(status_code=404, detail="sync_not_enabled")
-        declared = request.headers.get("content-length")
-        if declared is not None:
-            try:
-                declared_size = int(declared)
-            except ValueError:
-                raise HTTPException(
-                    status_code=400, detail="invalid_content_length"
-                ) from None
-            if declared_size > config.sync.max_batch_bytes:
-                raise HTTPException(
-                    status_code=413, detail="sync_batch_too_large"
-                )
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > config.sync.max_batch_bytes:
-                raise HTTPException(status_code=413, detail="sync_batch_too_large")
-            body.extend(chunk)
-        raw = bytes(body)
-        try:
-            envelope = validate_ingress_batch(raw, hashlib.sha256(raw).hexdigest())
-            if len(envelope.batch.events) > config.sync.max_batch_events:
-                raise SyncBatchRejected("batch exceeds configured event limit")
-            context = _authorization(request)
-            tenant_id, remote_id, _ = _sync_bindings(context)
-            if envelope.batch.origin_node_id != remote_id or any(
-                event.scope.tenant_id != tenant_id for event in envelope.batch.events
-            ):
-                raise SyncBatchRejected("invalid ingress identity")
-            svc = _get_service(request)
-            svc.scan_sync_events_before_persistence(envelope.batch.events)
-            store = svc._store_for(context)
-            result = store.sync_apply_batch(envelope.batch)
-        except SyncBackpressureError:
-            raise HTTPException(status_code=429, detail="sync_backpressure") from None
-        except SyncBatchRejected:
-            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
-        except (KeyError, TypeError, ValueError) as exc:
-            if str(exc) == "batch digest conflict":
-                raise HTTPException(status_code=409, detail="batch_conflict") from None
-            raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
-        except RuntimeError:
-            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
-        except Exception as exc:
-            sqlstate = _exception_sqlstate(exc)
-            if sqlstate == "23505":
-                raise HTTPException(status_code=409, detail="batch_conflict") from None
-            if sqlstate == "54000":
-                raise HTTPException(status_code=429, detail="sync_backpressure") from None
-            if sqlstate in {"22023", "23503", "23514", "42501"}:
-                raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
-            raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
-        return JSONResponse(result.to_dict())
-
-    @app.get("/sync/v1/changes", summary="Read a snapshot-stable sync event page")
-    async def sync_v1_changes(
-        request: Request,
-        cursor: Optional[str] = Query(None),
-        limit: int = Query(500),
-    ) -> JSONResponse:
-        from memplex.sync_repository import SyncCursorExpired
-
-        if not config.sync.enabled:
-            raise HTTPException(status_code=404, detail="sync_not_enabled")
-        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
-            raise HTTPException(status_code=422, detail="invalid_sync_limit")
-        context = _authorization(request)
-        tenant_id, remote_id, consumer_id = _sync_bindings(context)
-        claims = None
-        if cursor is not None:
-            try:
-                claims = _sync_cursor_codec().decode(
-                    cursor,
-                    tenant_binding=tenant_id,
-                    remote_binding=remote_id,
-                    consumer_binding=consumer_id,
-                )
-                if claims.snapshot_id is not None:
-                    raise SyncCursorExpired("invalid_cursor")
-            except (TypeError, ValueError, SyncCursorExpired):
-                raise HTTPException(status_code=400, detail="invalid_cursor") from None
-        store = _get_service(request)._store_for(context)
-        try:
-            page = store.sync_page(remote_id, consumer_id, claims, limit)
-        except SyncCursorExpired as exc:
-            if str(exc) == "cursor_expired":
-                raise HTTPException(status_code=409, detail="cursor_expired") from None
-            raise HTTPException(status_code=400, detail="invalid_cursor") from None
-        except Exception:
-            raise HTTPException(status_code=503, detail="sync_read_unavailable") from None
-        next_cursor = _encode_stream_cursor(
-            tenant_id=tenant_id,
-            remote_id=remote_id,
-            consumer_id=consumer_id,
-            after_seq=page.next_after_seq,
-            snapshot_seq=page.snapshot_seq,
-        )
-        return JSONResponse(
-            {
-                "items": [
-                    {
-                        "stream_seq": item.stream_seq,
-                        "event": item.event.to_dict(),
-                    }
-                    for item in page.items
-                ],
-                "snapshot_seq": page.snapshot_seq,
-                "next_cursor": next_cursor,
-                "has_more": page.has_more,
-            }
-        )
-
-    @app.get("/sync/v1/snapshot", summary="Read an immutable sync snapshot")
-    async def sync_v1_snapshot(
-        request: Request,
-        request_id: Optional[str] = Query(None),
-        cursor: Optional[str] = Query(None),
-        limit: int = Query(500),
-    ) -> JSONResponse:
-        from memplex.sync_repository import SyncBackpressureError, SyncCursorExpired
-
-        if not config.sync.enabled:
-            raise HTTPException(status_code=404, detail="sync_not_enabled")
-        if type(limit) is not int or not 1 <= limit <= config.sync.max_page_size:
-            raise HTTPException(status_code=422, detail="invalid_sync_limit")
-        if (request_id is None) == (cursor is None):
-            raise HTTPException(status_code=422, detail="invalid_snapshot_request")
-        context = _authorization(request)
-        tenant_id, remote_id, consumer_id = _sync_bindings(context)
-        store = _get_service(request)._store_for(context)
-        try:
-            if cursor is None:
-                if type(request_id) is not str or not request_id:
-                    raise ValueError("request_id must be non-empty")
-                page = store.sync_create_snapshot(
-                    remote_id, consumer_id, request_id, limit
-                )
-            else:
-                claims = _sync_cursor_codec().decode(
-                    cursor,
-                    tenant_binding=tenant_id,
-                    remote_binding=remote_id,
-                    consumer_binding=consumer_id,
-                )
-                if claims.snapshot_id is None:
-                    raise SyncCursorExpired("invalid_cursor")
-                page = store.sync_snapshot_page(
-                    remote_id, consumer_id, claims, limit
-                )
-        except SyncBackpressureError as exc:
-            code = str(exc)
-            status = 413 if code == "snapshot_too_large" else 409
-            raise HTTPException(status_code=status, detail=code) from None
-        except SyncCursorExpired as exc:
-            if str(exc) == "snapshot_expired":
-                raise HTTPException(
-                    status_code=409, detail="snapshot_expired"
-                ) from None
-            raise HTTPException(status_code=400, detail="invalid_cursor") from None
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=422, detail="invalid_snapshot_request") from None
-        except Exception:
-            raise HTTPException(
-                status_code=503, detail="sync_snapshot_unavailable"
-            ) from None
-
-        next_cursor = None
-        resume_cursor = None
-        if page.has_more:
-            next_cursor = _encode_snapshot_cursor(
-                tenant_id=tenant_id,
-                remote_id=remote_id,
-                consumer_id=consumer_id,
-                snapshot_id=page.snapshot_id,
-                snapshot_seq=page.resume_seq,
-                snapshot_after=page.next_anchor,
-            )
-        else:
-            resume_cursor = _encode_stream_cursor(
-                tenant_id=tenant_id,
-                remote_id=remote_id,
-                consumer_id=consumer_id,
-                after_seq=page.resume_seq,
-                snapshot_seq=page.resume_seq,
-            )
-        return JSONResponse(
-            {
-                "events": [event.to_dict() for event in page.events],
-                "snapshot_id": page.snapshot_id,
-                "next_cursor": next_cursor,
-                "resume_cursor": resume_cursor,
-                "has_more": page.has_more,
-            }
-        )
-
     @app.get("/sync/changes", summary="Pull incremental changes since a timestamp")
     async def sync_changes(
         request: Request,
@@ -1987,6 +1826,9 @@ def create_app(config=None) -> "FastAPI":
             {"accepted": accepted, "rejected_older": rejected_older, "by_type": by_type}
         )
 
+
+def _register_sync_events_route(app: "FastAPI") -> None:
+    """Register the /sync/events SSE stream."""
     @app.get("/sync/events", summary="SSE stream of sync events")
     async def sync_events(request: Request):
         """Server-Sent Events stream: notifies clients of writes/deletes.
@@ -2042,6 +1884,17 @@ def create_app(config=None) -> "FastAPI":
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+
+def _register_sync_routes(app: "FastAPI", config, profile: str) -> None:
+    """Register sync v1 (snapshot-stable) and legacy sync routes."""
+    _register_sync_v1_routes(app, config)
+    _register_legacy_sync_routes(app, config, profile)
+    _register_sync_events_route(app)
+
+
+
+def _register_metrics_routes(app: "FastAPI", operations_metrics) -> None:
+    """Register the Prometheus-format /metrics endpoint."""
     @app.get("/metrics", summary="Prometheus-format metrics")
     async def metrics(request: Request) -> PlainTextResponse:
         """Return bounded low-cardinality Prometheus text metrics."""
@@ -2051,6 +1904,199 @@ def create_app(config=None) -> "FastAPI":
             operations_metrics.shutdown_deadline_exceeded_total
         )
         return PlainTextResponse(operations_metrics.render_prometheus(runtime))
+
+    return app
+
+
+
+def create_app(config=None) -> "FastAPI":
+    """Build and return a FastAPI application.
+
+    Parameters
+    ----------
+    config:
+        A :class:`MemplexConfig` instance.  When ``None``, defaults are
+        loaded via :func:`load_config`.
+
+    Returns
+    -------
+    FastAPI
+        Configured application with lifecycle hooks.
+    """
+    if not _FASTAPI_AVAILABLE:
+        raise ImportError(
+            "FastAPI is required for the HTTP adapter. Install it with: pip install fastapi uvicorn"
+        )
+
+    from memplex.config import load_config
+    from memplex.logging_config import configure_logging, install_sensitive_data_filters
+    from memplex.service import MemplexService
+
+    # Configure logging once at app construction (the HTTP API is a
+    # long-running daemon surface; honour MEMPLEX_LOG_JSON for structured
+    # logs the same way the MCP server and CLI do).
+    configure_logging()
+
+    if config is None:
+        config = load_config()
+
+    operations_admission = RequestAdmission()
+    operations_metrics = OperationsMetrics()
+
+    try:
+        principal_registry = PrincipalRegistry.from_environment()
+    except PrincipalRegistryError as exc:
+        raise RuntimeError(f"Invalid principal registry: {exc}") from exc
+    deployment = getattr(config, "deployment", None)
+    profile = str(getattr(deployment, "profile", "development")).strip().lower()
+    if profile == "production" and principal_registry is None:
+        raise RuntimeError(
+            "production HTTP deployments require a principal registry "
+            "(MEMPLEX_PRINCIPALS_JSON); shared secrets are development-only"
+        )
+
+    # ── Lifecycle (lifespan replaces deprecated on_event) ──────
+    # Startup creates the MemplexService and starts its background
+    # worker; shutdown stops it. Keeping this as a closure over
+    # ``config`` mirrors the previous on_event behaviour.
+
+    @asynccontextmanager
+    async def _lifespan(app: "FastAPI"):
+        install_sensitive_data_filters()
+        operations_window_started_at = utc_timestamp_now()
+        svc = MemplexService(config=config)
+        svc.start()
+        app.state.memplex_service = svc
+        logger.info("Memplex HTTP API started (backend=%s)", config.storage.backend)
+        try:
+            yield
+        finally:
+            operations_admission.start_draining()
+            svc.begin_draining()
+            request_drained = operations_admission.wait_for_zero(
+                config.operations.request_drain_timeout_seconds
+            )
+            service_shutdown = svc.stop()
+            sync_shutdown = service_shutdown.get("sync")
+            worker_shutdown = service_shutdown.get("worker")
+            fully_drained = (
+                request_drained
+                and (sync_shutdown is None or bool(sync_shutdown.get("drained")))
+                and (worker_shutdown is None or bool(worker_shutdown.get("drained")))
+            )
+            deadline_exceeded = (
+                not fully_drained
+                or bool(sync_shutdown and sync_shutdown.get("deadline_exceeded"))
+                or bool(worker_shutdown and worker_shutdown.get("deadline_exceeded"))
+            )
+            if deadline_exceeded:
+                operations_metrics.record_shutdown_deadline_exceeded()
+            app.state.operations_shutdown = {
+                "request_drained": request_drained,
+                "deadline_exceeded": deadline_exceeded,
+            }
+            report_output = os.environ.get("MEMPLEX_G006_REPORT_OUTPUT")
+            if report_output is not None:
+                try:
+                    readiness_binding = _current_operations_readiness_binding(config)
+                except (
+                    AttributeError,
+                    OperationsEvidenceError,
+                    PackageNotFoundError,
+                    ReadinessEvidenceError,
+                    TypeError,
+                ):
+                    logger.warning("operations_report_deployment_binding_invalid")
+                else:
+                    try:
+                        window_ended_at = utc_timestamp_now()
+                        report = create_operations_evidence(
+                            metrics_snapshot=operations_metrics.snapshot(),
+                            shutdown_result={
+                                "request_drained": fully_drained,
+                                "deadline_exceeded": deadline_exceeded,
+                            },
+                            config=config,
+                            report_id=str(uuid.uuid4()),
+                            window_started_at=operations_window_started_at,
+                            window_ended_at=window_ended_at,
+                            generated_at=utc_timestamp_now(),
+                            readiness_binding=readiness_binding,
+                            signing_key=load_operations_signing_key(),
+                        )
+                        write_operations_report_atomic(Path(report_output), report)
+                    except Exception:
+                        logger.warning("operations_report_write_failed")
+            logger.info("Memplex HTTP API stopped")
+
+    app = FastAPI(
+        title="Memplex API",
+        version="0.1.0",
+        description="Multi-agent memory system REST API",
+        dependencies=[Depends(_require_auth), Depends(_rate_limit_dependency)],
+        lifespan=_lifespan,
+    )
+    app.state.principal_registry = principal_registry
+    app.state.deployment_profile = profile
+    app.state.operations_admission = operations_admission
+    app.state.operations_metrics = operations_metrics
+
+    @app.middleware("http")
+    async def _operations_admission_middleware(request: Request, call_next):
+        if request.url.path in _OPERATIONS_CONTROL_PATHS:
+            return await call_next(request)
+        if not operations_admission.begin():
+            return JSONResponse(
+                {"schema_version": 1, "status": "draining"},
+                status_code=503,
+            )
+        operations_metrics.begin_request()
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            try:
+                operations_metrics.finish_request(
+                    request.method,
+                    status_code,
+                    max(0.0, time.perf_counter() - started),
+                )
+            finally:
+                operations_admission.end()
+
+    # Refuse insecure binds (non-local host without auth) at construction
+    # time. Reads MEMPLEX_HOST / credentials from env; the ``app`` argument
+    # is kept for signature stability.
+    _check_bind_security(app)
+
+    # ── CORS (opt-in via env) ────────────────────────────────────
+    cors_origins = os.environ.get("MEMPLEX_CORS_ORIGINS", "")
+    if cors_origins:
+        try:
+            from fastapi.middleware.cors import CORSMiddleware
+
+            origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=origins,
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+        except Exception:
+            logger.warning("Failed to configure CORS middleware")
+
+    # ══════════════════════════════════════════════════════════════
+    #  Routes
+    # ══════════════════════════════════════════════════════════════
+
+    _register_memory_routes(app, config, profile)
+    _register_health_routes(app)
+    _register_sync_routes(app, config, profile)
+    _register_metrics_routes(app, operations_metrics)
 
     return app
 

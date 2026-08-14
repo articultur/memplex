@@ -160,6 +160,8 @@ def _contract_files(project_root: Path) -> dict[str, tuple[Path, ...]]:
     package_root = project_root / "memplex"
     plugin_root = package_root / "_plugin"
     installer = package_root / "adapters" / "agent_installer.py"
+    install_transaction = package_root / "adapters" / "install_transaction.py"
+    agent_assets = package_root / "adapters" / "agent_assets.py"
     agent_runtime = package_root / "adapters" / "agent_runtime.py"
     adapter_shared = package_root / "adapters" / "_shared.py"
     managed_identity = package_root / "adapters" / "managed_identity.py"
@@ -167,6 +169,8 @@ def _contract_files(project_root: Path) -> dict[str, tuple[Path, ...]]:
     runtime_status = package_root / "adapters" / "runtime_status.py"
     shared_runtime = (
         installer,
+        install_transaction,
+        agent_assets,
         agent_runtime,
         adapter_shared,
         managed_identity,

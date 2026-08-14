@@ -683,6 +683,108 @@ class MemplexService:
     #  Core query
     # ════════════════════════════════════════════════════════════════
 
+
+    def _parallel_scope_search(
+        self,
+        retriever: MultiPathRetriever,
+        text: str,
+        scope: QueryScope,
+        top_k: int,
+        query_vector: Optional[Vector],
+        trace: Optional[Dict[str, Any]],
+    ) -> List[List[SearchResult]]:
+        """Fan out the scoped retrieval paths under one global budget."""
+        # Parallel multi-path retrieval. ``top_k`` is one global candidate
+        # budget, not a per-path allowance: otherwise QueryScope.ALL silently
+        # triples model-controlled work. Split the budget as evenly as
+        # possible; when the budget is smaller than the number of paths, the
+        # zero-budget paths are not scheduled.
+        searches = []
+        if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
+            searches.append(("rag", retriever.rag_search, (query_vector,)))
+        if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
+            searches.append(("wiki", retriever.wiki_search, ()))
+        if scope in (QueryScope.RELATION, QueryScope.ALL):
+            searches.append(("graph", retriever.graph_search, (query_vector,)))
+
+        candidate_budget = max(0, int(top_k))
+        per_path, remainder = divmod(candidate_budget, len(searches))
+        futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
+        with ThreadPoolExecutor(max_workers=len(searches)) as pool:
+            for index, (path, search, extra_args) in enumerate(searches):
+                path_budget = per_path + (1 if index < remainder else 0)
+                if path_budget == 0:
+                    continue
+                futures[pool.submit(search, text, path_budget, *extra_args)] = (
+                    path,
+                    path_budget,
+                )
+
+            all_results: List[List[SearchResult]] = []
+            for future in as_completed(futures):
+                path, path_budget = futures[future]
+                try:
+                    path_results = future.result()
+                    all_results.append(path_results)
+                    if trace is not None:
+                        trace["stages"].append(
+                            {
+                                "stage": f"{path}_search",
+                                "status": "ok",
+                                "candidate_budget": path_budget,
+                                "candidates": len(path_results),
+                            }
+                        )
+                except Exception as exc:
+                    logger.warning("Search path %s failed: %s", path, exc)
+                    if trace is not None:
+                        trace["stages"].append(
+                            {
+                                "stage": f"{path}_search",
+                                "status": "failed",
+                                "error": str(exc),
+                                "candidate_budget": path_budget,
+                                "candidates": 0,
+                            }
+                        )
+
+        return all_results
+
+
+    @staticmethod
+    def _apply_token_budget(
+        results: List[SearchResult], max_tokens: int, trace: Optional[Dict[str, Any]]
+    ) -> tuple[List[SearchResult], int, bool]:
+        """Greedy token-budget truncation by relevance order."""
+        # Token budget truncation (greedy, by relevance_score desc)
+        truncated = False
+        used = 0
+        if max_tokens > 0:
+            kept: List[SearchResult] = []
+            for r in results:
+                est = max(r.token_estimate, len(r.summary) // 4 + 1)
+                r.token_estimate = est
+                if used + est <= max_tokens:
+                    kept.append(r)
+                    used += est
+                else:
+                    truncated = True
+            results = kept
+        else:
+            used = sum(r.token_estimate for r in results)
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "token_budget",
+                    "max_tokens": max_tokens,
+                    "tokens_used": used,
+                    "truncated": truncated,
+                    "after": len(results),
+                }
+            )
+        return results, used, truncated
+
+
     def query(
         self,
         text: str,
@@ -773,60 +875,10 @@ class MemplexService:
         if trace is not None:
             trace["embedding"]["query_vector_available"] = query_vector is not None
 
-        # Parallel multi-path retrieval. ``top_k`` is one global candidate
-        # budget, not a per-path allowance: otherwise QueryScope.ALL silently
-        # triples model-controlled work. Split the budget as evenly as
-        # possible; when the budget is smaller than the number of paths, the
-        # zero-budget paths are not scheduled.
-        searches = []
-        if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
-            searches.append(("rag", retriever.rag_search, (query_vector,)))
-        if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
-            searches.append(("wiki", retriever.wiki_search, ()))
-        if scope in (QueryScope.RELATION, QueryScope.ALL):
-            searches.append(("graph", retriever.graph_search, (query_vector,)))
-
+        all_results = self._parallel_scope_search(
+            retriever, text, scope, top_k, query_vector, trace
+        )
         candidate_budget = max(0, int(top_k))
-        per_path, remainder = divmod(candidate_budget, len(searches))
-        futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
-        with ThreadPoolExecutor(max_workers=len(searches)) as pool:
-            for index, (path, search, extra_args) in enumerate(searches):
-                path_budget = per_path + (1 if index < remainder else 0)
-                if path_budget == 0:
-                    continue
-                futures[pool.submit(search, text, path_budget, *extra_args)] = (
-                    path,
-                    path_budget,
-                )
-
-            all_results: List[List[SearchResult]] = []
-            for future in as_completed(futures):
-                path, path_budget = futures[future]
-                try:
-                    path_results = future.result()
-                    all_results.append(path_results)
-                    if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "ok",
-                                "candidate_budget": path_budget,
-                                "candidates": len(path_results),
-                            }
-                        )
-                except Exception as exc:
-                    logger.warning("Search path %s failed: %s", path, exc)
-                    if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "failed",
-                                "error": str(exc),
-                                "candidate_budget": path_budget,
-                                "candidates": 0,
-                            }
-                        )
-
         # Merge results
         results = MultiPathRetriever.merge_multi_path(all_results)
         if trace is not None:
@@ -961,32 +1013,8 @@ class MemplexService:
 
         latency = int((datetime.now() - start).total_seconds() * 1000)
 
-        # Token budget truncation (greedy, by relevance_score desc)
-        truncated = False
-        used = 0
-        if max_tokens > 0:
-            kept: List[SearchResult] = []
-            for r in results:
-                est = max(r.token_estimate, len(r.summary) // 4 + 1)
-                r.token_estimate = est
-                if used + est <= max_tokens:
-                    kept.append(r)
-                    used += est
-                else:
-                    truncated = True
-            results = kept
-        else:
-            used = sum(r.token_estimate for r in results)
+        results, used, truncated = self._apply_token_budget(results, max_tokens, trace)
         if trace is not None:
-            trace["stages"].append(
-                {
-                    "stage": "token_budget",
-                    "max_tokens": max_tokens,
-                    "tokens_used": used,
-                    "truncated": truncated,
-                    "after": len(results),
-                }
-            )
             trace["final_results"] = [
                 {
                     "id": r.func_id,
