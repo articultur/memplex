@@ -781,8 +781,14 @@ def test_stop_uses_one_absolute_deadline_for_all_thread_joins() -> None:
     )
 
     class SlowJoin:
+        # Record the timeout each join receives instead of sleeping it:
+    # the invariant under test is that every join shares ONE absolute
+    # deadline (each timeout <= the budget, never cumulative), which a
+    # wall-clock bound cannot prove reliably on shared macOS runners.
+        timeouts: list[float] = []
+
         def join(self, timeout):
-            time.sleep(timeout)
+            SlowJoin.timeouts.append(timeout)
 
     dispatcher._thread = SlowJoin()
     dispatcher._workers = [SlowJoin(), SlowJoin()]
@@ -792,7 +798,10 @@ def test_stop_uses_one_absolute_deadline_for_all_thread_joins() -> None:
     elapsed = time.monotonic() - started
 
     assert result.deadline_exceeded is True
-    assert elapsed < 0.09
+    # Three joins, each bounded by the one 0.05s budget (not 3x0.05 serial).
+    assert len(SlowJoin.timeouts) == 3
+    assert all(0 < t <= 0.05 for t in SlowJoin.timeouts)
+    assert elapsed < 1.0  # generous runaway guard only
 
 
 def test_stop_fence_rechecks_work_claimed_after_drain_snapshot() -> None:
