@@ -124,6 +124,7 @@ jobs:
             --extra postgres \
             --extra pgtest \
             --extra dev \
+            --no-emit-project \
             --format requirements-txt \
             --output-file /tmp/memplex-requirements.txt
           uvx --from pip-audit==2.9.0 pip-audit --strict --requirement /tmp/memplex-requirements.txt
@@ -142,10 +143,11 @@ jobs:
         with:
           version: '0.10.9'
           enable-cache: false
-      - name: Build package smoke artifacts
-        run: |
-          uv build --out-dir "$RUNNER_TEMP/python-dist" .
-          npm pack --dry-run --json --ignore-scripts --prefix npm/memplex
+      - name: Build python distribution
+        run: uv build --out-dir "$RUNNER_TEMP/python-dist" .
+      - name: Smoke the npm package
+        working-directory: npm/memplex
+        run: npm pack --dry-run --json --ignore-scripts
 
   release-install-matrix:
     runs-on: ${{ matrix.os }}
