@@ -45,7 +45,7 @@ def is_valid_at(fact, as_of: Optional[datetime] = None) -> bool:
     when = as_of or datetime.now(timezone.utc)
 
     def parse(value) -> Optional[datetime]:
-        if not value or not isinstance(value, str):
+        if not value and not isinstance(value, str):
             return None
         try:
             parsed = datetime.fromisoformat(value)

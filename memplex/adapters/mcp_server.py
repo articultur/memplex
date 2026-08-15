@@ -140,6 +140,52 @@ _TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "memory_promote",
+        "description": "Promote a memory to a curated knowledge tier (personal/domain/team). Team tier makes it workspace-visible to all member agents.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "Memory ID to promote"},
+                "tier": {
+                    "type": "string",
+                    "enum": ["personal", "domain", "team"],
+                    "description": "Target knowledge tier",
+                },
+            },
+            "required": ["memory_id", "tier"],
+        },
+    },
+    {
+        "name": "memory_share",
+        "description": "Share a user-private memory with a named peer agent (read-only grant; the peer cannot promote or re-share).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "Memory ID to share"},
+                "agent_id": {"type": "string", "description": "Target agent ID"},
+            },
+            "required": ["memory_id", "agent_id"],
+        },
+    },
+    {
+        "name": "memory_facts",
+        "description": "List facts with optional point-in-time filtering (bi-temporal history). Without --as_of, returns currently-valid facts only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "as_of": {
+                    "type": "string",
+                    "description": "ISO datetime for point-in-time query (optional)",
+                },
+                "include_invalidated": {
+                    "type": "boolean",
+                    "description": "Include superseded facts (default false)",
+                },
+                "limit": {"type": "integer", "description": "Max results (default 50)"},
+            },
+        },
+    },
+    {
         "name": "memory_delete",
         "description": "Delete a memory by ID.",
         "inputSchema": {
@@ -574,6 +620,49 @@ class MCPServer:
             payload["withheld_unsafe"] = True
         return payload
 
+    def _tool_memory_promote(self, args: dict) -> dict:
+        """Promote a memory to a curated knowledge tier."""
+        runtime = self._agent_runtime(args)
+        result = self._service.promote(
+            args["memory_id"], args["tier"],
+            authorization=runtime.authorization_context,
+        )
+        return result
+
+    def _tool_memory_share(self, args: dict) -> dict:
+        """Share a private memory with a named peer agent."""
+        runtime = self._agent_runtime(args)
+        result = self._service.share_with(
+            args["memory_id"], args["agent_id"],
+            authorization=runtime.authorization_context,
+        )
+        return result
+
+    def _tool_memory_facts(self, args: dict) -> dict:
+        """List facts with optional point-in-time filtering."""
+        runtime = self._agent_runtime(args)
+        facts = self._service.list_facts(
+            as_of=args.get("as_of"),
+            limit=int(args.get("limit", 50)),
+            include_invalidated=bool(args.get("include_invalidated", False)),
+            authorization=runtime.authorization_context,
+        )
+        return {
+            "count": len(facts),
+            "facts": [
+                {
+                    "id": f.id,
+                    "subject": f.subject,
+                    "predicate": f.predicate,
+                    "object": f.object_,
+                    "knowledge_tier": f.knowledge_tier,
+                    "valid_from": f.valid_from,
+                    "invalid_at": f.invalid_at,
+                }
+                for f in facts
+            ],
+        }
+
     def _tool_memory_delete(self, args: dict) -> dict:
         """Delete a memory."""
         runtime = self._agent_runtime(args)
@@ -842,6 +931,9 @@ class MCPServer:
         "memory_agent_manifest": _tool_memory_agent_manifest,
         "memory_turn_begin": _tool_memory_turn_begin,
         "memory_turn_end": _tool_memory_turn_end,
+        "memory_promote": _tool_memory_promote,
+        "memory_share": _tool_memory_share,
+        "memory_facts": _tool_memory_facts,
     }
 
     # ── Main loop ────────────────────────────────────────────────

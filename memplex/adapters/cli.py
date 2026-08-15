@@ -432,6 +432,69 @@ def cmd_improve(args: argparse.Namespace) -> int:
         raw_service.stop()
 
 
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Promote a memory to a curated knowledge tier."""
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    try:
+        result = raw_service.promote(
+            args.memory_id, args.tier, authorization=svc.authorization
+        )
+        print(_fmt(result, args.output))
+        return 0
+    except (ValueError, PermissionError) as exc:
+        print(_fmt({"error": str(exc)}, args.output))
+        return 1
+    finally:
+        raw_service.stop()
+
+
+def cmd_share(args: argparse.Namespace) -> int:
+    """Share a private memory with a named peer agent."""
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    try:
+        result = raw_service.share_with(
+            args.memory_id, args.agent, authorization=svc.authorization
+        )
+        print(_fmt(result, args.output))
+        return 0
+    except (ValueError, PermissionError) as exc:
+        print(_fmt({"error": str(exc)}, args.output))
+        return 1
+    finally:
+        raw_service.stop()
+
+
+def cmd_facts(args: argparse.Namespace) -> int:
+    """List facts with optional point-in-time filtering."""
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    try:
+        facts = raw_service.list_facts(
+            as_of=args.as_of,
+            limit=args.limit,
+            include_invalidated=args.all,
+            authorization=svc.authorization,
+        )
+        payload = {
+            "count": len(facts),
+            "facts": [
+                {
+                    "id": f.id,
+                    "subject": f.subject,
+                    "predicate": f.predicate,
+                    "object": f.object_,
+                    "knowledge_tier": f.knowledge_tier,
+                    "valid_from": f.valid_from,
+                    "invalid_at": f.invalid_at,
+                }
+                for f in facts
+            ],
+        }
+        print(_fmt(payload, args.output))
+        return 0
+    finally:
+        raw_service.stop()
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """Health check.
 
@@ -1839,6 +1902,26 @@ def _add_review_diag_parsers(sub) -> None:
     """pending / compact / health / stats / doctor (review + diagnostics)."""
     sub.add_parser("improve", help="Run proactive fact maintenance (dedupe/expire/reindex)")
 
+    p_promote = sub.add_parser("promote", help="Promote a memory to a knowledge tier")
+    p_promote.add_argument("memory_id", help="Memory node ID to promote")
+    p_promote.add_argument(
+        "--tier",
+        required=True,
+        choices=["personal", "domain", "team"],
+        help="Target knowledge tier",
+    )
+
+    p_share = sub.add_parser("share", help="Share a private memory with a named agent")
+    p_share.add_argument("memory_id", help="Memory node ID to share")
+    p_share.add_argument("--agent", required=True, help="Target agent ID")
+
+    p_facts = sub.add_parser("facts", help="List facts with temporal filtering")
+    p_facts.add_argument("--as-of", default=None, help="Point-in-time ISO datetime")
+    p_facts.add_argument(
+        "--all", action="store_true", help="Include invalidated facts (no temporal filter)"
+    )
+    p_facts.add_argument("--limit", type=int, default=50)
+
     sub.add_parser("pending", help="List pending reviews")
 
     p_compact = sub.add_parser("compact", help="Run compaction pipeline")
@@ -2178,6 +2261,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "pending": cmd_pending,
         "compact": cmd_compact,
         "improve": cmd_improve,
+        "promote": cmd_promote,
+        "share": cmd_share,
+        "facts": cmd_facts,
         "health": cmd_health,
         "readiness": cmd_readiness,
         "stats": cmd_stats,

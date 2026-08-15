@@ -111,6 +111,10 @@ files = [
     "memplex/intent.py",
     "memplex/backup.py",
     "memplex/compaction.py",
+    "memplex/temporal.py",
+    "memplex/working_memory.py",
+    "memplex/sleep_time.py",
+    "memplex/improve.py",
 ]
 python_version = "3.11"
 follow_imports = "skip"

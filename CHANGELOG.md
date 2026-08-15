@@ -7,6 +7,17 @@ to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **CLI + MCP surface for the knowledge tier**: `memplex promote <id>
+  --tier team`, `memplex share <id> --agent <id>`, `memplex facts
+  [--as-of ...] [--all]` commands; MCP tools `memory_promote`,
+  `memory_share`, `memory_facts` with schema descriptions.
+- mypy strict gate expanded from 12 to 16 files (temporal,
+  working_memory, sleep_time, improve admitted; all clean).
+- Mutation-testing baseline for `memplex/temporal.py`: 83% kill rate
+  (59/71 completed mutants), survivor equivalence documented in
+  `docs/mutation-testing.md`.
+
+### Added
 - HTTP-level integration tests for the S-wave features (5 tests):
   encrypted sync push tamper/reject/fail-closed/plaintext-compat,
   promoted team knowledge via HTTP recall, working-memory cross-tenant

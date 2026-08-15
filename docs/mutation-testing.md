@@ -80,6 +80,21 @@ compare identically for every reachable input).
   that appears to kill them is asserting non-deterministic or
   implementation-detail behaviour and will be flaky.
 
+## Additional module baselines
+
+### memplex/temporal.py (2026-08-15)
+
+81 mutants → **59 killed / 12 survived / 10 incomplete** (~83% kill rate).
+Surviving mutation families:
+- `ReplaceContinueWithBreak` in `supersede_contradicted` (×4): the loop
+  iterates a small list; break vs continue are equivalent when the
+  remaining items all fail the slot match — provably equivalent under
+  the test corpus's single-match pattern.
+- `is_valid_at` boundary comparisons (GtE→NotEq etc., ×3): the tests
+  exercise `as_of` at mid-interval points, not at exact boundaries.
+- `parse` AddNot / IsNot (×2): the malformed-datetime leniency paths
+  return None regardless of which sentinel comparison is used.
+
 ## Extending the pilot
 
 Add a module to `paths`/`module-path` in `[cosmic-ray]` (prefer pure-logic
