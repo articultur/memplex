@@ -209,15 +209,17 @@ def test_real_tcp_timeout_after_commit_is_idempotent_on_retry(
 
     monkeypatch.setattr("memplex.sync_dispatcher.random.uniform", lambda *_: 0.0)
     with HttpFaultProxy(_apply) as proxy:
-        proxy.enqueue(FaultAction("delay_after_commit", delay_seconds=0.2))
+        # 4:1 delay-to-timeout ratio with CI-tolerant margins (the
+        # original 50ms timeout flaked on loaded runners).
+        proxy.enqueue(FaultAction("delay_after_commit", delay_seconds=2.0))
         proxy.enqueue(FaultAction("pass"))
         dispatcher = SyncDispatcher(
             local,
             targets={"remote-b": proxy.url},
             local_node_id="local-a",
             http=UrllibSession(),
-            lease_seconds=1,
-            request_timeout=0.05,
+            lease_seconds=4,
+            request_timeout=0.5,
         )
         first = dispatcher.dispatch_once()
         assert (first.delivered, first.failed) == (0, 1)
