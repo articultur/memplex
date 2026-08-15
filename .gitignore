@@ -50,3 +50,4 @@ env/
 
 # Internal planning and local review artifacts
 /docs/superpowers/
+.mimosa/
