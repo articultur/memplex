@@ -116,7 +116,14 @@ class SleepTimeAgent:
         working_memory = getattr(self._service, "_working_memory", None)
         if working_memory is None:
             return 0
-        store = self._service.store
+        # V3 fix: scan through the authorization gate's store facade (the
+        # local-development principal), never the raw base store —
+        # production nodes outside the local tenant are filtered before
+        # their names can reach the hot-context tier.
+        from memplex.auth import local_development_context
+
+        context = local_development_context()
+        store = self._service._store_for(context)
         try:
             functions: List = list(store.list_functions(limit=100000))
         except Exception as exc:
@@ -138,7 +145,14 @@ class SleepTimeAgent:
                 + ", ".join(neighbours[:5])
             )
             working_memory.add(
-                f"sleep:{func.id}", summary, category="note", pinned=False
+                f"sleep:{func.id}",
+                summary,
+                category="note",
+                pinned=False,
+                # Scope to the local-development workspace (V3 fix):
+                # sleep-time inferences stay inside their workspace's
+                # hot-context tier and never leak cross-workspace.
+                scope="tenant:local",
             )
             pinned += 1
         return pinned

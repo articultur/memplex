@@ -392,6 +392,15 @@ def bind_node_identity(
             "memplex_workspace_id": context.workspace_id,
         }
     )
+    # Project typed fields into the namespace so metadata filters (domain
+    # binding, team-tier recall) can match without backend-specific typed
+    # reads (S2/S4 fix).
+    domain = getattr(node, "domain", None)
+    if domain:
+        next_namespace["domain"] = str(domain)
+    knowledge_tier = getattr(node, "knowledge_tier", None)
+    if knowledge_tier:
+        next_namespace["knowledge_tier"] = str(knowledge_tier)
     next_provenance = dict(context.provenance)
     next_provenance.update(
         {

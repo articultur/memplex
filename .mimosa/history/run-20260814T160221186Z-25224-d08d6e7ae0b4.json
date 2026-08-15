@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260814T160221186Z-25224-d08d6e7ae0b4",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_base64_document_source.py: bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+    "baseline:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_base64_document_source.py: baseline_partial: baseline exceeded 5000 candidate files"
+  ],
+  "target": ".",
+  "revision": "f13047ae00a7f81c96547f4a1500176718ad95b9",
+  "diffHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-08-14T16:02:21.186Z",
+  "timing": {
+    "startedAt": "2026-08-14T16:02:18.964Z",
+    "completedAt": "2026-08-14T16:02:21.186Z",
+    "durationMs": 2222
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "project_check_failed": 2
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260814T160221186Z-25224-d08d6e7ae0b4.json"
+}

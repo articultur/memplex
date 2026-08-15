@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260814T194007429Z-57575-d7b21a6446a5",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py: bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+    "baseline:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py: baseline_partial: baseline exceeded 5000 candidate files",
+    "scan:memplex/adapters/agent_assets.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:tests/test_storage_migrations.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:tests/test_sync_dispatcher.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "supply-chain-check:.: stop_budget_exhausted: focused supply-chain check was not run before the gate budget",
+    "agent-check:.: stop_budget_exhausted: focused agent configuration check was not run before the gate budget"
+  ],
+  "target": ".",
+  "revision": "3fcc83d622b4316dd44ceca6a83f1b8f028b8359",
+  "diffHash": "fa148e4893235229733e013ab923d7f6198a36db9b7da4a7d0b5d0f07a45468c",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-08-14T19:40:07.429Z",
+  "timing": {
+    "startedAt": "2026-08-14T19:40:05.073Z",
+    "completedAt": "2026-08-14T19:40:07.429Z",
+    "durationMs": 2356
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "scanner_failed": 3,
+      "stop_budget_exhausted": 2,
+      "project_check_failed": 7
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260814T194007429Z-57575-d7b21a6446a5.json"
+}

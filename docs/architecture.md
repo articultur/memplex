@@ -18,6 +18,11 @@ adapters/            Host + transport boundary (one port per agent platform)
 service.py           MemplexService: orchestration facade over collaborators
 authorization.py     AuthorizationGate: tenant/workspace/user/session ACL ¹
 serialization.py     Layer-neutral dataclass→JSON serializer (leaf) ¹
+temporal.py          Bi-temporal fact validity (supersede/as_of) ⁴
+improve.py           Proactive fact maintenance (dedupe/expire/reindex) ⁴
+sleep_time.py        Idle-time maintenance + inference precompute daemon ⁴
+working_memory.py    TTL hot-context tier (per-tenant scoped) ⁴
+sync_crypto.py       Shared-key AES-GCM sync payload encryption ⁴
 llm/
   injection_guard.py  InjectionScanCounter + drop_injection_suspected ¹
 storage/
@@ -40,7 +45,7 @@ product.py           Evidence-gated readiness (G002–G009), fail-closed
 host_lifecycle.py    G008 host-contract digests (see below)
 ```
 
-`¹ ² ³` mark the split groups described under [Split modules](#split-modules).
+`¹ ² ³ ⁴` mark the split groups (⁴ = post-S-wave leaf modules) described under [Split modules](#split-modules).
 
 ## Split modules and their re-export contracts
 

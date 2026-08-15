@@ -1,0 +1,393 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260815T051847750Z-36334-5e283acca507",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "bash-discovery",
+      "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_delete_response.py",
+      "reason": "bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files"
+    },
+    {
+      "stage": "baseline",
+      "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_list_params.py",
+      "reason": "baseline_partial: baseline exceeded 5000 candidate files"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/models/memory.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/authorization.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/service.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "tests/test_knowledge_tiers.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/config.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/storage/lite/store.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "memplex/adapters/agent_runtime.py",
+      "reason": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": false,
+      "captured_files": 5001,
+      "candidate_limit": 5000,
+      "truncated": true,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 7
+    },
+    "change_tracking": {
+      "touched_observed": 4,
+      "touched_retained": 4,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 7,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 7,
+      "selected_files": 7,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 7,
+      "scanned_files": 0,
+      "skipped_files": 0,
+      "failed_files": 7,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "scanner_failed": 7,
+      "project_check_failed": 9
+    },
+    "reasons": [
+      {
+        "code": "bash_discovery_incomplete",
+        "stage": "bash-discovery",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_delete_response.py",
+        "detail": "project enumeration exceeded 5000 reviewable files",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_list_params.py",
+        "detail": "baseline exceeded 5000 candidate files",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/models/memory.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/authorization.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/service.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "tests/test_knowledge_tiers.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/config.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/storage/lite/store.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/adapters/agent_runtime.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "bash-discovery",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_delete_response.py",
+        "detail": "bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_list_params.py",
+        "detail": "baseline_partial: baseline exceeded 5000 candidate files",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/models/memory.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/authorization.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/service.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "tests/test_knowledge_tiers.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/config.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/storage/lite/store.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/adapters/agent_runtime.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-08-15T05:18:47.750Z",
+  "session_id": "sess_6a6874bf-e2af-4cd5-9040-94f4421830e1",
+  "target": ".",
+  "revision": "5e6c4355144078b4103f3f641087a39a0fddde86",
+  "rules_version": "unavailable",
+  "diff_hash": "88815cf90f4361072110a5037a2f4dbf71631f924cb58797474a31e8043ebe1a",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 7,
+    "changed_files": [
+      {
+        "file": "memplex/adapters/agent_runtime.py",
+        "ranges": [
+          {
+            "start": 763,
+            "end": 763
+          },
+          {
+            "start": 866,
+            "end": 892
+          }
+        ],
+        "before_hash": "d715cc05c8b7aad61cea754e7777b6e93f595211698333c6093c2380e3746b0e",
+        "after_hash": "fba1a50e01659f0356ea57c9226f9ca9a73bb2062f99f006620910f436084f53"
+      },
+      {
+        "file": "memplex/authorization.py",
+        "ranges": [
+          {
+            "start": 174,
+            "end": 193
+          },
+          {
+            "start": 220,
+            "end": 225
+          }
+        ],
+        "before_hash": "4fe459a6f25044e4818c618757f123aefc2b6e5abe4fb8692ed615678469b721",
+        "after_hash": "93835812cbbef30b8aa90317b13ce897b72ab15e76a2d7bbfd3565cefa5bf94c"
+      },
+      {
+        "file": "memplex/config.py",
+        "ranges": [
+          {
+            "start": 236,
+            "end": 248
+          },
+          {
+            "start": 613,
+            "end": 613
+          }
+        ],
+        "before_hash": "a839826e611dc9d7b09301900d1c5765d7ab340771fbff60d035783ac253ee5b",
+        "after_hash": "e8cac765a722ae558030b2a88a45d588dd82dc9ac0773f3f183672d56dafcee5"
+      },
+      {
+        "file": "memplex/models/memory.py",
+        "ranges": [
+          {
+            "start": 65,
+            "end": 69
+          },
+          {
+            "start": 101,
+            "end": 101
+          },
+          {
+            "start": 136,
+            "end": 136
+          }
+        ],
+        "before_hash": "df396e0ebb1a2b1310a5e5f5fa95ce67a968ff14b14f9af17aad732325dfcf10",
+        "after_hash": "972f483b528f5c0ff7df048dbbb1e4f07902fb9301b26236bab92bd5c192b0df"
+      },
+      {
+        "file": "memplex/service.py",
+        "ranges": [
+          {
+            "start": 28,
+            "end": 28
+          },
+          {
+            "start": 2220,
+            "end": 2316
+          }
+        ],
+        "before_hash": "1f00397c17a0ee1c8e7b168e4f6a52a2ac518c0b414950236294e43a7e76f2a6",
+        "after_hash": "5654f53396d188a782ed03498429184c78654f5835dc424afdf1461916f52bd6"
+      },
+      {
+        "file": "memplex/storage/lite/store.py",
+        "ranges": [
+          {
+            "start": 85,
+            "end": 85
+          }
+        ],
+        "before_hash": "849a80915a4125ee4bc7721e9814f5266c6ef558f28881bfab87c88fa2672530",
+        "after_hash": "e651a197875e4078dec2e305b09992588c30a3488fe65baef81d0637926bef08"
+      },
+      {
+        "file": "tests/test_knowledge_tiers.py",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 219
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "5f7b1a4514f3dfb4a2fd0bf025afcf93e91e14e90cde841ba7ca335d4405595f"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-08-15T05:18:44.866Z",
+    "completed_at": "2026-08-15T05:18:47.750Z",
+    "duration_ms": 2884,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 2884,
+    "peakMemoryBytes": 137723904,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 0,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260815T051847750Z-36334-5e283acca507.json",
+    "latest_report": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1.json",
+    "history_summary": ".mimosa/history/run-20260815T051847750Z-36334-5e283acca507.json"
+  }
+}

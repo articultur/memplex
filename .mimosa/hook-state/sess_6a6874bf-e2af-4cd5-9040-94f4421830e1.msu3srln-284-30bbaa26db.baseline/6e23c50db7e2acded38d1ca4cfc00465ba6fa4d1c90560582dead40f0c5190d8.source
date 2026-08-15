@@ -1,0 +1,16 @@
+{
+  "name": "memplex",
+  "version": "3.3.0",
+  "description": "One-command Memplex setup for Codex, Claude Code, OpenClaw, Hermes, and other agents",
+  "bin": {
+    "memplex": "bin/memplex.js"
+  },
+  "files": [
+    "bin/memplex.js",
+    "install-agent.sh"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

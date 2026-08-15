@@ -302,6 +302,16 @@ def describe_memory_scope(
     # principal-scoped visibility metadata to authorize against.
     common = {"memplex_user_id": user}
     read_filters: list[Dict[str, Optional[str]]] = [
+        # Team-tier knowledge: promoted via service.promote(id, "team"),
+        # workspace-shared by definition — any member agent reads it
+        # regardless of which user captured it (S4 fix: previously every
+        # branch pinned memplex_user_id to the reader, so cross-user team
+        # recall returned zero at the runtime layer).
+        {
+            "memplex_visibility": "workspace",
+            "memplex_workspace_id": workspace,
+            "knowledge_tier": "team",
+        },
         {
             **common,
             "memplex_visibility": "session",
@@ -719,7 +729,18 @@ class AgentMemoryRuntime:
         working_memory = getattr(self.service, "_working_memory", None)
         if working_memory is not None:
             limit = self.service._config.working_memory.inject_limit
-            hot = working_memory.recall_context(limit=limit)
+            # Scope the recall to the runtime's tenant (V3 fix):
+            # cross-tenant hot context never leaks. Local-process runtimes
+            # share the service's development tenant so single-machine
+            # capture/recall stays seamless.
+            auth = self.authorization_context
+            tenant = auth.principal.tenant_id
+            if tenant.startswith("local-process-"):
+                from memplex.auth import local_development_context
+
+                tenant = local_development_context().principal.tenant_id
+            scope = f"tenant:{tenant}"
+            hot = working_memory.recall_context(limit=limit, scope=scope)
             if hot:
                 prefix = "[WORKING MEMORY]\n" + "\n".join(f"- {line}" for line in hot)
                 context = prefix + ("\n\n" + context if context else "")
@@ -1015,6 +1036,18 @@ class AgentMemoryRuntime:
         if tenant_id is not None:
             if tenant_id != self.authorization_context.principal.tenant_id:
                 return False
+            # S4 fix: team-tier knowledge is workspace-shared by definition —
+            # the owner's subject check must not gate a different member's
+            # recall of promoted team knowledge.
+            knowledge_tier = getattr(node, "knowledge_tier", None) or attrs.get(
+                "knowledge_tier"
+            )
+            if (
+                knowledge_tier == "team"
+                and visibility == "workspace"
+                and workspace_id == self.workspace_id
+            ):
+                return True
             if subject_id != self.user_id:
                 return False
             if visibility == "user":

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260815T051847750Z-36334-5e283acca507",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_delete_response.py: bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+    "baseline:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/skills/version_list_params.py: baseline_partial: baseline exceeded 5000 candidate files",
+    "scan:memplex/models/memory.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/authorization.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/service.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:tests/test_knowledge_tiers.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/config.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/storage/lite/store.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/adapters/agent_runtime.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "5e6c4355144078b4103f3f641087a39a0fddde86",
+  "diffHash": "88815cf90f4361072110a5037a2f4dbf71631f924cb58797474a31e8043ebe1a",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-08-15T05:18:47.750Z",
+  "timing": {
+    "startedAt": "2026-08-15T05:18:44.866Z",
+    "completedAt": "2026-08-15T05:18:47.750Z",
+    "durationMs": 2884
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "scanner_failed": 7,
+      "project_check_failed": 9
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260815T051847750Z-36334-5e283acca507.json"
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260814T155505574Z-7997-c01be0a3f294",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_base64_document_source.py: bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+    "baseline:.venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_base64_document_source.py: baseline_partial: baseline exceeded 5000 candidate files",
+    "scan:tests/test_postgres_store.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/storage/pool.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/storage/migrations/runner.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/adapters/agent_installer.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+    "scan:memplex/adapters/http_api.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "3acaa115a15208371966afb00d42680a601cc654",
+  "diffHash": "df51dd61cfb9226594f7468e41cc9e013636b308bdca706354c4a539f82238f4",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-08-14T15:55:05.574Z",
+  "timing": {
+    "startedAt": "2026-08-14T15:55:02.535Z",
+    "completedAt": "2026-08-14T15:55:05.574Z",
+    "durationMs": 3039
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 1,
+    "bySeverity": {
+      "high": 1
+    },
+    "byStatus": {
+      "blocked": 1
+    }
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "scanner_failed": 5,
+      "project_check_failed": 7
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260814T155505574Z-7997-c01be0a3f294.json"
+}

@@ -176,6 +176,13 @@ def test_domain_binding_filters_runtime_recall(tmp_path):
 
     svc = _service(tmp_path, **{"agent_domains.agent_domains": {"codex": ["database"]}})
     try:
+        from memplex.auth import AuthorizationContext, Principal
+
+        auth = AuthorizationContext(
+            principal=Principal(tenant_id="t1", subject_id="dev-user"),
+            workspace_id="w1",
+            agent_id="codex",
+        )
         for fid, name, domain in (
             ("fn-db", "postgres tuning", "database"),
             ("fn-ui", "react components", "frontend"),
@@ -188,16 +195,24 @@ def test_domain_binding_filters_runtime_recall(tmp_path):
                     domain=domain,
                     memory_type="function",
                     source_type=SourceType.MEETING,
+                    tenant_id="t1",
+                    owner_subject_id="dev-user",
+                    workspace_id="w1",
+                    visibility="workspace",
                 ),
                 None,
             )
-        runtime = AgentMemoryRuntime(service=svc, agent="codex")
+        runtime = AgentMemoryRuntime(service=svc, agent="codex", authorization=auth)
         filters = runtime._domain_scoped_filters()
         # Every branch pins domain=database
         assert filters and all(branch.get("domain") == "database" for branch in filters)
 
         result = runtime.search_memories("tuning components", top_k=10)
+        # Non-empty assertion (S7 fix): the original all() was vacuously
+        # true on an empty result set — domain binding was actually broken.
+        assert len(result.results) > 0, "domain-bound recall returned nothing"
         assert all(r.domain == "database" for r in result.results)
+        assert not any(r.domain == "frontend" for r in result.results)
 
         unbound = AgentMemoryRuntime(service=svc, agent="hermes")
         assert all(
@@ -215,5 +230,92 @@ def test_unbound_agent_sees_all_domains(tmp_path):
         runtime = AgentMemoryRuntime(service=svc, agent="codex")
         filters = runtime._domain_scoped_filters()
         assert filters  # visibility branches present, no domain pinning
+    finally:
+        svc.stop()
+
+
+def test_team_tier_cross_user_recall_at_runtime(tmp_path):
+    """S4 fix: team-tier knowledge is recallable by a DIFFERENT user's
+    runtime in the same workspace — the team branch bypasses the
+    per-user pinning that previously returned zero."""
+    from memplex.adapters.agent_runtime import AgentMemoryRuntime
+    from memplex.auth import AuthorizationContext, Principal
+
+    svc = _service(tmp_path)
+    try:
+        # Alice captures a function and promotes it to team tier.
+        svc.store.add(
+            Function(
+                id="team-fn",
+                name="team convention",
+                name_normalized="team convention",
+                domain=None,
+                memory_type="function",
+                source_type=SourceType.MEETING,
+                visibility="user",
+                tenant_id="t1",
+                owner_subject_id="alice",
+                workspace_id="w1",
+            ),
+            None,
+        )
+        alice = AuthorizationContext(
+            principal=Principal(tenant_id="t1", subject_id="alice"),
+            workspace_id="w1",
+        )
+        svc.promote("team-fn", "team", authorization=alice)
+
+        # Bob's runtime in the same workspace recalls it.
+        bob_runtime = AgentMemoryRuntime(
+            service=svc,
+            agent="hermes",
+            authorization=AuthorizationContext(
+                principal=Principal(tenant_id="t1", subject_id="bob"),
+                workspace_id="w1",
+            ),
+        )
+        result = bob_runtime.search_memories("team convention", top_k=10)
+        assert any(r.func_id == "team-fn" for r in result.results), (
+            "team-tier knowledge not visible cross-user at runtime"
+        )
+    finally:
+        svc.stop()
+
+
+def test_v1_grant_holder_cannot_promote(tmp_path):
+    """V1 fix: a cross-agent grant holder can read but NEVER widen —
+    promoting someone else's private memory to team would leak it
+    workspace-wide through a read-only grant."""
+    from memplex.auth import AuthorizationContext, Principal, MemoryNotFoundError
+
+    svc = _service(tmp_path)
+    try:
+        svc.store.add_fact(_private_fact("f-v1", owner="alice"))
+        alice = _alice()
+        svc.share_with("f-v1", "agent-bob", authorization=alice)
+        bob = AuthorizationContext(
+            principal=Principal(tenant_id="t1", subject_id="bob"),
+            workspace_id="w1",
+            agent_id="agent-bob",
+        )
+        # Bob CAN read (grant) but CANNOT promote — either opaque
+        # not-found (if ACL blocks) or PermissionError (if owner check).
+        with pytest.raises((PermissionError, MemoryNotFoundError)):
+            svc.promote("f-v1", "team", authorization=bob)
+        # Alice's memory remains private.
+        node = svc.store.get_fact("f-v1")
+        assert node.knowledge_tier is None
+        assert node.visibility == "user"
+    finally:
+        svc.stop()
+
+
+def test_v2_comma_injection_rejected(tmp_path):
+    """V2 fix: agent_id with commas cannot split into multiple grants."""
+    svc = _service(tmp_path)
+    try:
+        svc.store.add_fact(_private_fact("f-v2", owner="alice"))
+        with pytest.raises(ValueError, match="comma"):
+            svc.share_with("f-v2", "trusted,mallory", authorization=_alice())
     finally:
         svc.stop()

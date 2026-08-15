@@ -81,7 +81,7 @@ def test_precompute_pins_associations_into_working_memory(tmp_path):
         report = agent.run_once()
         # Only accessed functions precompute; cold ones never do.
         assert report["pinned_inferences"] >= 1
-        ctx = svc._working_memory.recall_context(limit=20)
+        ctx = svc._working_memory.recall_context(limit=20, scope="tenant:local")
         sleep_entries = [line for line in ctx if line.startswith("[SLEEP-TIME]")]
         assert sleep_entries, ctx
         assert any("auth-service" in line for line in sleep_entries)

@@ -1340,15 +1340,20 @@ class MemplexService:
         # 1b2. Working-memory tier (opt-in): typed captures also land in the
         # TTL hot-context store for automatic injection on the next recall.
         if self._working_memory is not None:
+            # Scope hot-context per workspace (V3 fix): entries are
+            # invisible across workspaces; within a workspace the tier is
+            # the team's shared hot context (matching the knowledge-tier
+            # visibility model).
+            scope = f"tenant:{context.principal.tenant_id}"
             for node in [*extracted.facts, *extracted.preferences]:
                 content = getattr(node, "preference", None) or getattr(node, "context", None) or ""
                 key = getattr(node, "id", None)
                 if content and key:
-                    self._working_memory.add(str(key), str(content))
+                    self._working_memory.add(str(key), str(content), scope=scope)
             for func in extracted.functions:
                 name = getattr(func, "name", "")
                 if name:
-                    self._working_memory.add(f"fn:{func.id}", name)
+                    self._working_memory.add(f"fn:{func.id}", name, scope=scope)
 
         # 1c. Persist Fact / Preference nodes. Previously only Functions
         #     were stored, so fact/preference-intent paragraphs (e.g.
@@ -2235,11 +2240,23 @@ class MemplexService:
         scope implied by that tier — ``team`` widens visibility to the
         workspace so every member agent recalls it. Promotion is
         provenance-stamped (who promoted, when) and idempotent.
+
+        Authorization: only the memory owner (or local development) may
+        promote — a cross-agent **grant holder can read but never widen**
+        (V1 fix: promoting someone else's private memory to team would
+        leak it workspace-wide through a read-only grant).
         """
         if tier not in self._KNOWLEDGE_TIERS:
             raise ValueError(f"tier must be one of {sorted(self._KNOWLEDGE_TIERS)}")
         context = self._require_authorization(authorization)
         node = self._require_visible_node(memory_id, context)
+
+        owner_subject = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
+        is_owner = owner_subject == context.principal.subject_id
+        if not (is_owner or self._is_local_development_context(context)):
+            raise PermissionError(
+                "only the memory owner can promote to a knowledge tier"
+            )
 
         node.knowledge_tier = tier
         if tier == "team":
@@ -2289,6 +2306,11 @@ class MemplexService:
         if not agent_id or not str(agent_id).strip():
             raise ValueError("agent_id must be a non-empty string")
         agent_id = str(agent_id).strip()
+        # V2 fix: the grant store is a comma-joined list in the node
+        # namespace; a comma/whitespace-bearing id would silently split
+        # into multiple grants at read time.
+        if any(ch in agent_id for ch in ",\t\n\r"):
+            raise ValueError("agent_id must not contain commas or whitespace")
         context = self._require_authorization(authorization)
         node = self._require_visible_node(memory_id, context)
 

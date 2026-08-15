@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260814T194007429Z-57575-d7b21a6446a5",
+  "runId": "20260814T194007429Z-57575-d7b21a6446a5",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "bash_discovery_incomplete",
+        "stage": "bash-discovery",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py",
+        "detail": "project enumeration exceeded 5000 reviewable files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py",
+        "detail": "baseline exceeded 5000 candidate files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "memplex/adapters/agent_assets.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "tests/test_storage_migrations.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "tests/test_sync_dispatcher.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "stop_budget_exhausted",
+        "stage": "supply-chain-check",
+        "target": ".",
+        "detail": "focused supply-chain check was not run before the gate budget",
+        "affectsCompletion": true
+      },
+      {
+        "code": "stop_budget_exhausted",
+        "stage": "agent-check",
+        "target": ".",
+        "detail": "focused agent configuration check was not run before the gate budget",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "bash-discovery",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py",
+        "detail": "bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".venv-pgcheck/lib/python3.11/site-packages/anthropic/types/beta/sessions/beta_managed_agents_agent_mcp_tool_use_event.py",
+        "detail": "baseline_partial: baseline exceeded 5000 candidate files",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "memplex/adapters/agent_assets.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "tests/test_storage_migrations.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "tests/test_sync_dispatcher.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node@22/22.23.1/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "supply-chain-check",
+        "target": ".",
+        "detail": "stop_budget_exhausted: focused supply-chain check was not run before the gate budget",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "agent-check",
+        "target": ".",
+        "detail": "stop_budget_exhausted: focused agent configuration check was not run before the gate budget",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "3fcc83d622b4316dd44ceca6a83f1b8f028b8359",
+  "diffHash": "fa148e4893235229733e013ab923d7f6198a36db9b7da4a7d0b5d0f07a45468c",
+  "rulesVersion": "unavailable",
+  "sessionHash": "860165aa9f31c713b6e36a2c9e9426e260d994fdb093a31f6680b71f8ddb0351",
+  "reportRef": ".mimosa/reports/task-review-sess_6a6874bf-e2af-4cd5-9040-94f4421830e1-20260814T194007429Z-57575-d7b21a6446a5.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-08-14T19:40:07.692Z"
+}

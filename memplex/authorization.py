@@ -278,7 +278,12 @@ class AuthorizationGate:
         *,
         visibility: str = "workspace",
     ) -> None:
-        """Stamp every extraction product before any store operation begins."""
+        """Stamp every extraction product before any store operation begins.
+
+        Also projects each node's typed ``domain`` into its namespace so
+        the domain-scoped recall filter (agent-domain binding) can match
+        without backend-specific typed-field reads.
+        """
         seen: set[int] = set()
         for nodes in (
             extracted.functions,
@@ -291,3 +296,13 @@ class AuthorizationGate:
                     continue
                 seen.add(id(node))
                 bind_node_identity(node, context, visibility=visibility)
+                # After bind_node_identity (which rewrites node.namespace),
+                # project the typed domain into the namespace for the
+                # domain-scoped recall filter.
+                domain = getattr(node, "domain", None)
+                if domain:
+                    namespace = getattr(node, "namespace", None)
+                    if isinstance(namespace, dict):
+                        namespace["domain"] = str(domain)
+                    else:
+                        node.namespace = {"domain": str(domain)}

@@ -328,6 +328,22 @@ class MultiPathRetriever:
                 continue
             attrs = dict(getattr(func, "namespace", {}) or {})
             attrs.update(getattr(func, "attributes", {}) or {})
+            # S2/S4 fix: project typed identity/ACL fields into the
+            # filterable metadata so domain-bound and team-tier filters
+            # match even when the write path ran before the namespace
+            # projection landed (or via direct store.add).
+            if getattr(func, "domain", None):
+                attrs.setdefault("domain", func.domain)
+            if getattr(func, "knowledge_tier", None):
+                attrs.setdefault("knowledge_tier", func.knowledge_tier)
+            if getattr(func, "visibility", None):
+                attrs.setdefault("memplex_visibility", func.visibility)
+            if getattr(func, "workspace_id", None):
+                attrs.setdefault("memplex_workspace_id", func.workspace_id)
+            if getattr(func, "tenant_id", None):
+                attrs.setdefault("memplex_tenant_id", func.tenant_id)
+            if getattr(func, "owner_subject_id", None):
+                attrs.setdefault("memplex_subject_id", func.owner_subject_id)
             if matches(attrs):
                 filtered.append(result)
         return filtered

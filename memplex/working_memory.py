@@ -37,7 +37,15 @@ class WorkingMemoryEntry:
 
 
 class WorkingMemory:
-    """Thread-safe TTL hot-context store with a hard entry cap."""
+    """Thread-safe TTL hot-context store with a hard entry cap.
+
+    Multi-principal safety (V3 fix): entries are keyed under an optional
+    ``scope`` prefix so one principal's hot context never leaks into
+    another's recall. The service pins capture-side entries under the
+    capturing principal's scope and reads with the requesting context's
+    scope; a missing scope (local development) shares the single default
+    tier, preserving the original single-tenant behaviour.
+    """
 
     def __init__(self, max_entries: int = 64, default_ttl_seconds: float = 900.0) -> None:
         self._max_entries = max(1, int(max_entries))
@@ -47,6 +55,13 @@ class WorkingMemory:
 
     # ── Capture ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _scoped_key(key: str, scope: Optional[str]) -> str:
+        """Namespacer: ``scope:key`` (or bare key when scope is None)."""
+        if not scope:
+            return key
+        return f"{scope}::{key}"
+
     def add(
         self,
         key: str,
@@ -55,10 +70,17 @@ class WorkingMemory:
         category: str = "note",
         ttl_seconds: Optional[float] = None,
         pinned: bool = False,
+        scope: Optional[str] = None,
     ) -> None:
-        """Add or refresh one entry; evicts the oldest unpinned entry at cap."""
+        """Add or refresh one entry; evicts the oldest unpinned entry at cap.
+
+        ``scope`` partitions the tier per principal (V3 fix); entries added
+        under one scope are invisible to ``recall_context`` calls with a
+        different scope.
+        """
         if not key or not content:
             return
+        key = self._scoped_key(key, scope)
         ttl = self._default_ttl if ttl_seconds is None else float(ttl_seconds)
         entry = WorkingMemoryEntry(
             content=content,
@@ -115,12 +137,26 @@ class WorkingMemory:
         for key in expired:
             self._entries.pop(key, None)
 
-    def recall_context(self, limit: int = 8) -> List[str]:
-        """Live entries, most-recent first, as ready-to-inject context lines."""
+    def recall_context(self, limit: int = 8, scope: Optional[str] = None) -> List[str]:
+        """Live entries for *scope*, most-recent first, as context lines.
+
+        Scope-filtered: a recall under scope A never returns entries pinned
+        under scope B (V3 fix). Unscoped recall sees only unscoped entries.
+        """
+        prefix = f"{scope}::" if scope else ""
         with self._lock:
             self._prune_locked()
             ordered = sorted(self._entries.values(), key=lambda e: e.created_at, reverse=True)
-            return [e.content for e in ordered[: max(0, limit)]]
+            scoped = [
+                entry
+                for key, entry in self._entries.items()
+                if key.startswith(prefix)
+                and ("::" not in key[len(prefix):])  # no deeper nesting leak
+            ] if scope else [
+                entry for key, entry in self._entries.items() if "::" not in key
+            ]
+            scoped.sort(key=lambda e: e.created_at, reverse=True)
+            return [e.content for e in scoped[: max(0, limit)]]
 
     def __len__(self) -> int:
         with self._lock:

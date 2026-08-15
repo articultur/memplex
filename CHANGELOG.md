@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **V1 (High, privilege escalation)**: `promote()` now requires the memory
+  owner (or local development) — a cross-agent grant holder could
+  previously promote the owner's private memory to team tier, leaking it
+  workspace-wide through a read-only grant. Grant = read, never widen.
+- **V2 (Medium, injection)**: `share_with()` rejects agent_ids containing
+  commas/whitespace — the comma-joined grant store would silently split
+  one id into multiple grants.
+- **V3 (Medium, cross-tenant leak)**: WorkingMemory entries are scoped
+  per tenant; sleep-time's graph scan now goes through the authorization
+  gate's store facade instead of the raw base store.
+- **S2 (domain binding blindness)**: typed `domain` and `knowledge_tier`
+  fields are projected into namespace metadata at write time AND at
+  filter time, so domain-bound agents actually see their domain's
+  knowledge instead of zero results.
+- **S3 (silent data loss)**: `store.add` merge path now carries
+  `knowledge_tier`/`visibility`/`provenance`/`namespace` from the
+  incoming node — `promote()`/`share_with()` on Function nodes no longer
+  silently no-op.
+- **S4 (cross-user team recall)**: runtime read-filters gain a team-tier
+  branch (workspace + knowledge_tier=team, no per-user pinning) and the
+  runtime post-check admits team-tier workspace nodes cross-user —
+  promoted team knowledge is now actually recallable by a different
+  member's runtime.
+- Vacuous tests replaced with non-empty assertions; cross-user team
+  recall and V1/V2 regressions are pinned by 3 new E2E tests.
+- docs/architecture.md now maps the 5 post-S-wave leaf modules;
+  memory-vs-knowledge.md grant wording corrected (read-only).
+
 ### Added
 - **Team knowledge tiering**: `MemoryNode.knowledge_tier`
   (personal/domain/team) with `service.promote()` — provenance-stamped,

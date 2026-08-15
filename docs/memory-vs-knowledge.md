@@ -37,7 +37,8 @@ relies on agent-domain binding for discovery.
    by default (the blackboard model, with `source_agent` provenance).
 2. **Cross-agent grants** (`service.share_with(id, agent_id)`) let an owner
    open one private memory to a named peer — additive, idempotent, honoured
-   by the authorization gate (`memplex_grants` namespace key).
+   by the authorization gate (`memplex_grants` namespace key). Grants are
+   read-only: a grant holder can never promote the owner's memory.
 3. **Agent-domain binding** (`agent_domains.agent_domains` config) scopes a
    runtime's recall to its bound knowledge domains — every visibility
    branch is exploded with `domain` pinned, so a "database agent" sees

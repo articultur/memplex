@@ -193,11 +193,14 @@ def test_manifest_and_scope_expose_shared_memory_contract(tmp_path: Path):
     assert scope["schema_version"] == 1
     assert scope["identity"]["workspace_id"] == str(workspace.resolve())
     assert scope["visibility"]["default"] == "workspace"
-    assert [item["memplex_visibility"] for item in scope["read_namespace_filters"][:3]] == [
+    # The team-tier branch (S4) is first; then session/workspace/user.
+    assert [item["memplex_visibility"] for item in scope["read_namespace_filters"][:4]] == [
+        "workspace",  # team-tier: workspace + knowledge_tier=team
         "session",
         "workspace",
         "user",
     ]
+    assert scope["read_namespace_filters"][0]["knowledge_tier"] == "team"
     assert scope["write_namespace"]["memplex_source_agent"] == "codex"
     assert scope["write_namespace"]["memplex_source_session_id"] == "session-1"
 

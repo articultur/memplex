@@ -855,6 +855,23 @@ class LiteMemoryStore:
                     existing.source_paragraphs.append(sp)
             existing.updated_at = datetime.now(timezone.utc).isoformat()
             existing.version += 1
+            # Carry lifecycle fields from the incoming node (promote /
+            # share_with re-add): the merge above intentionally keeps the
+            # existing FieldValues, but tier, visibility, provenance, and
+            # namespace grants must survive or promotion silently no-ops
+            # (S3 fix).
+            if func.knowledge_tier is not None:
+                existing.knowledge_tier = func.knowledge_tier
+            if func.visibility is not None:
+                existing.visibility = func.visibility
+            if func.provenance:
+                merged_provenance = dict(existing.provenance or {})
+                merged_provenance.update(func.provenance)
+                existing.provenance = merged_provenance
+            if func.namespace:
+                merged_namespace = dict(existing.namespace or {})
+                merged_namespace.update(func.namespace)
+                existing.namespace = merged_namespace
 
             self._changelog.append(
                 ChangelogEvent(
