@@ -134,3 +134,42 @@ def test_working_memory_no_cross_tenant_leak_via_http(tmp_path, monkeypatch):
         if svc._working_memory is not None:
             cross = svc._working_memory.recall_context(scope="tenant:other-tenant")
             assert all("[WORKING MEMORY]" not in line for line in cross)
+
+
+def test_admin_console_serves_page_and_json_api(tmp_path, monkeypatch):
+    """Curation console E2E: page loads, memories listed, promote works."""
+    with _app(tmp_path, monkeypatch) as client:
+        page = client.get("/admin")
+        assert page.status_code == 200
+        assert "策展" in page.text or "Memplex" in page.text
+
+        write = client.post(
+            "/memories",
+            json={"type": "text", "content": "The team decided to use PostgreSQL"},
+        )
+        assert write.status_code == 200
+        funcs = write.json().get("functions", [])
+        assert len(funcs) == 1
+
+        listed = client.get("/admin/api/memories")
+        assert listed.status_code == 200
+        memories = listed.json()["memories"]
+        assert len(memories) >= 1
+
+        mid = memories[0]["id"]
+        promoted = client.post("/admin/api/promote", json={"memory_id": mid, "tier": "team"})
+        assert promoted.status_code == 200
+        assert promoted.json()["tier"] == "team"
+
+        relisted = client.get("/admin/api/memories")
+        assert relisted.json()["memories"][0]["knowledge_tier"] == "team"
+
+        facts = client.get("/admin/api/facts")
+        assert facts.status_code == 200
+        assert "facts" in facts.json()
+
+
+def test_admin_promote_rejects_invalid_tier(tmp_path, monkeypatch):
+    with _app(tmp_path, monkeypatch) as client:
+        r = client.post("/admin/api/promote", json={"memory_id": "x", "tier": "enterprise"})
+        assert r.status_code == 400

@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Curation console** (`/admin`): static web page + JSON API
+  (`/admin/api/memories|promote|share|facts`) with the same auth as
+  every HTTP surface. Operators can browse memories, promote to
+  knowledge tiers, and query bi-temporal history from a browser.
+- mypy strict gate 21 → 23 files (operations.py + adapters/cli.py
+  admitted; fixed 8 real type errors incl. latent None-deref in the
+  backup executor paths).
+
+### Changed
+- test_sync_reliability TCP-timeout test: the invariant is idempotence,
+  not first-attempt timing — the first dispatch may either time out or
+  deliver, the retry must deliver exactly once.
+
+### Added
 - mypy strict gate expanded 16 → 21 files (service, reranker,
   multi_path, core/engine, sync admitted; all clean). The orchestration
   facade itself is now fully typed.

@@ -911,6 +911,8 @@ class _BackupCommandContext:
     def create(self, destination: str | None) -> Any:
         resolved = self._default_destination if destination is None else Path(destination)
         if self._backend == "postgres":
+            if self._postgres_executor is None:
+                raise RuntimeError("PostgreSQL backup executor unavailable")
             return self._postgres_executor.create(
                 migration_dsn=self._migration_dsn,
                 destination=resolved,
@@ -918,6 +920,8 @@ class _BackupCommandContext:
                 key_id=self._key_id,
                 max_bytes=self._max_artifact_bytes,
             )
+        if self._lite_store is None:
+            raise RuntimeError("Lite backup executor unavailable")
         return self._lite_store.create_backup(
             resolved,
             self._signing_key,
@@ -932,6 +936,8 @@ class _BackupCommandContext:
 
     def restore(self, artifact: str, target_schema: str) -> Any:
         if self._backend == "postgres":
+            if self._postgres_executor is None:
+                raise RuntimeError("PostgreSQL restore executor unavailable")
             return self._postgres_executor.restore(
                 migration_dsn=self._migration_dsn,
                 artifact=Path(artifact),
@@ -945,6 +951,8 @@ class _BackupCommandContext:
             )
         started = __import__("time").monotonic()
         verification = self.verify(artifact)
+        if self._lite_store is None:
+            raise RuntimeError("Lite restore executor unavailable")
         self._lite_store.restore_backup(Path(artifact), self._signing_key)
         from memplex.backup import RestoreResult
 
@@ -1233,7 +1241,7 @@ def cmd_storage(args: argparse.Namespace) -> int:
             }
         elif action == "apply":
             mutation, fresh = context.apply()
-            payload: dict[str, Any] = {
+            payload = {
                 "command": "apply",
                 "dry_run": False,
                 "readback": _migration_plan_payload(fresh),

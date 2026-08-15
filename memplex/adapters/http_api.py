@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # the adapter package remains importable without it.
 try:
     from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
-    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
     _FASTAPI_AVAILABLE = True
 except ImportError:  # pragma: no cover
@@ -2121,8 +2121,103 @@ def create_app(config=None) -> "FastAPI":
     _register_health_routes(app)
     _register_sync_routes(app, config, profile)
     _register_metrics_routes(app, operations_metrics)
+    _register_admin_routes(app)
 
     return app
+
+
+def _register_admin_routes(app: "FastAPI") -> None:
+    """Human curation console: /admin page + JSON API.
+
+    Read-model first: the admin page lists memories and lets the operator
+    promote to knowledge tiers (team/domain/personal). Grant editing and
+    bi-temporal history ride the same JSON API.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        admin_html = _Path(__file__).resolve().parent.parent / "operations_assets" / "admin.html"
+        html = admin_html.read_text(encoding="utf-8")
+    except OSError:
+        html = "<h1>admin.html missing</h1>"
+
+    @app.get("/admin", include_in_schema=False)
+    async def admin_page(request: Request) -> HTMLResponse:
+        _authorization(request)  # enforce the same auth as every surface
+        return HTMLResponse(html)
+
+    @app.get("/admin/api/memories", include_in_schema=False)
+    async def admin_memories(
+        request: Request,
+        q: Optional[str] = None,
+        tier: Optional[str] = None,
+        limit: int = 200,
+    ):
+        context = _authorization(request)
+        svc = _get_service(request)
+        store = svc._store_for(context)
+        functions = list(store.list_functions(limit=min(limit, 1000)))
+        visible = [f for f in functions if svc._is_node_visible(f, context)]
+        if q:
+            ql = q.lower()
+            visible = [
+                f for f in visible
+                if ql in (f.name or "").lower() or ql in (f.id or "")
+            ]
+        if tier:
+            if tier == "none":
+                visible = [f for f in visible if not getattr(f, "knowledge_tier", None)]
+            else:
+                visible = [f for f in visible if getattr(f, "knowledge_tier", None) == tier]
+        return JSONResponse({"memories": [
+            {
+                "id": f.id,
+                "name": f.name,
+                "domain": f.domain,
+                "memory_type": getattr(f, "memory_type", "function"),
+                "knowledge_tier": getattr(f, "knowledge_tier", None),
+                "updated_at": getattr(f, "updated_at", None),
+            }
+            for f in visible[:limit]
+        ]})
+
+    @app.post("/admin/api/promote", include_in_schema=False)
+    async def admin_promote(request: Request, body: dict):
+        context = _authorization(request)
+        svc = _get_service(request)
+        try:
+            result = svc.promote(body["memory_id"], body["tier"], authorization=context)
+        except (ValueError, PermissionError, MemoryNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result)
+
+    @app.post("/admin/api/share", include_in_schema=False)
+    async def admin_share(request: Request, body: dict):
+        context = _authorization(request)
+        svc = _get_service(request)
+        try:
+            result = svc.share_with(body["memory_id"], body["agent_id"], authorization=context)
+        except (ValueError, PermissionError, MemoryNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(result)
+
+    @app.get("/admin/api/facts", include_in_schema=False)
+    async def admin_facts(request: Request, as_of: Optional[str] = None, limit: int = 100):
+        context = _authorization(request)
+        svc = _get_service(request)
+        facts = svc.list_facts(as_of=as_of, limit=min(limit, 500), authorization=context)
+        return JSONResponse({"facts": [
+            {
+                "id": f.id,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object_,
+                "knowledge_tier": f.knowledge_tier,
+                "valid_from": f.valid_from,
+                "invalid_at": f.invalid_at,
+            }
+            for f in facts
+        ]})
 
 
 def _function_from_dict(data: dict) -> Any:

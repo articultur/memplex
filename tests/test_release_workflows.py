@@ -335,6 +335,8 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/retrieval/multi_path.py",
         "memplex/core/engine.py",
         "memplex/sync.py",
+        "memplex/operations.py",
+        "memplex/adapters/cli.py",
     ]
 
     workflow = _workflow(CI)

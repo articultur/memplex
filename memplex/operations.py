@@ -644,7 +644,7 @@ def create_operations_evidence(
             latency_sample_count=latency_sample_count,
             availability=availability,
             error_rate=error_rate,
-            p95_latency_ms=float(p95_latency_ms),
+            p95_latency_ms=float(p95_latency_ms) if isinstance(p95_latency_ms, (int, float)) else 0.0,
             availability_target=operations.availability_target,
             error_rate_target=operations.error_rate_target,
             p95_latency_target_ms=operations.p95_latency_target_ms,
@@ -856,7 +856,7 @@ class OperationsMetrics:
     def finish_request(self, method: object, status_code: object, duration_seconds: object) -> None:
         if type(duration_seconds) not in {int, float}:
             raise TypeError("operations_metrics_duration_invalid")
-        duration = float(duration_seconds)
+        duration = float(duration_seconds) if isinstance(duration_seconds, (int, float)) else 0.0
         if not math.isfinite(duration) or duration < 0.0:
             raise ValueError("operations_metrics_duration_invalid")
         normalized_method = self._method(method)
@@ -900,7 +900,7 @@ class OperationsMetrics:
     def _number(value: object) -> str:
         if type(value) is bool or type(value) not in {int, float}:
             return "0"
-        numeric = float(value)
+        numeric = float(value) if isinstance(value, (int, float)) else 0.0
         if not math.isfinite(numeric):
             return "0"
         if type(value) is int:

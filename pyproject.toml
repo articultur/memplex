@@ -120,6 +120,8 @@ files = [
     "memplex/retrieval/multi_path.py",
     "memplex/core/engine.py",
     "memplex/sync.py",
+    "memplex/operations.py",
+    "memplex/adapters/cli.py",
 ]
 python_version = "3.11"
 follow_imports = "skip"
