@@ -104,8 +104,13 @@ class _StubEmbeddingService:
         return self.embed_query(text)
 
     def embed_query(self, text):
-        # Distinct, text-dependent vector per summary.
-        return [float((hash(text) >> i) & 0xFF) / 255.0 for i in range(4)]
+        # Distinct, text-dependent vector per summary. Uses an explicit
+        # per-character mapping (NOT hash()) — hash("alpha") can equal
+        # hash("beta") under some interpreter hash seeds.
+        acc = 0
+        for ch in str(text):
+            acc = (acc * 31 + ord(ch)) % (1 << 32)
+        return [float((acc >> (i * 8)) & 0xFF) / 255.0 for i in range(4)]
 
 
 # ── rag_search ────────────────────────────────────────────────────────
