@@ -1930,6 +1930,7 @@ all = [
 dev = [
     { name = "build" },
     { name = "cosmic-ray" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "import-linter" },
@@ -1988,6 +1989,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2,<2" },
     { name = "chromadb", marker = "extra == 'vector'", specifier = ">=0.4.0,<2" },
     { name = "cosmic-ray", marker = "extra == 'dev'", specifier = ">=8,<9" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=50,<52" },
     { name = "cryptography", marker = "extra == 'sync-crypto'", specifier = ">=50,<52" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.100.0,<1" },
     { name = "fastapi", marker = "extra == 'http'", specifier = ">=0.100.0,<1" },

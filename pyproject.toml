@@ -83,6 +83,8 @@ dev = [
     "fastapi>=0.100.0,<1",
     "uvicorn>=0.23.0,<1",
     "httpx>=0.24.0,<1",
+    # sync_crypto HTTP integration tests need the AEAD primitive.
+    "cryptography>=50,<52",
     # Architecture-contract gate (CI: lint-imports) and complexity freeze.
     "import-linter>=2.13,<3",
     # Mutation-testing pilot runner (scripts/mutation_pilot.sh).
