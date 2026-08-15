@@ -1391,8 +1391,8 @@ def _register_sync_v1_routes(app: "FastAPI", config) -> None:  # noqa: C901  doc
         )
 
 
-def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None:  # noqa: C901  documented known debt
-    """Register the legacy /sync/changes + /sync/push adapter."""
+def _register_legacy_sync_endpoint_routes(app: "FastAPI", config, profile: str) -> None:  # noqa: C901  documented known debt
+    """Register the two legacy /sync endpoints (changes + push)."""
     def _legacy_sync_v1_changes(
         request: Request,
         context: AuthorizationContext,
@@ -1632,7 +1632,6 @@ def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None: 
                 "by_type": by_type,
             }
         )
-
     @app.get("/sync/changes", summary="Pull incremental changes since a timestamp")
     async def sync_changes(
         request: Request,
@@ -1851,6 +1850,7 @@ def _register_legacy_sync_routes(app: "FastAPI", config, profile: str) -> None: 
         )
 
 
+
 def _register_sync_events_route(app: "FastAPI") -> None:
     """Register the /sync/events SSE stream."""
     @app.get("/sync/events", summary="SSE stream of sync events")
@@ -1912,7 +1912,7 @@ def _register_sync_events_route(app: "FastAPI") -> None:
 def _register_sync_routes(app: "FastAPI", config, profile: str) -> None:
     """Register sync v1 (snapshot-stable) and legacy sync routes."""
     _register_sync_v1_routes(app, config)
-    _register_legacy_sync_routes(app, config, profile)
+    _register_legacy_sync_endpoint_routes(app, config, profile)
     _register_sync_events_route(app)
 
 

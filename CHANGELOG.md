@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- HTTP-level integration tests for the S-wave features (5 tests):
+  encrypted sync push tamper/reject/fail-closed/plaintext-compat,
+  promoted team knowledge via HTTP recall, working-memory cross-tenant
+  leak check.
+- `docs/adr/`: 8 architecture decision records covering the session's
+  key design choices (evidence gating, module splits, sync lockstep,
+  one-store/two-lifecycles, read-only grants, shared-key encryption,
+  bi-temporal supersede, complexity freeze).
+
+### Changed
+- Legacy sync registrar split (4th attempt, successful): the 458-line
+  `_register_legacy_sync_routes` is now a 5-line orchestrator calling
+  the extracted `_register_legacy_sync_endpoint_routes` — the parent
+  complexity drops from 54 to effectively zero (the child carries the
+  documented noqa).
+
 ### Fixed
 - **V1 (High, privilege escalation)**: `promote()` now requires the memory
   owner (or local development) — a cross-agent grant holder could

@@ -231,6 +231,9 @@ reproduction commands.
   and the equivalence argument for surviving mutants.
 - [Security Scan Triage](docs/security-triage.md): sealed deep-scan verdicts
   per finding category, with rerun instructions.
+- [ADRs](docs/adr/): architecture decision records for the key
+  design choices (readiness gating, module splits, grants, bi-temporal,
+  complexity freeze).
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
 - [Benchmarks](docs/benchmarks.md): evaluation methodology, metric
