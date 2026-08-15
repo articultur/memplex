@@ -88,7 +88,7 @@ _FUNCTION_KEYS = _BASE_NODE_KEYS | {
     "name_normalized", "trigger", "condition", "action", "benefit", "attributes",
     "cross_references", "priority_from_source", "source_authority",
 }
-_FACT_KEYS = _BASE_NODE_KEYS | {"subject", "predicate", "object", "valid_until"}
+_FACT_KEYS = _BASE_NODE_KEYS | {"subject", "predicate", "object", "valid_until", "valid_from", "invalid_at"}
 _FACT_LEGACY_KEYS = _FACT_KEYS | {"object_"}
 _PREFERENCE_KEYS = _BASE_NODE_KEYS | {"aspect", "preference", "subject_id"}
 _OBSERVATION_KEYS = _BASE_NODE_KEYS | {"event", "context", "observed_at", "actor", "category"}

@@ -52,6 +52,7 @@ from memplex.llm.injection_guard import (
 )
 from memplex.llm.provider import create_provider
 from memplex.models import (
+    Fact,
     CompactionResult,
     CompactionScope,
     ExtractedData,
@@ -147,6 +148,14 @@ class MemplexService:
         # current ``store`` / ``_feedback_store`` (never a stale snapshot).
         from memplex.working_memory import WorkingMemory
 
+        from memplex.sleep_time import SleepTimeAgent
+
+        self._sleep_time = SleepTimeAgent(
+            self,
+            interval_seconds=cfg.sleep_time.interval_seconds,
+            idle_grace_seconds=cfg.sleep_time.idle_grace_seconds,
+            precompute_top_k=cfg.sleep_time.precompute_top_k,
+        )
         self._working_memory = (
             WorkingMemory(
                 max_entries=cfg.working_memory.max_entries,
@@ -1412,6 +1421,8 @@ class MemplexService:
                 continue
             for node in nodes:
                 try:
+                    if kind == "fact":
+                        self._supersede_contradicted_facts(node, store)
                     add(node)
                 except Exception as exc:
                     logger.debug(
@@ -1420,6 +1431,37 @@ class MemplexService:
                         getattr(node, "id", "?"),
                         exc,
                     )
+
+    def _supersede_contradicted_facts(self, new_fact, store: Any) -> None:
+        """Bi-temporal supersede (Zep-style) before persisting a new fact.
+
+        Stamps ``invalid_at`` on stored facts occupying the same
+        (subject, predicate) slot so contradicted claims are retained for
+        point-in-time queries instead of being silently overwritten. The
+        new fact's ``valid_from`` defaults to now. Best-effort: a listing
+        failure skips supersession (the write itself proceeds).
+        """
+        from memplex import temporal
+
+        if not getattr(new_fact, "valid_from", None):
+            new_fact.valid_from = temporal.now_iso()
+        try:
+            list_facts = getattr(store, "list_facts", None)
+            if not callable(list_facts):
+                return
+            existing = list_facts()
+            superseded = temporal.supersede_contradicted(new_fact, existing)
+            for old_fact in superseded:
+                try:
+                    store.add_fact(old_fact)
+                except Exception as exc:
+                    logger.debug(
+                        "fact supersede persist failed for %s: %s", old_fact.id, exc
+                    )
+            if superseded:
+                logger.debug("superseded %d contradicted fact(s)", len(superseded))
+        except Exception as exc:
+            logger.debug("fact supersession listing failed: %s", exc)
 
     def _maybe_schedule_compaction(self, *, store: Any = None) -> None:
         """Submit a background compaction when the corpus crosses thresholds.
@@ -1530,6 +1572,58 @@ class MemplexService:
             return list(self._store_for(context).get_timeline(memory_id, limit=limit))
         except Exception as exc:
             logger.debug("get_timeline failed for %s: %s", memory_id, exc)
+            return []
+
+    def list_facts(
+        self,
+        as_of: Optional[str] = None,
+        limit: int = 1000,
+        *,
+        include_invalidated: bool = False,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> List[Fact]:
+        """List Fact nodes through the store's optional API, temporally scoped.
+
+        Bi-temporal read surface: by default only facts whose
+        (``valid_from``, ``invalid_at``) business-time interval covers *now*
+        are returned. ``as_of`` (ISO datetime string) selects any point in
+        time — the auditable history of superseded claims. Pass
+        ``include_invalidated=True`` to bypass temporal filtering entirely.
+        Visibility and injection safety follow the same rules as the other
+        list surfaces.
+        """
+        from datetime import datetime as _dt
+
+        from memplex import temporal
+
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+        list_fn = getattr(store, "list_facts", None)
+        if not callable(list_fn):
+            logger.debug(
+                "store %s has no list_facts; returning empty list",
+                type(store).__name__,
+            )
+            return []
+        try:
+            facts = list(list_fn(limit=limit))
+            visible = facts if (
+                authorization is None and self._is_local_development_context(context)
+            ) else [
+                fact for fact in facts if self._is_node_visible(fact, context)
+            ]
+            safe = [fact for fact in visible if self.is_safe_for_model(fact)]
+            if include_invalidated:
+                return safe
+            point = None
+            if as_of is not None:
+                try:
+                    point = _dt.fromisoformat(as_of)
+                except ValueError:
+                    point = None  # malformed as_of degrades to "now", never 500s
+            return temporal.facts_valid_at(safe, as_of=point)
+        except Exception as exc:
+            logger.debug("list_facts failed: %s", exc)
             return []
 
     def list_observations(
@@ -2123,6 +2217,27 @@ class MemplexService:
                 kept.append(r)
         return kept
 
+    def improve(
+        self,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> dict[str, object]:
+        """Run the proactive maintenance pass (Cognee ``improve``-style).
+
+        Dedupes contradicting facts into bi-temporal history, expires
+        shelf-lapsed facts, and rebuilds the search index. Read-only with
+        respect to Functions/Preferences — this is the fact-layer
+        counterpart to :meth:`compact`. See ``memplex/improve.py``.
+        """
+        from memplex.improve import improve_facts
+
+        context = self._require_authorization(authorization)
+        store = self._store_for(context)
+        report = improve_facts(store)
+        # Graph-builder cache must not serve pre-maintenance adjacency.
+        self._graph_builder.invalidate_cache()
+        return report
+
     def compact(self, scope: str = "project") -> CompactionResult:
         """Run the compaction pipeline synchronously.
 
@@ -2155,6 +2270,8 @@ class MemplexService:
             if isinstance(self.store, SyncableStore):
                 self.store.start_auto_pull()
                 self.store.start_sse_listener()
+            if self._config.sleep_time.enabled:
+                self._sleep_time.start()
             self._runtime_lifecycle.mark_ready()
         except BaseException:
             if self._runtime_lifecycle.state == "starting":
@@ -2186,6 +2303,7 @@ class MemplexService:
             self._service_stop_state = "stopping"
             self.begin_draining()
         try:
+            self._sleep_time.stop()
             result = self._stop_runtime(drain_sync=drain_sync)
         except BaseException as exc:
             if self._runtime_lifecycle.state == "draining":

@@ -234,6 +234,16 @@ class RerankerConfig:
 
 
 @dataclass
+class SleepTimeConfig:
+    """Idle-time maintenance + inference precompute (memplex/sleep_time.py)."""
+
+    enabled: bool = False
+    interval_seconds: float = 3600.0
+    idle_grace_seconds: float = 300.0
+    precompute_top_k: int = 20
+
+
+@dataclass
 class WorkingMemoryConfig:
     """Hot-context tier (memplex/working_memory.py), opt-in."""
 
@@ -586,6 +596,7 @@ class MemplexConfig:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
     working_memory: WorkingMemoryConfig = field(default_factory=WorkingMemoryConfig)
+    sleep_time: SleepTimeConfig = field(default_factory=SleepTimeConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     wiki: WikiConfig = field(default_factory=WikiConfig)
@@ -658,6 +669,10 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     "working_memory.max_entries": int,
     "working_memory.default_ttl_seconds": float,
     "working_memory.inject_limit": int,
+    "sleep_time.enabled": bool,
+    "sleep_time.interval_seconds": float,
+    "sleep_time.idle_grace_seconds": float,
+    "sleep_time.precompute_top_k": int,
     "llm.observation_compression": bool,
     "llm.provider": str,
     "llm.anthropic_api_key": str,

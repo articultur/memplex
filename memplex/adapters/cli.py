@@ -416,6 +416,22 @@ def cmd_compact(args: argparse.Namespace) -> int:
         raw_service.stop()
 
 
+def cmd_improve(args: argparse.Namespace) -> int:
+    """Run the proactive fact-maintenance pass (dedupe/expire/reindex)."""
+    raw_service, svc = _make_authorized_service(getattr(args, "config", None))
+    try:
+        is_local = getattr(raw_service, "_is_local_development_context", None)
+        if not callable(is_local) or not is_local(svc.authorization):
+            raise PermissionError(
+                "principal-scoped CLI improve is unavailable; use an authorized maintenance worker"
+            )
+        report = raw_service.improve()
+        print(_fmt(report, args.output))
+        return 0
+    finally:
+        raw_service.stop()
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """Health check.
 
@@ -1821,6 +1837,8 @@ def _add_write_parsers(sub) -> None:
 
 def _add_review_diag_parsers(sub) -> None:
     """pending / compact / health / stats / doctor (review + diagnostics)."""
+    sub.add_parser("improve", help="Run proactive fact maintenance (dedupe/expire/reindex)")
+
     sub.add_parser("pending", help="List pending reviews")
 
     p_compact = sub.add_parser("compact", help="Run compaction pipeline")
@@ -2159,6 +2177,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "feedback": cmd_feedback,
         "pending": cmd_pending,
         "compact": cmd_compact,
+        "improve": cmd_improve,
         "health": cmd_health,
         "readiness": cmd_readiness,
         "stats": cmd_stats,

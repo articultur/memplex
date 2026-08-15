@@ -240,6 +240,13 @@ class Fact(MemoryNode):
     predicate: str = ""
     object_: str = ""
     valid_until: Optional[str] = None
+    # Bi-temporal validity (Zep/Graphiti-style): the business-time interval
+    # the fact is TRUE for. ``valid_from`` defaults to write time;
+    # ``invalid_at`` is set when a contradicting fact supersedes this one —
+    # the row is retained (not deleted) so point-in-time queries with
+    # ``as_of`` stay answerable.
+    valid_from: Optional[str] = None
+    invalid_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Standard serialization covering every field (base + fact).
@@ -255,6 +262,8 @@ class Fact(MemoryNode):
                 "predicate": self.predicate,
                 "object": self.object_,
                 "valid_until": self.valid_until,
+                "valid_from": self.valid_from,
+                "invalid_at": self.invalid_at,
             }
         )
         return d
@@ -264,7 +273,7 @@ class Fact(MemoryNode):
         """Inverse of :meth:`to_dict`; tolerant of missing keys.
 
         Accepts both ``"object"`` (canonical, emitted by
-        :meth:`to_dict`) and the legacy/ Python-side ``"object_"`` key.
+        :meth:`to_dict`) and the legacy/ Python-side ``object_`` key.
         """
         kwargs = cls._base_from_dict(d)
         kwargs.update(
@@ -274,6 +283,8 @@ class Fact(MemoryNode):
                 "predicate": d.get("predicate", ""),
                 "object_": d.get("object", d.get("object_", "")),
                 "valid_until": d.get("valid_until"),
+                "valid_from": d.get("valid_from"),
+                "invalid_at": d.get("invalid_at"),
             }
         )
         return cls(**kwargs)

@@ -25,6 +25,14 @@ Working-memory tier (opt-in): with `MEMPLEX_WORKING_MEMORY_ENABLED=true`,
 recent typed captures live in a TTL hot-context store and are prepended to
 every agent recall (`[WORKING MEMORY]` prefix) before retrieval runs.
 
+Bi-temporal fact history (Zep-style): contradicted facts are stamped
+`invalid_at` and retained — `memplex agent`-scoped listing supports `as_of`
+point-in-time queries. `memplex improve` runs proactive maintenance
+(dedupe/expire/reindex), and opt-in sleep-time compute
+(`MEMPLEX_SLEEP_TIME_ENABLED=true`) reruns it during idle windows while
+precomputing `[SLEEP-TIME]` association inferences into the working-memory
+tier.
+
 Background compaction is automatic: the Claude Code hook loop compacts on
 Stop, and writes on any path trigger compaction once the corpus crosses the
 configured warn threshold. `memplex compact` remains available for manual

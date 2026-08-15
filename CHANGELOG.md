@@ -7,6 +7,22 @@ to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Bi-temporal fact validity** (Zep/Graphiti-style): `Fact.valid_from` /
+  `invalid_at`; the write path supersedes contradicted same-slot facts
+  (subject+predicate) instead of overwriting, and
+  `service.list_facts(as_of=...)` answers point-in-time queries — the
+  "agent changed its mind" history stays auditable (`memplex/temporal.py`).
+- **`improve()` maintenance verb** (Cognee-style): dedupes contradicting
+  valid facts into temporal history, expires shelf-lapsed `valid_until`
+  facts, rebuilds the FTS index. Exposed as `memplex improve` CLI
+  (`memplex/improve.py`).
+- **Sleep-time compute** (Letta-style, opt-in `sleep_time.enabled`):
+  `SleepTimeAgent` daemon waits for sustained worker idle, reruns
+  `improve()`, and precomputes graph-association inferences for the
+  hottest memories into the working-memory tier as `[SLEEP-TIME]` entries
+  (`memplex/sleep_time.py`).
+
+### Added
 - **6-dimensional reranker**: new per-memory `confidence` dimension
   (Hindsight-style belief strength, clamped/neutral-on-missing) and a
   configurable exponential recency half-life
