@@ -25,6 +25,12 @@ Working-memory tier (opt-in): with `MEMPLEX_WORKING_MEMORY_ENABLED=true`,
 recent typed captures live in a TTL hot-context store and are prepended to
 every agent recall (`[WORKING MEMORY]` prefix) before retrieval runs.
 
+Team knowledge tiers: memories promote to curated knowledge
+(`personal` / `domain` / `team`) via `service.promote`; team tier is
+workspace-shared; owners can `share_with` a named peer agent across the
+user-privacy boundary; agent↔domain binding scopes each agent's recall to
+its knowledge domains (`docs/memory-vs-knowledge.md`).
+
 Bi-temporal fact history (Zep-style): contradicted facts are stamped
 `invalid_at` and retained — `memplex agent`-scoped listing supports `as_of`
 point-in-time queries. `memplex improve` runs proactive maintenance

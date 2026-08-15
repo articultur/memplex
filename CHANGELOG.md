@@ -7,6 +7,18 @@ to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Team knowledge tiering**: `MemoryNode.knowledge_tier`
+  (personal/domain/team) with `service.promote()` — provenance-stamped,
+  version-bumped promotion; `team` widens visibility to the workspace.
+- **Cross-agent grants**: `service.share_with(memory_id, agent_id)` —
+  additive idempotent grants honoured by the authorization gate for
+  user-private nodes (`memplex_grants` namespace key, fail-closed).
+- **Agent-domain binding**: `agent_domains.agent_domains` config scopes a
+  runtime's recall to its bound knowledge domains (every visibility branch
+  exploded with `domain` pinned).
+- `docs/memory-vs-knowledge.md`: the one-store/two-lifecycle design answer.
+
+### Added
 - **Bi-temporal fact validity** (Zep/Graphiti-style): `Fact.valid_from` /
   `invalid_at`; the write path supersedes contradicted same-slot facts
   (subject+predicate) instead of overwriting, and

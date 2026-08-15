@@ -234,6 +234,19 @@ class RerankerConfig:
 
 
 @dataclass
+class AgentDomainConfig:
+    """Agent→domain binding for domain-scoped recall.
+
+    Maps agent names to the knowledge domains they own or serve; the
+    agent runtime ANDs a ``domain ∈ bound`` filter into every recall so a
+    domain agent only sees its domain's knowledge. An empty list (the
+    default) means unscoped — the agent sees everything its ACL allows.
+    """
+
+    agent_domains: Dict[str, List[str]] = field(default_factory=dict)
+
+
+@dataclass
 class SleepTimeConfig:
     """Idle-time maintenance + inference precompute (memplex/sleep_time.py)."""
 
@@ -597,6 +610,7 @@ class MemplexConfig:
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
     working_memory: WorkingMemoryConfig = field(default_factory=WorkingMemoryConfig)
     sleep_time: SleepTimeConfig = field(default_factory=SleepTimeConfig)
+    agent_domains: AgentDomainConfig = field(default_factory=AgentDomainConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     graph: GraphConfig = field(default_factory=GraphConfig)
     wiki: WikiConfig = field(default_factory=WikiConfig)

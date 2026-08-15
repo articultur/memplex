@@ -25,7 +25,7 @@ import concurrent.futures
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, RLock
 from typing import Any, Dict, Iterable, List, Optional
@@ -2216,6 +2216,103 @@ class MemplexService:
             if getattr(node, "owner", None) == owner:
                 kept.append(r)
         return kept
+
+    # ── Knowledge tiering: promotion + cross-agent sharing ───────────
+
+    _KNOWLEDGE_TIERS = frozenset({"personal", "domain", "team"})
+
+    def promote(
+        self,
+        memory_id: str,
+        tier: str,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> Dict[str, object]:
+        """Promote one memory into a curated knowledge tier.
+
+        The memory→knowledge lifecycle: a captured node (tier ``None``)
+        gains ``knowledge_tier`` ∈ {personal, domain, team} and the read
+        scope implied by that tier — ``team`` widens visibility to the
+        workspace so every member agent recalls it. Promotion is
+        provenance-stamped (who promoted, when) and idempotent.
+        """
+        if tier not in self._KNOWLEDGE_TIERS:
+            raise ValueError(f"tier must be one of {sorted(self._KNOWLEDGE_TIERS)}")
+        context = self._require_authorization(authorization)
+        node = self._require_visible_node(memory_id, context)
+
+        node.knowledge_tier = tier
+        if tier == "team":
+            # Team knowledge is workspace-shared by definition.
+            node.visibility = "workspace"
+        node.version = getattr(node, "version", 1) + 1
+        provenance = dict(getattr(node, "provenance", {}) or {})
+        provenance["promoted_by"] = context.principal.subject_id
+        provenance["promoted_at"] = datetime.now(timezone.utc).isoformat()
+        provenance["promoted_to_tier"] = tier
+        node.provenance = provenance
+
+        store = self._store_for(context)
+        add = getattr(store, "add_fact", None)
+        if callable(add) and getattr(node, "memory_type", "") == "fact":
+            add(node)
+        else:
+            add_fn = getattr(store, "add", None)
+            if callable(add_fn):
+                from memplex.models import SourceDocument
+
+                add_fn(node, SourceDocument(
+                    type="promotion", content="", source_type=node.source_type
+                ))
+        return {
+            "memory_id": memory_id,
+            "tier": tier,
+            "visibility": node.visibility,
+            "version": node.version,
+        }
+
+    def share_with(
+        self,
+        memory_id: str,
+        agent_id: str,
+        *,
+        authorization: Optional[AuthorizationContext] = None,
+    ) -> Dict[str, object]:
+        """Grant one named agent read access to a user-private memory.
+
+        Cross-agent directed sharing for the multi-agent team model: the
+        grant lands in the node namespace (``memplex_grants``) and the
+        authorization gate honours it for ``visibility="user"`` nodes.
+        Only the owner (or local development) may share; grants are
+        additive and idempotent.
+        """
+        if not agent_id or not str(agent_id).strip():
+            raise ValueError("agent_id must be a non-empty string")
+        agent_id = str(agent_id).strip()
+        context = self._require_authorization(authorization)
+        node = self._require_visible_node(memory_id, context)
+
+        owner_subject = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
+        is_owner = owner_subject == context.principal.subject_id
+        if not (is_owner or self._is_local_development_context(context)):
+            raise PermissionError("only the memory owner can share a private memory")
+
+        namespace = dict(getattr(node, "namespace", {}) or {})
+        grants = [
+            part.strip()
+            for part in str(namespace.get("memplex_grants", "")).split(",")
+            if part.strip()
+        ]
+        if agent_id not in grants:
+            grants.append(agent_id)
+        namespace["memplex_grants"] = ",".join(sorted(set(grants)))
+        node.namespace = namespace
+
+        store = self._store_for(context)
+        add = getattr(store, "add_fact", None)
+        if callable(add) and getattr(node, "memory_type", "") == "fact":
+            add(node)
+        return {"memory_id": memory_id, "granted_agents": grants}
 
     def improve(
         self,

@@ -171,6 +171,26 @@ class AuthorizationGate:
             and context.provenance.get("trust_boundary") == "local-development"
         )
 
+    @staticmethod
+    def _agent_has_grant(node: Any, context: AuthorizationContext) -> bool:
+        """Whether the calling agent holds an explicit cross-agent grant.
+
+        Grants are stored in the node namespace under ``memplex_grants`` as
+        a comma-separated agent-id list (written by
+        :meth:`MemplexService.share_with`). Fail-closed: malformed grant
+        data never grants access.
+        """
+        namespace = getattr(node, "namespace", {}) or {}
+        if not isinstance(namespace, dict):
+            return False
+        raw = namespace.get("memplex_grants", "")
+        if not raw:
+            return False
+        caller = context.agent_id or context.principal.subject_id
+        return bool(caller) and caller in [
+            part.strip() for part in str(raw).split(",") if part.strip()
+        ]
+
     def is_node_visible(self, node: Any, context: AuthorizationContext) -> bool:
         """Return whether *node* is in the authenticated caller's ACL scope.
 
@@ -197,7 +217,12 @@ class AuthorizationGate:
         workspace_id = self.identity_value(node, "workspace_id", "memplex_workspace_id")
 
         if visibility == "user":
-            return subject_id == context.principal.subject_id
+            if subject_id == context.principal.subject_id:
+                return True
+            # Cross-agent grant (service.share_with): the owner explicitly
+            # shared this node with the calling agent, overriding the
+            # user-private default within the same tenant.
+            return self._agent_has_grant(node, context)
         if visibility == "workspace":
             return workspace_id == context.workspace_id
         if visibility == "session":

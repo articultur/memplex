@@ -62,6 +62,11 @@ class MemoryNode:
     needs_review_until: Optional[str] = None
     content_hash: Optional[str] = None
     namespace: Dict[str, str] = field(default_factory=dict)
+    # Knowledge tier: None = plain personal memory (capture pipeline);
+    # "personal" | "domain" | "team" = curated knowledge promoted from
+    # memory through the review workflow. Tier drives default read scope
+    # (team tier ⇒ workspace-visible) and survives sync as ordinary data.
+    knowledge_tier: Optional[str] = None
 
     def _base_to_dict(self) -> Dict[str, Any]:
         """Serialize the MemoryNode base fields shared by all memory types."""
@@ -93,6 +98,7 @@ class MemoryNode:
             "needs_review_until": self.needs_review_until,
             "content_hash": self.content_hash,
             "namespace": dict(self.namespace),
+            "knowledge_tier": self.knowledge_tier,
         }
 
     @staticmethod
@@ -127,6 +133,7 @@ class MemoryNode:
             "needs_review_until": d.get("needs_review_until"),
             "content_hash": d.get("content_hash"),
             "namespace": dict(d.get("namespace", {})),
+            "knowledge_tier": d.get("knowledge_tier"),
         }
 
 

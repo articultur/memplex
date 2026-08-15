@@ -760,7 +760,7 @@ class AgentMemoryRuntime:
             text=query,
             top_k=query_top_k,
             max_tokens=selected_max_tokens,
-            namespace_filter=self._read_namespace_filters(),
+            namespace_filter=self._domain_scoped_filters(),
             explain=explain,
             authorization=self.authorization_context,
         )
@@ -862,6 +862,33 @@ class AgentMemoryRuntime:
             raise ValueError(
                 f"Unsupported memory visibility {visibility!r}. Supported: {supported}"
             )
+
+    def _domain_scoped_filters(self) -> list[Dict[str, Optional[str]]]:
+        """Read filters ANDed with the agent's bound knowledge domains.
+
+        Agent→domain binding (``agent_domains.agent_domains`` config): when
+        the current agent has bound domains, every visibility branch is
+        exploded into one branch per domain with ``domain`` pinned — a
+        domain agent sees only its domain's knowledge. Unbound agents get
+        the plain visibility boundaries.
+        """
+        branches = self._read_namespace_filters()
+        try:
+            bound = list(
+                self.service._config.agent_domains.agent_domains.get(self.agent, [])
+            )
+        except Exception:
+            bound = []
+        bound = [domain for domain in bound if domain]
+        if not bound:
+            return branches
+        scoped: list[Dict[str, Optional[str]]] = []
+        for branch in branches:
+            for domain in bound:
+                expanded = dict(branch)
+                expanded["domain"] = domain
+                scoped.append(expanded)
+        return scoped
 
     def _read_namespace_filters(self) -> list[Dict[str, Optional[str]]]:
         """Return OR-ed visibility boundaries for the current runtime."""

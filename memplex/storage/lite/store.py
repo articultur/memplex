@@ -82,7 +82,7 @@ _BASE_NODE_KEYS = {
     "owner", "tenant_id", "owner_subject_id", "workspace_id", "visibility",
     "provenance", "version", "created_at", "updated_at", "origin_session",
     "access_count", "last_accessed_at", "source_paragraphs", "needs_review",
-    "needs_review_until", "content_hash", "namespace",
+    "needs_review_until", "content_hash", "namespace", "knowledge_tier",
 }
 _FUNCTION_KEYS = _BASE_NODE_KEYS | {
     "name_normalized", "trigger", "condition", "action", "benefit", "attributes",
