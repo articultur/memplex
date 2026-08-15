@@ -793,7 +793,7 @@ class SyncableStore:
             if not node_id:
                 continue
             try:
-                existing = getter(node_id) if callable(getter) else index.get(node_id)
+                existing = getter(node_id) if callable(getter) else (index or {}).get(node_id)
             except Exception:
                 existing = None
             # LWW: reject if incoming is older than or equal to local.

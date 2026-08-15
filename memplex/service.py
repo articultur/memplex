@@ -351,7 +351,7 @@ class MemplexService:
                 backend=backend,
                 dsn=str(cfg.storage.path),
                 require_authorization=self._is_production_profile(),
-                ready_pool=self._postgres_resources.ready_pool,
+                ready_pool=self._postgres_resources.ready_pool if self._postgres_resources else None,
             )
         else:
             feedback_path = Path(cfg.storage.path).expanduser() / "feedback.json"
@@ -680,7 +680,10 @@ class MemplexService:
             model = model_by_type.get(node_type)
             if model is None:
                 continue
-            raw = event.to_dict().get("payload")
+            to_dict = getattr(event, "to_dict", None)
+            if not callable(to_dict):
+                raise TypeError("typed sync event must expose to_dict")
+            raw = to_dict().get("payload")
             if type(raw) is not dict:
                 raise TypeError("typed sync upsert payload must be an object")
             nodes.append(model.from_dict(raw))
@@ -720,7 +723,7 @@ class MemplexService:
         # triples model-controlled work. Split the budget as evenly as
         # possible; when the budget is smaller than the number of paths, the
         # zero-budget paths are not scheduled.
-        searches = []
+        searches: list[tuple[str, Any, tuple[Any, ...]]] = []
         if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
             searches.append(("rag", retriever.rag_search, (query_vector,)))
         if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
@@ -1240,6 +1243,8 @@ class MemplexService:
         isolation pattern as ``_compute_hyde_vector``); failures or empty
         results leave *content* unchanged.
         """
+        if self._llm is None:
+            return content
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 facts = pool.submit(

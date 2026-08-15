@@ -19,7 +19,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, List
 
 from memplex.core.associator.domain_classifier import DomainClassifier
 from memplex.core.associator.entity_aligner import EntityAligner
@@ -299,7 +299,7 @@ class CoreEngine:
             source_hint: str -- hint for confidence calculation
         """
         source_type = source.type
-        extracted_images = []
+        extracted_images: list[Any] = []
 
         # Text / clipboard content
         if source_type in ("text", "clipboard"):
@@ -334,7 +334,6 @@ class CoreEngine:
                 if full is None:
                     return "", extracted_images, "pdf"
                 text = "\n\n".join(full.get("pages", []))
-                extracted_images = []
                 for page_images in full.get("images", []):
                     for img in page_images:
                         if img.get("path"):

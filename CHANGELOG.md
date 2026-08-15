@@ -7,6 +7,16 @@ to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- mypy strict gate expanded 16 → 21 files (service, reranker,
+  multi_path, core/engine, sync admitted; all clean). The orchestration
+  facade itself is now fully typed.
+- ADR-009: MemplexService remains an orchestration facade — the
+  boundary rule is new capabilities land in leaf modules, service only
+  wires them.
+- docs/curation-ui.md: design for the human curation console
+  (recommended: web admin page reusing promote/share/facts APIs).
+
+### Added
 - **CLI + MCP surface for the knowledge tier**: `memplex promote <id>
   --tier team`, `memplex share <id> --agent <id>`, `memplex facts
   [--as-of ...] [--all]` commands; MCP tools `memory_promote`,

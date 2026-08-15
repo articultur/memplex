@@ -110,7 +110,9 @@ class MultiPathRetriever:
         """
         if self._wiki_searcher is not None:
             try:
-                return list(self._wiki_searcher.search(text, top_k))
+                search = getattr(self._wiki_searcher, "search", None)
+                if callable(search):
+                    return list(search(text, top_k))
             except Exception as exc:
                 logger.debug("wiki_search: searcher failed, falling back to FTS: %s", exc)
         return self._store.fts_search(text, top_k)
@@ -232,6 +234,8 @@ class MultiPathRetriever:
         embed_query = getattr(self._embedding_service, "embed_query", None)
         if callable(embed_query):
             return embed_query(text)
+        if self._embedding_service is None:
+            return []
         return self._embedding_service.embed(text)
 
     def _load_functions(self, func_ids: List[str]) -> Dict[str, object]:
@@ -333,17 +337,17 @@ class MultiPathRetriever:
             # match even when the write path ran before the namespace
             # projection landed (or via direct store.add).
             if getattr(func, "domain", None):
-                attrs.setdefault("domain", func.domain)
+                attrs.setdefault("domain", getattr(func, "domain", None))
             if getattr(func, "knowledge_tier", None):
-                attrs.setdefault("knowledge_tier", func.knowledge_tier)
+                attrs.setdefault("knowledge_tier", getattr(func, "knowledge_tier", None))
             if getattr(func, "visibility", None):
-                attrs.setdefault("memplex_visibility", func.visibility)
+                attrs.setdefault("memplex_visibility", getattr(func, "visibility", None))
             if getattr(func, "workspace_id", None):
-                attrs.setdefault("memplex_workspace_id", func.workspace_id)
+                attrs.setdefault("memplex_workspace_id", getattr(func, "workspace_id", None))
             if getattr(func, "tenant_id", None):
-                attrs.setdefault("memplex_tenant_id", func.tenant_id)
+                attrs.setdefault("memplex_tenant_id", getattr(func, "tenant_id", None))
             if getattr(func, "owner_subject_id", None):
-                attrs.setdefault("memplex_subject_id", func.owner_subject_id)
+                attrs.setdefault("memplex_subject_id", getattr(func, "owner_subject_id", None))
             if matches(attrs):
                 filtered.append(result)
         return filtered

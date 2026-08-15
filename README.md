@@ -234,6 +234,8 @@ reproduction commands.
 - [ADRs](docs/adr/): architecture decision records for the key
   design choices (readiness gating, module splits, grants, bi-temporal,
   complexity freeze).
+- [Curation UI design](docs/curation-ui.md): the human curation console
+  plan (web admin for promote / grants / history).
 - [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
   Codex, Claude Code, OpenClaw, and Hermes.
 - [Benchmarks](docs/benchmarks.md): evaluation methodology, metric
