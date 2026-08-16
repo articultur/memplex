@@ -1,3 +1,4 @@
+# Workflow re-evaluation: fix hash-seed determinism
 name: CI
 
 on:
