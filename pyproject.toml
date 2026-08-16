@@ -70,7 +70,7 @@ dev = [
     # ``python -m build --no-isolation`` is an explicit release/package-data
     # contract in the test suite, so the selected backend must exist in the
     # locked development environment rather than arriving from ambient tools.
-    "setuptools>=83,<84",  # PYSEC-2026-3447
+    "setuptools>=83,<85",  # PYSEC-2026-3447
     "wheel>=0.48,<1",  # pair with setuptools 83 (dependabot PR pending)
     "mypy>=1.13,<2",
     "pytest>=9.0.3,<10",  # PYSEC-2026-1845
