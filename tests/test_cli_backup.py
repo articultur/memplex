@@ -47,7 +47,9 @@ def test_backup_cli_never_constructs_service(monkeypatch, capsys) -> None:
             }
 
     monkeypatch.setattr(cli, "_make_service", lambda *_: (_ for _ in ()).throw(AssertionError))
-    monkeypatch.setattr(cli, "_build_backup_command_context", lambda _path: Context())
+    monkeypatch.setattr(
+        cli, "_build_backup_command_context", lambda _path, **_kwargs: Context()
+    )
 
     result = cli.main(
         [
@@ -75,7 +77,9 @@ def test_backup_verify_and_restore_emit_fixed_public_shapes(monkeypatch, capsys)
         def restore(self, _artifact, _schema):
             return RestoreResult("backup-id", "db", "tenant", True, 1.25)
 
-    monkeypatch.setattr(cli, "_build_backup_command_context", lambda _path: Context())
+    monkeypatch.setattr(
+        cli, "_build_backup_command_context", lambda _path, **_kwargs: Context()
+    )
     monkeypatch.setattr(
         cli, "_build_backup_verification_context", lambda _path: Context()
     )
@@ -162,7 +166,9 @@ def test_backup_drill_emits_complete_signed_report_for_offline_verification(
         def drill(self, _artifact, _target_schema):
             return report
 
-    monkeypatch.setattr(cli, "_build_backup_command_context", lambda _path: Context())
+    monkeypatch.setattr(
+        cli, "_build_backup_command_context", lambda _path, **_kwargs: Context()
+    )
 
     result = cli.main(
         [
@@ -180,3 +186,76 @@ def test_backup_drill_emits_complete_signed_report_for_offline_verification(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == report
+
+
+def test_restore_and_drill_build_context_with_missing_schema_tolerance(
+    monkeypatch,
+) -> None:
+    """Only restore/drill may tolerate a dropped schema; create/pitr stay strict."""
+    seen: list[bool] = []
+
+    class Context:
+        def create(self, _destination):
+            return {
+                "backup_id": "018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
+                "backend": "postgres",
+                "database": "memplex",
+                "schema": "tenant_a",
+                "migration_version": 6,
+                "payload_size": 123,
+                "verified": True,
+            }
+
+        def restore(self, _artifact, _schema):
+            return RestoreResult(
+                backup_id="018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
+                database="memplex",
+                schema="tenant_a",
+                restored=True,
+                elapsed_seconds=0.1,
+            )
+
+        def drill(self, _artifact, _schema):
+            return {
+                "backup_id": "018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
+                "restored": True,
+                "observed_rpo_seconds": 0.1,
+                "observed_rto_seconds": 0.2,
+                "industrial_gate_closing": True,
+            }
+
+        def pitr_status(self):
+            return {"ready": False}
+
+    def builder(_path, *, allow_missing_schema=False):
+        seen.append(allow_missing_schema)
+        return Context()
+
+    monkeypatch.setattr(cli, "_build_backup_command_context", builder)
+
+    assert (
+        cli.main(
+            [
+                "--output", "json", "storage", "backup", "restore", "/tmp/a",
+                "--target-schema", "tenant_a",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "--output", "json", "storage", "backup", "drill",
+                "--artifact", "/tmp/a", "--target-schema", "tenant_a",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            ["--output", "json", "storage", "backup", "create", "--destination", "/tmp/d"]
+        )
+        == 0
+    )
+    assert cli.main(["--output", "json", "storage", "backup", "pitr-status"]) == 0
+    assert seen == [True, True, False, False]

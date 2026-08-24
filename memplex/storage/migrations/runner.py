@@ -549,6 +549,24 @@ def inspect_postgres_connection_target(conn: Any, cur: Any) -> PostgresTargetIde
     ):
         raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
 
+    declared_database, declared_host, declared_hostaddr, declared_port = (
+        _declared_dsn_diagnostics(conn)
+    )
+
+    return PostgresTargetIdentity(
+        database=row[0],
+        schema=row[1],
+        server_address=row[2],
+        server_port=row[3],
+        declared_database=declared_database,
+        declared_host=declared_host,
+        declared_hostaddr=declared_hostaddr,
+        declared_port=declared_port,
+    )
+
+
+def _declared_dsn_diagnostics(conn: Any) -> tuple[str | None, str | None, str | None, int | None]:
+    """Read optional libpq DSN diagnostics without retaining secret values."""
     try:
         getter = getattr(conn, "get_dsn_parameters", None)
         parameters = getter() if callable(getter) else {}
@@ -567,12 +585,72 @@ def inspect_postgres_connection_target(conn: Any, cur: Any) -> PostgresTargetIde
         declared_port = None
     if declared_port is not None and not 1 <= declared_port <= 65_535:
         declared_port = None
+    return declared_database, declared_host, declared_hostaddr, declared_port
 
+
+def _restore_schema_from_search_path(search_path: str) -> str:
+    """Resolve the single pinned restore schema from a search_path setting."""
+    entry = search_path.strip()
+    if not entry or "," in entry:
+        raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+    if entry.startswith('"'):
+        if len(entry) < 2 or not entry.endswith('"'):
+            raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+        inner = entry[1:-1]
+        if '"' in inner.replace('""', ""):
+            raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+        schema = inner.replace('""', '"')
+    else:
+        schema = entry.lower()
+        if schema == "$user":
+            raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+    if not schema or "\x00" in schema:
+        raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+    return schema
+
+
+def inspect_postgres_restore_connection_target(conn: Any, cur: Any) -> PostgresTargetIdentity:
+    """Inspect a borrowed connection's target identity, tolerating an absent schema.
+
+    Strict inspection runs first; only when current_schema() no longer resolves
+    (post-disaster, pre-restore) does the fallback pin the identity's schema to
+    the connection's single-entry search_path.  The connection is borrowed: it
+    is neither closed nor rolled back here.
+    """
+    try:
+        return inspect_postgres_connection_target(conn, cur)
+    except MigrationIntegrityError:
+        pass
+    cur.execute(
+        """
+        SELECT pg_catalog.current_database(),
+               pg_catalog.inet_server_addr()::text,
+               pg_catalog.inet_server_port(),
+               pg_catalog.current_setting('search_path')
+        """
+    )
+    row = cur.fetchone()
+    if (
+        row is None
+        or len(row) != 4
+        or type(row[0]) is not str
+        or not row[0]
+        or (row[1] is not None and (type(row[1]) is not str or not row[1]))
+        or (
+            row[2] is not None
+            and (type(row[2]) is not int or not 1 <= row[2] <= 65_535)
+        )
+        or type(row[3]) is not str
+    ):
+        raise MigrationIntegrityError("PostgreSQL target identity cannot be inspected")
+    declared_database, declared_host, declared_hostaddr, declared_port = (
+        _declared_dsn_diagnostics(conn)
+    )
     return PostgresTargetIdentity(
         database=row[0],
-        schema=row[1],
-        server_address=row[2],
-        server_port=row[3],
+        schema=_restore_schema_from_search_path(row[3]),
+        server_address=row[1],
+        server_port=row[2],
         declared_database=declared_database,
         declared_host=declared_host,
         declared_hostaddr=declared_hostaddr,
@@ -612,12 +690,28 @@ def _target_identity_key(
     )
 
 
+def _read_application_principal(cur: Any) -> PostgresApplicationPrincipal:
+    """Read the exact login identity of the current session."""
+    cur.execute("SELECT current_user, session_user")
+    row = cur.fetchone()
+    if (
+        row is None
+        or len(row) != 2
+        or type(row[0]) is not str
+        or type(row[1]) is not str
+    ):
+        raise MigrationIntegrityError("PostgreSQL application principal is invalid")
+    return PostgresApplicationPrincipal(row[0], row[1])
+
+
 def _verify_target_identity(
     conn: Any,
     cur: Any,
     expected_target: PostgresTargetIdentity | None,
+    *,
+    inspector: Any = inspect_postgres_connection_target,
 ) -> PostgresTargetIdentity:
-    actual_target = inspect_postgres_connection_target(conn, cur)
+    actual_target = inspector(conn, cur)
     if expected_target is not None and _target_identity_key(actual_target) != _target_identity_key(
         expected_target
     ):
@@ -954,16 +1048,33 @@ class PostgresMigrationRunner:
             self._short_cursor(conn) as cur,
         ):
             _verify_target_identity(conn, cur, expected_target)
-            cur.execute("SELECT current_user, session_user")
-            row = cur.fetchone()
-            if (
-                row is None
-                or len(row) != 2
-                or type(row[0]) is not str
-                or type(row[1]) is not str
-            ):
-                raise MigrationIntegrityError("PostgreSQL application principal is invalid")
-            return PostgresApplicationPrincipal(row[0], row[1])
+            return _read_application_principal(cur)
+
+    def inspect_restore_target(self) -> PostgresTargetIdentity:
+        """Inspect target identity, tolerating an absent schema before a restore."""
+        with (
+            self._short_connection(readonly=True) as conn,
+            self._short_cursor(conn) as cur,
+        ):
+            return _verify_target_identity(
+                conn, cur, None, inspector=inspect_postgres_restore_connection_target
+            )
+
+    def inspect_restore_application_principal(
+        self, *, expected_target: PostgresTargetIdentity | None = None
+    ) -> PostgresApplicationPrincipal:
+        """Read the application principal, tolerating an absent schema pre-restore."""
+        with (
+            self._short_connection(readonly=True) as conn,
+            self._short_cursor(conn) as cur,
+        ):
+            _verify_target_identity(
+                conn,
+                cur,
+                expected_target,
+                inspector=inspect_postgres_restore_connection_target,
+            )
+            return _read_application_principal(cur)
 
     def plan(
         self,

@@ -1008,8 +1008,16 @@ class _BackupCommandContext:
         )
 
 
-def _build_backup_command_context(config_path: Optional[str] = None) -> _BackupCommandContext:
-    """Build backup collaborators without constructing MemplexService."""
+def _build_backup_command_context(
+    config_path: Optional[str] = None, *, allow_missing_schema: bool = False
+) -> _BackupCommandContext:
+    """Build backup collaborators without constructing MemplexService.
+
+    ``allow_missing_schema`` is reserved for restore/drill: after a disaster
+    drops the schema, target inspection tolerates the absent schema and pins
+    it from the connection search_path instead.  Creation and PITR probes
+    keep the strict contract.
+    """
     from memplex.backup import load_backup_signing_key
     from memplex.config import load_config, normalize_deployment_contract
 
@@ -1034,17 +1042,28 @@ def _build_backup_command_context(config_path: Optional[str] = None) -> _BackupC
                     "配置非空 storage.migration_dsn 后重试。",
                 )
             runner = PostgresMigrationRunner(migration_dsn)
-            target = runner.inspect_target()
             application_runner = PostgresMigrationRunner(str(config.storage.path))
-            application_target = application_runner.inspect_target()
+            if allow_missing_schema:
+                target = runner.inspect_restore_target()
+                application_target = application_runner.inspect_restore_target()
+            else:
+                target = runner.inspect_target()
+                application_target = application_runner.inspect_target()
             if application_target != target:
                 raise _BackupCommandError(
                     "backup_config_invalid",
                     "确认 application 与 migration DSN 指向同一 PostgreSQL target。",
                 )
-            application_principal = application_runner.inspect_application_principal(
-                expected_target=application_target
-            )
+            if allow_missing_schema:
+                application_principal = (
+                    application_runner.inspect_restore_application_principal(
+                        expected_target=application_target
+                    )
+                )
+            else:
+                application_principal = application_runner.inspect_application_principal(
+                    expected_target=application_target
+                )
             ingress_acl = None
             if config.sync.enabled:
                 inbound_dsn = config.storage.inbound_dsn
@@ -1053,15 +1072,25 @@ def _build_backup_command_context(config_path: Optional[str] = None) -> _BackupC
                         "backup_config_invalid", "配置非空 storage.inbound_dsn 后重试。"
                     )
                 inbound_runner = PostgresMigrationRunner(inbound_dsn)
-                inbound_target = inbound_runner.inspect_target()
+                if allow_missing_schema:
+                    inbound_target = inbound_runner.inspect_restore_target()
+                else:
+                    inbound_target = inbound_runner.inspect_target()
                 if inbound_target != target:
                     raise _BackupCommandError(
                         "backup_config_invalid",
                         "确认 inbound 与 migration DSN 指向同一 PostgreSQL target。",
                     )
-                ingress_principal = inbound_runner.inspect_application_principal(
-                    expected_target=inbound_target
-                )
+                if allow_missing_schema:
+                    ingress_principal = (
+                        inbound_runner.inspect_restore_application_principal(
+                            expected_target=inbound_target
+                        )
+                    )
+                else:
+                    ingress_principal = inbound_runner.inspect_application_principal(
+                        expected_target=inbound_target
+                    )
                 ingress_acl = IngressAclContract(ingress_principal.role)
             executor = PostgresBackupExecutor(
                 expected_target=target,
@@ -1180,12 +1209,13 @@ def _print_backup_error(args: argparse.Namespace, error: _BackupCommandError) ->
 def _cmd_storage_backup(args: argparse.Namespace) -> int:
     try:
         action = getattr(args, "backup_command", None)
-        builder = (
-            _build_backup_verification_context
-            if action == "verify"
-            else _build_backup_command_context
-        )
-        context = builder(getattr(args, "config", None))
+        if action == "verify":
+            context = _build_backup_verification_context(getattr(args, "config", None))
+        else:
+            context = _build_backup_command_context(
+                getattr(args, "config", None),
+                allow_missing_schema=action in ("restore", "drill"),
+            )
         if action == "create":
             result = context.create(getattr(args, "destination", None))
         elif action == "verify":

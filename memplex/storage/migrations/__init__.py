@@ -11,6 +11,7 @@ from .runner import (
     PostgresTargetIdentity,
     discover_migrations,
     inspect_postgres_connection_target,
+    inspect_postgres_restore_connection_target,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "PostgresTargetIdentity",
     "discover_migrations",
     "inspect_postgres_connection_target",
+    "inspect_postgres_restore_connection_target",
 ]

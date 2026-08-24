@@ -1675,3 +1675,224 @@ def test_apply_preserves_business_error_when_cursor_rollback_and_close_fail(
         runner.apply()
 
     assert calls == ["cursor.close", "rollback", "connection.close"]
+
+
+def _restore_target_fakes(search_path_setting):
+    """Fake conn/cursor: current_schema() is NULL, search_path holds one setting."""
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+            self._statement = ""
+
+        def execute(self, statement: str) -> None:
+            self.executed.append(statement)
+            self._statement = statement
+
+        def fetchone(self):
+            if "current_schema" in self._statement:
+                return ("postgres", None, "127.0.0.1", 55432)
+            return ("postgres", "127.0.0.1", 55432, search_path_setting)
+
+        def close(self) -> None:
+            pass
+
+    class _Connection:
+        @staticmethod
+        def get_dsn_parameters():
+            return {"dbname": "postgres", "host": "127.0.0.1", "port": "55432"}
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    return _Connection(), _Cursor()
+
+
+def test_restore_target_inspector_prefers_strict_identity_when_schema_present() -> None:
+    """A live schema never triggers the tolerant search_path fallback."""
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def execute(self, statement: str) -> None:
+            self.executed.append(statement)
+
+        @staticmethod
+        def fetchone():
+            return ("postgres", "tenant_a", "127.0.0.1", 55432)
+
+    class _Connection:
+        @staticmethod
+        def get_dsn_parameters():
+            return {"dbname": "postgres", "host": "127.0.0.1", "port": "55432"}
+
+    identity = _migrations().inspect_postgres_restore_connection_target(
+        _Connection(), _Cursor()
+    )
+
+    assert identity.schema == "tenant_a"
+    assert identity.database == "postgres"
+    assert identity.server_address == "127.0.0.1"
+    assert identity.server_port == 55432
+
+
+def test_restore_target_inspector_resolves_missing_schema_from_search_path() -> None:
+    """Post-disaster restore derives the pinned schema from the connection search_path."""
+    connection, cursor = _restore_target_fakes("g005_rehearsal")
+
+    identity = _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+    assert type(identity) is _migrations().PostgresTargetIdentity
+    assert identity.schema == "g005_rehearsal"
+    assert identity.database == "postgres"
+    assert identity.server_address == "127.0.0.1"
+    assert identity.server_port == 55432
+    assert identity.declared_database == "postgres"
+    assert identity.declared_host == "127.0.0.1"
+    assert identity.declared_port == 55432
+    assert len(cursor.executed) == 2
+
+
+def test_restore_target_inspector_folds_unquoted_identifier_case() -> None:
+    """Unquoted search_path identifiers fold to lower case like the server does."""
+    connection, cursor = _restore_target_fakes("G005_Rehearsal")
+
+    identity = _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+    assert identity.schema == "g005_rehearsal"
+
+
+def test_restore_target_inspector_unquotes_quoted_identifier() -> None:
+    """Quoted search_path entries keep case and collapse escaped double quotes."""
+    connection, cursor = _restore_target_fakes('"Mixed ""Q"""')
+
+    identity = _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+    assert identity.schema == 'Mixed "Q"'
+
+
+def test_restore_target_inspector_rejects_user_placeholder() -> None:
+    """An unquoted $user magic entry can never pin a restore schema."""
+    connection, cursor = _restore_target_fakes("$user")
+
+    with pytest.raises(_migrations().MigrationIntegrityError):
+        _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+
+def test_restore_target_inspector_rejects_multi_schema_search_path() -> None:
+    """Restore cannot pin a schema when the path names several candidates."""
+    connection, cursor = _restore_target_fakes("first_schema, public")
+
+    with pytest.raises(_migrations().MigrationIntegrityError):
+        _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+
+def test_restore_target_inspector_rejects_blank_search_path() -> None:
+    connection, cursor = _restore_target_fakes("")
+
+    with pytest.raises(_migrations().MigrationIntegrityError):
+        _migrations().inspect_postgres_restore_connection_target(connection, cursor)
+
+
+def test_restore_application_principal_reads_role_after_tolerant_verify() -> None:
+    """The pre-restore principal probe tolerates the dropped schema end to end."""
+    runner_module = importlib.import_module("memplex.storage.migrations.runner")
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self._statement = ""
+
+        def execute(self, statement: str) -> None:
+            self._statement = statement
+
+        def fetchone(self):
+            if "current_user" in self._statement:
+                return ("memplex_app", "memplex_app")
+            if "current_schema" in self._statement:
+                return ("postgres", None, "127.0.0.1", 55432)
+            return ("postgres", "127.0.0.1", 55432, "g005_rehearsal")
+
+        def close(self) -> None:
+            pass
+
+    class _Connection:
+        autocommit = True
+
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+        @staticmethod
+        def get_dsn_parameters():
+            return {"dbname": "postgres", "host": "127.0.0.1", "port": "55432"}
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    runner = runner_module.PostgresMigrationRunner(
+        "postgresql://example.invalid/memplex", connection_factory=_Connection
+    )
+
+    target = runner.inspect_restore_target()
+    assert target.schema == "g005_rehearsal"
+
+    principal = runner.inspect_restore_application_principal(expected_target=target)
+    assert type(principal) is runner_module.PostgresApplicationPrincipal
+    assert (principal.role, principal.session_role) == ("memplex_app", "memplex_app")
+
+
+def test_restore_application_principal_rejects_mismatched_expected_target() -> None:
+    runner_module = importlib.import_module("memplex.storage.migrations.runner")
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self._statement = ""
+
+        def execute(self, statement: str) -> None:
+            self._statement = statement
+
+        def fetchone(self):
+            if "current_schema" in self._statement:
+                return ("postgres", None, "127.0.0.1", 55432)
+            return ("postgres", "127.0.0.1", 55432, "g005_rehearsal")
+
+        def close(self) -> None:
+            pass
+
+    class _Connection:
+        autocommit = True
+
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+        @staticmethod
+        def get_dsn_parameters():
+            return {"dbname": "postgres", "host": "127.0.0.1", "port": "55432"}
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    runner = runner_module.PostgresMigrationRunner(
+        "postgresql://example.invalid/memplex", connection_factory=_Connection
+    )
+    wrong = runner_module.PostgresTargetIdentity(
+        database="postgres",
+        schema="other_schema",
+        server_address="127.0.0.1",
+        server_port=55432,
+    )
+
+    with pytest.raises(
+        runner_module.MigrationIntegrityError,
+        match="target identity does not match",
+    ):
+        runner.inspect_restore_application_principal(expected_target=wrong)
