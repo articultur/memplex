@@ -184,3 +184,48 @@ PUBLIC schema 权限回收 + `_APPLICATION_ACL` 精确授权（本 runbook 演�
   `/private/tmp/g005-drill-report.json`、`/private/tmp/g006-report.json`、
   `/private/tmp/pg-suite-junit.xml`
 - 演练密钥均一次性生成、仅存 /tmp，生产密钥必须经平台 secret 管理重新生成
+
+## 6. 阻塞项攻关（2026-08-25）：CI 幽灵 workflow 与 G008 runner 基建
+
+### CI 真相：deleted 幽灵 "BuildFailed" workflow
+- 现象：push/手动 dispatch 任何 workflow 都 startup_failure；GitHub 把事件路由到
+  一个 `state: deleted`、`path: BuildFailed` 的幽灵注册（workflow_id **335362895**，
+  2026-08-16 12:02 仓库重建时残留）。git 历史中从未存在该文件；本地 3 个
+  workflow YAML 均合法；dependabot PR（pull_request）08-23 曾正常起 job。
+- 诊断命令：`gh api repos/articultur/memplex/actions/workflows/335362895`
+- **2026-08-25 处置尝试与恶化**：
+  - `PUT .../workflows/335362895/disable` → **403** "Unable to disable a workflow
+    that is not active"（deleted 状态不可禁用，API 路穷尽）。
+  - 非 main 引用 dispatch（ci/probe-ghost，run 32863971145）同样 startup_failure
+    → 损坏为 repo 级，与分支无关。
+  - **pull_request 路径亦沦陷**：探针 PR #20（空提交）只产生幽灵 run 32865443996，
+    真实 CI（335362859）未收到 run；三条事件路径（push/PR/dispatch）全断。
+- 剩余选项（**需用户决策**）：a) GitHub support 工单清残留注册（非破坏、慢）；
+  b) 再次重建仓库（破坏性：PR/Actions 历史/secrets/runner 需迁移重建，git 历史可保留；
+  删除后等待再同名重建以降低竞态复发概率）；c) 推测性复活（main 上提交 path 同名
+  文件，成功率低且引入垃圾文件）。
+
+### G008 runner 基建（本机已全部就绪，runner 在线）
+- 已安装：`codex` 0.149.1、`openclaw` 2026.7.1-2（npm -g）；`claude` 已有；
+  `hermes` 已装入 `/Users/nonon/g008/hermes-venv` 并 symlink 至
+  `/opt/homebrew/bin/hermes`（四 CLI `command -v` 全通，干净环境模拟验证 SIM-OK）。
+- Hermes source：`/Users/nonon/g008/hermes-source` @3c27eb6（pinned
+  `agent/memory_provider.py` SHA-256 与 verifier 期望一致 ✓）。
+- Runner：`/Users/nonon/g008/actions-runner`（2.336.0）**已注册并在线**
+  （name `memplex-g008-macos`，labels: self-hosted,macOS,ARM64,memplex-g008-real-host，
+  API status=online）。`.env` 已写入含四 CLI 的 PATH（含 ~/.local/node/bin 与
+  hermes-venv/bin）。当前以前台 `./run.sh` 进程运行（会话绑定）；正式值守需
+  `./svc.sh install`（launchd 持久化，未执行）。
+- Secrets（5）**已写入 environment `g008-real-host`**（环境已建）：
+  `MEMPLEX_HOST_LIFECYCLE_HMAC_KEY`(64hex)、`MEMPLEX_G008_HERMES_SOURCE_ROOT`、
+  `MEMPLEX_G008_DEPLOYMENT_ID`、`MEMPLEX_G008_SOURCE_SHA256`、
+  `MEMPLEX_G008_TARGET_IDENTITY_SHA256`（部署绑定三值为 rehearsal 级，正式发布时轮换为真实值）。
+- G008 evidence 仅 24h 有效 → 正式发布日前 24h 内跑。
+
+### release.yml 演练路径确认
+- `workflow_dispatch`（main）：build 双构建字节比对 + OIDC attest 会跑，
+  **publish-pypi/npm 仅 `refs/tags/v` 触发，dispatch 不会发布**；
+  但 g008 manifest 校验要求 `tag == v{version}` → main dispatch 下 G008 步必失败，
+  完整演练须用真实 v-tag（发布决策）。
+- PyPI/npm 均为 OIDC trusted publishing（environments `pypi`/`npm`），
+  包侧 trusted publisher 需在 pypi.org/npmjs.com 预先配置（网页操作）。
