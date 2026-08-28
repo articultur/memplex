@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 OBSERVATION_CATEGORIES = ("bugfix", "decision", "change", "discovery", "note")
 DEFAULT_OBSERVATION_CATEGORY = "note"
 SYNCABLE_MEMORY_TYPES = ("function", "fact", "preference", "observation")
+# Deserialization-boundary enums: from_dict rejects any value outside these
+# sets (2026-08 review — admin console XSS via sync-ingress payload).
+MEMORY_TYPES = frozenset(SYNCABLE_MEMORY_TYPES)
+KNOWLEDGE_TIERS = frozenset(("personal", "domain", "team"))
 
 
 def sync_node_type_for_memory(memory: "MemoryNode") -> "SyncNodeType":
@@ -104,6 +108,16 @@ class MemoryNode:
     @staticmethod
     def _base_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
         """Build constructor kwargs for MemoryNode base fields from a dict."""
+        memory_type = d.get("memory_type")
+        if memory_type is not None and memory_type not in MEMORY_TYPES:
+            raise ValueError(
+                f"memory_type must be one of {sorted(MEMORY_TYPES)}, got {memory_type!r}"
+            )
+        knowledge_tier = d.get("knowledge_tier")
+        if knowledge_tier is not None and knowledge_tier not in KNOWLEDGE_TIERS:
+            raise ValueError(
+                f"knowledge_tier must be one of {sorted(KNOWLEDGE_TIERS)}, got {knowledge_tier!r}"
+            )
         source_type = d.get("source_type", "wiki")
         if isinstance(source_type, str):
             try:

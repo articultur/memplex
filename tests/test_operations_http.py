@@ -229,9 +229,10 @@ def test_active_request_finishes_while_new_business_is_rejected_during_drain(
         assert app.state.operations_admission.active == 0
 
 
-def test_rate_limit_registry_is_bounded_and_fails_closed_for_new_clients(
+def test_rate_limit_registry_is_bounded_and_evicts_oldest_when_full(
     monkeypatch,
 ) -> None:
+    """A full registry evicts the earliest-reset bucket, not the newcomer."""
     monkeypatch.setattr(http_api, "_RATE_BUCKET_CAPACITY", 8)
     monkeypatch.setattr(http_api.time, "monotonic", lambda: 100.0)
     with http_api._rate_bucket_lock:
@@ -239,9 +240,14 @@ def test_rate_limit_registry_is_bounded_and_fails_closed_for_new_clients(
     try:
         for index in range(8):
             assert http_api._check_rate_limit(f"198.51.100.{index}") is True
-        assert http_api._check_rate_limit("203.0.113.200") is False
+        # Capacity full: the new client evicts the oldest (earliest reset).
+        assert http_api._check_rate_limit("203.0.113.200") is True
         with http_api._rate_bucket_lock:
             assert len(http_api._rate_buckets) == 8
+            # The first client (earliest reset at 160.0) was evicted.
+            assert "198.51.100.0" not in http_api._rate_buckets
+            assert "198.51.100.7" in http_api._rate_buckets
+            assert "203.0.113.200" in http_api._rate_buckets
     finally:
         with http_api._rate_bucket_lock:
             http_api._rate_buckets.clear()

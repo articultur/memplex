@@ -965,7 +965,9 @@ class MCPServer:
 # ── CLI entry point ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from memplex.config import load_config
     from memplex.logging_config import configure_logging
 
-    configure_logging()
-    MCPServer().run()
+    config = load_config()
+    configure_logging(level=config.logging.level)
+    MCPServer(config=config).run()

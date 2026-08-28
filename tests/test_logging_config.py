@@ -159,6 +159,20 @@ def test_configure_logging_respects_level_env(monkeypatch):
     assert logging.getLogger().level == logging.DEBUG
 
 
+def test_configure_logging_explicit_level_is_the_fallback(monkeypatch):
+    _reset_root()
+    monkeypatch.delenv("MEMPLEX_LOG_LEVEL", raising=False)
+    configure_logging(json_mode=False, level="WARNING")
+    assert logging.getLogger().level == logging.WARNING
+
+
+def test_configure_logging_env_level_beats_explicit_level(monkeypatch):
+    _reset_root()
+    monkeypatch.setenv("MEMPLEX_LOG_LEVEL", "ERROR")
+    configure_logging(json_mode=False, level="DEBUG")
+    assert logging.getLogger().level == logging.ERROR
+
+
 def test_configure_logging_reads_json_env(monkeypatch):
     _reset_root()
     monkeypatch.setenv("MEMPLEX_LOG_JSON", "1")

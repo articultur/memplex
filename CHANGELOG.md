@@ -6,6 +6,58 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (2026-08-28 multi-dimensional review remediation)
+- **Dead config removed**: 6 keys that were declared, validated, and
+  tested but had zero runtime consumers (`observation.max_per_minute`,
+  `logging.sanitize_sensitive`, `encryption.enabled`,
+  `encryption.key_path`, `operations.startup/shutdown_timeout_seconds`)
+  deleted along with the `ObservationConfig` and `EncryptionConfig`
+  dataclasses; `logging.level` now wired into `configure_logging(level)`
+  as a fallback below `MEMPLEX_LOG_LEVEL` at all three entry points.
+- **admin.html XSS**: all template interpolations now escapeHtml
+  (memory_type, knowledge_tier, updated_at were missed); models
+  `from_dict` enforces `memory_type`/`knowledge_tier` enum sets at the
+  deserialization boundary.
+- **Corpus deny-list gap**: `.ssh/`, `.aws/`, `.kube/`, `.gnupg/`
+  directories and `id_rsa`, `id_ed25519`, `id_ecdsa`, `*.pem`, `*.key`,
+  `.netrc`, `.npmrc` files added to `PRIVATE_CORPUS_PATTERNS`.
+- **CI hang risk**: `timeout-minutes: 45` added to test and
+  test-postgres jobs; `pytest-timeout` (120s) prevents per-test hangs
+  from consuming the entire GitHub Actions 360-minute budget.
+- **DNS rebinding TOCTOU**: `url_handler.fetch` now pins the resolved
+  IP from the SSRF safety check into the connection URL (HTTP) rather
+  than performing a second independent DNS resolution.
+- **Rate-limit lockout**: a full bucket registry now evicts the
+  earliest-reset entry instead of rejecting new clients with 429.
+- **Worker claim misalignment**: `_run_once` aligns `_active_task_id`
+  with the actually-claimed task after a queue race.
+- **tmp file leak**: `durability._write_and_fsync` cleans up its
+  temporary file on write/fsync failure (previously accumulated on
+  full-disk retries).
+- **Worker timestamp parsing**: all `fromisoformat` calls wrapped as
+  `TaskStoreIntegrityError`; `_lease_matches` returns False on
+  unparseable lease timestamps.
+- **HTTP max_tokens**: `/memories` route now caps at 32,000 (matching
+  the MCP-side clamp).
+- **Reranker N+1**: batch `get_many` + per-id fallback replaces
+  per-result `storage.get()` calls.
+- **count_functions()**: lightweight O(1)/SQL-COUNT contract added to
+  `MemoryStore` ABC + both backends; `service._count_functions_exact`
+  no longer paginates the full store for compaction scheduling.
+- **Supersede N+1**: fact supersession batches into a single
+  `list_facts()` call per write batch instead of per-fact.
+- **Lite read amplification**: `_refresh_for_read` short-circuits on
+  an (mtime_ns, size) fingerprint when both pair files are unchanged;
+  FTS index signature only invalidates on generation change.
+- **SSE reverse dependency**: service.py no longer imports
+  `adapters.http_api._SSE_SUBSCRIBERS`; a domain-owned registration
+  callback replaces the hexagonal contract violation.
+- **Docs drift**: AGENTS.md mypy count now references pyproject (not
+  hardcoded 12); architecture.md lite backend correctly described as
+  JSON-pair + FTS5 sidecar (not "SQLite backend"); fictional C901
+  per-file-ignores mechanism description corrected to inline noqa
+  markers.
+
 ### Added
 - **Curation console** (`/admin`): static web page + JSON API
   (`/admin/api/memories|promote|share|facts`) with the same auth as

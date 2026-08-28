@@ -227,6 +227,21 @@ class MemoryStore(ABC):
     ) -> List[Function]:
         """Paginated listing, optionally filtered by *owner*."""
 
+    def count_functions(self) -> int:
+        """Total Function count, without materializing any node.
+
+        Backends should override with a cheaper implementation (SQL COUNT
+        or len(self._functions)); the ABC default paginates through
+        list_functions as a correctness-preserving fallback.
+        """
+        total = 0
+        while True:
+            page = self.list_functions(offset=total, limit=10_000)
+            count = len(page)
+            total += count
+            if count < 10_000:
+                return total
+
     def list_changes_since(
         self, since: Optional[str] = None, limit: int = 100000
     ) -> List[Function]:

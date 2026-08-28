@@ -5,7 +5,7 @@
 1. `uv lock --check` — lockfile must match pyproject.
 2. `.venv/bin/ruff check memplex tests` — lint gate incl. C901 complexity freeze
 2b. `.venv/bin/lint-imports` — hexagonal architecture contract
-2c. `.venv/bin/mypy` — typed-boundary gate (12 files, pinned) (ruff is pinned `<0.16`; do not bump without fixing the ~1.8k 0.16-rule violations first).
+2c. `.venv/bin/mypy` — typed-boundary gate (file list pinned in `pyproject.toml [tool.mypy]` — that list is the authoritative count; `tests/test_release_workflows.py` pins it against drift) (ruff is pinned `<0.16`; do not bump without fixing the ~1.8k 0.16-rule violations first).
 3. Full lite suite: `.venv/bin/python -m pytest tests -q --cov=memplex --cov-fail-under=68`
    (~3,100 tests, ~7 min; suite count grows — always report the real number).
 4. Real-PostgreSQL gate for any `storage/`, `sync*`, or migrations change —

@@ -174,7 +174,7 @@ def _truthy(value: Optional[str]) -> bool:
     return bool(value) and value.lower() in ("1", "true", "yes", "on")
 
 
-def configure_logging(json_mode: Optional[bool] = None) -> None:
+def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = None) -> None:
     """Configure the root logger.
 
     Parameters
@@ -183,6 +183,10 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
         When ``None`` (default), the mode is read from the
         ``MEMPLEX_LOG_JSON`` environment variable. Pass an explicit bool
         to override the env var (useful in tests).
+    level:
+        Fallback log-level name (e.g. from ``MemplexConfig.logging.level``).
+        The ``MEMPLEX_LOG_LEVEL`` environment variable takes precedence;
+        when neither is set the level defaults to ``INFO``.
 
     Idempotent in intent: re-configuring replaces the root logger's
     handlers rather than appending, so calling it more than once does not
@@ -191,7 +195,7 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
     if json_mode is None:
         json_mode = _truthy(os.environ.get("MEMPLEX_LOG_JSON"))
 
-    level_name = (os.environ.get("MEMPLEX_LOG_LEVEL") or "INFO").upper()
+    level_name = (os.environ.get("MEMPLEX_LOG_LEVEL") or (level or "INFO")).upper()
     level = getattr(logging, level_name, logging.INFO)
 
     root = logging.getLogger()

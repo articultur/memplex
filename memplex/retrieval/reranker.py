@@ -135,6 +135,28 @@ class Reranker:
         if query_vector is None:
             query_vector = self._embed_query_text(query)
 
+        # Pre-load all Function nodes in one batch (or per-id fallback),
+        # avoiding a per-result storage round-trip that compounds on
+        # backends with O(N) reads (2026-08 review).
+        node_map: dict[str, "Function"] = {}
+        if self.storage is not None:
+            unique_ids = list({r.func_id for r in results})
+            get_many = getattr(self.storage, "get_many", None)
+            if callable(get_many):
+                try:
+                    node_map = {k: v for k, v in get_many(unique_ids).items() if v is not None}
+                except Exception as exc:
+                    logger.debug("rerank: batch get_many failed (%s); falling back", exc)
+                    node_map = {}
+            for missing_id in unique_ids:
+                if missing_id not in node_map:
+                    try:
+                        node = self.storage.get(missing_id)
+                        if node is not None:
+                            node_map[missing_id] = node
+                    except Exception as exc:
+                        logger.debug("rerank: storage.get failed for %s: %s", missing_id, exc)
+
         scored: list[tuple[float, SearchResult]] = []
 
         for r in results:
@@ -155,13 +177,7 @@ class Reranker:
             source_weight = self._source_weight(r.source_type)
 
             # 5. Frequency (access count * recency of last access)
-            func: Optional["Function"] = None
-            if self.storage is not None:
-                try:
-                    func = self.storage.get(r.func_id)
-                except Exception as exc:
-                    logger.debug("rerank: storage.get failed for %s: %s", r.func_id, exc)
-                    func = None
+            func = node_map.get(r.func_id)
             frequency_score = self._frequency_score(func) if func else 0.5
 
             # 6. Confidence: extraction-quality score persisted on the node

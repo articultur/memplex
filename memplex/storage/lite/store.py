@@ -534,6 +534,9 @@ class LiteMemoryStore:
         self._observations: List[Observation] = []
         self._facts: Dict[str, Fact] = {}
         self._preferences: Dict[str, Preference] = {}
+        # (mtime_ns, size) fingerprint of both pair files, set after each
+        # successful publish so unchanged reads skip the O(N) reload.
+        self._pair_fingerprint: Optional[tuple] = None
         self._sync_state: dict[str, Any] = durability_module._empty_sync_state()
         self._generation = 0
         changelog_path = (
@@ -1253,6 +1256,11 @@ class LiteMemoryStore:
         return self._changelog.get_timeline(func_id, limit)
 
     @_with_writer_lock
+    def count_functions(self) -> int:
+        self._refresh_for_read()
+        return len(self._functions)
+
+    @_with_writer_lock
     def list_functions(
         self,
         offset: int = 0,
@@ -1670,7 +1678,26 @@ class LiteMemoryStore:
             self._publish_pair(self._durability._load_authoritative_locked())
 
     def _refresh_for_read(self) -> None:
-        """Observe a peer's committed pair before returning a public value."""
+        """Observe a peer's committed pair before returning a public value.
+
+        Short-circuits when both files are unchanged since the last
+        publish (stat-based fingerprint), so a scope=ALL query that
+        triggers 6-10 read calls performs 1 full load instead of 6-10.
+        """
+        if self._pair_fingerprint is not None:
+            try:
+                memory_stat = self._path.stat()
+                changelog_stat = self._path.with_name("changelog.json").stat()
+                current = (
+                    memory_stat.st_mtime_ns,
+                    memory_stat.st_size,
+                    changelog_stat.st_mtime_ns,
+                    changelog_stat.st_size,
+                )
+                if current == self._pair_fingerprint:
+                    return
+            except OSError:
+                pass  # stat failure → fall through to the authoritative load
         with self._durability.writer_lock():
             self._publish_pair(self._durability._load_authoritative_locked())
 
@@ -1929,8 +1956,24 @@ class LiteMemoryStore:
         # The index keeps a reference to the old dict; rebind it whenever a
         # peer commit, recovery, or local commit publishes a new snapshot.
         self._fts_index._functions = self._functions
-        self._fts_index._signature = None
+        # Only invalidate the FTS signature when the generation actually
+        # advanced (a write); a read-observation of the same generation
+        # keeps the incremental index warm.
+        if pair.generation != getattr(self, "_generation", 0):
+            self._fts_index._signature = None
         self._generation = pair.generation
+        # Record the (mtime, size) fingerprint so unchanged reads skip reload.
+        try:
+            memory_stat = self._path.stat()
+            changelog_stat = self._path.with_name("changelog.json").stat()
+            self._pair_fingerprint = (
+                memory_stat.st_mtime_ns,
+                memory_stat.st_size,
+                changelog_stat.st_mtime_ns,
+                changelog_stat.st_size,
+            )
+        except OSError:
+            self._pair_fingerprint = None
 
     @property
     def generation(self) -> int:

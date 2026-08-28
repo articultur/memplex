@@ -76,6 +76,7 @@ dev = [
     "pytest>=9.0.3,<10",  # PYSEC-2026-1845
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
+    "pytest-timeout>=2.3,<3",  # per-test hard stop; CI passes --timeout=120
     # ruff 0.16 broadened default rule selection; the codebase is lint-clean on
     # the 0.15 line. Cap until the codebase is migrated to the newer defaults.
     "ruff>=0.1.0,<0.16",
@@ -145,6 +146,15 @@ include = ["memplex*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "unit: fast, no external dependencies",
+    "integration: requires optional dependencies or services",
+    "pg: real-PostgreSQL tests (pgserver or external DSN)",
+    "e2e: end-to-end user journey",
+]
+
+[tool.coverage.report]
+fail_under = 68
 
 [tool.ruff]
 line-length = 100
@@ -163,8 +173,8 @@ line-length = 100
 "tests/test_hooks.py" = ["E741"]
 
 [tool.ruff.lint.mccabe]
-# Complexity freeze-gate: 25 is the current ceiling; the per-file ignores
-# above pin existing known-debt functions so any NEW violation fails CI.
+# Complexity freeze-gate: 25 is the current ceiling; known-debt functions
+# carry inline "# noqa: C901" markers in source, so any NEW violation fails CI.
 max-complexity = 25
 
 [tool.importlinter]
@@ -222,4 +232,9 @@ test-command = "pytest tests/test_sync_ingress.py -x -q --no-header -p no:cachep
 
 [cosmic-ray.distributor]
 name = "local"
+
+[dependency-groups]
+dev = [
+    "pytest-timeout>=2.3,<3",
+]
 

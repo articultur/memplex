@@ -331,6 +331,18 @@ class TaskStore(TaskRepository):
     def count_by_status(self, *statuses: TaskStatus) -> int:
         return len(self.list_by_status(*statuses))
 
+    @staticmethod
+    def _parse_ts(raw: object, *, field: str) -> Optional[datetime]:
+        """Parse an ISO timestamp, wrapping corruption as a store integrity error."""
+        if raw is None:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError) as exc:
+            raise TaskStoreIntegrityError(
+                f"task store is invalid: unparseable {field} timestamp"
+            ) from exc
+
     def due_task_ids(
         self, now: datetime | None = None, *, limit: int
     ) -> list[str]:
@@ -342,16 +354,16 @@ class TaskStore(TaskRepository):
             for task_id, data in self._tasks.items():
                 status = TaskStatus(data["status"])
                 if status is TaskStatus.RUNNING:
-                    lease_raw = data.get("lease_until")
-                    lease_until = (
-                        datetime.fromisoformat(lease_raw) if lease_raw else None
-                    )
+                    # A RUNNING task with no lease_until is a legacy artifact
+                    # (the claim path always writes one); it is treated as due
+                    # so the next claim heals it with a fresh lease.  This
+                    # recovery is pinned by test_worker_recovers_legacy_running_task_without_lease.
+                    lease_until = self._parse_ts(data.get("lease_until"), field="lease_until")
                     if lease_until is not None and lease_until > effective_now:
                         continue
                 elif status is not TaskStatus.PENDING:
                     continue
-                due_raw = data.get("next_attempt_at")
-                due_at = datetime.fromisoformat(due_raw) if due_raw else effective_now
+                due_at = self._parse_ts(data.get("next_attempt_at"), field="next_attempt_at") or effective_now
                 if due_at <= effective_now:
                     due.append((due_at, task_id))
             due.sort(key=lambda item: (item[0], item[1]))
@@ -375,14 +387,13 @@ class TaskStore(TaskRepository):
                 return None
             status = TaskStatus(data["status"])
             if status is TaskStatus.RUNNING:
-                lease_raw = data.get("lease_until")
-                lease_until = datetime.fromisoformat(lease_raw) if lease_raw else None
+                lease_until = self._parse_ts(data.get("lease_until"), field="lease_until")
                 if lease_until is not None and lease_until > effective_now:
                     return None
             elif status is not TaskStatus.PENDING:
                 return None
-            due_raw = data.get("next_attempt_at")
-            if due_raw and datetime.fromisoformat(due_raw) > effective_now:
+            due_at = self._parse_ts(data.get("next_attempt_at"), field="next_attempt_at")
+            if due_at is not None and due_at > effective_now:
                 return None
             info = self._dict_to_info(copy.deepcopy(data))
             info.status = TaskStatus.RUNNING
@@ -423,7 +434,13 @@ class TaskStore(TaskRepository):
         ):
             return False
         lease_raw = data.get("lease_until")
-        return bool(lease_raw and datetime.fromisoformat(lease_raw) > now)
+        try:
+            return bool(
+                lease_raw and datetime.fromisoformat(str(lease_raw)) > now
+            )
+        except (TypeError, ValueError):
+            # An unparseable lease timestamp can never authenticate a completion.
+            return False
 
     def complete(
         self,
@@ -909,6 +926,15 @@ class BackgroundWorker:
             if not claimed:
                 return False
             info = claimed[0]
+            if info.task_id != task_id:
+                # Another worker raced us to the dequeued hint; the store
+                # is the claim authority.  Align the re-entrancy hint with
+                # the task actually executing so _fill_due_queue sees truth.
+                logger.debug(
+                    "claim raced: dequeued %s but executing %s", task_id, info.task_id
+                )
+                with self._state_lock:
+                    self._active_task_id = info.task_id
             self._execute_claimed(info)
             return True
         finally:

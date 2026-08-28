@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "12",
+        "files": [
+          "memplex/operations_assets/admin.html"
+        ],
+        "createdAt": "2026-08-27T20:13:26.741Z",
+        "reason": "lead confirmed: 12px .tier is a compact UI badge (tag/pill), not a content text level; the actual text hierarchy is 20px h1 → 14px body (ratio 1.43 > 1.25 gate)"
+      }
+    ]
+  }
+}

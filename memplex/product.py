@@ -625,11 +625,22 @@ PRIVATE_CORPUS_PATTERNS = (
     ".claude",
     ".git",
     ".gitnexus",
+    ".ssh",
+    ".aws",
+    ".kube",
+    ".gnupg",
     ".env",
     ".env.*",
     "*secret*",
     "*credential*",
     "*token*",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "*.pem",
+    "*.key",
+    ".netrc",
+    ".npmrc",
 )
 
 
@@ -921,7 +932,7 @@ def _is_denied(path: Path, root: Path, patterns: Iterable[str]) -> bool:
     parts = rel_path.parts
     name = rel_path.name.lower()
 
-    private_dirs = {".codex", ".agents", ".claude", ".git", ".gitnexus"}
+    private_dirs = {".codex", ".agents", ".claude", ".git", ".gitnexus", ".ssh", ".aws", ".kube", ".gnupg"}
     if any(part.lower() in private_dirs for part in parts):
         return True
 
@@ -930,6 +941,13 @@ def _is_denied(path: Path, root: Path, patterns: Iterable[str]) -> bool:
 
     sensitive_name_fragments = ("secret", "credential", "token")
     if any(fragment in name for fragment in sensitive_name_fragments):
+        return True
+
+    # SSH/cloud key material and credential files (2026-08 review: these
+    # carry no secret-ish name fragment yet must never enter the corpus).
+    if name in {"id_rsa", "id_ed25519", "id_ecdsa", ".netrc", ".npmrc"}:
+        return True
+    if name.endswith((".pem", ".key")):
         return True
 
     return any(

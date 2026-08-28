@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, RLock
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from memplex.auth import (
     AuthorizationContext,
@@ -83,6 +83,11 @@ from memplex.sync_repository import SyncCapturePolicy
 from memplex.worker import BackgroundTask, BackgroundWorker
 
 logger = logging.getLogger(__name__)
+
+# Optional callback registered by the HTTP adapter at startup so the
+# service health surface can report the SSE subscriber count without a
+# reverse domain→adapter import. Returns int; never raises.
+_sse_subscriber_count_provider: Optional[Callable[[], int]] = None
 
 
 # ── Helper ─────────────────────────────────────────────────────────────
@@ -1429,10 +1434,10 @@ class MemplexService:
                     kind,
                 )
                 continue
+            if kind == "fact":
+                self._supersede_contradicted_facts_batch(nodes, store)
             for node in nodes:
                 try:
-                    if kind == "fact":
-                        self._supersede_contradicted_facts(node, store)
                     add(node)
                 except Exception as exc:
                     logger.debug(
@@ -1442,24 +1447,30 @@ class MemplexService:
                         exc,
                     )
 
-    def _supersede_contradicted_facts(self, new_fact, store: Any) -> None:
-        """Bi-temporal supersede (Zep-style) before persisting a new fact.
+    def _supersede_contradicted_facts_batch(self, facts, store: Any) -> None:
+        """Bi-temporal supersede (Zep-style) for a batch of new facts.
 
-        Stamps ``invalid_at`` on stored facts occupying the same
+        Loads the existing-fact list once (not per-fact), then stamps
+        ``invalid_at`` on stored facts occupying the same
         (subject, predicate) slot so contradicted claims are retained for
-        point-in-time queries instead of being silently overwritten. The
-        new fact's ``valid_from`` defaults to now. Best-effort: a listing
-        failure skips supersession (the write itself proceeds).
+        point-in-time queries instead of being silently overwritten.
+        Best-effort: a listing failure skips supersession (the write
+        itself proceeds).
         """
         from memplex import temporal
 
-        if not getattr(new_fact, "valid_from", None):
-            new_fact.valid_from = temporal.now_iso()
+        list_facts = getattr(store, "list_facts", None)
+        if not callable(list_facts):
+            return
         try:
-            list_facts = getattr(store, "list_facts", None)
-            if not callable(list_facts):
-                return
             existing = list_facts()
+        except Exception as exc:
+            logger.debug("fact supersession listing failed: %s", exc)
+            return
+
+        for new_fact in facts:
+            if not getattr(new_fact, "valid_from", None):
+                new_fact.valid_from = temporal.now_iso()
             superseded = temporal.supersede_contradicted(new_fact, existing)
             for old_fact in superseded:
                 try:
@@ -1470,8 +1481,6 @@ class MemplexService:
                     )
             if superseded:
                 logger.debug("superseded %d contradicted fact(s)", len(superseded))
-        except Exception as exc:
-            logger.debug("fact supersession listing failed: %s", exc)
 
     def _maybe_schedule_compaction(self, *, store: Any = None) -> None:
         """Submit a background compaction when the corpus crosses thresholds.
@@ -1500,14 +1509,17 @@ class MemplexService:
             logger.debug("compaction scheduling check failed: %s", exc)
 
     @staticmethod
-    def _count_functions_exact(store: Any, *, page_size: int = 10_000) -> int:
-        """Count every Function through the public paginated storage contract."""
+    def _count_functions_exact(store: Any) -> int:
+        """Count Functions via the lightweight contract, falling back to pagination."""
+        count = getattr(store, "count_functions", None)
+        if callable(count):
+            return int(count())
         total = 0
         while True:
-            page = store.list_functions(offset=total, limit=page_size)
+            page = store.list_functions(offset=total, limit=10_000)
             count = len(page)
             total += count
-            if count < page_size:
+            if count < 10_000:
                 return total
 
     def write_text(
@@ -2122,11 +2134,10 @@ class MemplexService:
         info["push_failures"] = store._push_failures
         info["pending_push_tasks"] = store.pending_push_tasks
         info["last_pull_at"] = store.last_pull_at
-        # SSE subscriber count (server-side only; client reports 0).
+        # SSE subscriber count via the domain-owned registration point
+        # (adapters register a provider at startup; no reverse import).
         try:
-            from memplex.adapters.http_api import _SSE_SUBSCRIBERS
-
-            info["sse_subscribers"] = len(_SSE_SUBSCRIBERS)
+            info["sse_subscribers"] = _sse_subscriber_count_provider() if _sse_subscriber_count_provider else 0
         except Exception:
             info["sse_subscribers"] = 0
         return info

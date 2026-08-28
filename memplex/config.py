@@ -341,26 +341,10 @@ class LLMConfig:
 
 
 @dataclass
-class ObservationConfig:
-    """Observation rate-limiting configuration."""
-
-    max_per_minute: int = 20
-
-
-@dataclass
 class LoggingConfig:
     """Logging configuration."""
 
     level: str = "INFO"
-    sanitize_sensitive: bool = True
-
-
-@dataclass
-class EncryptionConfig:
-    """Encryption configuration."""
-
-    enabled: bool = False
-    key_path: str = "~/.memplex/.enc_key"
 
 
 @dataclass
@@ -561,8 +545,6 @@ class BackupConfig:
 class OperationsConfig:
     """生产启动、停机和 SLO 的固定边界；签名密钥保持 env-only。"""
 
-    startup_timeout_seconds: int = 60
-    shutdown_timeout_seconds: int = 30
     request_drain_timeout_seconds: int = 15
     availability_target: float = 0.999
     p95_latency_target_ms: float = 250.0
@@ -570,11 +552,7 @@ class OperationsConfig:
     report_key_id: str = ""
 
     def __post_init__(self) -> None:
-        for name in (
-            "startup_timeout_seconds",
-            "shutdown_timeout_seconds",
-            "request_drain_timeout_seconds",
-        ):
+        for name in ("request_drain_timeout_seconds",):
             value = getattr(self, name)
             if type(value) is not int:
                 raise TypeError(f"operations.{name} must be an exact int")
@@ -616,9 +594,7 @@ class MemplexConfig:
     wiki: WikiConfig = field(default_factory=WikiConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
-    observation: ObservationConfig = field(default_factory=ObservationConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    encryption: EncryptionConfig = field(default_factory=EncryptionConfig)
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
@@ -693,14 +669,8 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     "llm.local_endpoint": str,
     "llm.local_model": str,
     "llm.max_input_length": int,
-    # ObservationConfig
-    "observation.max_per_minute": int,
     # LoggingConfig
     "logging.level": str,
-    "logging.sanitize_sensitive": bool,
-    # EncryptionConfig
-    "encryption.enabled": bool,
-    "encryption.key_path": str,
     # DeploymentConfig
     "deployment.profile": str,
     # SyncConfig (previous-key map is parsed separately to avoid lossy coercion)
@@ -740,8 +710,6 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     "backup.rpo_target_seconds": int,
     "backup.rto_target_seconds": int,
     # OperationsConfig (HMAC key is intentionally environment-only)
-    "operations.startup_timeout_seconds": int,
-    "operations.shutdown_timeout_seconds": int,
     "operations.request_drain_timeout_seconds": int,
     "operations.availability_target": float,
     "operations.p95_latency_target_ms": float,

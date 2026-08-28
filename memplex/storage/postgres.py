@@ -1815,6 +1815,15 @@ class PostgresMemoryStore:
         cur.close()
         return events
 
+    def count_functions(self) -> int:
+        cur = self._execute(
+            f"SELECT count(*) FROM memplex_functions WHERE {_acl_scope_sql()}",
+            commit=False,
+        )
+        row = cur.fetchone()
+        cur.close()
+        return int(row[0]) if row else 0
+
     def list_functions(
         self, offset: int = 0, limit: int = 1000, owner: Optional[str] = None
     ) -> List[Function]:

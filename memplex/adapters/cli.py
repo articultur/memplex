@@ -2277,12 +2277,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     argv:
         Argument list.  Defaults to ``sys.argv[1:]``.
     """
+    from memplex.config import load_config
     from memplex.logging_config import configure_logging
-
-    configure_logging()
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Honour the configured logging.level (yaml/env); MEMPLEX_LOG_LEVEL
+    # still takes precedence. Command handlers re-load config themselves.
+    configure_logging(level=load_config(getattr(args, "config", None)).logging.level)
 
     if args.command is None:
         parser.print_help()

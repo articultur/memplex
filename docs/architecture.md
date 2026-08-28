@@ -27,7 +27,7 @@ llm/
   injection_guard.py  InjectionScanCounter + drop_injection_suspected ¹
 storage/
   base.py             MemoryStore interface
-  lite/               SQLite backend (store, durability, sync_repository)
+  lite/               Development JSON-pair backend — in-memory model + journaled JSON persistence, with a SQLite FTS5 sidecar for search (store, durability, sync_repository); production must use postgres
   postgres.py         PostgreSQL business store (request-scoped ACL facade)
   postgres_sync.py    PostgreSQL sync repository
   postgres_backup.py  Backup/restore
@@ -108,9 +108,12 @@ mutation-coverage manifest in `tests/test_host_lifecycle_evidence.py`.
   and storage layers listed in `pyproject.toml [tool.importlinter]` may never
   import `memplex.adapters`. `memplex.serialization.py` exists so shared
   serializers do not force domain→adapter imports.
-- **Complexity freeze** (ruff `C901`, max 25): the per-file ignores in
-  `pyproject.toml` pin the current known-debt functions; extending that list
-  or adding any new >25-complexity function fails CI.
+- **Complexity freeze** (ruff `C901`, max 25): any function whose complexity
+  exceeds 25 fails CI. Known-debt hot spots carry inline `# noqa: C901`
+  markers in source (see the legacy sync-route registrars in
+  `adapters/http_api.py` and the ACL access probe in `storage/pool.py`);
+  adding a new >25-complexity function — or a new noqa marker without the
+  "documented known debt" justification — fails review.
 - **Typed boundary** (mypy): the file list in `[tool.mypy] files` is itself
   pinned by `tests/test_release_workflows.py` — extend both together.
 

@@ -629,10 +629,16 @@ def _fsync_dir(path: Path) -> None:
 def _write_and_fsync(path: Path, value: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with tmp.open("wb") as fh:
-        fh.write(_canonical_json(value))
-        fh.flush()
-        os.fsync(fh.fileno())
+    try:
+        with tmp.open("wb") as fh:
+            fh.write(_canonical_json(value))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        # A failed write/fsync must not leak the hidden tmp file: repeated
+        # retries on a full disk would otherwise accumulate them.
+        tmp.unlink(missing_ok=True)
+        raise
     return tmp
 
 

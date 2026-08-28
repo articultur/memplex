@@ -765,6 +765,10 @@ def _check_rate_limit(client_ip: str) -> bool:
             return True
 
         if len(_rate_buckets) >= _RATE_BUCKET_CAPACITY:
+            # Reclaim expired entries first; if still full, evict the
+            # bucket with the earliest reset time rather than rejecting
+            # new clients (a 429-on-first-request lockout is worse than
+            # letting one noisy earlier client restart its window).
             expired = [
                 key
                 for key, candidate in _rate_buckets.items()
@@ -773,7 +777,8 @@ def _check_rate_limit(client_ip: str) -> bool:
             for key in expired:
                 _rate_buckets.pop(key, None)
             if len(_rate_buckets) >= _RATE_BUCKET_CAPACITY:
-                return False
+                oldest = min(_rate_buckets, key=lambda k: _rate_buckets[k]["reset_at"])
+                _rate_buckets.pop(oldest, None)
 
         _rate_buckets[client_ip] = {
             "count": 1,
@@ -862,7 +867,7 @@ def _register_memory_routes(app: "FastAPI", config, profile: str) -> None:
         q: str = Query(..., description="Query text"),
         top_k: int = Query(10, ge=1, le=100),
         owner: Optional[str] = Query(None),
-        max_tokens: int = Query(4000, ge=0),
+        max_tokens: int = Query(4000, ge=0, le=32_000),
     ) -> JSONResponse:
         """Search memories with natural language."""
         svc = _get_service(request)
@@ -1956,13 +1961,19 @@ def create_app(config=None) -> "FastAPI":
     from memplex.logging_config import configure_logging, install_sensitive_data_filters
     from memplex.service import MemplexService
 
-    # Configure logging once at app construction (the HTTP API is a
-    # long-running daemon surface; honour MEMPLEX_LOG_JSON for structured
-    # logs the same way the MCP server and CLI do).
-    configure_logging()
+    # Register the SSE subscriber-count provider so the service health
+    # surface can report it without a reverse domain→adapter import.
+    import memplex.service as _service_module
+    _service_module._sse_subscriber_count_provider = lambda: len(_SSE_SUBSCRIBERS)
 
     if config is None:
         config = load_config()
+
+    # Configure logging once at app construction (the HTTP API is a
+    # long-running daemon surface; honour MEMPLEX_LOG_JSON for structured
+    # logs the same way the MCP server and CLI do). The configured
+    # logging.level is the fallback; MEMPLEX_LOG_LEVEL still wins.
+    configure_logging(level=config.logging.level)
 
     operations_admission = RequestAdmission()
     operations_metrics = OperationsMetrics()

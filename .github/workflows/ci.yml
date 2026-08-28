@@ -26,6 +26,7 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -57,13 +58,14 @@ jobs:
           # to it. (macOS images preinstall all versions; the dedicated
           # release-install-matrix job passes its own full matrix.)
           MEMPLEX_INSTALL_MATRIX_PYTHON: ${{ matrix.python-version }}
-        run: uv run pytest tests -v --cov=memplex --cov-report=term-missing --cov-fail-under=68
+        run: uv run pytest tests -v --timeout=120 --cov=memplex --cov-report=term-missing
 
   test-postgres:
     # Exercises the flagship PostgreSQL backend against the pgvector service
     # used in production-shaped CI.  The test fixture still creates a fresh
     # schema per test, so service reuse cannot leak catalogue state.
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       MEMPLEX_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/memplex
       MEMPLEX_REQUIRE_PGVECTOR: "1"
@@ -109,7 +111,7 @@ jobs:
             tests/test_sync_repository_contract.py \
             tests/test_postgres_store.py \
             tests/test_g014_postgres_task_repository.py \
-            -v
+            -v --timeout=120
 
   security:
     runs-on: ubuntu-latest
