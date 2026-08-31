@@ -26,6 +26,11 @@ Global options::
 
     --config <path>     Path to config YAML file
     --output json|table Output format (default: table)
+    --verbose           Print full tracebacks on unexpected errors
+
+Exit codes::
+
+    0 success; 1 runtime error; 2 usage error (argparse)
 """
 
 from __future__ import annotations
@@ -34,17 +39,22 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
 
 from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
+
+if TYPE_CHECKING:
+    from memplex.auth import AuthorizationContext
+    from memplex.service import MemplexService
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
-def _make_service(config_path: Optional[str] = None):
+def _make_service(config_path: Optional[str] = None) -> MemplexService:
     """Create and return a MemplexService instance."""
     from memplex.config import load_config
     from memplex.service import MemplexService
@@ -141,7 +151,9 @@ class _AuthorizedStore:
         return _filtered
 
 
-def _cli_authorization(config_path: Optional[str] = None, *, agent_id: str = "cli"):
+def _cli_authorization(
+    config_path: Optional[str] = None, *, agent_id: str = "cli"
+) -> AuthorizationContext:
     """Resolve the sole trusted identity source for CLI memory commands.
 
     A configured principal registry is authoritative.  Production therefore
@@ -171,7 +183,7 @@ def _make_authorized_service(
     return service, _AuthorizedService(service, authorization)
 
 
-def _fmt(data, output: str) -> str:
+def _fmt(data: Any, output: str) -> str:
     """Format *data* for the chosen output mode."""
     if output == "json":
         return json.dumps(data, indent=2, default=str, ensure_ascii=False)
@@ -214,7 +226,7 @@ def _dict_to_table(d: dict, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def _result_to_dict(result) -> dict:
+def _result_to_dict(result: Any) -> dict:
     """Convert a SearchResult / QueryResult / dataclass to a dict."""
     if hasattr(result, "__dataclass_fields__"):
         return asdict(result)
@@ -553,7 +565,7 @@ def cmd_operations(args: argparse.Namespace) -> int:
             print(_fmt(gate, args.output))
             return 0 if gate["status"] == "pass" else 1
         if action == "verify-report":
-            report = load_operations_report(Path(args.report))
+            ops_report = load_operations_report(Path(args.report))
             config = load_config(path=getattr(args, "config", None))
             deployment = load_deployment_evidence_binding_from_environment(
                 memplex_version=version("memplex")
@@ -565,18 +577,18 @@ def cmd_operations(args: argparse.Namespace) -> int:
                 target_identity_sha256=deployment.target_identity_sha256,
                 expected_key_id=config.operations.report_key_id,
             )
-            report.verify_readiness(load_operations_signing_key(), binding=binding)
+            ops_report.verify_readiness(load_operations_signing_key(), binding=binding)
             payload = {
                 "schema_version": 1,
                 "verified": True,
-                "report_id": report.report_id,
-                "key_id": report.key_id,
-                "request_count": report.request_count,
-                "availability": report.availability,
-                "error_rate": report.error_rate,
-                "p95_latency_ms": report.p95_latency_ms,
-                "shutdown_drained": report.shutdown_drained,
-                "industrial_gate_closing": report.industrial_gate_closing,
+                "report_id": ops_report.report_id,
+                "key_id": ops_report.key_id,
+                "request_count": ops_report.request_count,
+                "availability": ops_report.availability,
+                "error_rate": ops_report.error_rate,
+                "p95_latency_ms": ops_report.p95_latency_ms,
+                "shutdown_drained": ops_report.shutdown_drained,
+                "industrial_gate_closing": ops_report.industrial_gate_closing,
             }
             print(_fmt(payload, args.output))
             return 0
@@ -971,7 +983,9 @@ class _BackupCommandContext:
             )
         from memplex.storage.postgres_backup import inspect_pitr_readiness
 
-        return inspect_pitr_readiness(self._migration_dsn)
+        # ``migration_dsn`` is always set for the postgres backend (enforced
+        # by the CLI wiring above); cast keeps the runtime unchanged.
+        return inspect_pitr_readiness(cast(str, self._migration_dsn))
 
     def drill(self, artifact: str, target_schema: str) -> Any:
         from datetime import UTC, datetime
@@ -1692,7 +1706,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
                     args.output,
                 )
             )
-            return 2
+            return 1
         names = list(list_agent_profiles()) if requested == "all" else [requested]
         raw_service, svc = _make_authorized_service(getattr(args, "config", None))
         try:
@@ -1809,7 +1823,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     profile_name = getattr(args, "profile", None)
     profile = setup_profile(profile_name)
     output = _dataclass_to_dict(result)
-    if profile is not None:
+    if profile_name is not None and profile is not None:
         # Apply the profile's concrete settings to the loaded config and
         # surface what was applied vs what stays declarative (previously
         # the profile was only displayed, never applied).
@@ -1859,6 +1873,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="table",
         help="Output format (default: table)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full tracebacks on unexpected errors (also: MEMPLEX_DEBUG=1)",
+    )
 
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -1883,7 +1902,7 @@ def build_parser() -> argparse.ArgumentParser:
 # instead of editing a 230-line function.
 
 
-def _add_query_parsers(sub) -> None:
+def _add_query_parsers(sub: argparse._SubParsersAction) -> None:
     """query + recall + observations (the recall-style commands)."""
     p_query = sub.add_parser("query", help="Query memory")
     p_query.add_argument("text", help="Query text")
@@ -1911,7 +1930,7 @@ def _add_query_parsers(sub) -> None:
     p_obs.add_argument("--limit", type=int, default=100, help="Max results (default 100)")
 
 
-def _add_write_parsers(sub) -> None:
+def _add_write_parsers(sub: argparse._SubParsersAction) -> None:
     """write / get / delete / feedback (memory mutation commands)."""
     p_write = sub.add_parser("write", help="Write content to memory")
     p_write.add_argument("--text", help="Raw text to write")
@@ -1936,7 +1955,7 @@ def _add_write_parsers(sub) -> None:
     )
 
 
-def _add_review_diag_parsers(sub) -> None:
+def _add_review_diag_parsers(sub: argparse._SubParsersAction) -> None:
     """pending / compact / health / stats / doctor (review + diagnostics)."""
     sub.add_parser("improve", help="Run proactive fact maintenance (dedupe/expire/reindex)")
 
@@ -1997,7 +2016,7 @@ def _add_review_diag_parsers(sub) -> None:
     p_doctor.add_argument("--project-path", default=None)
 
 
-def _add_product_parsers(sub) -> None:
+def _add_product_parsers(sub: argparse._SubParsersAction) -> None:
     """scope / policy / inbox / corpus / report (operator workflow commands)."""
     # -- scope --
     p_scope = sub.add_parser("scope", help="Explain visibility scopes")
@@ -2053,7 +2072,7 @@ def _add_product_parsers(sub) -> None:
     p_report.add_argument("--agent", default="codex")
 
 
-def _add_agent_parsers(sub) -> None:
+def _add_agent_parsers(sub: argparse._SubParsersAction) -> None:
     """agent (nested: list / manifest / install / uninstall / recall / capture)."""
     p_agent = sub.add_parser("agent", help="Portable agent integration commands")
     agent_sub = p_agent.add_subparsers(dest="agent_command", help="Agent integration command")
@@ -2132,17 +2151,29 @@ def _add_agent_parsers(sub) -> None:
     p_agent_capture.add_argument("--next-prompt-hint", default=None)
 
 
-def _add_setup_parsers(sub) -> None:
+def _add_setup_parsers(sub: argparse._SubParsersAction) -> None:
     """setup / install / stepup / uninstall / unsetup (top-level install aliases)."""
-    for name in ("setup", "install", "stepup"):
-        _add_one_setup_parser(sub, name, uninstall=False)
+    _add_one_setup_parser(sub, "setup", uninstall=False)
+    _add_one_setup_parser(sub, "install", uninstall=False)
+    _add_one_setup_parser(
+        sub,
+        "stepup",
+        uninstall=False,
+        help="Alias for 'install' (kept for existing scripts)",
+    )
     _add_one_setup_parser(sub, "uninstall", uninstall=True)
 
     sub.add_parser("unsetup", help="Uninstall Memplex Claude Code plugin")
 
 
-def _add_one_setup_parser(sub, name: str, *, uninstall: bool = False):
-    help_text = (
+def _add_one_setup_parser(
+    sub: argparse._SubParsersAction,
+    name: str,
+    *,
+    uninstall: bool = False,
+    help: Optional[str] = None,
+) -> argparse.ArgumentParser:
+    help_text = help or (
         "Uninstall Memplex from local agent hosts"
         if uninstall
         else "Set up Memplex in detected local agent hosts"
@@ -2177,7 +2208,7 @@ def _add_one_setup_parser(sub, name: str, *, uninstall: bool = False):
     return p_setup
 
 
-def _add_sync_parsers(sub) -> None:
+def _add_sync_parsers(sub: argparse._SubParsersAction) -> None:
     """sync lifecycle and durable-delivery controls."""
     p_sync = sub.add_parser("sync", help="Reliable multi-node sync")
     sync_sub = p_sync.add_subparsers(dest="sync_command", help="Sync command")
@@ -2199,7 +2230,7 @@ def _add_sync_parsers(sub) -> None:
     p_replay.add_argument("--event-id", required=True, help="Event UUID")
 
 
-def _add_storage_parsers(sub) -> None:
+def _add_storage_parsers(sub: argparse._SubParsersAction) -> None:
     """Storage maintenance commands kept separate from service startup."""
     p_storage = sub.add_parser("storage", help="PostgreSQL storage maintenance")
     storage_sub = p_storage.add_subparsers(dest="storage_command", help="Storage command")
@@ -2228,7 +2259,7 @@ def _add_storage_parsers(sub) -> None:
     p_backup_drill.add_argument("--target-schema", required=True)
 
 
-def _add_operations_parsers(sub) -> None:
+def _add_operations_parsers(sub: argparse._SubParsersAction) -> None:
     """Production probes/SLO evidence commands that never construct service."""
     parser = sub.add_parser("operations", help="Production operations and SLO evidence")
     operations_sub = parser.add_subparsers(
@@ -2240,7 +2271,7 @@ def _add_operations_parsers(sub) -> None:
     operations_sub.add_parser("alerts-check", help="Verify packaged Prometheus alert rules")
 
 
-def _add_benchmark_parsers(sub) -> None:
+def _add_benchmark_parsers(sub: argparse._SubParsersAction) -> None:
     """benchmark (nested: list / run) -- evaluation harness, source checkout only."""
     p_bench = sub.add_parser("benchmark", help="Benchmarks (available from the source checkout)")
     bench_sub = p_bench.add_subparsers(dest="benchmark_command", help="Benchmark command")
@@ -2328,13 +2359,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     handler = dispatch.get(args.command)
     if handler is None:
+        # Usage error: no such subcommand -- same exit code as argparse.
         parser.print_help()
-        return 1
+        return 2
 
     try:
         return handler(args)
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        if getattr(args, "verbose", False) or os.environ.get("MEMPLEX_DEBUG"):
+            traceback.print_exc()
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
         return 1
 
 

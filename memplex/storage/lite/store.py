@@ -25,7 +25,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from memplex.backup import (
     BackupArtifactWriter,
@@ -55,6 +55,15 @@ from memplex.models import (
     validate_domain,
     validate_func_id,
 )
+from memplex.storage._messages import (
+    _BACKUP_ARTIFACT_INVALID,
+    _DUPLICATE_FACT_ID,
+    _DUPLICATE_OBSERVATION_ID,
+    _DUPLICATE_PREFERENCE_ID,
+    _GRAPH_NODES_MUST_BE_FUNCTIONS,
+    _INVALID_LITE_FIELD,
+    _ONLY_FUNCTION_NODES,
+)
 from memplex.storage.changelog import ChangelogStore
 from memplex.storage.lite import durability as durability_module
 from memplex.storage.lite.durability import LiteDurability, LitePair, LiteStorageIntegrityError
@@ -72,7 +81,7 @@ from memplex.sync_protocol import (
     SyncSnapshotPage,
     SyncStatus,
 )
-from memplex.sync_repository import SyncCapturePolicy
+from memplex.sync_repository import SyncCapturePolicy, SyncDeadLetterEntry
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +134,9 @@ def _validate_g002_historical_node_keys(raw: dict, memory_type: str) -> None:
         raise ValueError(f"invalid Lite recognized G002 {memory_type} schema")
 
 
-def _with_writer_lock(method):
+def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep reload, COW mutation, and journal decision in one flock scope."""
-    def wrapped(self, *args, **kwargs):
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         with self._durability.writer_lock():
             return method(self, *args, **kwargs)
 
@@ -188,12 +197,12 @@ def _require_exact_string(value: Any, label: str, *, optional: bool = False) -> 
     if optional and value is None:
         return
     if type(value) is not str:
-        raise ValueError(f"invalid Lite {label}")
+        raise ValueError(_INVALID_LITE_FIELD.format(field=label))
 
 
 def _require_finite_number(value: Any, label: str) -> None:
     if type(value) not in (int, float) or not math.isfinite(value):
-        raise ValueError(f"invalid Lite {label}")
+        raise ValueError(_INVALID_LITE_FIELD.format(field=label))
 
 
 def _validate_node_for_read(node: Any) -> None:
@@ -274,20 +283,20 @@ def _validate_raw_node_discriminators(raw: Any, expected_memory_type: str, *, le
             raise ValueError("invalid Lite source_type")
     for name in ("id", "name"):
         if name in raw and type(raw[name]) is not str:
-            raise ValueError(f"invalid Lite {name}")
+            raise ValueError(_INVALID_LITE_FIELD.format(field=name))
     for name in (
         "domain", "owner", "tenant_id", "owner_subject_id", "workspace_id", "visibility",
         "created_at", "updated_at", "origin_session", "last_accessed_at",
         "needs_review_until", "content_hash",
     ):
         if name in raw and raw[name] is not None and type(raw[name]) is not str:
-            raise ValueError(f"invalid Lite {name}")
+            raise ValueError(_INVALID_LITE_FIELD.format(field=name))
     for name in ("confidence",):
         if name in raw:
             _require_finite_number(raw[name], f"raw node {name}")
     for name in ("version", "access_count"):
         if name in raw and (type(raw[name]) is not int or raw[name] < 0):
-            raise ValueError(f"invalid Lite {name}")
+            raise ValueError(_INVALID_LITE_FIELD.format(field=name))
     if "needs_review" in raw and type(raw["needs_review"]) is not bool:
         raise ValueError("invalid Lite needs_review")
     if "source_paragraphs" in raw and (
@@ -300,7 +309,7 @@ def _validate_raw_node_discriminators(raw: Any, expected_memory_type: str, *, le
             type(raw[name]) is not dict
             or any(type(key) is not str or type(value) is not str for key, value in raw[name].items())
         ):
-            raise ValueError(f"invalid Lite {name}")
+            raise ValueError(_INVALID_LITE_FIELD.format(field=name))
 
 
 def _validate_raw_keys(raw: dict, allowed: set[str], *, legacy: bool, label: str) -> None:
@@ -332,7 +341,7 @@ def _validate_json_value(value: Any, label: str) -> None:
         return
     if type(value) is float:
         if not math.isfinite(value):
-            raise ValueError(f"invalid Lite {label}")
+            raise ValueError(_INVALID_LITE_FIELD.format(field=label))
         return
     if type(value) is list:
         for item in value:
@@ -342,7 +351,7 @@ def _validate_json_value(value: Any, label: str) -> None:
         for item in value.values():
             _validate_json_value(item, label)
         return
-    raise ValueError(f"invalid Lite {label}")
+    raise ValueError(_INVALID_LITE_FIELD.format(field=label))
 
 
 def _validate_raw_field_value(raw: Any, *, legacy: bool) -> None:
@@ -648,14 +657,14 @@ class LiteMemoryStore:
             result: dict[str, Any] = {}
             for key, value in pairs:
                 if key in result:
-                    raise BackupIntegrityError("backup_artifact_invalid")
+                    raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                 result[key] = value
             return result
 
         try:
             return json.loads(payload.decode("utf-8"), object_pairs_hook=_pairs)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise BackupIntegrityError("backup_artifact_invalid") from exc
+            raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID) from exc
 
     def restore_backup(self, artifact: Path, signing_key: bytes) -> None:
         """Replace the current Lite pair from one verified development snapshot."""
@@ -668,7 +677,7 @@ class LiteMemoryStore:
                     manifest.backend != "lite"
                     or manifest.consistency != "lite_pair_generation"
                 ):
-                    raise BackupIntegrityError("backup_artifact_invalid")
+                    raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                 with tempfile.TemporaryDirectory(prefix=".lite-restore-") as restore_dir:
                     payload = Path(restore_dir) / "payload.dump"
                     opened.copy_payload_to(payload)
@@ -678,24 +687,24 @@ class LiteMemoryStore:
                             "memory.json",
                             "changelog.json",
                         ]:
-                            raise BackupIntegrityError("backup_artifact_invalid")
+                            raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                         if any(
                             not member.isfile() or member.size < 0 for member in members
                         ):
-                            raise BackupIntegrityError("backup_artifact_invalid")
+                            raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                         extracted = []
                         for member in members:
                             source = archive.extractfile(member)
                             if source is None:
-                                raise BackupIntegrityError("backup_artifact_invalid")
+                                raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                             data = source.read(member.size + 1)
                             if len(data) != member.size:
-                                raise BackupIntegrityError("backup_artifact_invalid")
+                                raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID)
                             extracted.append(self._decode_backup_json(data))
         except BackupIntegrityError:
             raise
         except (OSError, tarfile.TarError) as exc:
-            raise BackupIntegrityError("backup_artifact_invalid") from exc
+            raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID) from exc
 
         restored = self._durability._decode_pair(extracted[0], extracted[1])
         self._durability._validate_semantics(restored)
@@ -772,7 +781,11 @@ class LiteMemoryStore:
     def sync_ack(self, delivery: SyncDelivery, receipt: SyncReceipt) -> None:
         self._sync_repository.sync_ack(delivery, receipt)
 
-    def sync_ack_batch(self, deliveries, receipts) -> None:
+    def sync_ack_batch(
+        self,
+        deliveries: list[SyncDelivery],
+        receipts: tuple[SyncReceipt, ...],
+    ) -> None:
         self._sync_repository.sync_ack_batch(deliveries, receipts)
 
     def sync_fail(self, delivery: SyncDelivery, error_code: str, now: datetime) -> None:
@@ -786,7 +799,7 @@ class LiteMemoryStore:
     def sync_replay_dead_letter(self, target_id: str, event_id: str) -> bool:
         return self._sync_repository.sync_replay_dead_letter(target_id, event_id)
 
-    def sync_list_dead_letters(self, *, limit: int):
+    def sync_list_dead_letters(self, *, limit: int) -> list[SyncDeadLetterEntry]:
         return self._sync_repository.sync_list_dead_letters(limit=limit)
 
     def sync_set_target_enabled(self, target_id: str, enabled: bool) -> None:
@@ -810,13 +823,25 @@ class LiteMemoryStore:
         """Capture business changes and publish one pair or restore the base."""
         try:
             for edge, scope_node, operation in edges or []:
-                self._sync_repository.capture_edge(
-                    edge, scope_node=scope_node, operation=operation
-                )
+                if operation is SyncOperation.TOMBSTONE:
+                    self._sync_repository.capture_edge(
+                        edge, scope_node=scope_node, operation=operation
+                    )
             for node, node_type, operation in nodes or []:
-                self._sync_repository.capture_node(
-                    node, node_type=node_type, operation=operation
-                )
+                if operation is SyncOperation.TOMBSTONE:
+                    self._sync_repository.capture_node(
+                        node, node_type=node_type, operation=operation
+                    )
+            for node, node_type, operation in nodes or []:
+                if operation is SyncOperation.UPSERT:
+                    self._sync_repository.capture_node(
+                        node, node_type=node_type, operation=operation
+                    )
+            for edge, scope_node, operation in edges or []:
+                if operation is SyncOperation.UPSERT:
+                    self._sync_repository.capture_edge(
+                        edge, scope_node=scope_node, operation=operation
+                    )
             self._commit_current_state()
         except BaseException:
             try:
@@ -837,7 +862,7 @@ class LiteMemoryStore:
         func, source = copy.deepcopy(func), copy.deepcopy(source)
         self._validate_resident_graph()
         if not isinstance(func, Function):
-            raise ValueError("LiteMemoryStore 只接受 Function 节点")
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="LiteMemoryStore"))
         # Dataclasses are mutable: revalidate here so a caller cannot mutate
         # an otherwise valid Function into GraphBuilder's virtual namespace.
         validate_func_id(func.id)
@@ -1120,7 +1145,7 @@ class LiteMemoryStore:
         )
 
     @_with_writer_lock
-    def increment_access_batch(self, func_ids) -> None:
+    def increment_access_batch(self, func_ids: List[str]) -> None:
         """Update access_count for many funcs with a SINGLE persistence pass.
 
         Overrides the base default (which would call increment_access N
@@ -1331,7 +1356,7 @@ class LiteMemoryStore:
         seen_node_ids: set[str] = set()
         for node in nodes:
             if not isinstance(node, Function):
-                raise ValueError("LiteMemoryStore 图节点必须是 Function")
+                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="LiteMemoryStore"))
             validate_func_id(node.id)
             validate_domain(node.domain)
             if node.id in seen_node_ids:
@@ -1701,7 +1726,21 @@ class LiteMemoryStore:
         with self._durability.writer_lock():
             self._publish_pair(self._durability._load_authoritative_locked())
 
-    def _canonical_historical_pair(self, decoded, generation: int, transaction_id: str) -> LitePair:
+    def _canonical_historical_pair(
+        self,
+        decoded: tuple[
+            Dict[str, Function],
+            Dict[str, str],
+            List[Observation],
+            Dict[str, Fact],
+            Dict[str, Preference],
+            List[GraphEdge],
+            List[ChangelogEvent],
+            Dict[str, Any],
+        ],
+        generation: int,
+        transaction_id: str,
+    ) -> LitePair:
         """Serialize a recognized historical decode into the complete v2 shape."""
         (
             functions,
@@ -1787,7 +1826,7 @@ class LiteMemoryStore:
                 _require_exact_string(getattr(observation, name), f"Observation {name}")
             _require_exact_string(observation.observed_at, "Observation observed_at", optional=True)
             if any(existing.id == observation.id for existing in loaded_observations):
-                raise ValueError("duplicate Lite Observation id")
+                raise ValueError(_DUPLICATE_OBSERVATION_ID)
             loaded_observations.append(observation)
 
         # Older files (schema_version 1 without these keys) load as empty.
@@ -1799,7 +1838,7 @@ class LiteMemoryStore:
                 _require_exact_string(getattr(fact, name), f"Fact {name}")
             _require_exact_string(fact.valid_until, "Fact valid_until", optional=True)
             if fact.id in loaded_facts:
-                raise ValueError("duplicate Lite Fact id")
+                raise ValueError(_DUPLICATE_FACT_ID)
             loaded_facts[fact.id] = fact
 
         for pd in raw.get("preferences", []):
@@ -1810,11 +1849,22 @@ class LiteMemoryStore:
                 _require_exact_string(getattr(pref, name), f"Preference {name}")
             _require_exact_string(pref.subject_id, "Preference subject_id", optional=True)
             if pref.id in loaded_preferences:
-                raise ValueError("duplicate Lite Preference id")
+                raise ValueError(_DUPLICATE_PREFERENCE_ID)
             loaded_preferences[pref.id] = pref
         return loaded_observations, loaded_facts, loaded_preferences
 
-    def _decode_pair(self, pair: LitePair):
+    def _decode_pair(
+        self, pair: LitePair
+    ) -> tuple[
+        Dict[str, Function],
+        Dict[str, str],
+        List[Observation],
+        Dict[str, Fact],
+        Dict[str, Preference],
+        List[GraphEdge],
+        List[ChangelogEvent],
+        Dict[str, Any],
+    ]:
         """Fully deserialize a pair without touching published resident state."""
         raw = pair.memory
 
@@ -1841,7 +1891,7 @@ class LiteMemoryStore:
                     _require_exact_string(getattr(fact, name), f"Fact {name}")
                 _require_exact_string(fact.valid_until, "Fact valid_until", optional=True)
                 if fact.id in loaded_facts:
-                    raise ValueError("duplicate Lite Fact id")
+                    raise ValueError(_DUPLICATE_FACT_ID)
                 loaded_facts[fact.id] = fact
                 continue
             if g002_historical and memory_type == "preference":
@@ -1852,7 +1902,7 @@ class LiteMemoryStore:
                     _require_exact_string(getattr(pref, name), f"Preference {name}")
                 _require_exact_string(pref.subject_id, "Preference subject_id", optional=True)
                 if pref.id in loaded_preferences:
-                    raise ValueError("duplicate Lite Preference id")
+                    raise ValueError(_DUPLICATE_PREFERENCE_ID)
                 loaded_preferences[pref.id] = pref
                 continue
             if g002_historical and memory_type == "observation":
@@ -1863,7 +1913,7 @@ class LiteMemoryStore:
                     _require_exact_string(getattr(observation, name), f"Observation {name}")
                 _require_exact_string(observation.observed_at, "Observation observed_at", optional=True)
                 if any(existing.id == observation.id for existing in loaded_observations):
-                    raise ValueError("duplicate Lite Observation id")
+                    raise ValueError(_DUPLICATE_OBSERVATION_ID)
                 loaded_observations.append(observation)
                 continue
 
@@ -1893,15 +1943,15 @@ class LiteMemoryStore:
         dec_obs, dec_facts, dec_prefs = self._decode_typed_collections(raw, legacy)
         for observation in dec_obs:
             if any(existing.id == observation.id for existing in loaded_observations):
-                raise ValueError("duplicate Lite Observation id")
+                raise ValueError(_DUPLICATE_OBSERVATION_ID)
             loaded_observations.append(observation)
         for fact_id, fact in dec_facts.items():
             if fact_id in loaded_facts:
-                raise ValueError("duplicate Lite Fact id")
+                raise ValueError(_DUPLICATE_FACT_ID)
             loaded_facts[fact_id] = fact
         for pref_id, pref in dec_prefs.items():
             if pref_id in loaded_preferences:
-                raise ValueError("duplicate Lite Preference id")
+                raise ValueError(_DUPLICATE_PREFERENCE_ID)
             loaded_preferences[pref_id] = pref
 
         loaded_changelog = [

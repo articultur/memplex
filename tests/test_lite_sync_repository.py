@@ -650,6 +650,96 @@ def test_all_local_node_types_edges_and_tombstones_share_capture_commit(
     assert reopened.sync_status().pending == 10
 
 
+def test_merge_sync_page_orders_functions_before_edge_for_empty_destination(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source"
+    destination_path = tmp_path / "destination"
+    source_path.mkdir()
+    destination_path.mkdir()
+    source = _store(source_path)
+    destination = _store(destination_path)
+    left = _function("merge-left")
+    right = _function("merge-right")
+    edge = GraphEdge("merge-left", "merge-right", "REFERENCES")
+
+    source.merge(GraphData(nodes=[left, right], edges=[edge]))
+    page = source.sync_page("destination", "destination-consumer", None, 10)
+
+    applied = destination.sync_apply_page("source", page)
+    assert [item.event.node_type for item in page.items] == [
+        SyncNodeType.FUNCTION,
+        SyncNodeType.FUNCTION,
+        SyncNodeType.EDGE,
+    ]
+    assert applied.applied == 3
+    assert {node.id for node in destination.list_functions()} == {
+        "merge-left",
+        "merge-right",
+    }
+    destination_edges = destination.get_graph().edges
+    assert len(destination_edges) == 1
+    assert (
+        destination_edges[0].source,
+        destination_edges[0].target,
+        destination_edges[0].edge_type,
+    ) == ("merge-left", "merge-right", "REFERENCES")
+
+
+def test_clear_sync_page_orders_edge_tombstone_before_function_tombstones(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source"
+    destination_path = tmp_path / "destination"
+    source_path.mkdir()
+    destination_path.mkdir()
+    source = _store(source_path)
+    destination = _store(destination_path)
+    source.merge(
+        GraphData(
+            nodes=[_function("clear-left"), _function("clear-right")],
+            edges=[GraphEdge("clear-left", "clear-right", "REFERENCES")],
+        )
+    )
+    initial_page = source.sync_page(
+        "destination", "destination-consumer", None, 10
+    )
+    destination.sync_apply_page("source", initial_page)
+    now = datetime.now(timezone.utc)
+    cursor = SyncCursorClaims(
+        1,
+        "key-1",
+        "tenant-a",
+        "destination",
+        "destination-consumer",
+        initial_page.next_after_seq,
+        initial_page.snapshot_seq,
+        None,
+        None,
+        now,
+        now + timedelta(minutes=5),
+    )
+
+    source.clear()
+    deletion_page = source.sync_page(
+        "destination", "destination-consumer", cursor, 10
+    )
+
+    applied = destination.sync_apply_page("source", deletion_page)
+    assert [item.event.node_type for item in deletion_page.items] == [
+        SyncNodeType.EDGE,
+        SyncNodeType.FUNCTION,
+        SyncNodeType.FUNCTION,
+    ]
+    assert all(
+        item.event.operation is SyncOperation.TOMBSTONE
+        for item in deletion_page.items
+    )
+    assert applied.applied == 3
+    assert destination.list_functions() == []
+    assert destination.get_graph().edges == []
+
+
 def test_clear_captures_every_node_and_edge_tombstone_in_one_pair(
     tmp_path: Path,
 ) -> None:

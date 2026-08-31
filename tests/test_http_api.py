@@ -1372,3 +1372,115 @@ def test_sync_changes_uses_function_to_dict(client):
     # to_dict shape: memory_type + FieldValue lists present.
     assert change["memory_type"] == "function"
     assert change["trigger"] == []
+
+
+# ── API surface metadata + auth observability ────────────────────────
+
+
+def test_legacy_sync_endpoints_marked_deprecated(client):
+    """Legacy /sync/changes|push|events are deprecated in the schema only;
+    the development-profile runtime behaviour is unchanged."""
+    schema = client.app.openapi()
+    for path, method in (
+        ("/sync/changes", "get"),
+        ("/sync/push", "post"),
+        ("/sync/events", "get"),
+    ):
+        assert schema["paths"][path][method].get("deprecated") is True
+    # The snapshot-stable successor stays current.
+    assert schema["paths"]["/sync/v1/batches"]["post"].get("deprecated") is not True
+    # Deprecation is documentation-only: the endpoint still serves.
+    r = client.get("/sync/changes")
+    assert r.status_code == 200, r.text
+
+
+def test_app_version_comes_from_package_metadata(tmp_path, monkeypatch):
+    """FastAPI(version=...) tracks the installed distribution, with a
+    source-tree fallback when dist metadata is absent."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    monkeypatch.setenv("MEMPLEX_STORAGE_PATH", str(tmp_path))
+    monkeypatch.setenv("MEMPLEX_STORAGE_BACKEND", "lite")
+    monkeypatch.delenv("MEMPLEX_API_KEY", raising=False)
+    monkeypatch.delenv("MEMPLEX_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("MEMPLEX_PRINCIPALS_JSON", raising=False)
+    try:
+        expected = version("memplex")
+    except PackageNotFoundError:
+        expected = "0.1.0"
+    assert create_app().version == expected
+
+
+def test_auth_failures_are_counted_logged_and_surfaced(tmp_path, monkeypatch, caplog):
+    """Credential-validation failures: structured warning (peer IP, no
+    secret material) + process-local counter surfaced on /health."""
+    import logging
+
+    monkeypatch.setenv("MEMPLEX_STORAGE_PATH", str(tmp_path))
+    monkeypatch.setenv("MEMPLEX_STORAGE_BACKEND", "lite")
+    monkeypatch.setenv("MEMPLEX_API_KEY", "counted-secret-key")
+    monkeypatch.delenv("MEMPLEX_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("MEMPLEX_PRINCIPALS_JSON", raising=False)
+    # create_app() -> configure_logging() replaces root handlers, so the
+    # caplog handler rides on the module logger directly.
+    module_logger = logging.getLogger("memplex.adapters.http_api")
+    module_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memplex.adapters.http_api"):
+            app = create_app()
+            with TestClient(app, client=("127.0.0.1", 50000)) as c:
+                bad = c.get("/health", headers={"X-API-Key": "wrong-key-canary"})
+                assert bad.status_code == 401
+                assert c.get("/health").status_code == 401
+                ok = c.get("/health", headers={"X-API-Key": "counted-secret-key"})
+                assert ok.status_code == 200, ok.text
+                assert ok.json()["auth_failures_total"] == 2
+    finally:
+        module_logger.removeHandler(caplog.handler)
+    assert app.state.auth_failures_total == 2
+    rendered = "\n".join(r.getMessage() for r in caplog.records)
+    assert "http_auth_failure" in rendered
+    assert "client_ip=127.0.0.1" in rendered
+    # Credential material must never appear in the failure log lines.
+    assert "wrong-key-canary" not in rendered
+
+
+def test_shared_secret_mode_logs_one_time_startup_warning(tmp_path, monkeypatch, caplog):
+    """Shared-secret auth (no registry) must announce its missing tenant
+    isolation once at app startup."""
+    import logging
+
+    monkeypatch.setenv("MEMPLEX_STORAGE_PATH", str(tmp_path))
+    monkeypatch.setenv("MEMPLEX_STORAGE_BACKEND", "lite")
+    monkeypatch.setenv("MEMPLEX_API_KEY", "startup-warning-key")
+    monkeypatch.delenv("MEMPLEX_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("MEMPLEX_PRINCIPALS_JSON", raising=False)
+    module_logger = logging.getLogger("memplex.adapters.http_api")
+    module_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memplex.adapters.http_api"):
+            create_app()
+    finally:
+        module_logger.removeHandler(caplog.handler)
+    assert any("http_auth_shared_secret_mode" in r.getMessage() for r in caplog.records)
+
+
+def test_no_shared_secret_mode_no_startup_warning(tmp_path, monkeypatch, caplog):
+    """No shared secrets configured -> no shared-secret startup warning."""
+    import logging
+
+    monkeypatch.setenv("MEMPLEX_STORAGE_PATH", str(tmp_path))
+    monkeypatch.setenv("MEMPLEX_STORAGE_BACKEND", "lite")
+    monkeypatch.delenv("MEMPLEX_API_KEY", raising=False)
+    monkeypatch.delenv("MEMPLEX_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("MEMPLEX_PRINCIPALS_JSON", raising=False)
+    module_logger = logging.getLogger("memplex.adapters.http_api")
+    module_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memplex.adapters.http_api"):
+            create_app()
+    finally:
+        module_logger.removeHandler(caplog.handler)
+    assert not any(
+        "http_auth_shared_secret_mode" in r.getMessage() for r in caplog.records
+    )

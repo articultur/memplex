@@ -308,7 +308,10 @@ class GraphBuilder:
         if func.id in self._embedding_cache:
             return self._embedding_cache[func.id]
         try:
-            function_to_text = getattr(self._embedding_service, "function_to_text", None)
+            service = self._embedding_service
+            if service is None:
+                raise AttributeError("embedding service is not configured")
+            function_to_text = getattr(service, "function_to_text", None)
             text = (
                 function_to_text(func)
                 if callable(function_to_text)
@@ -319,7 +322,7 @@ class GraphBuilder:
                     if part
                 )
             )
-            vector = list(self._embedding_service.embed(text))
+            vector = list(service.embed(text))
         except Exception as exc:
             logger.debug("semantic-similar: embed failed for %s: %s", func.id, exc)
             vector = None

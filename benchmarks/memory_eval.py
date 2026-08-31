@@ -10,7 +10,7 @@ memory capabilities:
 
 Unlike RAG-style benchmarks that test context retrieval, these tests verify
 that memplex actually remembers and can retrieve structured memories using
-the 3-layer retrieval and 5-dim reranker.
+the 3-layer retrieval and 6-dim reranker.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from benchmarks.base import (
     BenchmarkSample,
     BenchmarkSourceDocument,
     EvaluationDataset,
+    LatencyStats,
 )
 from memplex.models.memory import Fact, Function, Observation, Preference
 from memplex.models.source import SourceDocument, SourceType
@@ -470,17 +471,15 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
 
         retention_scores = []
         mrr_scores = []
-        latencies = []
+        latencies = LatencyStats()
 
         for sample in samples:
             expected_id = sample.metadata.get("memory_id", "")
             if not expected_id:
                 continue
 
-            start = datetime.now()
-            query_result = service.query(sample.query, top_k=top_k)
-            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            latencies.append(latency_ms)
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
 
             retrieved_ids = [r.func_id for r in query_result.results]
 
@@ -497,7 +496,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         if n == 0:
             return []
 
-        avg_latency = int(sum(latencies) / n)
+        avg_latency = latencies.mean
 
         return [
             BenchmarkResult(
@@ -508,6 +507,8 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=n,
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             ),
             BenchmarkResult(
                 name="memory_fact_retention",
@@ -517,6 +518,8 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=n,
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             ),
         ]
 
@@ -529,7 +532,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     ) -> List[BenchmarkResult]:
         """Test recency decay: Do recent memories rank higher than older ones?
 
-        This tests the recency_decay dimension of the 5-dim reranker.
+        This tests the recency_decay dimension of the 6-dim reranker.
         """
         if not samples:
             return []
@@ -545,12 +548,12 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         if not recent_sample:
             return []
 
-        start = datetime.now()
-        query_result = service.query(
-            recent_sample.query,
-            top_k=min(top_k, len(samples)),
-        )
-        latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+        latencies = LatencyStats()
+        with latencies.timed():
+            query_result = service.query(
+                recent_sample.query,
+                top_k=min(top_k, len(samples)),
+            )
 
         retrieved_ids = [r.func_id for r in query_result.results]
 
@@ -573,7 +576,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                 dataset=self.DATASET_NAME,
                 metric="recency_ranking",
                 value=round(recency_score, 4),
-                latency_ms=latency_ms,
+                latency_ms=latencies.mean,
                 samples=len(samples),
                 timestamp=timestamp,
             ),
@@ -593,17 +596,15 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         self._seed_memories(service, samples)
 
         retention_scores = []
-        latencies = []
+        latencies = LatencyStats()
 
         for sample in samples:
             expected_id = sample.metadata.get("memory_id", "")
             if not expected_id:
                 continue
 
-            start = datetime.now()
-            query_result = service.query(sample.query, top_k=top_k)
-            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            latencies.append(latency_ms)
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
 
             retrieved_ids = [r.func_id for r in query_result.results]
             if expected_id in retrieved_ids:
@@ -621,9 +622,11 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                 dataset=self.DATASET_NAME,
                 metric="preference_retention_rate",
                 value=round(sum(retention_scores) / n, 4),
-                latency_ms=int(sum(latencies) / n),
+                latency_ms=latencies.mean,
                 samples=n,
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             ),
         ]
 
@@ -641,17 +644,15 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         self._seed_memories(service, samples)
 
         retention_scores = []
-        latencies = []
+        latencies = LatencyStats()
 
         for sample in samples:
             expected_id = sample.metadata.get("memory_id", "")
             if not expected_id:
                 continue
 
-            start = datetime.now()
-            query_result = service.query(sample.query, top_k=top_k)
-            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            latencies.append(latency_ms)
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
 
             retrieved_ids = [r.func_id for r in query_result.results]
             if expected_id in retrieved_ids:
@@ -669,9 +670,11 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                 dataset=self.DATASET_NAME,
                 metric="observation_retention_rate",
                 value=round(sum(retention_scores) / n, 4),
-                latency_ms=int(sum(latencies) / n),
+                latency_ms=latencies.mean,
                 samples=n,
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             ),
         ]
 

@@ -202,7 +202,7 @@ def _principal_tenant_acl_gate(profile: str, backend: str) -> dict[str, Any]:
     }
 
 
-def _deployment_evidence_binding():
+def _deployment_evidence_binding() -> Any:
     from memplex.readiness_evidence import (
         load_deployment_evidence_binding_from_environment,
     )
@@ -232,9 +232,13 @@ def _signed_deployment_gate(
         "next_goal": next_goal,
         "evidence": "signed current deployment evidence invalid",
     }
-    if any(
-        type(value) is not str or not value.strip()
-        for value in (report_value, key_value, key_id_value)
+    if (
+        type(report_value) is not str
+        or type(key_value) is not str
+        or type(key_id_value) is not str
+        or not report_value.strip()
+        or not key_value.strip()
+        or not key_id_value.strip()
     ):
         return invalid
     try:
@@ -342,11 +346,14 @@ def _release_supply_chain_gate() -> dict[str, Any]:
         "next_goal": "G007",
         "evidence": "signed release supply-chain evidence invalid",
     }
-    if any(type(value) is not str or not value.strip() for value in (
-        bundle_value,
-        evidence_value,
-        key_value,
-    )):
+    if (
+        type(bundle_value) is not str
+        or type(evidence_value) is not str
+        or type(key_value) is not str
+        or not bundle_value.strip()
+        or not evidence_value.strip()
+        or not key_value.strip()
+    ):
         return invalid
     try:
         from importlib.metadata import version
@@ -386,9 +393,13 @@ def _four_host_e2e_gate() -> dict[str, Any]:
         "next_goal": "G008",
         "evidence": "signed four-host lifecycle evidence invalid",
     }
-    if any(
-        type(value) is not str or not value.strip()
-        for value in (report_value, key_value, key_id_value)
+    if (
+        type(report_value) is not str
+        or type(key_value) is not str
+        or type(key_id_value) is not str
+        or not report_value.strip()
+        or not key_value.strip()
+        or not key_id_value.strip()
     ):
         return invalid
     try:
@@ -441,9 +452,11 @@ def _capacity_chaos_gate() -> dict[str, Any]:
         "next_goal": "G009",
         "evidence": "signed capacity and chaos evidence invalid",
     }
-    if any(
-        type(value) is not str or not value.strip()
-        for value in (report_value, key_value)
+    if (
+        type(report_value) is not str
+        or type(key_value) is not str
+        or not report_value.strip()
+        or not key_value.strip()
     ):
         return invalid
     try:
@@ -752,7 +765,7 @@ def scope_explain(
 
 
 def run_agent_diagnostics(
-    service,
+    service: Any,
     *,
     agent: str = "codex",
     target_dir: Optional[str | Path] = None,
@@ -821,7 +834,7 @@ def run_agent_diagnostics(
 
 
 def scope_preview(
-    service,
+    service: Any,
     namespace_filter: dict[str, Any] | list[dict[str, Any]],
     *,
     limit: int = 10,
@@ -1009,7 +1022,7 @@ def corpus_preview(path: str | Path, *, limit: int = 100) -> dict[str, Any]:
     }
 
 
-def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[str, Any]:
+def corpus_index(service: Any, path: str | Path, *, dry_run: bool = False) -> dict[str, Any]:
     """Index manifest-selected files as reviewable canonical corpus memories."""
 
     preview = corpus_preview(path, limit=100000)
@@ -1067,7 +1080,7 @@ def corpus_index(service, path: str | Path, *, dry_run: bool = False) -> dict[st
 
 
 def corpus_recall(
-    service, query: str, *, top_k: int = 10, max_tokens: int = 4000
+    service: Any, query: str, *, top_k: int = 10, max_tokens: int = 4000
 ) -> dict[str, Any]:
     """Recall only memories stamped as canonical corpus entries."""
 
@@ -1104,7 +1117,7 @@ def corpus_recall(
 
 
 def run_doctor(
-    service,
+    service: Any,
     *,
     agent: str = "codex",
     profile: Optional[str] = None,
@@ -1287,7 +1300,7 @@ def run_doctor(
     }
 
 
-def lifecycle_counts(service) -> dict[str, int]:
+def lifecycle_counts(service: Any) -> dict[str, int]:
     """Return derived lifecycle labels without changing storage schema."""
 
     counts = {"working": 0, "trusted": 0, "project": 0, "archived": 0, "blocked": 0}
@@ -1308,7 +1321,7 @@ def lifecycle_counts(service) -> dict[str, int]:
     return counts
 
 
-def operator_report(service, *, agent: str = "codex") -> dict[str, Any]:
+def operator_report(service: Any, *, agent: str = "codex") -> dict[str, Any]:
     """Generate a local operator report."""
 
     pending = service.get_pending_reviews(limit=100)

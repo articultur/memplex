@@ -15,6 +15,35 @@ from hashlib import sha256
 from importlib import resources
 from typing import Any, Final, Literal
 
+from memplex.storage.migrations._constants import (
+    _ACL_COLUMNS,
+    _APPLICATION_ACL,
+    _APPLICATION_ACL_FUNCTIONS,
+    _APPLICATION_ACL_TABLES,
+    _CAPABILITIES_TABLE,
+    _CORE_POLICY_DIGESTS,
+    _CORE_TABLES,
+    _FEEDBACK_CURRENT_POLICY_DIGESTS,
+    _FEEDBACK_RUNTIME_V1_POLICY_DIGESTS,
+    _KNOWN_MEMPLEX_RELATION_KINDS,
+    _LEDGER_TABLE,
+    _LEGACY_CORE_TABLES,
+    _MANAGED_TABLES,
+    _MAX_VECTOR_DIM,
+    _SEARCH_TSV_GENERATION_DIGEST,
+    _SYNC_FUNCTIONS,
+    _SYNC_TABLES,
+    _TASK_TABLES,
+    ApplicationAclContract,
+    IngressAclContract,
+    Migration,
+    MigrationIntegrityError,
+    MigrationPlan,
+    SchemaFingerprint,
+    SchemaVariantFeatures,
+    _LedgerEntry,
+)
+
 _APPROVED_0002_CHECKSUM = "8e932e605e4eb36f6ec410c5a589001133a2db29ba902ff34227ae0a223e9a16"
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z][a-z0-9_]*)\.sql$")
 _SQL_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -22,192 +51,6 @@ _SQL_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Deliberately fixed, reviewed once, and kept independent of schema/migration
 # names.  This is a signed PostgreSQL bigint accepted by pg_advisory_xact_lock.
 _MIGRATION_LOCK_KEY: Final[int] = -4_710_001_234_567_890_123
-_LEDGER_TABLE: Final[str] = "memplex_schema_migrations"
-_CAPABILITIES_TABLE: Final[str] = "memplex_schema_capabilities"
-_MAX_VECTOR_DIM: Final[int] = 16_000
-_CORE_TABLES: Final[tuple[str, ...]] = (
-    "memplex_functions",
-    "memplex_edges",
-    "memplex_observations",
-    "memplex_facts",
-    "memplex_preferences",
-    "memplex_changelog",
-)
-_SYNC_TABLES: Final[tuple[str, ...]] = (
-    "memplex_sync_outbox",
-    "memplex_sync_entity_versions",
-    "memplex_sync_inbox",
-    "memplex_sync_batches",
-    "memplex_sync_targets",
-    "memplex_sync_deliveries",
-    "memplex_sync_cursors",
-    "memplex_sync_stream_state",
-    "memplex_sync_local_identity",
-    "memplex_sync_ingress_principals",
-    "memplex_sync_snapshots",
-    "memplex_sync_snapshot_items",
-)
-_TASK_TABLES: Final[tuple[str, ...]] = ("memplex_background_tasks",)
-_LEGACY_CORE_TABLES: Final[tuple[str, ...]] = (
-    "memplex_functions",
-    "memplex_edges",
-    "memplex_observations",
-    "memplex_changelog",
-)
-_MANAGED_TABLES: Final[tuple[str, ...]] = (
-    *_CORE_TABLES,
-    *_SYNC_TABLES,
-    *_TASK_TABLES,
-    "feedback",
-    _CAPABILITIES_TABLE,
-    _LEDGER_TABLE,
-)
-_APPLICATION_ACL_TABLES: Final[tuple[str, ...]] = (
-    *_CORE_TABLES,
-    "feedback",
-    *_SYNC_TABLES,
-    *_TASK_TABLES,
-)
-_APPLICATION_ACL: Final[dict[str, frozenset[str]]] = {
-    "memplex_functions": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_edges": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_observations": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_facts": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_preferences": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_changelog": frozenset({"SELECT", "INSERT", "DELETE"}),
-    "feedback": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_sync_outbox": frozenset({"SELECT", "INSERT", "DELETE"}),
-    "memplex_sync_entity_versions": frozenset({"SELECT", "INSERT", "UPDATE"}),
-    "memplex_sync_inbox": frozenset({"SELECT", "INSERT"}),
-    "memplex_sync_batches": frozenset({"SELECT", "INSERT"}),
-    "memplex_sync_targets": frozenset({"SELECT", "INSERT", "UPDATE"}),
-    "memplex_sync_deliveries": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_sync_cursors": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_sync_stream_state": frozenset({"SELECT", "INSERT", "UPDATE"}),
-    "memplex_sync_local_identity": frozenset(),
-    "memplex_sync_ingress_principals": frozenset(),
-    "memplex_sync_snapshots": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-    "memplex_sync_snapshot_items": frozenset({"SELECT", "INSERT", "DELETE"}),
-    "memplex_background_tasks": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
-}
-_APPLICATION_ACL_FUNCTIONS: Final[tuple[str, ...]] = (
-    "memplex_sync_capture_before",
-    "memplex_sync_capture_local_change",
-    "memplex_sync_assert_delivery_quota",
-    "memplex_sync_snapshot_admission_counts",
-    "memplex_sync_compact",
-)
-_SYNC_FUNCTIONS: Final[tuple[str, ...]] = (
-    "memplex_configure_sync_local_identity",
-    "memplex_sync_assert_delivery_quota",
-    "memplex_sync_snapshot_admission_counts",
-    "memplex_sync_compact",
-    "memplex_sync_capture_before",
-    "memplex_sync_capture_local_change",
-    "memplex_configure_sync_ingress_principal",
-    "memplex_sync_apply_inbound",
-    "memplex_sync_require_canonical_entity_key",
-    "memplex_sync_require_canonical_version",
-    "memplex_sync_encode_string_array",
-)
-_ACL_COLUMNS: Final[tuple[str, ...]] = (
-    "tenant_id",
-    "owner_subject",
-    "workspace",
-    "visibility",
-    "source_agent",
-    "source_session",
-)
-
-# ``pg_class`` is the authoritative managed-object namespace. PostgreSQL
-# represents primary-key backing indexes and BIGSERIAL sequences there too, so
-# scanning only ordinary relations would let a memplex-named object hide behind
-# an ignored relkind.
-_KNOWN_MEMPLEX_RELATION_KINDS: Final[dict[str, str]] = {
-    **{name: "r" for name in (*_CORE_TABLES, _CAPABILITIES_TABLE, _LEDGER_TABLE)},
-    **{name: "r" for name in _SYNC_TABLES},
-    **{name: "r" for name in _TASK_TABLES},
-    **{f"{name}_pkey": "i" for name in (*_CORE_TABLES, _CAPABILITIES_TABLE, _LEDGER_TABLE)},
-    "memplex_changelog_id_seq": "S",
-    "memplex_sync_local_identity_pkey": "i",
-    "memplex_sync_local_identity_node_id_key": "i",
-    "memplex_sync_ingress_principals_pkey": "i",
-    "memplex_functions_tenant_updated_idx": "i",
-    "memplex_functions_tenant_idx": "i",
-    "memplex_edges_tenant_source_type_target_idx": "i",
-    "memplex_edges_tenant_target_type_source_idx": "i",
-    "memplex_edges_tenant_idx": "i",
-    "memplex_edges_tenant_target_function_idx": "i",
-    "memplex_observations_tenant_idx": "i",
-    "memplex_facts_tenant_idx": "i",
-    "memplex_preferences_tenant_idx": "i",
-    "memplex_changelog_tenant_idx": "i",
-    "memplex_functions_workspace_normalized_name_key": "i",
-    "memplex_functions_user_normalized_name_key": "i",
-    "memplex_functions_session_normalized_name_key": "i",
-    **{f"{name}_pkey": "i" for name in _SYNC_TABLES},
-    "memplex_sync_targets_tenant_id_remote_node_id_key": "i",
-    "memplex_sync_snapshots_tenant_id_remote_id_consumer_id_requ_key": "i",
-    "memplex_sync_outbox_tenant_id_origin_node_id_event_id_key": "i",
-    "memplex_sync_outbox_stream_seq_seq": "S",
-    "memplex_sync_outbox_tenant_stream_idx": "i",
-    "memplex_sync_deliveries_claim_idx": "i",
-    "memplex_sync_deliveries_retention_idx": "i",
-    "memplex_sync_cursors_tenant_after_idx": "i",
-    "memplex_sync_snapshots_expiry_idx": "i",
-    "memplex_background_tasks_pkey": "i",
-    "memplex_background_tasks_due_idx": "i",
-    "memplex_background_tasks_lease_idx": "i",
-}
-
-_CORE_POLICY_DIGESTS: Final[tuple[str, str]] = (
-    "966aa3ee5c0224eafbba062f2bfee28f4a34b0f0f86f9ee23b72e6f62d08de0d",
-    "3f1fe3be69457e86e5c3f595d60141abcd127e987d5a7d01eab84f871c0d4493",
-)
-_FEEDBACK_CURRENT_POLICY_DIGESTS: Final[tuple[str, str]] = (
-    "5b5ddc963fccdcb941c7eccbcb646b053ef079d7bf47272964fc184891152025",
-    "f2c2439d4d159bdc189dc2cd46d116b69799483dd879af36d05f9b03ee98e679",
-)
-_FEEDBACK_RUNTIME_V1_POLICY_DIGESTS: Final[tuple[str, str]] = (
-    "dfa495e062435c70a0cbd2e3b971cdce89abc48a19b7a215897ad7b7fe03e5c2",
-    "8c8dd0553aab40d8e7c042fd759fa97ded54317596a291407d6a864fda2cb5c6",
-)
-_SEARCH_TSV_GENERATION_DIGEST: Final[str] = (
-    "542630b9761cfc19062f8e4c97e4b75cdfabc0f715170d779c5d33c0ec6968d7"
-)
-
-
-class MigrationIntegrityError(RuntimeError):
-    """Raised when versioned SQL resources cannot be safely trusted."""
-
-
-@dataclass(frozen=True, slots=True)
-class Migration:
-    """One immutable SQL resource discovered from the installed package."""
-
-    version: int
-    name: str
-    sql_bytes: bytes
-    checksum: str
-
-
-@dataclass(frozen=True, slots=True)
-class MigrationPlan:
-    """Read-only migration status returned by the Task 2 runner state machine."""
-
-    current_version: int
-    known_version: int
-    pending: tuple[Migration, ...]
-    state: Literal["ready", "upgrade_required", "blocked"]
-
-
-@dataclass(frozen=True, slots=True)
-class SchemaFingerprint:
-    """Canonical, catalogue-derived classification of the current schema."""
-
-    kind: Literal["empty", "pre_g002_3_2_7", "post_g002_current", "unknown"]
-    digest: str
-    variant: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,28 +85,6 @@ class PostgresApplicationPrincipal:
 
 
 @dataclass(frozen=True, slots=True)
-class ApplicationAclContract:
-    """Data-only authorization allowance for one exact application role."""
-
-    role: str
-
-    def __post_init__(self) -> None:
-        if type(self.role) is not str or not self.role:
-            raise TypeError("application ACL role must be an exact non-empty str")
-
-
-@dataclass(frozen=True, slots=True)
-class IngressAclContract:
-    """Exact relation-less LOGIN principal allowed to submit inbound batches."""
-
-    role: str
-
-    def __post_init__(self) -> None:
-        if type(self.role) is not str or not self.role:
-            raise TypeError("ingress ACL role must be an exact non-empty str")
-
-
-@dataclass(frozen=True, slots=True)
 class VectorCapabilityRequest:
     """An immutable request for the one controlled pgvector capability."""
 
@@ -289,15 +110,6 @@ class VectorCapabilityStatus:
     state: Literal["ready", "degraded", "disabled"]
     dim: int
     parameter_digest: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _LedgerEntry:
-    version: int
-    name: str
-    checksum: str
-    execution_mode: str
-    baseline_fingerprint: str | None
 
 
 def _migration_resources() -> dict[str, bytes]:
@@ -753,10 +565,11 @@ def _vector_extension_type(cur: Any) -> tuple[str, int] | None:
 # Re-export the split-out whole-catalogue snapshot reader so
 # schema_fingerprint's bare-name call and any external import path keep
 # resolving.
-# Re-export the split-out catalogue verification helpers and schema
-# constants so existing ``from ...runner import _matches_post_core`` /
+# Re-export the split-out catalogue verification helpers so existing
+# ``from ...runner import _matches_post_core`` /
 # ``runner._EDGE_TARGET_FUNCTION_EXPRESSION`` paths and bare-name
-# references in this module keep resolving.
+# references in this module keep resolving.  Shared schema constants and
+# data classes come from ``_constants`` (imported at the top).
 from memplex.storage.migrations.catalogue_checks import (  # noqa: F401
     _EDGE_FOREIGN_KEY_SHAPES,
     _EDGE_TARGET_FUNCTION_EXPRESSION,
@@ -877,14 +690,16 @@ def schema_fingerprint(
     layout, has_integrity_indexes, vector_dim, has_edge_integrity = core
     feedback = tables.get("feedback")
     capabilities = tables.get(_CAPABILITIES_TABLE)
+    # The variant classification is feature-structured; the display name is
+    # rendered once from the features at the end.
+    feedback_v1 = False
+    current = False
     if (
         not has_integrity_indexes
         and feedback is None
         and capabilities is None
     ):
-        variant = f"post_g002_{layout}"
-        if vector_dim is not None:
-            variant = f"{variant}_vector_{vector_dim}"
+        pass
     elif (
         layout == "runtime_v1"
         and not has_integrity_indexes
@@ -892,9 +707,7 @@ def schema_fingerprint(
         and _matches_runtime_feedback_v1(feedback)
         and capabilities is None
     ):
-        variant = "post_g002_runtime_v1_feedback_v1"
-        if vector_dim is not None:
-            variant = f"{variant}_vector_{vector_dim}"
+        feedback_v1 = True
     elif (
         has_integrity_indexes
         and feedback is not None
@@ -902,35 +715,30 @@ def schema_fingerprint(
         and capabilities is not None
         and _matches_capabilities(capabilities, snapshot["capabilities"], vector_dim=vector_dim)
     ):
-        variant = f"post_g002_{layout}"
-        if has_edge_integrity:
-            variant = f"{variant}_edge_integrity"
-        variant = f"{variant}_current"
-        if vector_dim is not None:
-            variant = f"{variant}_vector_{vector_dim}"
+        current = True
     else:
         return SchemaFingerprint("unknown", digest, "unknown")
     if has_reliable_sync:
-        if not variant.endswith("_current") and "_current_vector_" not in variant:
+        if not current:
             return SchemaFingerprint("unknown", digest, "unknown")
-        variant = (
-            variant.replace("_vector_", "_reliable_sync_v5_vector_", 1)
-            if "_vector_" in variant
-            else f"{variant}_reliable_sync_v5"
-        )
     elif any(name in tables for name in _SYNC_TABLES):
         return SchemaFingerprint("unknown", digest, "unknown")
     if has_background_tasks:
         if not has_reliable_sync:
             return SchemaFingerprint("unknown", digest, "unknown")
-        variant = (
-            variant.replace("_vector_", "_background_tasks_v6_vector_", 1)
-            if "_vector_" in variant
-            else f"{variant}_background_tasks_v6"
-        )
     elif any(name in tables for name in _TASK_TABLES):
         return SchemaFingerprint("unknown", digest, "unknown")
-    return SchemaFingerprint("post_g002_current", _variant_digest(variant), variant)
+    features = SchemaVariantFeatures(
+        layout=layout,
+        feedback_v1=feedback_v1,
+        current=current,
+        has_edge_integrity=has_edge_integrity and current,
+        has_reliable_sync=has_reliable_sync,
+        has_background_tasks=has_background_tasks,
+        vector_dim=vector_dim,
+    )
+    variant = features.display_name()
+    return SchemaFingerprint("post_g002_current", _variant_digest(variant), variant, features)
 
 
 
@@ -1269,17 +1077,14 @@ class PostgresMigrationRunner:
         final = _plan_from_observed_state(
             _read_ledger_if_present(cur), fingerprint, self._migrations
         )
+        features = fingerprint.features
         if (
             digest != _vector_parameter_digest(dimension)
             or final.state != "ready"
             or fingerprint.kind != "post_g002_current"
-            or not (
-                fingerprint.variant.endswith(f"_current_vector_{dimension}")
-                or fingerprint.variant.endswith(f"_reliable_sync_v5_vector_{dimension}")
-                or fingerprint.variant.endswith(
-                    f"_background_tasks_v6_vector_{dimension}"
-                )
-            )
+            or features is None
+            or not features.current
+            or features.vector_dim != dimension
         ):
             raise MigrationIntegrityError("vector capability did not converge")
 
@@ -1500,14 +1305,11 @@ class PostgresMigrationRunner:
             )
             capabilities = tuple((str(name), str(digest)) for name, digest in cur.fetchall())
             expected_digest = _vector_parameter_digest(request.dim)
+            features = fingerprint.features
             if (
-                (
-                    fingerprint.variant.endswith(f"_current_vector_{request.dim}")
-                    or fingerprint.variant.endswith(f"_reliable_sync_v5_vector_{request.dim}")
-                    or fingerprint.variant.endswith(
-                        f"_background_tasks_v6_vector_{request.dim}"
-                    )
-                )
+                features is not None
+                and features.current
+                and features.vector_dim == request.dim
                 and capabilities == (("pgvector_embedding", expected_digest),)
             ):
                 return VectorCapabilityStatus(
@@ -1518,12 +1320,9 @@ class PostgresMigrationRunner:
             if (
                 profile == "development"
                 and request.policy == "best_effort"
-                and (
-                    fingerprint.variant.endswith("_current")
-                    or fingerprint.variant.endswith("_reliable_sync_v5")
-                    or fingerprint.variant.endswith("_background_tasks_v6")
-                )
-                and "_vector_" not in fingerprint.variant
+                and features is not None
+                and features.current
+                and features.vector_dim is None
                 and capabilities == ()
             ):
                 return VectorCapabilityStatus(state="degraded", dim=request.dim)

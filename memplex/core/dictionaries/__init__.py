@@ -1,7 +1,7 @@
 """Term dictionary for association mapping."""
 
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import yaml
 
@@ -9,15 +9,16 @@ import yaml
 class TermDictionary:
     """Term dictionary for association mapping."""
 
-    def __init__(self, base_path: str = None):
+    def __init__(self, base_path: Optional[str] = None):
         if base_path is None:
-            base_path = Path(__file__).parent / "base_terms.yaml"
-        self.base_path = Path(base_path)
+            self.base_path = Path(__file__).parent / "base_terms.yaml"
+        else:
+            self.base_path = Path(base_path)
         self.terms: Dict[str, List[str]] = {}
         self.reverse_map: Dict[str, str] = {}  # synonym -> canonical
         self._load()
 
-    def _load(self):
+    def _load(self) -> None:
         """Load dictionary from YAML."""
         if not self.base_path.exists():
             return

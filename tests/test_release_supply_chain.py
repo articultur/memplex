@@ -82,8 +82,8 @@ def test_release_version_set_rejects_any_metadata_drift(tmp_path: Path) -> None:
     paths = {
         "pyproject.toml": '[project]\nname="memplex"\nversion="3.3.0"\n',
         "npm/memplex/package.json": '{"name":"memplex","version":"3.3.1"}',
-        "npm/agent-installer/package.json": '{"version":"0.2.0","dependencies":{"memplex":"3.3.0"}}',
-        "npm/hermes-installer/package.json": '{"version":"0.2.0","dependencies":{"memplex":"3.3.0"}}',
+        "npm/archive/agent-installer/package.json": '{"version":"0.2.0","dependencies":{"memplex":"3.3.0"}}',
+        "npm/archive/hermes-installer/package.json": '{"version":"0.2.0","dependencies":{"memplex":"3.3.0"}}',
         "marketplace.json": '{"plugins":[{"version":"3.3.0"}]}',
         "plugin/.claude-plugin/plugin.json": '{"version":"3.3.0"}',
         "plugin/.codex-plugin/plugin.json": '{"version":"3.3.0"}',

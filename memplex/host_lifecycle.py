@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NoReturn
 
 _SCHEMA_VERSION = 3
 _HOSTS = ("claude-code", "codex", "hermes", "openclaw")
@@ -91,7 +91,7 @@ class HostLifecycleIntegrityError(RuntimeError):
         super().__init__("host lifecycle evidence integrity check failed")
 
 
-def _fail(code: str = "host_lifecycle_integrity") -> None:
+def _fail(code: str = "host_lifecycle_integrity") -> NoReturn:
     raise HostLifecycleIntegrityError(code)
 
 
@@ -342,7 +342,7 @@ class HostLifecycleProof:
         for result in results:
             if type(result) is not list or len(result) != 2:
                 _fail()
-            parsed_results.append((result[0], result[1]))  # type: ignore[arg-type]
+            parsed_results.append((result[0], result[1]))
         return cls(
             host=payload["host"],
             cli_path=payload["cli_path"],
@@ -353,7 +353,7 @@ class HostLifecycleProof:
             required_node_results=tuple(parsed_results),
             required_node_manifest_sha256=payload["required_node_manifest_sha256"],
             junit_sha256=payload["junit_sha256"],
-        )  # type: ignore[arg-type]
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,7 +483,7 @@ class HostLifecycleEvidence:
             key_id=payload["key_id"],
             status=payload["status"],
             signature=payload["signature"],
-        )  # type: ignore[arg-type]
+        )
 
     @classmethod
     def create(

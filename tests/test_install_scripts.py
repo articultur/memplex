@@ -10,10 +10,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 AGENT_INSTALLER = PROJECT_ROOT / "scripts" / "install-agent.sh"
 HERMES_INSTALLER = PROJECT_ROOT / "scripts" / "install-hermes.sh"
-NPM_AGENT_PACKAGE = PROJECT_ROOT / "npm" / "agent-installer" / "package.json"
-NPM_AGENT_BIN = PROJECT_ROOT / "npm" / "agent-installer" / "bin" / "memplex-install-agent.js"
-NPM_PACKAGE = PROJECT_ROOT / "npm" / "hermes-installer" / "package.json"
-NPM_BIN = PROJECT_ROOT / "npm" / "hermes-installer" / "bin" / "memplex-install-hermes.js"
+NPM_AGENT_PACKAGE = PROJECT_ROOT / "npm" / "archive" / "agent-installer" / "package.json"
+NPM_AGENT_BIN = (
+    PROJECT_ROOT / "npm" / "archive" / "agent-installer" / "bin" / "memplex-install-agent.js"
+)
+NPM_PACKAGE = PROJECT_ROOT / "npm" / "archive" / "hermes-installer" / "package.json"
+NPM_BIN = (
+    PROJECT_ROOT / "npm" / "archive" / "hermes-installer" / "bin" / "memplex-install-hermes.js"
+)
 NPM_MEMPLEX_PACKAGE = PROJECT_ROOT / "npm" / "memplex" / "package.json"
 NPM_MEMPLEX_BIN = PROJECT_ROOT / "npm" / "memplex" / "bin" / "memplex.js"
 NPM_MEMPLEX_INSTALLER = PROJECT_ROOT / "npm" / "memplex" / "install-agent.sh"

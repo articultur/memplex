@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import tempfile
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class URLHandler:
         return True
 
     @staticmethod
-    def _read_limited(response, limit: int) -> Optional[bytes]:
+    def _read_limited(response: Any, limit: int) -> Optional[bytes]:
         """Read at most ``limit`` bytes; return None if the body exceeds it."""
         total = 0
         chunks = []
@@ -162,7 +162,7 @@ class URLHandler:
         return b"".join(chunks)
 
     @staticmethod
-    def _build_opener():
+    def _build_opener() -> Any:
         """Build an opener that does NOT auto-follow redirects."""
         import urllib.request
 
@@ -214,7 +214,7 @@ class URLHandler:
                 # For HTTPS, hostname verification uses the original URL's
                 # hostname; only the TCP destination is pinned.
                 if parsed.scheme == "http":
-                    pinned = current_url.replace(parsed.hostname, safe_ip, 1)
+                    pinned = current_url.replace(parsed.hostname or "", safe_ip, 1)
                     host_header = parsed.netloc
                 else:
                     pinned = current_url  # HTTPS: pin via custom handler below

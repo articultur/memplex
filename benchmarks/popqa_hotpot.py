@@ -29,6 +29,9 @@ from benchmarks.base import (
     BenchmarkSample,
     BenchmarkSourceDocument,
     EvaluationDataset,
+    LatencyStats,
+    normalize_answer_text,
+    token_f1,
 )
 from memplex.models.memory import Fact
 from memplex.models.source import SourceDocument, SourceType
@@ -55,12 +58,7 @@ _HF_CONFIGS = {
 
 def _normalize_text(text: str) -> str:
     """Normalize text for comparison: lowercase, strip punctuation."""
-    if not text:
-        return ""
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s']", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return normalize_answer_text(text)
 
 
 def _extract_answer_aliases(answer: Any) -> List[str]:
@@ -103,23 +101,7 @@ def _extract_answer_aliases(answer: Any) -> List[str]:
 
 def _compute_token_f1(prediction: str, reference: str) -> float:
     """Compute token-level F1 between prediction and reference strings."""
-    pred_tokens = _normalize_text(prediction).split()
-    ref_tokens = _normalize_text(reference).split()
-
-    if not pred_tokens or not ref_tokens:
-        return 0.0
-
-    common = set(pred_tokens) & set(ref_tokens)
-    if not common:
-        return 0.0
-
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(ref_tokens)
-
-    if precision + recall == 0:
-        return 0.0
-
-    return 2 * precision * recall / (precision + recall)
+    return token_f1(prediction, reference)
 
 
 class PopQAHotpotDataset(EvaluationDataset):
@@ -562,8 +544,9 @@ def _compute_multihop_metrics(
     for fact in supporting_facts:
         if isinstance(fact, dict):
             title = fact.get("title", "")
-            if title:
-                hop_entities.append(_normalize_text(title))
+            entity = _normalize_text(title) if title else ""
+            if entity and entity not in hop_entities:
+                hop_entities.append(entity)
 
     num_hops = len(hop_entities) if hop_entities else max_hops
 
@@ -576,11 +559,19 @@ def _compute_multihop_metrics(
 
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
-        top_k_lower = " ".join(top_k_summaries).lower()
-        hops_in_top_k = sum(1 for entity in hop_entities if entity in top_k_lower)
-        # Precision: covered hops per retrieved slot; Recall: covered hops per required hop
-        metrics[f"hop_precision@{k}"] = hops_in_top_k / k if k > 0 else 0.0
-        metrics[f"hop_recall@{k}"] = hops_in_top_k / num_hops if num_hops > 0 else 0.0
+        normalized_summaries = [summary.lower() for summary in top_k_summaries]
+        relevant_slots = sum(
+            1
+            for summary in normalized_summaries
+            if any(entity in summary for entity in hop_entities)
+        )
+        covered_hops = sum(
+            1
+            for entity in hop_entities
+            if any(entity in summary for summary in normalized_summaries)
+        )
+        metrics[f"hop_precision@{k}"] = relevant_slots / k if k > 0 else 0.0
+        metrics[f"hop_recall@{k}"] = covered_hops / num_hops if num_hops > 0 else 0.0
 
     metrics["multihop_accuracy"] = 1.0 if all(hops_covered) else 0.0
     metrics["hop_coverage"] = sum(hops_covered) / num_hops if num_hops > 0 else 0.0
@@ -648,10 +639,12 @@ class PopQAHotpotRunner(BenchmarkRunner):
         popqa_metrics = self._run_popqa_retrieval(service, popqa_samples, top_k)
         hotpotqa_metrics = self._run_hotpotqa_retrieval(service, hotpotqa_samples, top_k)
 
-        latencies = [
-            m["_latency_ms"] for m in (popqa_metrics, hotpotqa_metrics) if "_latency_ms" in m
-        ]
-        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        combined_latency = LatencyStats()
+        for metrics in (popqa_metrics, hotpotqa_metrics):
+            stats = metrics.get("_latency_stats")
+            if isinstance(stats, LatencyStats):
+                combined_latency.extend(stats)
+        avg_latency = combined_latency.mean
 
         all_metrics = {**popqa_metrics, **hotpotqa_metrics}
 
@@ -675,6 +668,8 @@ class PopQAHotpotRunner(BenchmarkRunner):
                     latency_ms=avg_latency,
                     samples=total_samples,
                     timestamp=timestamp,
+                    latency_p50_ms=combined_latency.p50,
+                    latency_p99_ms=combined_latency.p99,
                 )
             )
 
@@ -692,7 +687,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
         service: MemplexService,
         samples: List[BenchmarkSample],
         top_k: int,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """Run retrieval on PopQA samples (single-hop entity QA)."""
         if not samples:
             return {}
@@ -700,16 +695,15 @@ class PopQAHotpotRunner(BenchmarkRunner):
         mrr_scores: List[float] = []
         em_scores: List[float] = []
         recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
-        latencies: List[int] = []
+        latencies = LatencyStats()
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
             if not answer_aliases and sample.expected_answer:
                 answer_aliases = [_normalize_text(sample.expected_answer)]
 
-            query_start = datetime.utcnow()
-            query_result = service.query(sample.query, top_k=top_k)
-            latencies.append(int((datetime.utcnow() - query_start).total_seconds() * 1000))
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
             retrieved_summaries = [r.summary for r in query_result.results]
 
             metrics = _compute_hop_metrics(
@@ -724,7 +718,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
             for k in self._k_values:
                 recall_scores[f"recall@{k}"].append(metrics.get(f"recall@{k}", 0.0))
 
-        avg_metrics: Dict[str, float] = {}
+        avg_metrics: Dict[str, Any] = {}
 
         if mrr_scores:
             avg_metrics["mrr"] = sum(mrr_scores) / len(mrr_scores)
@@ -733,9 +727,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 avg_metrics[f"recall@{k}"] = sum(recall_scores[f"recall@{k}"]) / len(
                     recall_scores[f"recall@{k}"]
                 )
-            avg_metrics["_latency_ms"] = (
-                int(sum(latencies) / len(latencies)) if latencies else 0
-            )
+            avg_metrics["_latency_stats"] = latencies
 
         return avg_metrics
 
@@ -744,7 +736,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
         service: MemplexService,
         samples: List[BenchmarkSample],
         top_k: int,
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Any]:
         """Run retrieval on HotpotQA samples (multi-hop reasoning)."""
         if not samples:
             return {}
@@ -756,7 +748,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
             f"hop_precision@{k}": [] for k in self._k_values
         }
         hop_recall_scores: Dict[str, List[float]] = {f"hop_recall@{k}": [] for k in self._k_values}
-        latencies: List[int] = []
+        latencies = LatencyStats()
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
@@ -766,9 +758,8 @@ class PopQAHotpotRunner(BenchmarkRunner):
             supporting_facts = sample.metadata.get("supporting_facts", [])
             num_hops = sample.metadata.get("num_hops", 2)
 
-            query_start = datetime.utcnow()
-            query_result = service.query(sample.query, top_k=top_k)
-            latencies.append(int((datetime.utcnow() - query_start).total_seconds() * 1000))
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
             first_hop_summaries = [r.summary for r in query_result.results]
             first_hop_func_ids = [r.func_id for r in query_result.results]
 
@@ -803,7 +794,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 )
                 hop_recall_scores[f"hop_recall@{k}"].append(metrics.get(f"hop_recall@{k}", 0.0))
 
-        avg_metrics: Dict[str, float] = {}
+        avg_metrics: Dict[str, Any] = {}
 
         if multihop_acc_scores:
             n = len(multihop_acc_scores)
@@ -815,9 +806,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                     sum(hop_precision_scores[f"hop_precision@{k}"]) / n
                 )
                 avg_metrics[f"hop_recall@{k}"] = sum(hop_recall_scores[f"hop_recall@{k}"]) / n
-            avg_metrics["_latency_ms"] = (
-                int(sum(latencies) / len(latencies)) if latencies else 0
-            )
+            avg_metrics["_latency_stats"] = latencies
 
         return avg_metrics
 
@@ -833,17 +822,15 @@ class PopQAHotpotRunner(BenchmarkRunner):
         results: List[BenchmarkResult] = []
         em_scores: List[float] = []
         f1_scores: List[float] = []
-        total_latency = 0
+        latencies = LatencyStats()
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
             if not answer_aliases and sample.expected_answer:
                 answer_aliases = [_normalize_text(sample.expected_answer)]
 
-            query_start = datetime.utcnow()
-            query_result = service.query(sample.query, top_k=5)
-            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
-            total_latency += query_latency
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=5)
 
             prediction = ""
             for r in query_result.results:
@@ -857,7 +844,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
             em_scores.append(qa_metrics.get("exact_match", 0.0))
             f1_scores.append(qa_metrics.get("f1", 0.0))
 
-        avg_latency = total_latency // max(len(samples), 1)
+        avg_latency = latencies.mean
         timestamp = datetime.utcnow().isoformat() + "Z"
 
         avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
@@ -872,6 +859,8 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=len(samples),
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             )
         )
 
@@ -884,6 +873,8 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=len(samples),
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             )
         )
 

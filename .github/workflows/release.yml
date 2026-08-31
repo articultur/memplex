@@ -114,6 +114,11 @@ jobs:
             release/*.tgz
           sbom-path: release/release-sbom.cdx.json
 
+  # The real-host proof runs on the protected macOS runner labeled
+  # memplex-g008-real-host.  Its timeout and the offline-runner rerun
+  # guidance live in g008-real-host-lifecycle.yml; a stalled gate blocks
+  # publish-pypi and publish-npm, which are digest-idempotent and safe
+  # to re-run.
   four-host-real-lifecycle:
     needs: [attest, build]
     uses: ./.github/workflows/g008-real-host-lifecycle.yml

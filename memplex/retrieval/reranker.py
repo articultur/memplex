@@ -3,7 +3,7 @@
 Two-stage retrieval architecture::
 
     Stage 1 (bi-encoder, fast):
-        Reranker scores candidates across 5 dimensions and returns top-K.
+        Reranker scores candidates across 6 dimensions and returns top-K.
 
     Stage 2 (cross-encoder, precise, optional):
         CrossEncoderReranker re-scores the top-K with a jointly-encoded model
@@ -55,7 +55,7 @@ def cosine_similarity(a: Vector, b: Vector) -> float:
     return dot / (norm_a * norm_b + 1e-8)
 
 
-# ── 5-dimensional Reranker ────────────────────────────────────────────
+# ── 6-dimensional Reranker ────────────────────────────────────────────
 
 
 class Reranker:
@@ -63,11 +63,13 @@ class Reranker:
 
     Scoring dimensions and default weights::
 
-        raw_relevance      0.25  -- original score from each retrieval path
+        raw_relevance       0.25  -- original score from each retrieval path
         semantic_similarity 0.30  -- cosine(query_vec, result_vec)
         recency_decay       0.15  -- exponential decay (~0.61 at 30 days)
-        source_authority    0.15  -- requirement > meeting > code > wiki
-        frequency           0.15  -- log-scaled access count * recency
+        source_authority    0.10  -- requirement > meeting > code > wiki
+        frequency           0.10  -- log-scaled access count * recency
+        confidence          0.10  -- extraction-quality score persisted on the
+                                     node (clamped [0, 1], neutral 0.5 if absent)
 
     Parameters
     ----------
@@ -116,7 +118,7 @@ class Reranker:
         top_k: int = 10,
         query_vector: Optional[Vector] = None,
     ) -> List[SearchResult]:
-        """Re-rank *results* using the 5-dimensional scoring model.
+        """Re-rank *results* using the 6-dimensional scoring model.
 
         Parameters
         ----------
@@ -212,7 +214,7 @@ class Reranker:
             return embed_query(text)
         return self.embedder.embed(text)
 
-    def _recency_decay(self, updated_at: Optional[datetime]) -> float:
+    def _recency_decay(self, updated_at: Optional[datetime] | str) -> float:
         """Exponential time decay, range (0, 1], 0.5 at ``halflife * ln 2`` days.
 
         ``score = exp(-days_since_update / halflife)`` where the half-life is

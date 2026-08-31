@@ -35,7 +35,7 @@ class Paragraph:
 class ParagraphCollection:
     paragraphs: List[Paragraph] = field(default_factory=list)
 
-    def add(self, paragraph: Paragraph):
+    def add(self, paragraph: Paragraph) -> None:
         self.paragraphs.append(paragraph)
 
     def get_by_id(self, para_id: str) -> Optional[Paragraph]:

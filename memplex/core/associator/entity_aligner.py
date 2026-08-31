@@ -18,7 +18,7 @@ class EntityAligner:
         "payment": ["支付", "payment", "pay", "付款"],
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Build reverse mapping from Chinese/alt terms to English canonical forms."""
         self._chinese_to_english = {}
         for english, chinese_list in self.TERM_EQUIVALENCES.items():

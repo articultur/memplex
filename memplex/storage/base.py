@@ -154,7 +154,7 @@ class MemoryStore(ABC):
         avoid read-modify-write races.
         """
 
-    def increment_access_batch(self, func_ids) -> None:
+    def increment_access_batch(self, func_ids: List[str]) -> None:
         """Increment access_count for many funcs in a single persistence pass.
 
         Default implementation loops the single-func primitive so every

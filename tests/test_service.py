@@ -1376,6 +1376,27 @@ class TestHealthSemantics:
         assert health["injection_scans_detected_24h"] == 2
         assert set(service._injection_scans._counts) == {today}
 
+    def test_operations_metrics_status_tolerates_sync_scoped_resources(self, service):
+        # Regression: with sync ingress enabled, ``_postgres_resources`` holds
+        # a PostgresSyncStorageResources wrapper, which deliberately exposes no
+        # pool counters.  The metrics status must degrade those gauges to 0
+        # instead of raising AttributeError.
+        from memplex.storage.postgres_resources import PostgresSyncStorageResources
+
+        service._postgres_resources = PostgresSyncStorageResources(
+            app_dsn="postgresql://app@example.invalid/app",
+            migration_dsn="postgresql://migration@example.invalid/migration",
+            inbound_dsn="postgresql://inbound@example.invalid/inbound",
+        )
+        try:
+            status = service.operations_metrics_status()
+        finally:
+            service._postgres_resources = None
+
+        assert status["pool_business_leases"] == 0
+        assert status["pool_high_watermark"] == 0
+        assert status["pool_max_connections"] == 0
+
 
 class TestStopFlushesSyncPush:
     def test_sync_health_reports_bounded_pending_task_count(self, service, monkeypatch):
@@ -1402,3 +1423,53 @@ class TestStopFlushesSyncPush:
         service.store = wrapped
         service.stop()
         assert calls == [1]
+
+
+class TestSseSubscriberCountProvider:
+    """The public SSE subscriber-count registration point on memplex.service."""
+
+    def _syncable_service(self, service, monkeypatch):
+        from memplex.sync import RemoteSyncConfig, SyncableStore
+
+        monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+        monkeypatch.delenv("MEMPLEX_PEERS", raising=False)
+        service.store = SyncableStore(service.store, config=RemoteSyncConfig())
+        return service
+
+    def test_registered_provider_count_surfaces_in_sync_health(
+        self, service, monkeypatch
+    ):
+        import memplex.service as service_module
+
+        # Register teardown for the process-global provider so a
+        # create_app-registered callback from another suite is restored.
+        monkeypatch.setattr(
+            service_module,
+            "_sse_subscriber_count_provider",
+            service_module._sse_subscriber_count_provider,
+        )
+        service_module.register_sse_subscriber_count_provider(lambda: 3)
+        service = self._syncable_service(service, monkeypatch)
+
+        health = service._sync_health()
+
+        assert health["sse_subscribers"] == 3
+
+    def test_raising_provider_fails_closed_to_zero(self, service, monkeypatch):
+        import memplex.service as service_module
+
+        monkeypatch.setattr(
+            service_module,
+            "_sse_subscriber_count_provider",
+            service_module._sse_subscriber_count_provider,
+        )
+
+        def broken() -> int:
+            raise RuntimeError("adapter gone")
+
+        service_module.register_sse_subscriber_count_provider(broken)
+        service = self._syncable_service(service, monkeypatch)
+
+        health = service._sync_health()
+
+        assert health["sse_subscribers"] == 0

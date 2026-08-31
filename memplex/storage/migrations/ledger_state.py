@@ -25,9 +25,9 @@ from memplex.storage.migrations.catalogue_checks import (
     _variant_digest,
 )
 
-# Data classes and the ledger-table constant live in ``runner``; this is an
-# ordered circular import (``runner`` re-imports these functions at its end).
-from memplex.storage.migrations.runner import (
+# Data classes and the ledger-table constant live in ``_constants`` (the
+# dependency-free shared module for this migration cluster).
+from memplex.storage.migrations._constants import (
     _LEDGER_TABLE,
     Migration,
     MigrationIntegrityError,

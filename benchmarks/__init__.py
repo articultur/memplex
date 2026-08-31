@@ -19,6 +19,10 @@ from .locomo import (
     LocomoDataset,
     LocomoRunner,
 )
+from .longmemeval import (
+    LongMemEvalDataset,
+    LongMemEvalRunner,
+)
 from .memory_eval import (
     MemoryBenchmarkDataset,
     MemoryBenchmarkRunner,
@@ -82,6 +86,9 @@ __all__ = [
     # LoCoMo
     "LocomoDataset",
     "LocomoRunner",
+    # LongMemEval
+    "LongMemEvalDataset",
+    "LongMemEvalRunner",
     # Memory benchmark
     "MemoryBenchmarkDataset",
     "MemoryBenchmarkRunner",

@@ -6,8 +6,8 @@
 2. `.venv/bin/ruff check memplex tests` — lint gate incl. C901 complexity freeze
 2b. `.venv/bin/lint-imports` — hexagonal architecture contract
 2c. `.venv/bin/mypy` — typed-boundary gate (file list pinned in `pyproject.toml [tool.mypy]` — that list is the authoritative count; `tests/test_release_workflows.py` pins it against drift) (ruff is pinned `<0.16`; do not bump without fixing the ~1.8k 0.16-rule violations first).
-3. Full lite suite: `.venv/bin/python -m pytest tests -q --cov=memplex --cov-fail-under=68`
-   (~3,100 tests, ~7 min; suite count grows — always report the real number).
+3. Full lite suite: `.venv/bin/python -m pytest tests -q --cov=memplex --cov-fail-under=75`
+   (~3,300 tests, ~7 min; suite count grows — always report the real number; CI enforces the same `--cov-fail-under=75`).
 4. Real-PostgreSQL gate for any `storage/`, `sync*`, or migrations change —
    CI-fidelity run (external DSN + mandatory pgvector):
    `python /tmp/ci_pg_fidelity.py` pattern — i.e. `MEMPLEX_TEST_POSTGRES_DSN=<uri> MEMPLEX_REQUIRE_PGVECTOR=1 pytest tests/test_postgres_integration.py tests/test_postgres_backup_integration.py tests/test_sync_postgres_integration.py tests/test_sync_repository_contract.py tests/test_g014_postgres_task_repository.py tests/test_ci_postgres_contract.py` (~730 tests via pgserver).
@@ -15,7 +15,7 @@
 
 ## Architecture invariants (see docs/architecture.md for the full map)
 
-- **Ordered circular imports**: `storage/migrations/{catalogue_checks,acl_verification,ledger_state,catalogue_snapshot}.py` borrow constants/dataclasses from `runner.py`. This only works because `runner.py` defines them BEFORE its end-of-file re-export imports. Never move a constant definition below those import blocks.
+- **Shared migration constants**: `storage/migrations/_constants.py` (stdlib-only, no internal imports) owns every schema constant and data class shared by `runner.py` and `{catalogue_checks,acl_verification,ledger_state,catalogue_snapshot}.py` — all five import from `_constants`, so no import order is load-bearing. `runner.py` keeps its re-export blocks (and its top-level `_constants` import) so `from ...runner import X` paths and `runner.X` monkeypatches keep resolving. Add new shared names to `_constants.py`, never back into `runner.py`.
 - **Live-module routing**: `storage/postgres_resources.py` must resolve `PostgresPoolManager` / `_new_migration_runner` via `_pool.X` attribute access (not `from pool import X`) — the test suite monkeypatches `pool.*` and direct imports would silently break ~15 patches.
 - **G008 contract file set**: `memplex/adapters/{agent_installer,install_transaction,agent_assets,agent_runtime,managed_identity,runtime_status,_shared}.py` are hashed into every host's readiness proof. Adding/removing/renaming any file in this cluster requires updating BOTH `host_lifecycle._contract_files()` AND the mutation manifest in `tests/test_host_lifecycle_evidence.py`.
 - **Sync lockstep**: both sync repositories inherit `AbstractSyncRepository` (17 abstract methods). Adding a sync operation = add it to the ABC + Protocol + both backends + `tests/test_sync_repository_contract.py`.
@@ -31,7 +31,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **memplex** (10788 symbols, 27826 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **memplex** (11226 symbols, 28920 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

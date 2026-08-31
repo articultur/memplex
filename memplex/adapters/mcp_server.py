@@ -405,13 +405,13 @@ class MCPServer:
         :func:`load_config`.
     """
 
-    def __init__(self, config=None) -> None:
+    def __init__(self, config: Any = None) -> None:
         self._config = config
-        self._service = None
+        self._service: Any = None
 
     # ── Lifecycle ────────────────────────────────────────────────
 
-    def _ensure_service(self):
+    def _ensure_service(self) -> None:
         """Lazy-initialize the MemplexService."""
         if self._service is not None:
             return
@@ -764,7 +764,7 @@ class MCPServer:
             )
         return {"total": len(items), "observations": items}
 
-    def _list_observations_filtered(self, *, category, query, limit, runtime):
+    def _list_observations_filtered(self, *, category: Any, query: Any, limit: Any, runtime: Any) -> list:
         """List observations with the substring filter applied BEFORE *limit*.
 
         The store applies its own limit first, so when a *query* is present
@@ -782,7 +782,7 @@ class MCPServer:
             return []
         if limit <= 0:
             return []
-        matched = []
+        matched: list = []
         offset = 0
         scanned = 0
         page_size = min(MAX_MODEL_SCAN_ITEMS, max(limit, 100))
@@ -862,7 +862,7 @@ class MCPServer:
 
         return get_agent_manifest(args.get("agent", "codex"))
 
-    def _agent_runtime(self, args: dict):
+    def _agent_runtime(self, args: dict) -> Any:
         """Build an AgentMemoryRuntime bound to this MCP service."""
         from memplex.adapters.agent_runtime import AgentMemoryRuntime
 
@@ -881,7 +881,7 @@ class MCPServer:
         )
 
     @staticmethod
-    def _trusted_identity(env_name: str, default):
+    def _trusted_identity(env_name: str, default: Any) -> Any:
         """Resolve identity from process state, never model-controlled arguments."""
 
         installed_value = os.environ.get(env_name)
@@ -889,7 +889,7 @@ class MCPServer:
             return installed_value
         return default
 
-    def _require_memory_access(self, memory_id: str, args: dict):
+    def _require_memory_access(self, memory_id: str, args: dict) -> Any:
         runtime = self._agent_runtime(args)
         memory = runtime.get_accessible_memory(memory_id)
         if memory is None:

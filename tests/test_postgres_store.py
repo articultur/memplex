@@ -128,7 +128,11 @@ class _MockCursor:
         if not self.executed:
             return self._fetchone_val
         sql, params = self.executed[-1]
-        if any("memplex_sync_local_identity" in str(param) for param in params):
+        if any(
+            denied in str(param)
+            for denied in ("memplex_sync_local_identity", "memplex_sync_ingress_principals")
+            for param in params
+        ):
             return (False,)
         if any(
             "memplex_configure_sync_local_identity" in str(param)
@@ -1764,6 +1768,43 @@ def test_application_probe_uses_savepoints_for_negative_rls_with_check_writes():
         release = f"RELEASE SAVEPOINT memplex_probe_{name}_rls"
         assert statements.index(savepoint) < statements.index(rollback) < statements.index(release)
     assert sum("set_config('memplex.tenant_id'" in item for item in statements) >= 5
+
+
+def test_application_probe_denies_runner_owned_principal_state_in_production():
+    """The readiness probe derives its negative probes from the runner ACL:
+    any application privilege on an empty-ACL table must fail readiness."""
+    from memplex.storage.pool import PostgresPoolManager
+
+    class _IngressCursor(_MockCursor):
+        def fetchone(self):
+            _sql, params = self.executed[-1] if self.executed else ("", ())
+            if any("memplex_sync_ingress_principals" in str(param) for param in params):
+                return (True,)
+            return super().fetchone()
+
+    with pytest.raises(PermissionError, match="runner-owned principal state"):
+        PostgresPoolManager._probe_application_access(
+            _IngressCursor(), _test_target(), "production", 0
+        )
+
+    class _RlsCursor(_MockCursor):
+        def execute(self, sql, params=()):
+            super().execute(sql, params)
+            if (
+                "INSERT INTO memplex_functions" in sql
+                or "INSERT INTO feedback" in sql
+            ) and "-other" in getattr(self, "_probe_tenant", ""):
+                raise PermissionError("new row violates row-level security policy")
+
+    cursor = _RlsCursor()
+    PostgresPoolManager._probe_application_access(cursor, _test_target(), "production", 0)
+    denied_params = [
+        params
+        for sql, params in cursor.executed
+        if "has_table_privilege(current_user, %s::regclass" in str(sql)
+    ]
+    assert ('"public".memplex_sync_local_identity',) in denied_params
+    assert ('"public".memplex_sync_ingress_principals',) in denied_params
 
 
 def test_resources_rejects_public_runner_keyword_without_initializing_or_pooling():

@@ -8,35 +8,35 @@ memory loop can both capture and recall context.
 - macOS, Linux, or another shell environment with Bash.
 - Python 3.11 or newer.
 - One of `uv`, `python -m venv`, or an existing Python environment.
-- Optional: Node.js/npm for the `npx memplex setup` entrypoint.
+- Optional: Node.js/npm for the `npx memplex@3.2.7 setup` entrypoint.
 
 ## Fast Path
 
 Install into detected local agents:
 
 ```bash
-npx memplex setup
+npx memplex@3.2.7 setup
 ```
 
 Install into every supported agent config on the machine:
 
 ```bash
-npx memplex setup --agent all --project-path "$PWD"
+npx memplex@3.2.7 setup --agent all --project-path "$PWD"
 ```
 
 Preview without writing files:
 
 ```bash
-npx memplex setup --agent all --project-path "$PWD" --dry-run
+npx memplex@3.2.7 setup --agent all --project-path "$PWD" --dry-run
 ```
 
 ## Choose One Agent
 
 ```bash
-npx memplex setup --agent codex --project-path "$PWD"
-npx memplex setup --agent claude-code --project-path "$PWD"
-npx memplex setup --agent openclaw --project-path "$PWD"
-npx memplex setup --agent hermes --project-path "$PWD"
+npx memplex@3.2.7 setup --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --agent claude-code --project-path "$PWD"
+npx memplex@3.2.7 setup --agent openclaw --project-path "$PWD"
+npx memplex@3.2.7 setup --agent hermes --project-path "$PWD"
 ```
 
 Supported agent ids are:
@@ -55,14 +55,14 @@ Supported agent ids are:
 If npm is unavailable, install the Python package directly:
 
 ```bash
-uv tool install memplex==3.3.0
+uv tool install memplex==3.2.7
 memplex setup --agent all --project-path "$PWD"
 ```
 
 If you are already inside a Python environment:
 
 ```bash
-python -m pip install --upgrade memplex==3.3.0
+python -m pip install --upgrade memplex==3.2.7
 python -m memplex setup --agent all --project-path "$PWD"
 ```
 
@@ -71,13 +71,13 @@ python -m memplex setup --agent all --project-path "$PWD"
 通过 npm 使用与发布版本绑定的包内安装器：
 
 ```bash
-npx memplex@3.3.0 setup --agent all --project-path "$PWD"
+npx memplex@3.2.7 setup --agent all --project-path "$PWD"
 ```
 
 也可以先安装 Python 工具，再执行相同的 setup 命令：
 
 ```bash
-uv tool install memplex==3.3.0
+uv tool install memplex==3.2.7
 memplex setup --agent codex --project-path "$PWD"
 ```
 
@@ -142,10 +142,10 @@ automation boundaries; they do not switch Memplex to a remote embedding service
 or a different storage architecture:
 
 ```bash
-npx memplex setup --profile local --agent codex --project-path "$PWD"
-npx memplex setup --profile privacy --agent codex --project-path "$PWD"
-npx memplex setup --profile max-recall --agent codex --project-path "$PWD"
-npx memplex setup --profile team --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --profile local --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --profile privacy --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --profile max-recall --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --profile team --agent codex --project-path "$PWD"
 ```
 
 ## Productized Memory Operations
@@ -289,16 +289,16 @@ memory loop.
 Remove every Memplex-managed local agent integration:
 
 ```bash
-npx memplex uninstall --agent all
+npx memplex@3.2.7 uninstall --agent all
 ```
 
 Or remove one host:
 
 ```bash
-npx memplex uninstall --agent codex
-npx memplex uninstall --agent claude-code
-npx memplex uninstall --agent openclaw
-npx memplex uninstall --agent hermes
+npx memplex@3.2.7 uninstall --agent codex
+npx memplex@3.2.7 uninstall --agent claude-code
+npx memplex@3.2.7 uninstall --agent openclaw
+npx memplex@3.2.7 uninstall --agent hermes
 ```
 
 Python-first uninstall:
@@ -350,18 +350,19 @@ hermes memory status
 
 ## Troubleshooting
 
-### `npx` Uses An Old Package
+### Public release versus source checkout
 
-Force a fresh lookup:
+The public npm and Python stable release is `3.2.7`. Pin that version instead
+of relying on `@latest`:
 
 ```bash
-npx --yes memplex@latest setup --agent codex --project-path "$PWD"
+npx --yes memplex@3.2.7 setup --agent codex --project-path "$PWD"
 ```
 
 If npm cache permissions are broken, use a temporary cache:
 
 ```bash
-npx --yes --cache /tmp/memplex-npm-cache memplex@latest setup
+npx --yes --cache /tmp/memplex-npm-cache memplex@3.2.7 setup
 ```
 
 ### Python Package Install Fails
@@ -369,16 +370,21 @@ npx --yes --cache /tmp/memplex-npm-cache memplex@latest setup
 Install with `uv` directly:
 
 ```bash
-uv tool install --force memplex==3.3.0
+uv tool install --force memplex==3.2.7
 ```
 
 Or use a project-local venv:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade memplex==3.3.0
+.venv/bin/python -m pip install --upgrade memplex==3.2.7
 .venv/bin/python -m memplex setup --agent codex --project-path "$PWD"
 ```
+
+This source checkout declares `3.3.0`; it is an unreleased development version.
+To test it, install the checkout itself (for example, `uv tool install .` or an
+editable project environment). `npx memplex@latest` resolves the public stable
+package and does not install the checkout's `3.3.0` sources.
 
 ### The Agent Does Not See Memplex
 
@@ -403,6 +409,13 @@ before setting `MEMPLEX_EMBEDDING_MODEL=minilm`, `bge-m3`, or `hf:<model-id>`.
 
 ## Next Reading
 
-- [Memplex Explainer](explainer.md)
-- [Agent Integration Loop](agent-integration.md)
-- [README](../README.md)
+- **New adopter:** [Memplex Explainer](explainer.md) and
+  [Agent Integration Loop](agent-integration.md).
+- **Evaluator or security reviewer:** [Capability mechanisms](capability-mechanisms.md),
+  [machine-readable capability manifest](capabilities.json), and the
+  [point-in-time open-source baseline](open-source-benchmark-baseline.md).
+- **Operator:** [Production readiness](production-readiness.md) and the
+  [production operations runbook](runbooks/production-operations.md).
+- **Contributor:** [Architecture](architecture.md) and
+  [architecture decision records](adr/README.md).
+- **Project overview:** [README](../README.md).

@@ -60,9 +60,9 @@ def _plugin_root() -> Path | None:
 
 def _identity_config() -> dict[str, Any]:
     root = _plugin_root()
-    path = root / _IDENTITY_FILE if root else None
-    if path is None:
+    if root is None:
         return {}
+    path = root / _IDENTITY_FILE
     expected_host_root = derive_managed_host_root(root, expected_agent="codex")
     payload = load_managed_identity(
         path,
@@ -121,7 +121,7 @@ def _runtime_status_path() -> Path:
     """Keep hook health with the stable Codex host root, not per-turn data."""
 
     configured = _identity_config()
-    root = Path(configured.get("host_root") or os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    root = Path(configured.get("host_root") or os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     return runtime_status_path(root)
 
 

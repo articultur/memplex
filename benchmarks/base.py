@@ -7,15 +7,121 @@ BenchmarkRunner, and BenchmarkRunnerFactory.
 from __future__ import annotations
 
 import logging
+import math
+import re
+import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, Iterator, List, Optional, Type
 
 from memplex.models.source import SourceDocument
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
+
+
+# ── Latency measurement ───────────────────────────────────────────────────────
+
+
+class LatencyStats:
+    """Collects per-call latency samples in float milliseconds.
+
+    All runners time queries through :meth:`timed` (``time.perf_counter``
+    based, monotonic and wall-clock independent) and attach ``mean`` / ``p50``
+    / ``p99`` to the emitted :class:`BenchmarkResult` rows, replacing the old
+    ``datetime.now()`` + truncated-int-millis pattern.
+    """
+
+    def __init__(self) -> None:
+        self._samples: List[float] = []
+
+    def add(self, elapsed_ms: float) -> None:
+        """Record one latency sample (milliseconds, float)."""
+        self._samples.append(float(elapsed_ms))
+
+    def extend(self, other: "LatencyStats") -> None:
+        """Merge another collector's samples into this one."""
+        self._samples.extend(other._samples)
+
+    @contextmanager
+    def timed(self) -> Iterator[None]:
+        """Context manager that records the wrapped block's wall latency."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add((time.perf_counter() - start) * 1000.0)
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    @property
+    def mean(self) -> float:
+        """Arithmetic mean of all samples (0.0 when empty)."""
+        return sum(self._samples) / len(self._samples) if self._samples else 0.0
+
+    def percentile(self, q: float) -> float:
+        """Nearest-rank percentile (q in [0, 100]); 0.0 when empty.
+
+        Nearest-rank is used so small benchmark samples stay interpretable:
+        the p99 of 3 samples is simply the maximum.
+        """
+        if not self._samples:
+            return 0.0
+        ordered = sorted(self._samples)
+        rank = max(1, math.ceil(q / 100.0 * len(ordered)))
+        return ordered[min(rank, len(ordered)) - 1]
+
+    @property
+    def p50(self) -> float:
+        """Median latency in milliseconds."""
+        return self.percentile(50)
+
+    @property
+    def p99(self) -> float:
+        """99th percentile latency in milliseconds."""
+        return self.percentile(99)
+
+
+# ── Shared answer-text metrics ────────────────────────────────────────────────
+
+
+def normalize_answer_text(text: str) -> str:
+    """Normalize text for comparison: lowercase, strip punctuation."""
+    if not text:
+        return ""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s']", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def token_f1(prediction: str, reference: str) -> float:
+    """Token-level F1 between prediction and reference strings.
+
+    Tokens are whitespace splits of :func:`normalize_answer_text` output;
+    overlap is computed on the token *sets* (bag semantics, duplicates
+    ignored) — the same convention SQuAD-style evaluations use.
+    """
+    pred_tokens = normalize_answer_text(prediction).split()
+    ref_tokens = normalize_answer_text(reference).split()
+
+    if not pred_tokens or not ref_tokens:
+        return 0.0
+
+    common = set(pred_tokens) & set(ref_tokens)
+    if not common:
+        return 0.0
+
+    precision = len(common) / len(pred_tokens)
+    recall = len(common) / len(ref_tokens)
+
+    if precision + recall == 0:
+        return 0.0
+
+    return 2 * precision * recall / (precision + recall)
 
 
 # ── Data Classes ──────────────────────────────────────────────────────────────
@@ -55,7 +161,10 @@ class BenchmarkResult:
         dataset: Dataset name (e.g., "locomo_val").
         metric: Metric name (e.g., "recall@5", "mrr", "precision@10").
         value: Computed metric value (0.0 to 1.0 typically).
-        latency_ms: Latency of the retrieval call in milliseconds.
+        latency_ms: Mean per-query latency in milliseconds (float; measured
+            with ``time.perf_counter`` via :class:`LatencyStats`).
+        latency_p50_ms: Optional median per-query latency in milliseconds.
+        latency_p99_ms: Optional 99th-percentile per-query latency.
         samples: Number of samples evaluated.
         timestamp: ISO timestamp of when the benchmark ran.
     """
@@ -64,13 +173,19 @@ class BenchmarkResult:
     dataset: str
     metric: str
     value: float
-    latency_ms: int
+    latency_ms: float
     samples: int
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    latency_p50_ms: Optional[float] = None
+    latency_p99_ms: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to dict for JSON serialization."""
-        return {
+        """Serialize to dict for JSON serialization.
+
+        Percentile fields are omitted when unset so older result rows keep
+        their exact key set (the evidence verifier enforces it).
+        """
+        row: Dict[str, Any] = {
             "benchmark": self.name,
             "dataset": self.dataset,
             "metric": self.metric,
@@ -79,6 +194,11 @@ class BenchmarkResult:
             "samples": self.samples,
             "timestamp": self.timestamp,
         }
+        if self.latency_p50_ms is not None:
+            row["latency_p50_ms"] = self.latency_p50_ms
+        if self.latency_p99_ms is not None:
+            row["latency_p99_ms"] = self.latency_p99_ms
+        return row
 
 
 # ── Abstract Interfaces ───────────────────────────────────────────────────────

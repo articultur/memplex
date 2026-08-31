@@ -30,7 +30,8 @@ def key_env(monkeypatch):
 
 def test_unset_key_is_inert_passthrough():
     payload = {"functions": [{"id": "f1"}], "facts": []}
-    assert sync_crypto.is_configured() is False
+    assert sync_crypto.is_enabled() is False
+    assert sync_crypto.is_configured() is False  # backward-compatible alias
     assert sync_crypto.encrypt_json_payload(payload) is payload
     assert sync_crypto.encrypt_bytes(b"raw-bytes") == b"raw-bytes"
 
@@ -113,3 +114,118 @@ def test_encrypted_push_rejected_without_server_key(monkeypatch, tmp_path):
     assert sync_crypto.is_encrypted_envelope(envelope)
     with pytest.raises(sync_crypto.SyncCryptoError, match="no key"):
         sync_crypto.decrypt_json_payload(envelope)
+
+
+def _set_key(monkeypatch, raw: bytes, previous: bytes | None = None) -> None:
+    monkeypatch.setenv("MEMPLEX_SYNC_ENCRYPTION_KEY", base64.urlsafe_b64encode(raw).decode())
+    if previous is None:
+        monkeypatch.delenv("MEMPLEX_SYNC_ENCRYPTION_KEY_PREVIOUS", raising=False)
+    else:
+        monkeypatch.setenv(
+            "MEMPLEX_SYNC_ENCRYPTION_KEY_PREVIOUS", base64.urlsafe_b64encode(previous).decode()
+        )
+
+
+def test_new_envelope_carries_kid(key_env):
+    payload = {"observations": [{"id": "o1"}]}
+    envelope = sync_crypto.encrypt_json_payload(payload)
+    assert isinstance(envelope["kid"], str) and envelope["kid"]
+    # kid must not equal or contain the key material
+    assert base64.urlsafe_b64encode(key_env).decode() != envelope["kid"]
+    assert sync_crypto.decrypt_json_payload(envelope) == payload
+
+
+def test_bytes_envelope_carries_kid(key_env):
+    import json as _json
+
+    encrypted = sync_crypto.encrypt_bytes(b'{"canonical":1}')
+    envelope = _json.loads(encrypted.decode("utf-8"))
+    assert isinstance(envelope["kid"], str) and envelope["kid"]
+    assert sync_crypto.decrypt_bytes(encrypted) == b'{"canonical":1}'
+
+
+def test_legacy_envelope_without_kid_decrypts(key_env):
+    """Envelopes written before the kid field existed stay decryptable."""
+    payload = {"legacy": True, "n": 7}
+    envelope = sync_crypto.encrypt_json_payload(payload)
+    del envelope["kid"]  # hand-construct the pre-kid wire format
+    assert sync_crypto.is_encrypted_envelope(envelope)
+    assert sync_crypto.decrypt_json_payload(envelope) == payload
+
+
+def test_previous_key_rotation_decrypts(monkeypatch):
+    """Rotation: old key moved to MEMPLEX_SYNC_ENCRYPTION_KEY_PREVIOUS."""
+    old_raw, new_raw = os.urandom(32), os.urandom(32)
+    _set_key(monkeypatch, old_raw)
+    kid_pinned = sync_crypto.encrypt_json_payload({"era": "old", "k": 1})
+    legacy = sync_crypto.encrypt_json_payload({"era": "old", "k": 2})
+    del legacy["kid"]
+
+    _set_key(monkeypatch, new_raw, previous=old_raw)
+    # Old envelopes still open — kid-pinned and legacy kid-less alike.
+    assert sync_crypto.decrypt_json_payload(kid_pinned) == {"era": "old", "k": 1}
+    assert sync_crypto.decrypt_json_payload(legacy) == {"era": "old", "k": 2}
+    # New encryption uses only the current key.
+    fresh = sync_crypto.encrypt_json_payload({"era": "new"})
+    assert fresh["kid"] != kid_pinned["kid"]
+    assert sync_crypto.decrypt_json_payload(fresh) == {"era": "new"}
+    # The previous key alone can no longer open new envelopes.
+    _set_key(monkeypatch, old_raw)
+    with pytest.raises(sync_crypto.SyncCryptoError):
+        sync_crypto.decrypt_json_payload(fresh)
+
+
+def test_unknown_kid_fails_closed_without_leaking_reason(key_env):
+    envelope = sync_crypto.encrypt_json_payload({"x": 1})
+    envelope["kid"] = "no-such-key-id"
+    with pytest.raises(sync_crypto.SyncCryptoError) as excinfo:
+        sync_crypto.decrypt_json_payload(envelope)
+    message = str(excinfo.value)
+    assert "authentication" in message
+    assert "no-such-key-id" not in message  # never echo the attacker-supplied kid
+
+
+def test_kid_pinned_envelope_not_opened_by_wrong_known_key(monkeypatch):
+    """kid pins the key: no silent fallback to another known key."""
+    raw_a, raw_b = os.urandom(32), os.urandom(32)
+    _set_key(monkeypatch, raw_a)
+    envelope = sync_crypto.encrypt_json_payload({"x": 1})
+    _set_key(monkeypatch, raw_b, previous=raw_a)
+    envelope["kid"] = sync_crypto.encrypt_json_payload({"y": 2})["kid"]  # kid of B
+    with pytest.raises(sync_crypto.SyncCryptoError, match="authentication"):
+        sync_crypto.decrypt_json_payload(envelope)
+
+
+def test_is_enabled_never_raises_on_malformed_key(monkeypatch):
+    monkeypatch.setenv("MEMPLEX_SYNC_ENCRYPTION_KEY", "a")  # invalid b64 padding
+    assert sync_crypto.is_enabled() is True
+    assert sync_crypto.is_configured() is True
+    with pytest.raises(sync_crypto.SyncCryptoError):
+        sync_crypto.encrypt_json_payload({"x": 1})
+
+
+def test_malformed_previous_key_fails_closed(monkeypatch, key_env):
+    envelope = sync_crypto.encrypt_json_payload({"x": 1})
+    monkeypatch.setenv("MEMPLEX_SYNC_ENCRYPTION_KEY_PREVIOUS", "%%%bogus%%%")
+    with pytest.raises(sync_crypto.SyncCryptoError, match="base64"):
+        sync_crypto.decrypt_json_payload(envelope)
+
+
+def test_key_cache_tracks_env_change(monkeypatch):
+    """Key material is cached, but keyed on the env value: a key change must
+    take effect immediately (no stale-key decrypts within the process)."""
+    raw_a, raw_b = os.urandom(32), os.urandom(32)
+    _set_key(monkeypatch, raw_a)
+    env_a = sync_crypto.encrypt_json_payload({"k": "a"})
+    assert sync_crypto.decrypt_json_payload(env_a) == {"k": "a"}
+
+    _set_key(monkeypatch, raw_b)
+    with pytest.raises(sync_crypto.SyncCryptoError):
+        sync_crypto.decrypt_json_payload(env_a)  # stale cache would decrypt
+    env_b = sync_crypto.encrypt_json_payload({"k": "b"})
+    assert env_b["kid"] != env_a["kid"]
+    assert sync_crypto.decrypt_json_payload(env_b) == {"k": "b"}
+
+    # Switching back hits the cache again and works.
+    _set_key(monkeypatch, raw_a)
+    assert sync_crypto.decrypt_json_payload(env_a) == {"k": "a"}

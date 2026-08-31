@@ -1,0 +1,25 @@
+# Minimal Alertmanager routing example for the memplex alert rules in
+# memplex-alerts.yml.  Replace the webhook receivers with the real oncall
+# endpoints; keep severity-based routing so `critical` alerts page while
+# `warning` alerts only notify.
+route:
+  receiver: memplex-oncall
+  group_by:
+    - alertname
+    - severity
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: memplex-oncall-critical
+      repeat_interval: 1h
+
+receivers:
+  - name: memplex-oncall
+    webhook_configs:
+      - url: http://localhost:9095/alerts
+  - name: memplex-oncall-critical
+    webhook_configs:
+      - url: http://localhost:9095/alerts/critical

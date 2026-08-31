@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from memplex.storage.migrations.runner import (
+from memplex.storage.migrations._constants import (
     _APPLICATION_ACL,
     _APPLICATION_ACL_FUNCTIONS,
     _APPLICATION_ACL_TABLES,
@@ -160,6 +160,7 @@ def _verify_application_acl(
         raise MigrationIntegrityError("application role table ACL is not least privilege")
     _verify_application_sequence_acls(cur, role_oid)
     _verify_application_function_acls(cur, role_oid, ingress_role)
+    return True
 def _verify_ingress_acl(
     cur: Any,
     contract: IngressAclContract,

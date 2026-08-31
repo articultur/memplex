@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a reproducible Memplex defect with redacted diagnostics.
+title: "[Bug] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: Before submitting, search existing issues and remove all credentials and private data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Defect summary
+      description: Describe the observable failure and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact steps and safe command forms that reproduce the defect.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include versions, exit status, selected test counts, and sanitized output.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      description: Confirm that the public report contains only safe diagnostic material.
+      options:
+        - label: I removed credentials, DSNs, private memory, identifiers, and backup artifacts.
+          required: true
+    validations:
+      required: true

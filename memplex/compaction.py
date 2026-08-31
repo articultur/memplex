@@ -39,7 +39,7 @@ def _ensure_aware(dt: datetime) -> datetime:
 
 
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, cast
 
 from memplex.config import MemplexConfig
 from memplex.models import (
@@ -47,6 +47,7 @@ from memplex.models import (
     CompactionScope,
     CompactionStageResult,
     FieldValue,
+    Function,
     Memory,
 )
 from memplex.retrieval.dedup import MemoryDeduplicator
@@ -345,8 +346,9 @@ class CompactionPipeline:
         from memplex.models import SourceDocument, SourceType
 
         for function in functions:
+            # Compaction only ever processes Function nodes (list_functions).
             self._store.add(
-                function,
+                cast(Function, function),
                 SourceDocument(type="compaction", source_type=SourceType.WIKI),
             )
 
@@ -457,7 +459,7 @@ class CompactionPipeline:
 
             # Stale and rarely accessed
             if not should_delete:
-                updated = func.updated_at
+                updated: str | datetime | None = func.updated_at
                 if isinstance(updated, str):
                     try:
                         updated = datetime.fromisoformat(updated)
@@ -470,7 +472,7 @@ class CompactionPipeline:
 
             # Expired needs_review
             if not should_delete and func.needs_review:
-                review_until = func.needs_review_until
+                review_until: str | datetime | None = func.needs_review_until
                 if isinstance(review_until, str):
                     try:
                         review_until = datetime.fromisoformat(review_until)
@@ -480,7 +482,7 @@ class CompactionPipeline:
                     should_delete = True
                 elif review_until is None:
                     # No expiry set -- use TTL from creation
-                    created = func.created_at
+                    created: str | datetime | None = func.created_at
                     if isinstance(created, str):
                         try:
                             created = datetime.fromisoformat(created)
@@ -557,7 +559,7 @@ class CompactionPipeline:
 
         for func in functions:
             # Only archive very old, very rarely accessed memories
-            updated = func.updated_at
+            updated: str | datetime | None = func.updated_at
             if isinstance(updated, str):
                 try:
                     updated = datetime.fromisoformat(updated)

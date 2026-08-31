@@ -68,6 +68,11 @@ from memplex.models import (
     validate_domain,
     validate_func_id,
 )
+from memplex.storage._messages import (
+    _GRAPH_NODES_MUST_BE_FUNCTIONS,
+    _ONLY_FUNCTION_NODES,
+    _PG_WRITE_NO_AUTHORIZED_ROW,
+)
 from memplex.storage.inbound import InboundSyncExecutor
 from memplex.storage.pool import ReadyPostgresPool, validate_ready_postgres_pool
 from memplex.sync_protocol import (
@@ -183,13 +188,13 @@ class _AuthorizedPostgresStore:
         self._store = store
         self._context = context
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         target = getattr(self._store, name)
         if not callable(target):
             return target
 
         @wraps(target)
-        def scoped_call(*args, **kwargs):
+        def scoped_call(*args: Any, **kwargs: Any) -> Any:
             token = _POSTGRES_SCOPE.set(self._context)
             try:
                 return target(*args, **kwargs)
@@ -231,7 +236,7 @@ def _fv_from_json(d: dict) -> FieldValue:
     return FieldValue.from_dict(d)
 
 
-def _iso(value) -> str:
+def _iso(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, datetime):
@@ -358,7 +363,7 @@ class PostgresMemoryStore:
             raise TypeError("context must be an AuthorizationContext")
         return _AuthorizedPostgresStore(self, context)
 
-    def _require_sync_repository(self):
+    def _require_sync_repository(self) -> Any:
         repository = self._sync_repository
         if repository is None:
             raise RuntimeError("PostgreSQL sync repository is not enabled")
@@ -424,7 +429,7 @@ class PostgresMemoryStore:
     def sync_ack(self, delivery: SyncDelivery, receipt: SyncReceipt) -> None:
         self._require_sync_repository().sync_ack(delivery, receipt)
 
-    def sync_ack_batch(self, deliveries, receipts) -> None:
+    def sync_ack_batch(self, deliveries: Any, receipts: Any) -> None:
         self._require_sync_repository().sync_ack_batch(deliveries, receipts)
 
     def sync_fail(
@@ -450,7 +455,7 @@ class PostgresMemoryStore:
             target_id, event_id
         )
 
-    def sync_list_dead_letters(self, *, limit: int):
+    def sync_list_dead_letters(self, *, limit: int) -> Any:
         return self._require_sync_repository().sync_list_dead_letters(
             limit=limit
         )
@@ -491,7 +496,7 @@ class PostgresMemoryStore:
             context.session_id,
         )
 
-    def _bind_transaction_scope(self, cur, context: AuthorizationContext) -> None:
+    def _bind_transaction_scope(self, cur: Any, context: AuthorizationContext) -> None:
         """Bind all RLS settings transaction-locally before application SQL."""
         cur.execute(
             "SELECT "
@@ -505,7 +510,7 @@ class PostgresMemoryStore:
 
     def _bind_local_sync_context(
         self,
-        cur,
+        cur: Any,
         node_type: str,
         node_id: str,
         payload: dict,
@@ -579,7 +584,7 @@ class PostgresMemoryStore:
             + sql
         )
 
-    def _write_identity(self, node) -> AuthorizationContext:
+    def _write_identity(self, node: Any) -> AuthorizationContext:
         """Return the active scope and project it only for authenticated calls.
 
         Legacy unscoped development calls retain their historical payload
@@ -647,7 +652,7 @@ class PostgresMemoryStore:
     def _is_lock_unavailable(exc: BaseException) -> bool:
         return getattr(exc, "pgcode", None) == "55P03"
 
-    def _acquire_function_write_lock(self, cur, context: AuthorizationContext) -> None:
+    def _acquire_function_write_lock(self, cur: Any, context: AuthorizationContext) -> None:
         """Serialize Function/edge writers for one tenant in this transaction.
 
         Scope settings have already been installed by the pool transaction
@@ -666,7 +671,7 @@ class PostgresMemoryStore:
         self,
         context: AuthorizationContext,
         operation: str,
-    ):
+    ) -> Any:
         """One locked transaction for a public Function/edge write operation."""
         try:
             with self._pool_manager.transaction(
@@ -684,7 +689,7 @@ class PostgresMemoryStore:
             raise
 
 
-    def _execute(self, sql: str, params: tuple = (), *, commit: bool = True):
+    def _execute(self, sql: str, params: tuple = (), *, commit: bool = True) -> Any:
         context = self._authorization_context()
         if commit:
             with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
@@ -726,7 +731,7 @@ class PostgresMemoryStore:
 
     def _upsert_function(
         self,
-        cur,
+        cur: Any,
         func: Function,
         relational_identity: tuple[str, str, str, str, str, str] | None = None,
     ) -> None:
@@ -737,7 +742,7 @@ class PostgresMemoryStore:
         a function row and its audit row are one durable decision.
         """
         if not isinstance(func, Function):
-            raise ValueError("PostgreSQL 只接受 Function 节点")
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))
         validate_func_id(func.id)
         validate_domain(func.domain)
         data = _func_to_json(func)
@@ -803,7 +808,7 @@ class PostgresMemoryStore:
             self._require_returning(cur, (func.id,))
 
     @staticmethod
-    def _require_returning(cur, expected: tuple[object, ...]) -> None:
+    def _require_returning(cur: Any, expected: tuple[object, ...]) -> None:
         """Require an ACL-qualified DML statement to name its durable row.
 
         PostgreSQL treats ``ON CONFLICT ... DO UPDATE WHERE <ACL>`` that
@@ -814,12 +819,12 @@ class PostgresMemoryStore:
         row = cur.fetchone()
         if row is None or tuple(row) != expected:
             raise PostgresWriteRejected(
-                "PostgreSQL write did not affect an authorized row"
+                _PG_WRITE_NO_AUTHORIZED_ROW
             )
 
     def _record_changelog(
         self,
-        cur,
+        cur: Any,
         func_id: str,
         event_type: str,
         description: str,
@@ -863,7 +868,7 @@ class PostgresMemoryStore:
         """Add a Function, merging FieldValues when a Function with the same
         ``name_normalized`` already exists (base contract; lite semantics)."""
         if not isinstance(func, Function):
-            raise ValueError("PostgreSQL 只接受 Function 节点")
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))
         validate_func_id(func.id)
         validate_domain(func.domain)
         context = self._write_identity(func)
@@ -903,7 +908,7 @@ class PostgresMemoryStore:
 
     def _locked_function_by_id(
         self,
-        cur,
+        cur: Any,
         func_id: str,
         context: AuthorizationContext,
     ) -> tuple[Function, tuple[str, str, str, str, str, str]] | None:
@@ -919,7 +924,7 @@ class PostgresMemoryStore:
 
     def _require_visible_function_endpoint(
         self,
-        cur,
+        cur: Any,
         func_id: str,
         context: AuthorizationContext,
     ) -> tuple[Function, tuple[str, str, str, str, str, str]]:
@@ -927,7 +932,7 @@ class PostgresMemoryStore:
         locked = self._locked_function_by_id(cur, func_id, context)
         if locked is None:
             raise PostgresWriteRejected(
-                "PostgreSQL write did not affect an authorized row"
+                _PG_WRITE_NO_AUTHORIZED_ROW
             )
         return locked
 
@@ -963,7 +968,7 @@ class PostgresMemoryStore:
 
     def _normalized_function(
         self,
-        cur,
+        cur: Any,
         normalized_name: str,
         incoming: Function,
         context: AuthorizationContext,
@@ -982,7 +987,7 @@ class PostgresMemoryStore:
         )
         if visibility == "workspace":
             scope_sql = "tenant_id = %s AND visibility = 'workspace' AND workspace = %s"
-            scope_params = (tenant, workspace)
+            scope_params: tuple[str, ...] = (tenant, workspace)
         elif visibility == "user":
             scope_sql = "tenant_id = %s AND visibility = 'user' AND owner_subject = %s"
             scope_params = (tenant, subject)
@@ -1005,7 +1010,7 @@ class PostgresMemoryStore:
 
     def _merge_or_insert_function(
         self,
-        cur,
+        cur: Any,
         incoming: Function,
         context: AuthorizationContext,
     ) -> tuple[Function, bool]:
@@ -1021,7 +1026,7 @@ class PostgresMemoryStore:
         races converge the same way.
         """
         if not isinstance(incoming, Function):
-            raise ValueError("PostgreSQL 图节点必须是 Function")
+            raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))
         validate_func_id(incoming.id)
         validate_domain(incoming.domain)
         locked = self._locked_function_by_id(cur, incoming.id, context)
@@ -1185,7 +1190,7 @@ class PostgresMemoryStore:
     # ── Fact / Preference (optional MemoryStore extensions) ─────────
 
     @staticmethod
-    def _stamp_node(node) -> None:
+    def _stamp_node(node: Any) -> None:
         """Fill created_at/updated_at on a Fact/Preference before upsert."""
         now = datetime.now(timezone.utc).isoformat()
         if not node.created_at:
@@ -1194,9 +1199,9 @@ class PostgresMemoryStore:
 
     def _upsert_typed_node(
         self,
-        cur,
+        cur: Any,
         table: str,
-        node,
+        node: Any,
         context: AuthorizationContext,
         *,
         data: dict | None = None,
@@ -1456,7 +1461,7 @@ class PostgresMemoryStore:
             )
             self._require_returning(cur, (func_id,))
 
-    def increment_access_batch(self, func_ids) -> None:
+    def increment_access_batch(self, func_ids: Any) -> None:
         context = self._authorization_context()
         with self._function_write_transaction(context, "increment_access_batch") as cur:
             for fid in func_ids:
@@ -1531,7 +1536,7 @@ class PostgresMemoryStore:
         return self._rrf_merge(tsv_rows, vec_rows, top_k)
 
     @staticmethod
-    def _rrf_merge(tsv_rows, vec_rows, top_k, k: int = 60) -> List[SearchResult]:
+    def _rrf_merge(tsv_rows: Any, vec_rows: Any, top_k: Any, k: int = 60) -> List[SearchResult]:
         """Reciprocal Rank Fusion of the two result legs."""
         scores: dict = {}
         meta: dict = {}
@@ -1924,7 +1929,7 @@ class PostgresMemoryStore:
         nodes = list(sub_graph.nodes)
         for node in nodes:
             if not isinstance(node, Function):
-                raise ValueError("PostgreSQL 图节点必须是 Function")
+                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))
             validate_func_id(node.id)
             validate_domain(node.domain)
         context = self._authorization_context()
@@ -2011,13 +2016,13 @@ class PostgresMemoryStore:
                         edge, source_node, target
                     ):
                         raise PostgresWriteRejected(
-                            "PostgreSQL write did not affect an authorized row"
+                            _PG_WRITE_NO_AUTHORIZED_ROW
                         )
                 elif target not in canonical_nodes and target not in external_nodes:
                     # Defensive invariant: the deterministic prelock set
                     # above must cover every concrete endpoint.
                     raise PostgresWriteRejected(
-                        "PostgreSQL write did not affect an authorized row"
+                        _PG_WRITE_NO_AUTHORIZED_ROW
                     )
                 cur.execute(
                     "SELECT 1 FROM memplex_edges "

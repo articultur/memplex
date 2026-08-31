@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_hex
+from typing import Any, NoReturn
 
 _SCHEMA_VERSION = 1
 _MAX_EVIDENCE_BYTES = 128 * 1024
@@ -49,7 +50,7 @@ class ReadinessEvidenceError(RuntimeError):
         super().__init__("industrial_gate_evidence_invalid")
 
 
-def _fail() -> None:
+def _fail() -> NoReturn:
     raise ReadinessEvidenceError()
 
 
@@ -167,10 +168,10 @@ def load_deployment_evidence_binding_from_environment(
     try:
         return DeploymentEvidenceBinding.from_values(
             memplex_version=memplex_version,
-            source_sha256=os.environ.get("MEMPLEX_SOURCE_SHA256"),
-            artifact_sha256=os.environ.get("MEMPLEX_ARTIFACT_SHA256"),
-            deployment_id=os.environ.get("MEMPLEX_DEPLOYMENT_ID"),
-            target_identity_sha256=os.environ.get("MEMPLEX_TARGET_IDENTITY_SHA256"),
+            source_sha256=_exact_text(os.environ.get("MEMPLEX_SOURCE_SHA256")),
+            artifact_sha256=_exact_text(os.environ.get("MEMPLEX_ARTIFACT_SHA256")),
+            deployment_id=_exact_text(os.environ.get("MEMPLEX_DEPLOYMENT_ID")),
+            target_identity_sha256=_exact_text(os.environ.get("MEMPLEX_TARGET_IDENTITY_SHA256")),
         )
     except (ReadinessEvidenceError, TypeError, ValueError):
         _fail()
@@ -316,7 +317,7 @@ class IndustrialGateEvidence:
             target_identity_sha256=self.target_identity_sha256,
         )
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "gate_id": self.gate_id,

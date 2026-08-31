@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "manifest_id": "memplex-capabilities",
+  "validation_scope": "static_repository_mapping",
+  "supported_hosts": [
+    "claude-code",
+    "codex",
+    "openclaw",
+    "hermes"
+  ],
+  "claims": {
+    "current_test_status": "not_asserted",
+    "industrial_readiness": "not_asserted"
+  },
+  "limitations": [
+    "This manifest maps repository mechanisms and tests; it does not assert that those tests passed in the current checkout.",
+    "Repository-static evidence is not deployment evidence, benchmark qualification, or industrial-readiness proof.",
+    "Line ranges identify the mapped implementation at this revision and must be reviewed when referenced files change."
+  ],
+  "capabilities": [
+    {
+      "id": "module-boundaries",
+      "title": "Module boundaries",
+      "summary": "Host adapters call an orchestration service that delegates authorization, retrieval, storage, sync, and operations to bounded modules.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "MemplexService remains a large facade, and split modules retain compatibility re-exports and import-order constraints."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#module-boundaries",
+      "code_refs": [
+        "memplex/service.py:145-184",
+        "memplex/service.py:292-369"
+      ],
+      "test_refs": [
+        "tests/test_dependency_boundaries.py:19-66",
+        "tests/test_authorization_gate.py:46-63",
+        "tests/test_operations.py:61-77"
+      ]
+    },
+    {
+      "id": "typed-memory-model",
+      "title": "Typed memory model",
+      "summary": "Function, Fact, Preference, and Observation share identity, provenance, visibility, version, and namespace fields through MemoryNode.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "A typed model and serialization tests do not by themselves prove complete cross-backend persistence parity."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#typed-memory-model",
+      "code_refs": [
+        "memplex/models/memory.py:42-73",
+        "memplex/models/memory.py:154-169",
+        "memplex/models/memory.py:255-270",
+        "memplex/models/memory.py:315-362"
+      ],
+      "test_refs": [
+        "tests/test_models.py:372-407"
+      ]
+    },
+    {
+      "id": "capture-write-path",
+      "title": "Capture and write path",
+      "summary": "Ordinary capture reaches write(), which strips private blocks, extracts and authorizes Function, Fact, and Preference nodes, then persists typed nodes plus graph edges; Observation uses the separate authorized add_observation() path.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Development-only indexing and compaction tasks are best effort after the primary persistence path."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#capture-write-path",
+      "code_refs": [
+        "memplex/service.py:1291-1408",
+        "memplex/service.py:1689-1707"
+      ],
+      "test_refs": [
+        "tests/test_agent_runtime.py:26-46",
+        "tests/test_service.py:83-102",
+        "tests/test_storage.py:604-628",
+        "tests/test_observation_pipeline.py:33-105"
+      ]
+    },
+    {
+      "id": "recall-retrieval-path",
+      "title": "Recall and retrieval path",
+      "summary": "Recall applies authorization, intent-selected retrieval paths, a shared candidate budget, merge and authorization filters, reranking, injection filtering, access accounting, top_k, and a final token budget.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Individual retrieval paths may fail independently and are recorded in an optional trace; repository mapping does not establish real-dataset recall quality."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#recall-retrieval-path",
+      "code_refs": [
+        "memplex/service.py:731-814",
+        "memplex/service.py:817-1067",
+        "memplex/retrieval/multi_path.py:79-118"
+      ],
+      "test_refs": [
+        "tests/test_service.py:108-167",
+        "tests/test_multi_path.py:120-172"
+      ]
+    },
+    {
+      "id": "temporal-facts",
+      "title": "Bi-temporal facts",
+      "summary": "Facts retain business-time validity with valid_from and invalid_at while inherited timestamps record system time; superseded rows remain queryable with as_of.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "The model distinguishes business and system timestamps but does not provide general temporal reasoning across arbitrary graph paths."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#temporal-facts",
+      "code_refs": [
+        "memplex/models/memory.py:255-270",
+        "memplex/temporal.py:39-98",
+        "memplex/service.py:1450-1483",
+        "memplex/service.py:1641-1646"
+      ],
+      "test_refs": [
+        "tests/test_temporal_facts.py:42-69",
+        "tests/test_temporal_facts.py:87-137"
+      ]
+    },
+    {
+      "id": "bounded-graph-expansion",
+      "title": "Bounded graph expansion",
+      "summary": "Graph retrieval selects at most three seeds and spends the remaining top_k budget on bounded one-hop relation neighbors.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "The implemented path is one-hop bounded expansion, not unrestricted traversal or general multi-hop reasoning."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#bounded-graph-expansion",
+      "code_refs": [
+        "memplex/retrieval/multi_path.py:120-215"
+      ],
+      "test_refs": [
+        "tests/test_multi_path.py:178-205",
+        "tests/test_multi_path.py:256-305"
+      ]
+    },
+    {
+      "id": "principal-tenant-authorization",
+      "title": "Principal and tenant authorization",
+      "summary": "Authenticated principal and workspace context are bound before persistence, and each service call derives a request-scoped store facade for tenant-aware access.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Lite storage is a single-user development backend and is not an operating-system adversary boundary; production isolation depends on PostgreSQL predicates and RLS configuration."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#principal-tenant-authorization",
+      "code_refs": [
+        "memplex/authorization.py:70-122"
+      ],
+      "test_refs": [
+        "tests/test_authorization_context.py:33-100",
+        "tests/test_authorization_gate.py:57-105"
+      ]
+    },
+    {
+      "id": "sync-convergence",
+      "title": "Durable sync convergence",
+      "summary": "The durable protocol uses tenant-bound pages, atomic inbox/outbox state, cursors, leases, acknowledgements, retries, and dead letters behind one Lite/PostgreSQL repository contract.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "The legacy SyncableStore transport is development-only best effort, can drop queued pushes at its hard cap, and is not equivalent to durable convergence."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#sync-convergence",
+      "code_refs": [
+        "memplex/sync_repository.py:74-133",
+        "memplex/sync_repository.py:170-235",
+        "memplex/sync.py:223-253",
+        "memplex/sync.py:498-516"
+      ],
+      "test_refs": [
+        "tests/test_sync_repository_contract.py:148-176",
+        "tests/test_sync_dispatcher.py:232-306",
+        "tests/test_sync_dispatcher.py:506-541"
+      ]
+    },
+    {
+      "id": "backup-restore",
+      "title": "Backup and restore",
+      "summary": "Backup artifacts carry a canonical signed manifest and payload digest; verification pins the artifact before restore, with separate Lite and PostgreSQL restore surfaces.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Lite backup is development-only, and repository-static mapping does not prove a current PostgreSQL restore drill or recovery objective."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#backup-restore",
+      "code_refs": [
+        "memplex/backup.py:100-232",
+        "memplex/backup.py:803-919",
+        "memplex/backup.py:1022-1031"
+      ],
+      "test_refs": [
+        "tests/test_backup.py:133-175",
+        "tests/test_backup.py:308-328",
+        "tests/test_backup.py:370-418"
+      ]
+    },
+    {
+      "id": "operations-observability",
+      "title": "Operations and observability",
+      "summary": "Runtime lifecycle, request admission, bounded low-cardinality metrics, drain results, alert-rule digests, and signed SLO evidence form the operations surface.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Signed-report machinery does not establish that a current deployment supplied the required observation window, load, drain, or report."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#operations-observability",
+      "code_refs": [
+        "memplex/operations.py:167-235",
+        "memplex/operations.py:599-660",
+        "memplex/operations.py:667-705"
+      ],
+      "test_refs": [
+        "tests/test_operations.py:61-77",
+        "tests/test_operations.py:138-223",
+        "tests/test_operations_evidence.py:227-290"
+      ]
+    },
+    {
+      "id": "reproducible-supply-chain",
+      "title": "Reproducible supply chain",
+      "summary": "The release builder fixes locale, hash seed, epoch, timezone, and offline inputs, normalizes archives, and emits checksums, an SBOM, and a canonical release manifest.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Deterministic builder code and tests do not prove that current public registry artifacts correspond to this checkout or that benchmark outputs are immutable."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#reproducible-supply-chain",
+      "code_refs": [
+        "scripts/build_release_artifacts.py:200-296"
+      ],
+      "test_refs": [
+        "tests/test_reproducible_release.py:66-112"
+      ]
+    },
+    {
+      "id": "four-host-lifecycle",
+      "title": "Four-host lifecycle",
+      "summary": "Claude Code, Codex, OpenClaw, and Hermes share capture and recall semantics while host-specific install, status, uninstall, and contract digests remain explicit.",
+      "evidence_level": 2,
+      "evidence_basis": "repository_static",
+      "limitations": [
+        "Repository tests and evidence schemas are not a current run on four real host installations; valid external lifecycle evidence remains separately required."
+      ],
+      "mechanism_ref": "docs/capability-mechanisms.md#four-host-lifecycle",
+      "code_refs": [
+        "memplex/adapters/agent_installer.py:67-166",
+        "memplex/adapters/agent_installer.py:343-363",
+        "memplex/adapters/runtime_status.py:38-151",
+        "memplex/host_lifecycle.py:211-244",
+        "memplex/host_lifecycle.py:282-394"
+      ],
+      "test_refs": [
+        "tests/test_agent_installer_registry.py:43-459",
+        "tests/test_runtime_status.py:91-190",
+        "tests/test_runtime_status.py:193-241",
+        "tests/test_runtime_status.py:271-320",
+        "tests/test_host_lifecycle_evidence.py:112-175",
+        "tests/test_agent_host_matrix.py:602-655"
+      ]
+    }
+  ]
+}

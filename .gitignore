@@ -27,6 +27,7 @@ htmlcov/
 
 # OMC / Serena
 .omc/
+.omx/
 .serena/
 .superpowers/
 .claude/
@@ -46,8 +47,14 @@ env/
 /_g008_dyn/
 /_tmp_mem/
 /_tmp_rate
-/postgresql:/
+/_tmp_home/
+/artifacts/
 
 # Internal planning and local review artifacts
 /docs/superpowers/
 .mimosa/
+
+# Local tool state (merged from .git/info/exclude)
+.impeccable/hook.cache.json
+.impeccable/hook.pending.json
+.impeccable/config.local.json

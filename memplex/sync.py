@@ -30,10 +30,21 @@ import threading
 import time
 from contextvars import ContextVar
 from functools import wraps
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
 from memplex.auth import AuthorizationContext, resolve_environment_authorization
 from memplex.config import validate_sync_remote_url
+
+if TYPE_CHECKING:
+    from memplex.models import (
+        Fact,
+        Function,
+        GraphData,
+        MemoryNode,
+        Observation,
+        Preference,
+        SourceDocument,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +92,7 @@ class _AuthorizedSyncableStore:
             return target
 
         @wraps(target)
-        def scoped_call(*args, **kwargs):
+        def scoped_call(*args: Any, **kwargs: Any) -> Any:
             token = _SYNC_SCOPE.set(self._context)
             try:
                 return getattr(self._store, name)(*args, **kwargs)
@@ -179,6 +190,9 @@ class RemoteSyncConfig:
                 provenance={"transport": "sync"},
                 require_registry=True,
             )
+            # require_registry=True fails closed (raises) instead of returning
+            # None, so the resolved context is always present here.
+            assert self.authorization is not None
             self.agent_id = self.authorization.agent_id or self.agent_id
             self.session_id = self.authorization.session_id
         # Auto-pull interval in seconds. 0 (default) = disabled; pull stays
@@ -264,7 +278,7 @@ class SyncableStore:
         self._sse_threads: list = []
         self._sse_stop = threading.Event()
 
-    def _requests(self):
+    def _requests(self) -> Any:
         if self._http is None:
             import requests
 
@@ -326,34 +340,34 @@ class SyncableStore:
 
     # ── Write methods: local first, then best-effort push ──────────
 
-    def add(self, func, source) -> None:
+    def add(self, func: Function, source: SourceDocument) -> None:
         self._scoped_local().add(func, source)
         self._push_functions([func])
 
-    def add_batch(self, funcs, sources) -> None:
+    def add_batch(self, funcs: list[Function], sources: list[SourceDocument]) -> None:
         # Store contract (base/lite/postgres): add_batch takes a list of
         # SourceDocuments parallel to funcs, not a single source.
         self._scoped_local().add_batch(funcs, sources)
         self._push_functions(list(funcs))
 
-    def merge(self, sub_graph) -> None:
+    def merge(self, sub_graph: GraphData) -> None:
         self._scoped_local().merge(sub_graph)
         # sub_graph.nodes carry the merged Functions; push them.
         nodes = getattr(sub_graph, "nodes", None) or []
         self._push_functions(list(nodes))
 
-    def delete(self, func_id) -> None:
+    def delete(self, func_id: str) -> None:
         self._scoped_local().delete(func_id)
         # Deletion propagation: tell the server to delete + tombstone.
         self._push_delete(func_id)
 
-    def increment_access(self, func_id) -> None:
+    def increment_access(self, func_id: str) -> None:
         # Access-count churn is local-only; pushing it would flood the
         # server with per-query writes (the exact anti-pattern we just
         # fixed). Pull merges server-side access_count via LWW.
         self._scoped_local().increment_access(func_id)
 
-    def increment_access_batch(self, func_ids) -> None:
+    def increment_access_batch(self, func_ids: list[str]) -> None:
         self._scoped_local().increment_access_batch(func_ids)
 
     # ── Typed-node writes (Fact / Preference / Observation) ────────
@@ -362,15 +376,15 @@ class SyncableStore:
     # tombstone/retry protocol. Refuse before the local mutation so callers
     # never mistake a local-only delete for replicated state.
 
-    def add_fact(self, fact) -> None:
+    def add_fact(self, fact: Fact) -> None:
         self._scoped_local().add_fact(fact)
         self._push_typed_nodes(facts=[fact])
 
-    def add_preference(self, preference) -> None:
+    def add_preference(self, preference: Preference) -> None:
         self._scoped_local().add_preference(preference)
         self._push_typed_nodes(preferences=[preference])
 
-    def add_observation(self, observation) -> None:
+    def add_observation(self, observation: Observation) -> None:
         self._scoped_local().add_observation(observation)
         self._push_typed_nodes(observations=[observation])
 
@@ -405,7 +419,7 @@ class SyncableStore:
             headers["X-Memplex-Session-ID"] = self._config.session_id
         return headers
 
-    def _push_functions(self, funcs) -> None:
+    def _push_functions(self, funcs: list[Function]) -> None:
         """Schedule an async push of Functions to every target.
 
         Returns immediately; the actual HTTP POST runs on the bounded daemon
@@ -422,7 +436,12 @@ class SyncableStore:
         for target in self._config.all_targets():
             self._enqueue_push(self._do_push_functions, target, payload)
 
-    def _push_typed_nodes(self, facts=(), preferences=(), observations=()) -> None:
+    def _push_typed_nodes(
+        self,
+        facts: Iterable[Fact] = (),
+        preferences: Iterable[Preference] = (),
+        observations: Iterable[Observation] = (),
+    ) -> None:
         """Schedule an async push of Fact/Preference/Observation nodes.
 
         Same best-effort async contract as :meth:`_push_functions`; the
@@ -768,7 +787,14 @@ class SyncableStore:
             "server_time": server_time,
         }
 
-    def _apply_typed_pull(self, changes, *, cls, getter_name, adder_name) -> tuple:
+    def _apply_typed_pull(
+        self,
+        changes: list[dict[str, Any]],
+        *,
+        cls: type[MemoryNode],
+        getter_name: Optional[str],
+        adder_name: str,
+    ) -> tuple[int, int]:
         """Apply pulled Fact/Preference/Observation changes locally with LWW.
 
         Returns ``(applied, rejected_older)``. Duck-typed: a local backend
@@ -836,7 +862,7 @@ class SyncableStore:
             return  # already running
         self._auto_pull_stop.clear()
 
-        def _loop():
+        def _loop() -> None:
             while not self._auto_pull_stop.wait(interval):
                 try:
                     self.pull_incremental()

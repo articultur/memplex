@@ -1,7 +1,27 @@
 """LongMemEval benchmark: long-term interactive memory (Wu et al., ICLR 2025).
 
-Dataset format (official ``xuanyuan14/LongMemEval`` releases, ``*_s`` /
+Two on-disk schemas are supported; the loader auto-detects per entry.
+
+Official schema (``xiaowu0162/longmemeval-cleaned`` releases, ``*_s`` /
 ``*_m`` / ``*_oracle`` splits)::
+
+    [
+      {
+        "question_id": "...",
+        "question_type": "single-session-user | single-session-assistant |
+                          single-session-preference | temporal-reasoning |
+                          knowledge-update | multi-session",
+        "question": "...",
+        "answer": "...",                    # single gold string
+        "question_date": "YYYY/M/D H:MM",
+        "haystack_session_ids": [...],
+        "haystack_dates": [...],
+        "haystack_sessions": [[{"role": "...", "content": "..."}, ...], ...],
+        "answer_session_ids": [...]
+      }, ...
+    ]
+
+Synthetic schema (the deterministic generator in ``benchmarks/loader.py``)::
 
     [
       {
@@ -16,11 +36,17 @@ Dataset format (official ``xuanyuan14/LongMemEval`` releases, ``*_s`` /
     ]
 
 This module:
-    - ``LongMemEvalDataset``: loads the format, converts each question into a
-      :class:`BenchmarkSample` whose source document materialises the session
-      history as Observation memories.
+    - ``LongMemEvalDataset``: loads either format, converts each question
+      into a :class:`BenchmarkSample` whose source document materialises the
+      session history as Observation memories. Official entries are
+      recognised by the presence of ``haystack_sessions``: the single gold
+      ``answer`` is wrapped into the answers list and the per-session
+      haystack is flattened into one turn-level history (``haystack_dates``
+      are accepted but not yet materialised as per-session timestamps).
     - ``LongMemEvalRunner``: ingests the sessions, queries memplex, and scores
-      answer hits (normalised substring / exact match) per question type.
+      per question type. Primary metrics are token-F1 and exact match (max
+      over gold answers, SQuAD convention); the normalised substring hit is
+      kept only as the auxiliary diagnostic ``substring_hit_rate``.
     - A deterministic synthetic generator backs ``download_dataset`` when the
       real corpus is absent, so CI exercises the full path without network.
 """
@@ -31,6 +57,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +66,9 @@ from benchmarks.base import (
     BenchmarkRunner,
     BenchmarkSample,
     EvaluationDataset,
+    LatencyStats,
+    normalize_answer_text,
+    token_f1,
 )
 from memplex.models import Observation
 
@@ -63,10 +93,12 @@ class LongMemEvalSample:
     question_date: str
     session_history: List[Dict[str, str]]
     evidence_session_ids: List[Any] = field(default_factory=list)
+    question_id: Optional[str] = None
 
     def to_benchmark_sample(self) -> BenchmarkSample:
+        slug = self.question_id or f"{abs(hash(self.question)) & 0xFFFFFF:06x}"
         return BenchmarkSample(
-            id=f"longmemeval-{abs(hash(self.question)) & 0xFFFFFF:06x}",
+            id=f"longmemeval-{slug}",
             query=self.question,
             expected_ids=[f"answer::{a}" for a in self.answers],
             expected_answer=self.answers[0] if self.answers else None,
@@ -81,8 +113,52 @@ class LongMemEvalSample:
         )
 
 
+def _parse_synthetic_entry(item: Dict[str, Any]) -> LongMemEvalSample:
+    """Parse the repo's synthetic schema (``answers`` list, flat history)."""
+    return LongMemEvalSample(
+        question=str(item.get("question", "")),
+        answers=[str(a) for a in item.get("answers", [])],
+        question_type=str(item.get("question_type", "single-hop-user")),
+        question_date=str(item.get("question_date", "")),
+        session_history=list(item.get("session_history", [])),
+        evidence_session_ids=list(item.get("evidence_session_ids", [])),
+    )
+
+
+def _parse_official_entry(item: Dict[str, Any]) -> LongMemEvalSample:
+    """Parse the official schema (``answer`` string + ``haystack_sessions``).
+
+    The single gold ``answer`` is wrapped into the answers list and the
+    per-session haystack is flattened into one turn-level history, matching
+    the shape the runner and ``to_memories`` already consume. Official
+    question types (``single-session-user``, ``multi-session``, ...) are kept
+    verbatim; abstention questions (``question_id`` ending in ``_abs``) load
+    like any other entry.
+    """
+    raw_answer = item.get("answer")
+    candidates = raw_answer if isinstance(raw_answer, list) else [raw_answer]
+    answers = [str(a) for a in candidates if a is not None and str(a).strip()]
+    session_history = [
+        turn for session in item.get("haystack_sessions", []) for turn in session
+    ]
+    return LongMemEvalSample(
+        question=str(item.get("question", "")),
+        answers=answers,
+        question_type=str(item.get("question_type", "single-hop-user")),
+        question_date=str(item.get("question_date", "")),
+        session_history=session_history,
+        evidence_session_ids=list(item.get("answer_session_ids", [])),
+        question_id=str(item["question_id"]) if item.get("question_id") else None,
+    )
+
+
 class LongMemEvalDataset(EvaluationDataset):
-    """Loads official LongMemEval JSON (list-of-questions form)."""
+    """Loads LongMemEval JSON (list-of-questions form).
+
+    Entries in the official haystack schema and the repo's synthetic flat
+    schema may be mixed in one file; detection is per entry on the presence
+    of ``haystack_sessions``.
+    """
 
     def __init__(self, path: Optional[str] = None):
         self.path = path
@@ -100,13 +176,10 @@ class LongMemEvalDataset(EvaluationDataset):
             raise ValueError("LongMemEval top level must be a list of questions")
         samples: List[BenchmarkSample] = []
         for item in raw:
-            sample = LongMemEvalSample(
-                question=str(item.get("question", "")),
-                answers=[str(a) for a in item.get("answers", [])],
-                question_type=str(item.get("question_type", "single-hop-user")),
-                question_date=str(item.get("question_date", "")),
-                session_history=list(item.get("session_history", [])),
-                evidence_session_ids=list(item.get("evidence_session_ids", [])),
+            sample = (
+                _parse_official_entry(item)
+                if "haystack_sessions" in item
+                else _parse_synthetic_entry(item)
             )
             if not sample.question or not sample.answers:
                 logger.debug("skipping malformed LongMemEval entry")
@@ -142,19 +215,39 @@ def _normalise(text: str) -> str:
 
 
 def answer_hit(predicted: str, gold_answers: List[str]) -> bool:
-    """Normalised substring hit of any gold answer inside the prediction."""
+    """Auxiliary diagnostic: normalised gold-as-substring-of-prediction hit.
+
+    One-directional on purpose: the previous bidirectional version also
+    counted ``prediction in gold``, which inflates the score whenever the
+    retrieved text is a short fragment of a longer gold answer. Kept as a
+    diagnostic alongside the token-F1 / exact-match primary metrics.
+    """
     pred = _normalise(predicted)
     if not pred:
         return False
     for gold in gold_answers:
         norm_gold = _normalise(gold)
-        if norm_gold and (norm_gold in pred or pred in norm_gold):
+        if norm_gold and norm_gold in pred:
             return True
     return False
 
 
 class LongMemEvalRunner(BenchmarkRunner):
-    """Ingest sessions → query → per-type answer-hit scoring."""
+    """Ingest sessions → query → per-type token-F1/EM scoring.
+
+    Scoring per question (max over gold answers, SQuAD convention):
+        - ``token_f1``: token-overlap F1 between the concatenated retrieved
+          summaries and the gold answer — the primary metric.
+        - ``exact_match``: 1.0 when the normalised prediction equals a
+          normalised gold answer. Because the "prediction" is a concatenation
+          of retrieval snippets (not a generated answer), EM is expected to
+          be near zero and is reported for honesty, not as a quality target.
+        - ``substring_hit_rate``: auxiliary diagnostic, see :func:`answer_hit`.
+
+    The official LongMemEval uses an LLM judge over generated answers; this
+    runner has no generation step, so token-F1 over retrieved evidence is the
+    closest reproducible proxy.
+    """
 
     DATASET_NAME = "longmemeval"
 
@@ -188,52 +281,74 @@ class LongMemEvalRunner(BenchmarkRunner):
             )
             service.store.add(func, source)
 
+    @staticmethod
+    def _score_sample(predicted: str, gold_answers: List[str]) -> Dict[str, float]:
+        """Score one prediction against its gold answers (max over golds)."""
+        f1 = max((token_f1(predicted, gold) for gold in gold_answers), default=0.0)
+        norm_pred = normalize_answer_text(predicted)
+        em = (
+            max(
+                (1.0 if norm_pred and norm_pred == normalize_answer_text(gold) else 0.0)
+                for gold in gold_answers
+            )
+            if gold_answers
+            else 0.0
+        )
+        return {
+            "token_f1": f1,
+            "exact_match": em,
+            "substring_hit": 1.0 if answer_hit(predicted, gold_answers) else 0.0,
+        }
+
     def run_retrieval(
         self, service, samples: List[BenchmarkSample], top_k: int = 10
     ) -> List[BenchmarkResult]:
-        from datetime import datetime
-
         timestamp = datetime.utcnow().isoformat() + "Z"
-        per_type: Dict[str, List[bool]] = {}
-        latencies: List[int] = []
+        per_type: Dict[str, List[Dict[str, float]]] = {}
+        latencies = LatencyStats()
 
         for sample in samples:
             self._seed(service, self.dataset.to_memories(sample))
-            from datetime import datetime as _dt
-
-            start = _dt.now()
-            result = service.query(sample.query, top_k=top_k, explain=False)
-            latencies.append(int((_dt.now() - start).total_seconds() * 1000))
+            with latencies.timed():
+                result = service.query(sample.query, top_k=top_k, explain=False)
             predicted = " ".join(r.summary for r in result.results)
-            hit = answer_hit(predicted, list(sample.metadata.get("answers", [])))
+            scores = self._score_sample(predicted, list(sample.metadata.get("answers", [])))
             qtype = sample.metadata.get("question_type", "unknown")
-            per_type.setdefault(qtype, []).append(hit)
+            per_type.setdefault(qtype, []).append(scores)
 
-        total = sum(len(v) for v in per_type.values())
-        hits = sum(sum(v) for v in per_type.values())
-        avg_latency = int(sum(latencies) / len(latencies)) if latencies else 0
+        all_scores = [score for scores in per_type.values() for score in scores]
+        total = len(all_scores)
 
-        results: List[BenchmarkResult] = [
-            BenchmarkResult(
-                name="longmemeval_answer_hit",
-                dataset=self.DATASET_NAME,
-                metric="answer_hit_rate",
-                value=round(hits / total, 4) if total else 0.0,
-                latency_ms=avg_latency,
-                samples=total,
-                timestamp=timestamp,
-            )
-        ]
-        for qtype, outcomes in sorted(per_type.items()):
+        results: List[BenchmarkResult] = []
+        for metric in ("token_f1", "exact_match", "substring_hit_rate"):
+            key = "substring_hit" if metric == "substring_hit_rate" else metric
+            value = sum(s[key] for s in all_scores) / total if total else 0.0
             results.append(
                 BenchmarkResult(
-                    name="longmemeval_answer_hit",
+                    name="longmemeval_answer_quality",
+                    dataset=self.DATASET_NAME,
+                    metric=metric,
+                    value=round(value, 4),
+                    latency_ms=latencies.mean,
+                    samples=total,
+                    timestamp=timestamp,
+                    latency_p50_ms=latencies.p50,
+                    latency_p99_ms=latencies.p99,
+                )
+            )
+        for qtype, outcomes in sorted(per_type.items()):
+            value = sum(s["token_f1"] for s in outcomes) / len(outcomes)
+            results.append(
+                BenchmarkResult(
+                    name="longmemeval_answer_quality",
                     dataset=f"{self.DATASET_NAME}::{qtype}",
-                    metric="answer_hit_rate",
-                    value=round(sum(outcomes) / len(outcomes), 4),
-                    latency_ms=avg_latency,
+                    metric="token_f1",
+                    value=round(value, 4),
+                    latency_ms=latencies.mean,
                     samples=len(outcomes),
                     timestamp=timestamp,
+                    latency_p50_ms=latencies.p50,
+                    latency_p99_ms=latencies.p99,
                 )
             )
         return results

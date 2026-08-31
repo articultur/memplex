@@ -69,7 +69,7 @@ _SYNC_STATE_KEYS = {
     "snapshots",
     "snapshot_items",
 }
-_EMPTY_SYNC_STATE = {
+_EMPTY_SYNC_STATE: dict[str, Any] = {
     "tenant_binding": None,
     "next_stream_seq": 1,
     "retention_floor": 0,
@@ -993,11 +993,10 @@ def _validate_sync_entity_versions_items(items: list, *,
 def _validate_sync_targets_items(items: list, *,
     payload: Any,
     label: Any,
-) -> None:
+) -> set[str]:
     """Validate every item of the sync collection."""
     target_ids: set[str] = set()
     seen: set[Any] = set()
-    target_ids: set[str] = set()
     for item in items:
         target_id = _require_str(item["target_id"], label="target target_id")
         _require_str(item["remote_node_id"], label="target remote_node_id")

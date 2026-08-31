@@ -859,7 +859,7 @@ def _dict_to_dataclass(cls: type, data: Dict[str, Any]) -> Any:
         if f.name not in data:
             continue
         value = data[f.name]
-        field_type = f.type
+        field_type: Any = f.type
 
         # Resolve string annotations to actual types
         if isinstance(field_type, str):
@@ -867,9 +867,11 @@ def _dict_to_dataclass(cls: type, data: Dict[str, Any]) -> Any:
             # Try to resolve from module globals
             import sys
 
-            field_type = sys.modules.get(cls.__module__, None)
-            if field_type is not None:
-                field_type = getattr(field_type, f.type, None)
+            module = sys.modules.get(cls.__module__, None)
+            if module is not None:
+                field_type = getattr(module, field_type, None)
+            else:
+                field_type = None
 
         # Handle nested dataclasses
         if isinstance(value, dict) and hasattr(field_type, "__dataclass_fields__"):

@@ -54,13 +54,13 @@ class _AuthorizedFeedbackStore:
         self._store = store
         self._context = context
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         target = getattr(self._store, name)
         if not callable(target):
             return target
 
         @wraps(target)
-        def scoped_call(*args, **kwargs):
+        def scoped_call(*args: Any, **kwargs: Any) -> Any:
             token = _FEEDBACK_SCOPE.set(self._context)
             try:
                 return target(*args, **kwargs)
@@ -70,7 +70,7 @@ class _AuthorizedFeedbackStore:
         return scoped_call
 
 
-def _connection_locked(method):
+def _connection_locked(method: Any) -> Any:
     """Serialize one complete database operation on a shared connection.
 
     PostgreSQL transaction-local identity and SQLite transactions belong to
@@ -80,7 +80,7 @@ def _connection_locked(method):
     """
 
     @wraps(method)
-    def locked(self, *args, **kwargs):
+    def locked(self: Any, *args: Any, **kwargs: Any) -> Any:
         with self._connection_lock:
             return method(self, *args, **kwargs)
 
@@ -284,13 +284,13 @@ class FeedbackStore(Protocol):
 
 
 def _serialize_feedback(fb: MemoryFeedback) -> dict:
-    ts = fb.timestamp
+    ts: Any = fb.timestamp
     if isinstance(ts, datetime):
         ts = ts.isoformat()
-    reviewed = fb.needs_review_until
+    reviewed: Any = fb.needs_review_until
     if isinstance(reviewed, datetime):
         reviewed = reviewed.isoformat()
-    resolved = fb.resolved_at
+    resolved: Any = fb.resolved_at
     if isinstance(resolved, datetime):
         resolved = resolved.isoformat()
     return {
@@ -516,7 +516,7 @@ class SQLiteFeedbackStore:
         self._db_path = db_path or str(Path("~/.memplex/feedback.db").expanduser())
         self._require_authorization = require_authorization
         self._connection_lock = RLock()
-        self._conn = None
+        self._conn: Any = None
 
     def authorized(self, context: AuthorizationContext) -> _AuthorizedFeedbackStore:
         if not isinstance(context, AuthorizationContext):
@@ -527,7 +527,7 @@ class SQLiteFeedbackStore:
         return _feedback_context(self._require_authorization)
 
     @_connection_locked
-    def _ensure_conn(self):
+    def _ensure_conn(self) -> None:
         if self._conn is not None:
             return
         import sqlite3
@@ -782,7 +782,7 @@ class PostgresFeedbackStore:
             context.session_id,
         )
 
-    def _bind_transaction_scope(self, cur, context: AuthorizationContext) -> None:
+    def _bind_transaction_scope(self, cur: Any, context: AuthorizationContext) -> None:
         """Set RLS values transaction-locally before feedback application SQL."""
         cur.execute(
             "SELECT "
@@ -841,7 +841,7 @@ class PostgresFeedbackStore:
         )
 
     @staticmethod
-    def _execute_in_transaction(cur, sql: str, params: tuple = ()) -> None:
+    def _execute_in_transaction(cur: Any, sql: str, params: tuple = ()) -> None:
         """Execute one feedback statement on the public operation's cursor.
 
         Keeping this narrow seam makes the transaction boundary testable and
@@ -1004,8 +1004,8 @@ class PostgresFeedbackStore:
 
 def create_feedback_store(
     backend: str = "lite",
-    **kwargs,
-):
+    **kwargs: Any,
+) -> FeedbackStore:
     """Create a feedback store by backend name.
 
     Parameters

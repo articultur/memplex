@@ -31,7 +31,7 @@ from memplex.sync_protocol import (
     SyncStatus,
     SyncStreamItem,
 )
-from memplex.sync_repository import SyncCursorExpired
+from memplex.sync_repository import SyncCursorExpired, SyncDeadLetterEntry
 
 _BATCH_NAMESPACE = uuid.UUID("a9d2e586-6a74-4f68-a45b-86db880a4368")
 _MAX_PROTOCOL_BYTES = 4 * 1024 * 1024
@@ -128,22 +128,22 @@ class SyncDispatcher:
             raise ValueError(
                 "max_response_bytes must be between 1 and the 4MiB protocol cap"
             )
-        for name, value in (
+        for num_name, num_value in (
             ("request_timeout", request_timeout),
             ("poll_interval", poll_interval),
         ):
-            if type(value) not in {int, float} or not math.isfinite(float(value)):
-                raise TypeError(f"{name} must be a finite number")
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
+            if type(num_value) not in {int, float} or not math.isfinite(float(num_value)):
+                raise TypeError(f"{num_name} must be a finite number")
+            if num_value <= 0:
+                raise ValueError(f"{num_name} must be positive")
         detached_headers: dict[str, str] = {}
         if headers is not None:
             if not isinstance(headers, Mapping):
                 raise TypeError("headers must be a mapping")
-            for name, value in headers.items():
-                if type(name) is not str or not name or type(value) is not str:
+            for hdr_name, hdr_value in headers.items():
+                if type(hdr_name) is not str or not hdr_name or type(hdr_value) is not str:
                     raise ValueError("headers must contain exact string pairs")
-                detached_headers[name] = value
+                detached_headers[hdr_name] = hdr_value
 
         self._repository = repository
         self._targets = detached_targets
@@ -396,7 +396,7 @@ class SyncDispatcher:
             raise ValueError("target is not configured")
         return self._repository.sync_replay_dead_letter(target_id, event_id)
 
-    def list_dead_letters(self, *, limit: int = 100):
+    def list_dead_letters(self, *, limit: int = 100) -> list[SyncDeadLetterEntry]:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("limit must be an exact int between 1 and 1000")
         return self._repository.sync_list_dead_letters(limit=limit)

@@ -38,7 +38,12 @@ jobs:
     # never satisfy the protected check for real installed host CLIs.
     name: g008-real-host-lifecycle
     runs-on: [self-hosted, macOS, memplex-g008-real-host]
-    timeout-minutes: 20
+    # Hard cap for the proof itself; a job queued on an offline runner does
+    # not consume this budget.  If the runner is offline the job sits queued
+    # and the release stalls: restore the runner, then re-run the failed job
+    # (or the whole Release workflow — the PyPI/npm publish jobs are
+    # digest-idempotent, so a rerun never double-publishes).
+    timeout-minutes: 30
     environment: g008-real-host
     env:
       MEMPLEX_HOST_LIFECYCLE_HMAC_KEY: ${{ secrets.MEMPLEX_HOST_LIFECYCLE_HMAC_KEY }}

@@ -34,7 +34,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 # Reserved attributes that should not leak into the JSON "extra" payload.
 _STDLOG_ATTRS = frozenset(
@@ -90,7 +90,7 @@ def _redact_text(value: str) -> str:
     return _URI_CREDENTIALS.sub(rf"\1{_REDACTED}@", value)
 
 
-def _redact_value(value, *, key: str = ""):
+def _redact_value(value: Any, *, key: str = "") -> Any:
     if key and _SENSITIVE_KEY.search(key):
         return _REDACTED
     if isinstance(value, str):
@@ -171,7 +171,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def _truthy(value: Optional[str]) -> bool:
-    return bool(value) and value.lower() in ("1", "true", "yes", "on")
+    return value is not None and value.lower() in ("1", "true", "yes", "on")
 
 
 def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = None) -> None:
@@ -196,7 +196,7 @@ def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = N
         json_mode = _truthy(os.environ.get("MEMPLEX_LOG_JSON"))
 
     level_name = (os.environ.get("MEMPLEX_LOG_LEVEL") or (level or "INFO")).upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level_value = getattr(logging, level_name, logging.INFO)
 
     root = logging.getLogger()
     # Clear any handlers from a previous configure/basicConfig call so we
@@ -211,5 +211,5 @@ def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = N
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
-    root.setLevel(level)
+    root.setLevel(level_value)
     install_sensitive_data_filters()

@@ -1,0 +1,40 @@
+name: Support request
+description: Request help with installation, configuration, or an exercised CLI workflow.
+title: "[Support] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues and read docs/guides/real-value-cli.md before submitting.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal and blocker
+      description: State what you are trying to do and where progress stops.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Memplex, Python, operating system, install method, backend, and agent.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction evidence
+      description: Include safe argv shape, exit status, expected behavior, and observed behavior.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation
+      description: Confirm that the public request contains no sensitive material.
+      options:
+        - label: I removed credentials, DSNs, private memory, identifiers, and backup artifacts.
+          required: true
+    validations:
+      required: true

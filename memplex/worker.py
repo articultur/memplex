@@ -34,10 +34,10 @@ from enum import Enum
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, cast
 
 from memplex.compaction import CompactionPipeline, CompactionScope
-from memplex.models import BackgroundTask, TaskInfo, TaskStatus, WorkerDrainResult
+from memplex.models import BackgroundTask, CompactionResult, TaskInfo, TaskStatus, WorkerDrainResult
 from memplex.task_repository import TaskRepository, WorkerQueueFull
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class TaskStore(TaskRepository):
     # ── Persistence ─────────────────────────────────────────────────
 
     @contextmanager
-    def _disk_lock(self):
+    def _disk_lock(self) -> Iterator[None]:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path.touch(exist_ok=True)
         with open(self._lock_path, "r+b") as lock_file:
@@ -634,23 +634,27 @@ class BackgroundWorker:
         task_repository: TaskRepository | None = None,
     ) -> None:
         worker_config = getattr(config, "worker", None)
-        queue_capacity = (
+        queue_capacity = cast(
+            int,
             queue_capacity
             if queue_capacity is not None
-            else getattr(worker_config, "queue_capacity", 1000)
+            else getattr(worker_config, "queue_capacity", 1000),
         )
-        claim_size = (
-            claim_size if claim_size is not None else getattr(worker_config, "claim_size", 32)
+        claim_size = cast(
+            int,
+            claim_size if claim_size is not None else getattr(worker_config, "claim_size", 32),
         )
-        max_attempts = (
+        max_attempts = cast(
+            int,
             max_attempts
             if max_attempts is not None
-            else getattr(worker_config, "max_attempts", 3)
+            else getattr(worker_config, "max_attempts", 3),
         )
-        lease_seconds = (
+        lease_seconds = cast(
+            int,
             lease_seconds
             if lease_seconds is not None
-            else getattr(worker_config, "lease_seconds", 60)
+            else getattr(worker_config, "lease_seconds", 60),
         )
         for name, value in (
             ("queue_capacity", queue_capacity),
@@ -668,7 +672,7 @@ class BackgroundWorker:
             raise TypeError("task_repository must implement TaskRepository")
         if task_repository is None:
             storage_path = storage_path or Path("~/.memplex/tasks.json").expanduser()
-            self._task_store = TaskStore(storage_path)
+            self._task_store: TaskRepository = TaskStore(storage_path)
         else:
             self._task_store = task_repository
         self._queue_capacity = queue_capacity
@@ -1158,7 +1162,7 @@ class BackgroundWorker:
         logger.info("Refresh vector: refreshed %d functions", result.refreshed)
         return {"status": "completed", "refreshed": result.refreshed}
 
-    def _handle_compaction(self, payload: dict) -> dict:
+    def _handle_compaction(self, payload: dict) -> dict | CompactionResult:
         """Handle COMPACTION tasks.
 
         When a CompactionPipeline is injected at init time, this handler

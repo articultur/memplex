@@ -109,9 +109,9 @@ def install_agent(
             installed.append(name)
     except Exception as exc:
         if transaction is not None:
-            snapshots, snapshot_root, created_directories = transaction
+            snapshots, snapshot_root, created_dirs = transaction
             rollback_errors = _restore_install_snapshot(snapshots, snapshot_root)
-            rollback_errors.extend(_remove_created_install_directories(created_directories))
+            rollback_errors.extend(_remove_created_install_directories(created_dirs))
             transaction = None
             restored = ", ".join(reversed(installed)) or "none completed"
             detail = f" Rolled back installed agents to exact preinstall state: {restored}."

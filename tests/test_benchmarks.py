@@ -12,7 +12,13 @@ from types import SimpleNamespace
 import pytest
 
 import benchmarks  # noqa: F401  (import triggers benchmark registration)
-from benchmarks.base import BenchmarkRunnerFactory, BenchmarkSample
+from benchmarks.base import (
+    BenchmarkResult,
+    BenchmarkRunnerFactory,
+    BenchmarkSample,
+    LatencyStats,
+    token_f1,
+)
 from benchmarks.evaluator import BenchmarkEvaluator
 from benchmarks.loader import download_dataset
 from benchmarks.locomo import LocomoDataset, LocomoRunner
@@ -295,6 +301,17 @@ class TestTriviaQASynthetic:
 
 
 class TestMultihopMetrics:
+    def test_top_one_result_covering_two_hops_has_unit_precision_and_recall(self):
+        metrics = _compute_multihop_metrics(
+            retrieved_summaries=["Alpha connects to Beta and contains the answer."],
+            supporting_facts=[{"title": "Alpha"}, {"title": "Beta"}],
+            answer_aliases=["answer"],
+            k_values=[1],
+        )
+
+        assert metrics["hop_precision@1"] == 1.0
+        assert metrics["hop_recall@1"] == 1.0
+
     def test_single_dataset_run_labels_all_metrics_with_dataset_name(self):
         """A hotpotqa-only run must not emit rows labeled 'popqa' in JSONL."""
         from benchmarks.popqa_hotpot import PopQAHotpotRunner
@@ -567,3 +584,246 @@ def test_cli_all_resolves_self_generated_without_download(tmp_path, monkeypatch)
     )
     assert captured["paths"]["memory_benchmark"] == ""
     assert "memory_benchmark" not in downloaded
+
+
+# ── Latency measurement (perf_counter / float ms / percentiles) ────────────
+
+
+class TestLatencyStats:
+    def test_percentiles_and_mean(self):
+        stats = LatencyStats()
+        for value in (10.0, 20.0, 30.0, 40.0):
+            stats.add(value)
+        assert stats.mean == 25.0
+        # Nearest-rank: p50 of 4 samples is the 2nd, p99 is the max.
+        assert stats.p50 == 20.0
+        assert stats.p99 == 40.0
+
+    def test_empty_stats_are_zero(self):
+        stats = LatencyStats()
+        assert stats.mean == 0.0
+        assert stats.p50 == 0.0
+        assert stats.p99 == 0.0
+
+    def test_timed_context_records_positive_float(self):
+        stats = LatencyStats()
+        with stats.timed():
+            sum(range(1000))
+        assert len(stats) == 1
+        assert stats.mean > 0.0
+        assert isinstance(stats.mean, float)
+
+    def test_result_serializes_optional_percentiles(self):
+        result = BenchmarkResult(
+            name="b", dataset="d", metric="m", value=1.0,
+            latency_ms=1.5, samples=1,
+            latency_p50_ms=1.4, latency_p99_ms=2.0,
+        )
+        row = result.to_dict()
+        assert row["latency_ms"] == 1.5
+        assert row["latency_p50_ms"] == 1.4
+        assert row["latency_p99_ms"] == 2.0
+        # Unset percentiles keep the legacy exact key set.
+        plain = BenchmarkResult(
+            name="b", dataset="d", metric="m", value=1.0,
+            latency_ms=1.5, samples=1,
+        ).to_dict()
+        assert "latency_p50_ms" not in plain
+        assert "latency_p99_ms" not in plain
+
+
+# ── Shared token-F1 ─────────────────────────────────────────────────────────
+
+
+def test_token_f1_shared_helper():
+    assert token_f1("the cat sat", "the cat") == pytest.approx(2 * (2 / 3) * 1 / ((2 / 3) + 1))
+    assert token_f1("", "anything") == 0.0
+    assert token_f1("alpha", "beta") == 0.0
+
+
+# ── LoCoMo official locomo10.json format ────────────────────────────────────
+
+
+class TestLocomoOfficialFormat:
+    @staticmethod
+    def _official_entry() -> dict:
+        return {
+            "sample_id": "conv-1",
+            "qa": [
+                {
+                    "question": "Where does Alice work?",
+                    "answer": "Acme",
+                    "category": 1,
+                    "evidence": ["D1:2"],
+                },
+                {
+                    "question": "How many plants does Bob have?",
+                    "answer": 42,  # numeric answers are stringified
+                    "category": 2,
+                    "evidence": ["D2:1", "D9:9"],  # D9:9 references no turn
+                },
+            ],
+            "conversation": {
+                "speaker_a": "Alice",
+                "speaker_b": "Bob",
+                # Out of declaration order on purpose: loader must sort.
+                "session_2_date_time": "2024-02-01 10:00",
+                "session_2": [
+                    {"speaker": "Bob", "dia_id": "D2:1", "text": "I have many plants."}
+                ],
+                "session_1_date_time": "2024-01-01 09:00",
+                "session_1": [
+                    {"speaker": "Alice", "dia_id": "D1:1", "text": "Hi Bob."},
+                    {"speaker": "Alice", "dia_id": "D1:2", "text": "I work at Acme."},
+                ],
+            },
+        }
+
+    def test_loads_official_format(self, tmp_path):
+        path = tmp_path / "locomo10.json"
+        path.write_text(json.dumps([self._official_entry()]), encoding="utf-8")
+
+        samples = LocomoDataset().load(str(path))
+
+        assert [s.id for s in samples] == ["conv-1_q0", "conv-1_q1"]
+        first, second = samples
+        assert first.query == "Where does Alice work?"
+        assert first.expected_answer == "Acme"
+        assert first.expected_ids == ["D1:2"]
+        assert second.expected_answer == "42"
+        assert second.expected_ids == ["D2:1", "D9:9"]
+        # Turns flattened chronologically across sessions.
+        turns = first.metadata["turns"]
+        assert [t["dia_id"] for t in turns] == ["D1:1", "D1:2", "D2:1"]
+        assert turns[0]["timestamp"] == "2024-01-01 09:00"
+        assert first.metadata["speakers"] == ["Alice", "Bob"]
+        # Evidence turns become ground-truth memories; unknown dia_ids get
+        # empty content but keep their id for expected_ids alignment.
+        assert first.metadata["ground_truth_memories"] == [
+            {"memory_id": "D1:2", "content": "I work at Acme.", "session_id": "session_1"}
+        ]
+        assert second.metadata["ground_truth_memories"][1]["content"] == ""
+
+    def test_legacy_synthetic_format_still_supported(self, tmp_path):
+        path = download_dataset("locomo", output_dir=str(tmp_path), force_synthetic=True)
+        samples = LocomoDataset().load(str(path))
+        assert len(samples) == 3
+        assert all(s.metadata["type"] == "qa" for s in samples)
+
+
+# ── LoCoMo persona consistency (token-F1 against reference) ────────────────
+
+
+class TestPersonaConsistency:
+    @staticmethod
+    def _sample() -> BenchmarkSample:
+        return BenchmarkSample(
+            id="conv_persona",
+            query="What does Alice do?",
+            metadata={
+                "type": "conversation",
+                "conversation_id": "conv_persona",
+                "speakers": ["Alice", "Bob"],
+                "target_speaker": "Alice",
+                "turns": [
+                    {"speaker": "Alice", "text": "I work at Acme as an engineer."},
+                    {"speaker": "Bob", "text": "I bake bread on weekends."},
+                ],
+                "ground_truth_memories": [],
+            },
+        )
+
+    @staticmethod
+    def _service_with(summary: str):
+        class StubService:
+            def query(self, query, top_k=10):
+                return SimpleNamespace(
+                    results=[SimpleNamespace(summary=summary, func_id="f1")]
+                )
+
+        return StubService()
+
+    def test_content_overlap_scores_one(self):
+        runner = LocomoRunner()
+        results = runner._run_persona_consistency(
+            self._service_with("I work at Acme as an engineer."),
+            [self._sample()],
+            top_k=5,
+            timestamp="t",
+        )
+        assert results[0].value == 1.0
+
+    def test_unrelated_retrieval_scores_zero(self):
+        runner = LocomoRunner()
+        results = runner._run_persona_consistency(
+            self._service_with("completely unrelated drizzle forecast"),
+            [self._sample()],
+            top_k=5,
+            timestamp="t",
+        )
+        assert results[0].value == 0.0
+
+    def test_other_speaker_content_alone_does_not_pass(self):
+        """Retrieving only Bob's utterance must not count as Alice-consistent."""
+        runner = LocomoRunner()
+        results = runner._run_persona_consistency(
+            self._service_with("I bake bread on weekends."),
+            [self._sample()],
+            top_k=5,
+            timestamp="t",
+        )
+        assert results[0].value == 0.0
+
+
+# ── LoCoMo event tracking (word-boundary, case-insensitive) ─────────────────
+
+
+class TestEventMentioned:
+    @pytest.mark.parametrize(
+        "event,text,expected",
+        [
+            ("art", "the art gallery was quiet", True),
+            ("Art", "the ART show opened", True),  # case-insensitive
+            ("art", "Artemis launch coverage", False),  # word boundary
+            ("book club", "our Book Club met", True),  # multi-word phrase
+            ("book club", "club members read a book", False),  # word order matters
+            ("", "anything", False),
+        ],
+    )
+    def test_word_boundary_matching(self, event, text, expected):
+        assert LocomoRunner._event_mentioned(event, text) is expected
+
+
+# ── Evaluator warmup ────────────────────────────────────────────────────────
+
+
+class TestEvaluatorWarmup:
+    class CountingService:
+        def __init__(self):
+            self.queries = 0
+
+        def query(self, query, top_k=10, **kwargs):
+            self.queries += 1
+            return SimpleNamespace(results=[])
+
+    def test_warmup_issues_untimed_queries(self, tmp_path):
+        service = self.CountingService()
+        evaluator = BenchmarkEvaluator(service, output_dir=str(tmp_path / "out"))
+        samples = [
+            BenchmarkSample(id="s1", query="q1"),
+            BenchmarkSample(id="s2", query="q2"),
+        ]
+        evaluator._warmup(samples, retrieval_k=5, rounds=3)
+        assert service.queries == 3
+
+    def test_warmup_zero_rounds_is_noop(self, tmp_path):
+        service = self.CountingService()
+        evaluator = BenchmarkEvaluator(service, output_dir=str(tmp_path / "out"))
+        evaluator._warmup([BenchmarkSample(id="s1", query="q1")], retrieval_k=5, rounds=0)
+        assert service.queries == 0
+
+    def test_run_single_warmup_disabled_still_completes(self, service, tmp_path):
+        path = download_dataset("locomo", output_dir=str(tmp_path), force_synthetic=True)
+        evaluator = BenchmarkEvaluator(service, output_dir=str(tmp_path / "out"))
+        results = evaluator.run_single("locomo", str(path), retrieval_k=5, warmup_rounds=0)
+        assert results
