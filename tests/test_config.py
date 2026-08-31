@@ -12,12 +12,10 @@ from memplex.config import (
     BackupConfig,
     CompactionConfig,
     EmbeddingConfig,
-    EncryptionConfig,
     GraphConfig,
     LLMConfig,
     LoggingConfig,
     MemplexConfig,
-    ObservationConfig,
     OperationsConfig,
     RerankerConfig,
     RetrievalConfig,
@@ -104,20 +102,10 @@ class TestDefaultConfig:
         assert cfg.llm.observation_compression is True
         assert cfg.llm.provider == "anthropic"
 
-    def test_observation_defaults(self):
-        cfg = MemplexConfig()
-        assert isinstance(cfg.observation, ObservationConfig)
-        assert cfg.observation.max_per_minute == 20
-
     def test_logging_defaults(self):
         cfg = MemplexConfig()
         assert isinstance(cfg.logging, LoggingConfig)
         assert cfg.logging.level == "INFO"
-
-    def test_encryption_defaults(self):
-        cfg = MemplexConfig()
-        assert isinstance(cfg.encryption, EncryptionConfig)
-        assert cfg.encryption.enabled is False
 
     def test_wiki_defaults(self):
         cfg = MemplexConfig()
@@ -135,10 +123,10 @@ class TestDefaultConfig:
         assert "cursor_signing_secret" not in repr(cfg.sync)
 
     def test_operations_config_rejects_weak_bounds_and_invalid_targets(self):
-        with pytest.raises(TypeError, match="operations.startup_timeout_seconds"):
-            OperationsConfig(startup_timeout_seconds=True)
-        with pytest.raises(ValueError, match="operations.shutdown_timeout_seconds"):
-            OperationsConfig(shutdown_timeout_seconds=0)
+        with pytest.raises(TypeError, match="operations.request_drain_timeout_seconds"):
+            OperationsConfig(request_drain_timeout_seconds=True)
+        with pytest.raises(ValueError, match="operations.request_drain_timeout_seconds"):
+            OperationsConfig(request_drain_timeout_seconds=0)
         with pytest.raises(ValueError, match="operations.availability_target"):
             OperationsConfig(availability_target=1.1)
         with pytest.raises(ValueError, match="operations.error_rate_target"):
@@ -347,17 +335,10 @@ class TestEnvOverrides:
         cfg = load_config()
         assert cfg.logging.level == "DEBUG"
 
-    def test_encryption_enabled_override(self, monkeypatch):
-        monkeypatch.setenv("MEMPLEX_ENCRYPTION_ENABLED", "true")
-        cfg = load_config()
-        assert cfg.encryption.enabled is True
-
     def test_operations_overrides_are_typed(self, monkeypatch):
-        monkeypatch.setenv("MEMPLEX_OPERATIONS_STARTUP_TIMEOUT_SECONDS", "45")
         monkeypatch.setenv("MEMPLEX_OPERATIONS_AVAILABILITY_TARGET", "0.9995")
         monkeypatch.setenv("MEMPLEX_OPERATIONS_REPORT_KEY_ID", "ops-key")
         cfg = load_config()
-        assert cfg.operations.startup_timeout_seconds == 45
         assert cfg.operations.availability_target == pytest.approx(0.9995)
         assert cfg.operations.report_key_id == "ops-key"
 
@@ -651,3 +632,24 @@ class TestRemovedDeadConfig:
 
         assert "graph.semantic_similar_ttl_days" not in _ENV_TYPE_COERCIONS
         assert "graph.semantic_similar_sync_on_merge" not in _ENV_TYPE_COERCIONS
+
+    def test_observation_encryption_and_dead_operations_keys_removed(self):
+        """2026-08 review: these keys were declared/validated but had zero
+        runtime consumers (grep-verified) — removed rather than advertised."""
+        config = MemplexConfig()
+        assert not hasattr(config, "observation")
+        assert not hasattr(config, "encryption")
+        assert not hasattr(LoggingConfig(), "sanitize_sensitive")
+        assert not hasattr(OperationsConfig(), "startup_timeout_seconds")
+        assert not hasattr(OperationsConfig(), "shutdown_timeout_seconds")
+        from memplex.config import _ENV_TYPE_COERCIONS
+
+        for key in (
+            "observation.max_per_minute",
+            "logging.sanitize_sensitive",
+            "encryption.enabled",
+            "encryption.key_path",
+            "operations.startup_timeout_seconds",
+            "operations.shutdown_timeout_seconds",
+        ):
+            assert key not in _ENV_TYPE_COERCIONS

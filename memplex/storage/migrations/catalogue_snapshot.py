@@ -12,13 +12,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from memplex.storage.migrations.catalogue_checks import _normalise_sql
-from memplex.storage.migrations.runner import (
+from memplex.storage.migrations._constants import (
     _CAPABILITIES_TABLE,
     _KNOWN_MEMPLEX_RELATION_KINDS,
     _MANAGED_TABLES,
     _SYNC_FUNCTIONS,
 )
+from memplex.storage.migrations.catalogue_checks import _normalise_sql
 
 
 def _read_schema_and_relations(cur: Any) -> tuple[Any, Any, tuple]:

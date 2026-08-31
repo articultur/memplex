@@ -14,12 +14,9 @@ import re
 from hashlib import sha256
 from typing import Any, Final, Literal
 
-# Schema constants live in ``runner`` (they are also consumed by
-# ``_catalog_snapshot`` / ``schema_fingerprint`` there). Importing them here is
-# an ordered circular import: ``runner`` only imports *this* module at its very
-# end (the re-export below), by which point every constant below is already
-# defined, so the borrow resolves cleanly.
-from memplex.storage.migrations.runner import (
+# Schema constants live in ``_constants`` (dependency-free, stdlib only), the
+# single source shared by every module in this migration cluster.
+from memplex.storage.migrations._constants import (
     _ACL_COLUMNS,
     _CAPABILITIES_TABLE,
     _CORE_POLICY_DIGESTS,
@@ -517,7 +514,10 @@ def _post_core_defaults_match(
             for sequence_bigint in sequence_forms
         ):
             return False
-        expected["id"] = _column_defaults(table)["id"]
+        id_default = _column_defaults(table)["id"]
+        if id_default is None:
+            return False
+        expected["id"] = id_default
     if layout == "runtime_v1":
         expected.update(
             {
@@ -991,7 +991,7 @@ def _sync_table_signature(table: dict[str, Any]) -> str:
 
 def _sync_table_catalogue_matches(name: str, table: dict[str, Any]) -> bool:
     """Verify the v5 durable-state boundary from parsed catalogues, not SQL text."""
-    return (
+    return bool(
         _has_sequential_attnums(table)
         and _managed_table_catalogue_matches(table)
         and tuple(column[0] for column in table["columns"]) == _SYNC_COLUMN_NAMES[name]

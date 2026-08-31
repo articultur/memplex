@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, overload
 
 from memplex.models.misc import FieldValue
 
@@ -15,6 +15,10 @@ class FeedbackVerdict(Enum):
     ALTERNATIVE = "alternative"
 
 
+@overload
+def _to_naive(dt: datetime) -> datetime: ...
+@overload
+def _to_naive(dt: None) -> None: ...
 def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
     """Normalize a datetime to naive UTC.
 
@@ -54,7 +58,7 @@ class MemoryFeedback:
     visibility: str = "workspace"
     provenance: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.timestamp = _to_naive(self.timestamp)
         self.needs_review_until = _to_naive(self.needs_review_until)
         self.resolved_at = _to_naive(self.resolved_at)

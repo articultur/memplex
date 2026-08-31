@@ -41,40 +41,40 @@ tier.
 
 Background compaction is automatic: the Claude Code hook loop compacts on
 Stop, and writes on any path trigger compaction once the corpus crosses the
-configured warn threshold. `memplex compact` remains available for manual
-runs.
+configured warn threshold. Manual compaction remains available from the CLI.
 
 ## Install
 
 No source checkout is required.
 
 ```bash
-npx memplex setup
+npx memplex@3.3.0 setup
 ```
 
 Install into a specific agent:
 
 ```bash
-npx memplex setup --agent codex --project-path "$PWD"
-npx memplex setup --agent claude-code --project-path "$PWD"
-npx memplex setup --agent openclaw --project-path "$PWD"
-npx memplex setup --agent hermes --project-path "$PWD"
+npx memplex@3.3.0 setup --agent codex --project-path "$PWD"
+npx memplex@3.3.0 setup --agent claude-code --project-path "$PWD"
+npx memplex@3.3.0 setup --agent openclaw --project-path "$PWD"
+npx memplex@3.3.0 setup --agent hermes --project-path "$PWD"
 ```
 
 Install every supported local agent:
 
 ```bash
-npx memplex setup --agent all --project-path "$PWD"
+npx memplex@3.3.0 setup --agent all --project-path "$PWD"
 ```
 
 Uninstall is symmetrical:
 
 ```bash
-npx memplex uninstall --agent all
+npx memplex@3.3.0 uninstall --agent all
 ```
 
-The npm wrapper creates a persistent Python environment at
-`~/.local/share/memplex/agent-venv`, installs `memplex==3.3.0`, detects local
+The current public stable release is `3.3.0`. Its npm wrapper creates a
+persistent Python environment at `~/.local/share/memplex/agent-venv`, installs
+`memplex==3.3.0`, detects local
 agent config directories, and registers Memplex into the selected hosts. It uses
 `uv` when available and falls back to `python -m venv` plus `pip`.
 
@@ -85,12 +85,6 @@ Python-first users can skip npm:
 ```bash
 uv tool install memplex==3.3.0
 memplex setup --agent all --project-path "$PWD"
-```
-
-版本绑定的 npm 安装：
-
-```bash
-npx memplex@3.3.0 setup --agent all --project-path "$PWD"
 ```
 
 ## What Gets Installed
@@ -117,7 +111,7 @@ it removes only the Memplex-owned keys.
 任何主机/宿主升级（含插件、包、配置漂移）后需重新执行 host matrix 与健康检查：
 
 - `memplex --output json doctor --agent <agent>`
-- `memplex --output json agent status --agent all`
+- inspect agent status for all supported hosts
 
 List supported profiles:
 
@@ -141,7 +135,7 @@ memplex --output json agent recall \
 For a no-write preview:
 
 ```bash
-npx memplex setup --agent all --project-path "$PWD" --dry-run
+npx memplex@3.3.0 setup --agent all --project-path "$PWD" --dry-run
 ```
 
 ## Offline And Mainland China
@@ -150,7 +144,7 @@ Memplex's default local retrieval uses a SQLite FTS5 sidecar index with
 `bm25()` ranking plus generated trigram tokens for Chinese, code symbols,
 paths, and short memory fragments. If SQLite FTS5 is unavailable, it falls back
 to pure-Python local BM25/trigram matching. The agent hot path does not need
-HuggingFace, so `npx memplex setup`, capture, recall, MCP tools, and hooks
+HuggingFace, so `npx memplex@3.3.0 setup`, capture, recall, MCP tools, and hooks
 continue to work when HuggingFace is blocked or unavailable.
 
 The embedding fallback is also local. To force that path explicitly:
@@ -202,8 +196,8 @@ the default local retrieval and embedding path for agent reliability.
   compressed before storage (rule-based fallback otherwise; disable with
   `MEMPLEX_LLM_OBSERVATION_COMPRESSION=false`).
 - **3-layer retrieval**: SQLite FTS5/BM25+trigram search, timeline, get.
-- **5-dim reranking**: raw relevance, semantic similarity, recency, source
-  authority, frequency.
+- **6-dim reranking**: raw relevance, semantic similarity, recency, source
+  authority, frequency, confidence.
 - **5-stage compaction**: extract, dedup, summarize, prune, archive.
 - **Wiki layer**: full-text/vector retrieval plus graph-aware synthesis.
 - **Namespacing**: user, session, project path, and storage path isolation.
@@ -221,29 +215,29 @@ reproduction commands.
 
 ## Docs
 
-- [Getting Started](docs/getting-started.md): install, verify, doctor,
-  recall explain, scope, inbox, corpus, policy, report, uninstall, and
-  troubleshoot.
-- [Explainer](docs/explainer.md): what Memplex is and how the memory loop works.
-- [Architecture](docs/architecture.md): module map, split-module re-export
-  contracts, ordered-circular-import rules, and the sync lockstep ABC.
-- [Mutation Testing](docs/mutation-testing.md): pilot baseline, how to run,
-  and the equivalence argument for surviving mutants.
-- [Security Scan Triage](docs/security-triage.md): sealed deep-scan verdicts
-  per finding category, with rerun instructions.
-- [ADRs](docs/adr/): architecture decision records for the key
-  design choices (readiness gating, module splits, grants, bi-temporal,
-  complexity freeze).
-- [Curation UI design](docs/curation-ui.md): the human curation console
-  plan (web admin for promote / grants / history).
-- [Agent Integration Loop](docs/agent-integration.md): adapter contracts for
-  Codex, Claude Code, OpenClaw, and Hermes.
-- [Benchmarks](docs/benchmarks.md): evaluation methodology, metric
-  definitions, offline synthetic baselines, and reproduction commands.
-- [Release Automation](docs/release-automation.md): 可复现构建、OIDC trusted
-  publishing、attestation 与不可变摘要门禁。
+- **Start:** [Real-value CLI workflows](docs/guides/real-value-cli.md),
+  [Getting Started](docs/getting-started.md),
+  [Explainer](docs/explainer.md), and
+  [Agent Integration Loop](docs/agent-integration.md).
+- **Evaluate:** [Positioning and decision guide](docs/positioning.md),
+  [Capability mechanisms](docs/capability-mechanisms.md),
+  [machine-readable manifest](docs/capabilities.json),
+  [point-in-time open-source baseline](docs/open-source-benchmark-baseline.md),
+  and [benchmark methodology](docs/benchmarks.md).
+- **Operate:** [Production readiness](docs/production-readiness.md),
+  [production runbooks](docs/runbooks/production-operations.md),
+  [release automation](docs/release-automation.md), and
+  [security scan triage](docs/security-triage.md).
+- **Extend:** [Architecture](docs/architecture.md), [ADRs](docs/adr/README.md),
+  [mutation testing](docs/mutation-testing.md), and
+  [memory versus curated knowledge](docs/memory-vs-knowledge.md).
 
 ## From Source
+
+The checkout declares `3.3.0`, which is also the current public stable
+release (see `## [3.3.0] - 2026-08-09` in CHANGELOG.md). Use editable
+installation for source testing; `npx memplex@latest` installs the published
+stable `3.3.0` build from the registry, not this checkout.
 
 ```bash
 git clone https://github.com/articultur/memplex.git

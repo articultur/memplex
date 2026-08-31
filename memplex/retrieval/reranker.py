@@ -3,7 +3,7 @@
 Two-stage retrieval architecture::
 
     Stage 1 (bi-encoder, fast):
-        Reranker scores candidates across 5 dimensions and returns top-K.
+        Reranker scores candidates across 6 dimensions and returns top-K.
 
     Stage 2 (cross-encoder, precise, optional):
         CrossEncoderReranker re-scores the top-K with a jointly-encoded model
@@ -55,7 +55,7 @@ def cosine_similarity(a: Vector, b: Vector) -> float:
     return dot / (norm_a * norm_b + 1e-8)
 
 
-# ── 5-dimensional Reranker ────────────────────────────────────────────
+# ── 6-dimensional Reranker ────────────────────────────────────────────
 
 
 class Reranker:
@@ -63,11 +63,13 @@ class Reranker:
 
     Scoring dimensions and default weights::
 
-        raw_relevance      0.25  -- original score from each retrieval path
+        raw_relevance       0.25  -- original score from each retrieval path
         semantic_similarity 0.30  -- cosine(query_vec, result_vec)
         recency_decay       0.15  -- exponential decay (~0.61 at 30 days)
-        source_authority    0.15  -- requirement > meeting > code > wiki
-        frequency           0.15  -- log-scaled access count * recency
+        source_authority    0.10  -- requirement > meeting > code > wiki
+        frequency           0.10  -- log-scaled access count * recency
+        confidence          0.10  -- extraction-quality score persisted on the
+                                     node (clamped [0, 1], neutral 0.5 if absent)
 
     Parameters
     ----------
@@ -116,7 +118,7 @@ class Reranker:
         top_k: int = 10,
         query_vector: Optional[Vector] = None,
     ) -> List[SearchResult]:
-        """Re-rank *results* using the 5-dimensional scoring model.
+        """Re-rank *results* using the 6-dimensional scoring model.
 
         Parameters
         ----------
@@ -134,6 +136,28 @@ class Reranker:
 
         if query_vector is None:
             query_vector = self._embed_query_text(query)
+
+        # Pre-load all Function nodes in one batch (or per-id fallback),
+        # avoiding a per-result storage round-trip that compounds on
+        # backends with O(N) reads (2026-08 review).
+        node_map: dict[str, "Function"] = {}
+        if self.storage is not None:
+            unique_ids = list({r.func_id for r in results})
+            get_many = getattr(self.storage, "get_many", None)
+            if callable(get_many):
+                try:
+                    node_map = {k: v for k, v in get_many(unique_ids).items() if v is not None}
+                except Exception as exc:
+                    logger.debug("rerank: batch get_many failed (%s); falling back", exc)
+                    node_map = {}
+            for missing_id in unique_ids:
+                if missing_id not in node_map:
+                    try:
+                        node = self.storage.get(missing_id)
+                        if node is not None:
+                            node_map[missing_id] = node
+                    except Exception as exc:
+                        logger.debug("rerank: storage.get failed for %s: %s", missing_id, exc)
 
         scored: list[tuple[float, SearchResult]] = []
 
@@ -155,13 +179,7 @@ class Reranker:
             source_weight = self._source_weight(r.source_type)
 
             # 5. Frequency (access count * recency of last access)
-            func: Optional["Function"] = None
-            if self.storage is not None:
-                try:
-                    func = self.storage.get(r.func_id)
-                except Exception as exc:
-                    logger.debug("rerank: storage.get failed for %s: %s", r.func_id, exc)
-                    func = None
+            func = node_map.get(r.func_id)
             frequency_score = self._frequency_score(func) if func else 0.5
 
             # 6. Confidence: extraction-quality score persisted on the node
@@ -196,7 +214,7 @@ class Reranker:
             return embed_query(text)
         return self.embedder.embed(text)
 
-    def _recency_decay(self, updated_at: Optional[datetime]) -> float:
+    def _recency_decay(self, updated_at: Optional[datetime] | str) -> float:
         """Exponential time decay, range (0, 1], 0.5 at ``halflife * ln 2`` days.
 
         ``score = exp(-days_since_update / halflife)`` where the half-life is

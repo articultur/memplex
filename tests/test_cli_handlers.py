@@ -772,3 +772,69 @@ def test_cmd_setup_without_profile_keeps_plain_output(service, capsys):
     payload = json.loads(_out(capsys))
     assert "profile" not in payload
     assert "applied" not in payload
+
+
+# ── exit codes / top-level error surface ─────────────────────────────
+
+
+def test_main_unknown_command_is_usage_error_2(capsys):
+    """argparse usage errors exit 2 (argparse's own convention)."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["no-such-command"])
+    assert excinfo.value.code == 2
+
+
+def test_main_handler_error_prints_one_line_without_verbose(monkeypatch, capsys):
+    """Runtime errors: rc=1 with a single-line message, no traceback."""
+
+    def _boom(_args):
+        raise RuntimeError("cli-main-quiet-canary")
+
+    monkeypatch.setattr(cli, "cmd_health", _boom)
+    monkeypatch.delenv("MEMPLEX_DEBUG", raising=False)
+    rc = cli.main(["health"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "cli-main-quiet-canary" in err
+    assert "Traceback" not in err
+
+
+def test_main_handler_error_prints_traceback_with_verbose(monkeypatch, capsys):
+    """--verbose surfaces the full traceback for the same failure."""
+
+    def _boom(_args):
+        raise RuntimeError("cli-main-verbose-canary")
+
+    monkeypatch.setattr(cli, "cmd_health", _boom)
+    monkeypatch.delenv("MEMPLEX_DEBUG", raising=False)
+    rc = cli.main(["--verbose", "health"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Traceback" in err
+    assert "cli-main-verbose-canary" in err
+
+
+def test_main_handler_error_prints_traceback_with_memplex_debug(monkeypatch, capsys):
+    """MEMPLEX_DEBUG is the env equivalent of --verbose."""
+
+    def _boom(_args):
+        raise RuntimeError("cli-main-debug-canary")
+
+    monkeypatch.setattr(cli, "cmd_health", _boom)
+    monkeypatch.setenv("MEMPLEX_DEBUG", "1")
+    rc = cli.main(["health"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Traceback" in err
+    assert "cli-main-debug-canary" in err
+
+
+def test_stepup_help_marks_it_as_install_alias(capsys):
+    """The stepup alias stays, but --help must say what it is."""
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["--help"])
+    assert excinfo.value.code == 0
+    out = _out(capsys)
+    assert "stepup" in out
+    assert "Alias for 'install'" in out

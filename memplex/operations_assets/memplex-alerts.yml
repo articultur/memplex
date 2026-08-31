@@ -7,53 +7,53 @@ groups:
         labels:
           severity: critical
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#readiness-unavailable
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#readiness-unavailable
       - alert: MemplexErrorBudgetBurn
         expr: sum(rate(memplex_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(memplex_http_requests_total[5m])), 0.001) > 0.001
         for: 5m
         labels:
           severity: critical
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#error-budget-burn
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#error-budget-burn
       - alert: MemplexP95LatencyHigh
         expr: histogram_quantile(0.95, sum by (le) (rate(memplex_http_request_duration_seconds_bucket[5m]))) > 0.25
         for: 10m
         labels:
           severity: warning
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#latency
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#latency
       - alert: MemplexWorkerBacklog
         expr: memplex_worker_pending + memplex_worker_leased > 1000
         for: 10m
         labels:
           severity: warning
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#worker-backlog
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#worker-backlog
       - alert: MemplexSyncBacklog
         expr: memplex_sync_pending + memplex_sync_leased > 1000
         for: 10m
         labels:
           severity: warning
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#sync-backlog
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#sync-backlog
       - alert: MemplexDeadLettersPresent
         expr: memplex_worker_dead_letters + memplex_sync_dead_letters > 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#dead-letters
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#dead-letters
       - alert: MemplexPoolSaturated
         expr: memplex_pool_max_connections > 0 and memplex_pool_business_leases / memplex_pool_max_connections >= 0.9
         for: 5m
         labels:
           severity: critical
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#pool-saturation
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#pool-saturation
       - alert: MemplexShutdownDeadlineExceeded
         expr: increase(memplex_shutdown_deadline_exceeded_total[15m]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          runbook_url: docs/runbooks/production-operations.md#shutdown-deadline
+          runbook_url: https://github.com/articultur/memplex/blob/main/docs/runbooks/production-operations.md#shutdown-deadline

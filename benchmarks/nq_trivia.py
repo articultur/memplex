@@ -28,6 +28,9 @@ from benchmarks.base import (
     BenchmarkRunnerFactory,
     BenchmarkSample,
     EvaluationDataset,
+    LatencyStats,
+    normalize_answer_text,
+    token_f1,
 )
 from memplex.models.source import SourceDocument, SourceType
 from memplex.service import MemplexService
@@ -110,12 +113,7 @@ _HF_CONFIGS = {
 
 def _normalize_text(text: str) -> str:
     """Normalize text for comparison: lowercase, strip punctuation."""
-    if not text:
-        return ""
-    text = text.lower().strip()
-    text = re.sub(r"[^\w\s']", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return normalize_answer_text(text)
 
 
 def _extract_answer_aliases(answer: Any) -> List[str]:
@@ -170,23 +168,7 @@ def _extract_answer_aliases(answer: Any) -> List[str]:
 
 def _compute_token_f1(prediction: str, reference: str) -> float:
     """Compute token-level F1 between prediction and reference strings."""
-    pred_tokens = _normalize_text(prediction).split()
-    ref_tokens = _normalize_text(reference).split()
-
-    if not pred_tokens or not ref_tokens:
-        return 0.0
-
-    common = set(pred_tokens) & set(ref_tokens)
-    if not common:
-        return 0.0
-
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(ref_tokens)
-
-    if precision + recall == 0:
-        return 0.0
-
-    return 2 * precision * recall / (precision + recall)
+    return token_f1(prediction, reference)
 
 
 def _exact_match_score(prediction: str, reference: str) -> float:
@@ -830,17 +812,15 @@ class NQTriviaRunner(BenchmarkRunner):
         recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
         precision_scores: Dict[str, List[float]] = {f"precision@{k}": [] for k in self._k_values}
         mrr_scores: List[float] = []
-        total_latency = 0
+        latencies = LatencyStats()
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
             if not answer_aliases and sample.expected_answer:
                 answer_aliases = [_normalize_text(sample.expected_answer)]
 
-            query_start = datetime.utcnow()
-            query_result = service.query(sample.query, top_k=top_k)
-            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
-            total_latency += query_latency
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=top_k)
 
             retrieved_summaries = [r.summary for r in query_result.results]
             if not retrieved_summaries:
@@ -855,7 +835,7 @@ class NQTriviaRunner(BenchmarkRunner):
                 recall_scores[f"recall@{k}"].append(metrics.get(f"recall@{k}", 0.0))
                 precision_scores[f"precision@{k}"].append(metrics.get(f"precision@{k}", 0.0))
 
-        avg_latency = total_latency // max(len(samples), 1)
+        avg_latency = latencies.mean
         timestamp = datetime.utcnow().isoformat() + "Z"
 
         avg_mrr = sum(mrr_scores) / len(mrr_scores) if mrr_scores else 0.0
@@ -868,6 +848,8 @@ class NQTriviaRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=len(samples),
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             )
         )
 
@@ -884,6 +866,8 @@ class NQTriviaRunner(BenchmarkRunner):
                     latency_ms=avg_latency,
                     samples=len(samples),
                     timestamp=timestamp,
+                    latency_p50_ms=latencies.p50,
+                    latency_p99_ms=latencies.p99,
                 )
             )
 
@@ -897,6 +881,8 @@ class NQTriviaRunner(BenchmarkRunner):
                     latency_ms=avg_latency,
                     samples=len(samples),
                     timestamp=timestamp,
+                    latency_p50_ms=latencies.p50,
+                    latency_p99_ms=latencies.p99,
                 )
             )
 
@@ -931,7 +917,7 @@ class NQTriviaRunner(BenchmarkRunner):
             return []
 
         results: List[BenchmarkResult] = []
-        total_latency = 0
+        latencies = LatencyStats()
 
         em_scores: List[float] = []
         f1_scores: List[float] = []
@@ -941,10 +927,8 @@ class NQTriviaRunner(BenchmarkRunner):
             if not answer_aliases and sample.expected_answer:
                 answer_aliases = [_normalize_text(sample.expected_answer)]
 
-            query_start = datetime.utcnow()
-            query_result = service.query(sample.query, top_k=5)
-            query_latency = int((datetime.utcnow() - query_start).total_seconds() * 1000)
-            total_latency += query_latency
+            with latencies.timed():
+                query_result = service.query(sample.query, top_k=5)
 
             prediction = ""
             for r in query_result.results:
@@ -958,7 +942,7 @@ class NQTriviaRunner(BenchmarkRunner):
             em_scores.append(qa_metrics.get("exact_match", 0.0))
             f1_scores.append(qa_metrics.get("f1", 0.0))
 
-        avg_latency = total_latency // max(len(samples), 1)
+        avg_latency = latencies.mean
         timestamp = datetime.utcnow().isoformat() + "Z"
 
         avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
@@ -971,6 +955,8 @@ class NQTriviaRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=len(samples),
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             )
         )
 
@@ -984,6 +970,8 @@ class NQTriviaRunner(BenchmarkRunner):
                 latency_ms=avg_latency,
                 samples=len(samples),
                 timestamp=timestamp,
+                latency_p50_ms=latencies.p50,
+                latency_p99_ms=latencies.p99,
             )
         )
 

@@ -11,7 +11,7 @@ import copy
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 from memplex.sync_protocol import (
     SyncApplyResult,
@@ -821,7 +821,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         )
         if version_row is None:
             event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"memplex:{node_type.value}:{node.id}"))
-            occurred_at = datetime.fromisoformat(node.updated_at).astimezone(timezone.utc)
+            occurred_at = datetime.fromisoformat(cast(str, node.updated_at)).astimezone(timezone.utc)
             version = str(SyncVersion.create(occurred_at, self._local_node_id, event_id))
         else:
             event_id = version_row["event_id"]
@@ -1175,7 +1175,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         payload = event.to_dict()["payload"]
         if type(payload) is not dict or payload.get("id") != node_id:
             raise ValueError("node payload identity mismatch")
-        node_class = {
+        node_class: type[MemoryNode] = {
             SyncNodeType.FUNCTION: Function,
             SyncNodeType.FACT: Fact,
             SyncNodeType.PREFERENCE: Preference,
@@ -1209,7 +1209,8 @@ class LiteSyncRepository(AbstractSyncRepository):
             self._store._observations = [
                 item for item in self._store._observations if item.id != node_id
             ]
-            self._store._observations.append(node)
+            # node_class was selected from event.node_type above.
+            self._store._observations.append(cast(Observation, node))
         else:
             collection[node_id] = node
             if event.node_type is SyncNodeType.FUNCTION:
@@ -1218,7 +1219,8 @@ class LiteSyncRepository(AbstractSyncRepository):
                     for name, identifier in self._store._name_index.items()
                     if identifier != node_id
                 }
-                normalized = node.name_normalized or node.name
+                function_node = cast(Function, node)
+                normalized = function_node.name_normalized or function_node.name
                 self._store._name_index[normalized.strip().lower()] = node_id
 
     def _apply_events(self, events: tuple[SyncEvent, ...]) -> tuple[list[SyncReceipt], int, int, int]:

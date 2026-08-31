@@ -93,7 +93,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
             raise TypeError("store must expose _pool_manager")
         if not hasattr(store, "_bind_transaction_scope"):
             raise TypeError("store must expose _bind_transaction_scope")
-        capture_policy = getattr(store, "_sync_capture_policy", None)
+        capture_policy: Any = getattr(store, "_sync_capture_policy", None)
         if type(capture_policy) is not SyncCapturePolicy:
             raise TypeError("store must expose an exact SyncCapturePolicy")
         if capture_policy.mode != "required":
@@ -113,7 +113,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
     def _pool(self) -> Any:
         return self._store._pool_manager
 
-    def _authorization_context(self):
+    def _authorization_context(self) -> Any:
         return self._store._authorization_context()
 
     @staticmethod

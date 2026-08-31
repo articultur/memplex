@@ -20,7 +20,10 @@ Semantics:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable, List, Optional
+from typing import TYPE_CHECKING, Iterable, List, Optional
+
+if TYPE_CHECKING:
+    from memplex.models import Fact
 
 
 def now_iso() -> str:
@@ -28,7 +31,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _key(fact) -> tuple[str, str]:
+def _key(fact: Fact) -> tuple[str, str]:
     """Stable contradiction key: same subject+predicate ⇒ same claim slot."""
     return (
         (getattr(fact, "subject", "") or "").strip().lower(),
@@ -36,7 +39,7 @@ def _key(fact) -> tuple[str, str]:
     )
 
 
-def is_valid_at(fact, as_of: Optional[datetime] = None) -> bool:
+def is_valid_at(fact: Fact, as_of: Optional[datetime] = None) -> bool:
     """Whether *fact*'s business-time interval covers *as_of* (default now).
 
     Invalid dates on the fields are treated as absent rather than raising:
@@ -44,8 +47,8 @@ def is_valid_at(fact, as_of: Optional[datetime] = None) -> bool:
     """
     when = as_of or datetime.now(timezone.utc)
 
-    def parse(value) -> Optional[datetime]:
-        if not value and not isinstance(value, str):
+    def parse(value: Optional[str]) -> Optional[datetime]:
+        if not value:
             return None
         try:
             parsed = datetime.fromisoformat(value)
@@ -67,7 +70,9 @@ def is_valid_at(fact, as_of: Optional[datetime] = None) -> bool:
     return True
 
 
-def supersede_contradicted(new_fact, existing: Iterable, *, now: Optional[str] = None):
+def supersede_contradicted(
+    new_fact: Fact, existing: Iterable[Fact], *, now: Optional[str] = None
+) -> List[Fact]:
     """Return the stored facts *new_fact* supersedes, stamped ``invalid_at``.
 
     Mutation contract: only facts sharing the (subject, predicate) slot that
@@ -78,7 +83,7 @@ def supersede_contradicted(new_fact, existing: Iterable, *, now: Optional[str] =
     stamp = now or now_iso()
     slot = _key(new_fact)
     new_id = getattr(new_fact, "id", None)
-    superseded: List = []
+    superseded: List[Fact] = []
     for fact in existing:
         if getattr(fact, "id", None) == new_id:
             continue
@@ -93,6 +98,6 @@ def supersede_contradicted(new_fact, existing: Iterable, *, now: Optional[str] =
     return superseded
 
 
-def facts_valid_at(facts: Iterable, as_of: Optional[datetime] = None) -> List:
+def facts_valid_at(facts: Iterable[Fact], as_of: Optional[datetime] = None) -> List[Fact]:
     """Filter an iterable of facts down to those valid at *as_of*."""
     return [fact for fact in facts if is_valid_at(fact, as_of)]

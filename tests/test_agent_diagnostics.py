@@ -404,7 +404,9 @@ def test_agent_status_all_rejects_one_shared_target_root(capsys):
         )
     )
 
-    assert result == 2
+    # Handler-level validation failure = runtime error (exit 1); exit 2 is
+    # reserved for argparse usage errors.
+    assert result == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "error"
     assert "four different host roots" in payload["error"]

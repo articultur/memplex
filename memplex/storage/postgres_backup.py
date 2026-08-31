@@ -303,7 +303,7 @@ class PostgresBackupExecutor:
         if self._connection_factory is not None:
             return self._connection_factory(dsn)
         try:
-            import psycopg2  # type: ignore
+            import psycopg2
         except ImportError as exc:
             raise BackupConfigurationError("postgres_driver_missing") from exc
         return psycopg2.connect(dsn)
@@ -600,8 +600,10 @@ class PostgresBackupExecutor:
             raise BackupIntegrityError("postgres_restore_readback_failed")
         factory = None
         if self._connection_factory is not None:
-            def connection_factory():
-                return self._connection_factory(migration_dsn)
+            connection_factory_impl = self._connection_factory
+
+            def connection_factory() -> Any:
+                return connection_factory_impl(migration_dsn)
 
             factory = connection_factory
         try:

@@ -1,5 +1,7 @@
 """LLM provider implementations."""
 
+from typing import Any
+
 from memplex.llm.providers.rule_based import RuleBasedProvider
 
 # Anthropic and Local providers are optional -- they require external
@@ -11,7 +13,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Lazy-load optional providers that depend on external packages."""
     if name == "AnthropicProvider":
         from memplex.llm.providers.anthropic import AnthropicProvider

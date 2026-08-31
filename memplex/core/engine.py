@@ -19,7 +19,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from memplex.core.associator.domain_classifier import DomainClassifier
 from memplex.core.associator.entity_aligner import EntityAligner
@@ -42,7 +42,7 @@ from memplex.models import (
     Preference,
     SourceDocument,
 )
-from memplex.models.paragraph import ParagraphCollection
+from memplex.models.paragraph import Paragraph, ParagraphCollection
 from memplex.processing.function_builder import (
     build_functions_from_paragraphs as _build_functions_from_paragraphs,
 )
@@ -50,6 +50,9 @@ from memplex.processing.function_builder import normalize_name
 from memplex.processing.graph_builder import GraphBuilder, build_edges_rule_based
 from memplex.processing.merger.confidence_calculator import ConfidenceCalculator
 from memplex.processing.merger.conflict_resolver import ConflictResolver
+
+if TYPE_CHECKING:
+    from memplex.storage.base import MemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +99,7 @@ class CoreEngine:
         (graph edges will be built from the batch only).
     """
 
-    def __init__(self, store=None) -> None:
+    def __init__(self, store: Optional[MemoryStore] = None) -> None:
         # ── Extractors ──────────────────────────────────────────────
         self.markdown_extractor = MarkdownExtractor()
         self.image_extractor = ImageExtractor()
@@ -288,7 +291,7 @@ class CoreEngine:
     #  Internal: content acquisition
     # ════════════════════════════════════════════════════════════════
 
-    def _acquire_content(self, source: SourceDocument):
+    def _acquire_content(self, source: SourceDocument) -> tuple[str, list[Any], str]:
         """Route source to the correct handler and return normalized content.
 
         Returns
@@ -398,7 +401,7 @@ class CoreEngine:
     # ── Fact / Preference builders (intent-routed paragraphs) ──────
 
     @staticmethod
-    def _build_fact_from_paragraph(para, source: SourceDocument) -> Fact:
+    def _build_fact_from_paragraph(para: Paragraph, source: SourceDocument) -> Fact:
         """Build a Fact node from a fact-intent paragraph.
 
         Subject/predicate/object are split on the first copula
@@ -431,7 +434,7 @@ class CoreEngine:
         )
 
     @staticmethod
-    def _build_preference_from_paragraph(para, source: SourceDocument) -> Preference:
+    def _build_preference_from_paragraph(para: Paragraph, source: SourceDocument) -> Preference:
         """Build a Preference node from a preference-intent paragraph."""
         raw = (para.raw_text or "").strip()
         content_hash = hashlib.sha256(raw.encode()).hexdigest()

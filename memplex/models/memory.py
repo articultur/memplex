@@ -1,7 +1,7 @@
 """Memory node types: MemoryNode base + Function, Fact, Preference, Observation."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
 
 from .graph import GraphEdge, domain_node_id
 from .misc import FieldValue, validate_domain, validate_func_id
@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 OBSERVATION_CATEGORIES = ("bugfix", "decision", "change", "discovery", "note")
 DEFAULT_OBSERVATION_CATEGORY = "note"
 SYNCABLE_MEMORY_TYPES = ("function", "fact", "preference", "observation")
+# Deserialization-boundary enums: from_dict rejects any value outside these
+# sets (2026-08 review — admin console XSS via sync-ingress payload).
+MEMORY_TYPES = frozenset(SYNCABLE_MEMORY_TYPES)
+KNOWLEDGE_TIERS = frozenset(("personal", "domain", "team"))
 
 
 def sync_node_type_for_memory(memory: "MemoryNode") -> "SyncNodeType":
@@ -101,9 +105,28 @@ class MemoryNode:
             "knowledge_tier": self.knowledge_tier,
         }
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-safe dict (implemented by every concrete node)."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "MemoryNode":
+        """Deserialize from a JSON-safe dict (implemented by every concrete node)."""
+        raise NotImplementedError
+
     @staticmethod
     def _base_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
         """Build constructor kwargs for MemoryNode base fields from a dict."""
+        memory_type = d.get("memory_type")
+        if memory_type is not None and memory_type not in MEMORY_TYPES:
+            raise ValueError(
+                f"memory_type must be one of {sorted(MEMORY_TYPES)}, got {memory_type!r}"
+            )
+        knowledge_tier = d.get("knowledge_tier")
+        if knowledge_tier is not None and knowledge_tier not in KNOWLEDGE_TIERS:
+            raise ValueError(
+                f"knowledge_tier must be one of {sorted(KNOWLEDGE_TIERS)}, got {knowledge_tier!r}"
+            )
         source_type = d.get("source_type", "wiki")
         if isinstance(source_type, str):
             try:
@@ -154,7 +177,7 @@ class Function(MemoryNode):
 
     MAX_VALUES_PER_FIELD: ClassVar[int] = 20
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         validate_func_id(self.id)
         validate_domain(self.domain)
         if not self.created_at:
@@ -209,7 +232,9 @@ class Function(MemoryNode):
         return cls(**kwargs)
 
 
-def validate_belongs_to_edges(functions, edges) -> None:
+def validate_belongs_to_edges(
+    functions: Iterable[Function], edges: Iterable[GraphEdge]
+) -> None:
     """Validate the shared virtual-domain edge contract.
 
     ``BELONGS_TO`` is the one graph relation that intentionally targets a
@@ -382,7 +407,7 @@ class Observation(MemoryNode):
 Memory = MemoryNode
 
 
-def create_memory_node(memory_type: str, **kwargs) -> MemoryNode:
+def create_memory_node(memory_type: str, **kwargs: Any) -> MemoryNode:
     """Factory: create the correct MemoryNode subclass by type string."""
     cls_map = {
         "function": Function,

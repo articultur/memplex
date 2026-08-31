@@ -14,7 +14,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
 import yaml
 
@@ -421,7 +421,8 @@ class WikiCompiler:
             return self.compile_preference(node)
         if isinstance(node, Observation):
             return self.compile_observation(node)
-        return self.compile_function(node)
+        # Remaining node kinds are Functions (enforced by the dispatch table).
+        return self.compile_function(cast(Function, node))
 
     # ── Search ────────────────────────────────────────────────────────
 

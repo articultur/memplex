@@ -1,0 +1,40 @@
+name: Public conduct report
+description: Submit a non-confidential report about conduct in a Memplex project space.
+title: "[Conduct] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: This entire Issue is public. Do not submit confidential or personally identifying information.
+  - type: checkboxes
+    id: public_notice
+    attributes:
+      label: Public-report confirmation
+      description: Confirm that every field and attachment is safe for public disclosure.
+      options:
+        - label: I understand this report is public and contains no confidential information.
+          required: true
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Conduct summary
+      description: Describe the behavior and the project space where it occurred.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Public evidence
+      description: Provide public links, dates, and context without exposing private information.
+    validations:
+      required: true
+  - type: textarea
+    id: remedy
+    attributes:
+      label: Requested project response
+      description: State the public correction, moderation, or enforcement outcome requested.
+    validations:
+      required: true

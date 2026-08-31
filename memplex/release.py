@@ -20,7 +20,7 @@ import zipfile
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NoReturn
 
 _RELEASE_SCHEMA_VERSION = 1
 _SEMVER_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
@@ -82,7 +82,7 @@ class ReleaseIntegrityError(RuntimeError):
         super().__init__("release manifest integrity check failed")
 
 
-def _fail(code: str = "release_integrity") -> None:
+def _fail(code: str = "release_integrity") -> NoReturn:
     raise ReleaseIntegrityError(code)
 
 
@@ -141,7 +141,7 @@ class ReleaseArtifact:
         data = _require_exact_mapping(payload)
         if frozenset(data) != _ARTIFACT_KEYS:
             _fail()
-        return cls(name=data["name"], sha256=data["sha256"], size=data["size"])  # type: ignore[arg-type]
+        return cls(name=data["name"], sha256=data["sha256"], size=data["size"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,9 +188,9 @@ class ReleaseManifest:
             _fail()
         artifacts = tuple(ReleaseArtifact.from_dict(item) for item in data["artifacts"])
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            version=data["version"],  # type: ignore[arg-type]
-            tag=data["tag"],  # type: ignore[arg-type]
+            schema_version=data["schema_version"],
+            version=data["version"],
+            tag=data["tag"],
             artifacts=artifacts,
         )
 
@@ -261,7 +261,7 @@ class ReleaseEvidence:
         data = _require_exact_mapping(payload)
         if frozenset(data) != _EVIDENCE_KEYS:
             _fail()
-        return cls(**data)  # type: ignore[arg-type]
+        return cls(**data)
 
     @classmethod
     def create(
@@ -554,11 +554,13 @@ def validate_release_version_set(project_root: Path, *, tag: str) -> str:
         _nested_version(_read_json(root / "memplex/_plugin/.codex-plugin/plugin.json"), "version"),
     )
     compatibility_requirements = (
+        # Archived installer wrappers (npm/archive/, no longer published) —
+        # still version-checked so the deprecation record cannot drift.
         _require_exact_str(
-            _read_json(root / "npm/agent-installer/package.json")["dependencies"]["memplex"]  # type: ignore[index]
+            _read_json(root / "npm/archive/agent-installer/package.json")["dependencies"]["memplex"]
         ),
         _require_exact_str(
-            _read_json(root / "npm/hermes-installer/package.json")["dependencies"]["memplex"]  # type: ignore[index]
+            _read_json(root / "npm/archive/hermes-installer/package.json")["dependencies"]["memplex"]
         ),
     )
     if any(candidate != version for candidate in descriptor_versions + compatibility_requirements):
@@ -653,7 +655,7 @@ def build_cyclonedx_sbom(project_root: Path) -> bytes:
             source_hash = _require_exact_mapping(package["wheels"][0]).get("hash")
         if type(source_hash) is not str or not source_hash.startswith("sha256:"):
             _fail("release_lock_invalid")
-        digest = source_hash.removeprefix("sha256:")
+        digest = _require_exact_str(source_hash).removeprefix("sha256:")
         if _SHA256_RE.fullmatch(digest) is None:
             _fail("release_lock_invalid")
         components.append(

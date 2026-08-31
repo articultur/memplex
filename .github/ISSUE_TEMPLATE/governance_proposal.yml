@@ -1,0 +1,32 @@
+name: Governance proposal
+description: Propose or appeal a documented project-wide decision.
+title: "[Governance] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        This form is public. Do not include confidential content in this public form.
+        The project currently has no controlled private governance or conduct intake.
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision requested
+      description: State the exact decision, owner, and scope.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and alternatives
+      description: Compare the evidence, tradeoffs, reversible options, and rejected alternatives.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Identify affected users, compatibility, security, releases, and maintenance.
+    validations:
+      required: true

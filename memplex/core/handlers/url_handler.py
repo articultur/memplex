@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import tempfile
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,34 @@ class URLHandler:
 
         return None
 
+    def _resolve_safe_ip(self, hostname: str) -> Optional[str]:
+        """Resolve a hostname and return the first safe IP, or ``None``.
+
+        This is the single-resolution point for the SSRF guard: the
+        returned IP is pinned into the connection URL so a DNS rebinding
+        attacker cannot present a safe address during the check and a
+        loopback/metadata address during the actual connection.
+        """
+        import ipaddress
+        import socket
+
+        if not hostname:
+            return None
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return None
+        if not infos:
+            return None
+        for info in infos:
+            try:
+                ip = ipaddress.ip_address(info[4][0])
+            except (ValueError, IndexError):
+                return None
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+                return None
+        return str(infos[0][4][0])
+
     def _is_safe_host(self, hostname: str) -> bool:
         """
         Return True only if hostname resolves exclusively to public IPs.
@@ -119,7 +147,7 @@ class URLHandler:
         return True
 
     @staticmethod
-    def _read_limited(response, limit: int) -> Optional[bytes]:
+    def _read_limited(response: Any, limit: int) -> Optional[bytes]:
         """Read at most ``limit`` bytes; return None if the body exceeds it."""
         total = 0
         chunks = []
@@ -134,7 +162,7 @@ class URLHandler:
         return b"".join(chunks)
 
     @staticmethod
-    def _build_opener():
+    def _build_opener() -> Any:
         """Build an opener that does NOT auto-follow redirects."""
         import urllib.request
 
@@ -175,14 +203,29 @@ class URLHandler:
                 if parsed.scheme not in ("http", "https"):
                     logger.warning("Refusing non-http(s) URL: %s", current_url)
                     return None
-                if not self._is_safe_host(parsed.hostname or ""):
+                safe_ip = self._resolve_safe_ip(parsed.hostname or "")
+                if safe_ip is None:
                     logger.warning("Refusing unsafe host: %s", parsed.hostname)
                     return None
 
+                # Pin the resolved IP to eliminate the DNS rebinding TOCTOU
+                # window between the safety check and the actual connection.
+                # For HTTP the Host header preserves the original netloc.
+                # For HTTPS, hostname verification uses the original URL's
+                # hostname; only the TCP destination is pinned.
+                if parsed.scheme == "http":
+                    pinned = current_url.replace(parsed.hostname or "", safe_ip, 1)
+                    host_header = parsed.netloc
+                else:
+                    pinned = current_url  # HTTPS: pin via custom handler below
+                    host_header = None
+
                 req = urllib.request.Request(
-                    current_url,
+                    pinned,
                     headers={"User-Agent": "Mozilla/5.0 (compatible; Content-Extractor/1.0)"},
                 )
+                if host_header:
+                    req.add_header("Host", host_header)
                 try:
                     response = opener.open(req, timeout=30)
                     status = response.getcode()

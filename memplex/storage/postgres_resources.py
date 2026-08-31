@@ -370,7 +370,7 @@ class PostgresStorageResources:
                         "PostgreSQL application and migration principals must be distinct"
                     )
             if request.policy == "disabled":
-                apply_kwargs = {
+                apply_kwargs: dict[str, Any] = {
                     "expected_target": application_target,
                     "application_acl": application_acl,
                 }
@@ -381,7 +381,7 @@ class PostgresStorageResources:
                 # The mutator's return value is intentionally provisional.
                 # A distinct readonly connection below supplies the only
                 # status that may become a seal.
-                ensure_kwargs = {
+                ensure_kwargs: dict[str, Any] = {
                     "expected_target": application_target,
                     "application_acl": application_acl,
                 }
@@ -400,7 +400,7 @@ class PostgresStorageResources:
             # never cause a pool_factory side effect or leave a connection to
             # clean up; only the final DML proof needs the future pool.
             verifier = _pool._new_migration_runner(self.migration_dsn)
-            verify_kwargs = {
+            verify_kwargs: dict[str, Any] = {
                 "expected_target": application_target,
                 "application_acl": application_acl,
             }
@@ -562,7 +562,7 @@ class PostgresSyncStorageResources:
         self._profile: str | None = None
         self._status: VectorCapabilityStatus | None = None
         self._ready_pool: ReadyPostgresPool | None = None
-        self._executor = None
+        self._executor: InboundSyncExecutor | None = None
         self._app_resources: PostgresStorageResources | None = None
         self._inbound_manager: _pool.PostgresPoolManager | None = None
         self._fault: BaseException | None = None
@@ -583,7 +583,7 @@ class PostgresSyncStorageResources:
             return self._ready_pool
 
     @property
-    def executor(self):
+    def executor(self) -> InboundSyncExecutor:
         with self._condition:
             self._refresh_from_app_resource_fault()
             if self._state is not ResourceState.READY or self._executor is None:
@@ -795,7 +795,7 @@ class PostgresSyncStorageResources:
                     "PostgreSQL inbound principal is not direct login/session login"
                 )
 
-            def noop_bind(_cursor, _context):  # pylint: disable=unused-argument
+            def noop_bind(_cursor: Any, _context: Any) -> None:  # pylint: disable=unused-argument
                 return None
 
             executor = InboundSyncExecutor(

@@ -17,12 +17,71 @@ from memplex.host_lifecycle import (
     HostLifecycleEvidence,
     HostLifecycleIntegrityError,
     HostLifecycleProof,
+    _contract_files,
     current_host_contract_digests,
     read_host_lifecycle_evidence,
     required_host_node_results,
     required_node_manifest_sha256,
     write_host_lifecycle_evidence,
 )
+
+# Hardcoded manifest of the G008 contract cluster: every file hashed into a
+# host readiness proof, mapped to the hosts whose digest it feeds. Adding or
+# removing a contract file without updating this map must fail
+# test_contract_files_match_coverage_map below.
+_CONTRACT_COVERAGE = {
+    "memplex/adapters/runtime_status.py": {"claude-code", "codex", "hermes", "openclaw"},
+    "memplex/adapters/managed_identity.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/adapters/agent_installer.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/adapters/install_transaction.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/adapters/agent_assets.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/adapters/agent_runtime.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/adapters/_shared.py": {
+        "claude-code",
+        "codex",
+        "hermes",
+        "openclaw",
+    },
+    "memplex/_plugin/.claude-plugin/plugin.json": {"claude-code"},
+    "memplex/_plugin/.mcp.json": {"claude-code"},
+    "memplex/_plugin/hooks/hooks.json": {"claude-code"},
+    "memplex/_plugin/scripts/claude-hook.sh": {"claude-code"},
+    "memplex/_plugin/scripts/hook-runner.py": {"claude-code"},
+    "memplex/_plugin/scripts/mcp-server.sh": {"claude-code", "codex"},
+    "memplex/_plugin/.codex-plugin/plugin.json": {"codex"},
+    "memplex/_plugin/.codex.mcp.json": {"codex"},
+    "memplex/_plugin/hooks/hooks-codex.json": {"codex"},
+    "memplex/_plugin/scripts/codex-plugin.sh": {"codex"},
+    "memplex/adapters/codex_plugin.py": {"codex"},
+    "memplex/adapters/mcp_server.py": {"claude-code", "codex"},
+    "memplex/adapters/openclaw_plugin.py": {"openclaw"},
+    "memplex/adapters/hermes_memory_provider.py": {"hermes"},
+}
 
 
 def _proofs(root: Path) -> tuple[HostLifecycleProof, ...]:
@@ -109,6 +168,18 @@ def test_host_lifecycle_evidence_creation_validates_the_producer_cli_digest(
         )
 
 
+def test_contract_files_match_coverage_map() -> None:
+    """_contract_files() is the source of truth for the G008 contract
+    cluster; every hashed file must be pinned by _CONTRACT_COVERAGE.
+    Adding/removing a contract file without updating the map fails here."""
+    actual = {
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for paths in _contract_files(PROJECT_ROOT).values()
+        for path in paths
+    }
+    assert actual == set(_CONTRACT_COVERAGE)
+
+
 def test_current_host_contract_digests_cover_each_real_launcher_adapter_and_shared_status(
     tmp_path: Path,
 ) -> None:
@@ -116,52 +187,7 @@ def test_current_host_contract_digests_cover_each_real_launcher_adapter_and_shar
     isolated_project = tmp_path / "project"
     shutil.copytree(PROJECT_ROOT / "memplex", isolated_project / "memplex")
     baseline = current_host_contract_digests(project_root=isolated_project)
-    coverage = {
-        "memplex/adapters/runtime_status.py": {"claude-code", "codex", "hermes", "openclaw"},
-        "memplex/adapters/managed_identity.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/adapters/agent_installer.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/adapters/install_transaction.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/adapters/agent_assets.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/adapters/agent_runtime.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/adapters/_shared.py": {
-            "claude-code",
-            "codex",
-            "hermes",
-            "openclaw",
-        },
-        "memplex/_plugin/scripts/claude-hook.sh": {"claude-code"},
-        "memplex/_plugin/scripts/hook-runner.py": {"claude-code"},
-        "memplex/_plugin/scripts/codex-plugin.sh": {"codex"},
-        "memplex/adapters/codex_plugin.py": {"codex"},
-        "memplex/adapters/mcp_server.py": {"claude-code", "codex"},
-        "memplex/adapters/openclaw_plugin.py": {"openclaw"},
-        "memplex/adapters/hermes_memory_provider.py": {"hermes"},
-    }
+    coverage = _CONTRACT_COVERAGE
 
     for relative, affected_hosts in coverage.items():
         target = isolated_project / relative

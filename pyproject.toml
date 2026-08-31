@@ -26,8 +26,8 @@ extractors = [
     "pytesseract>=0.3.10,<1",
 ]
 vector = [
+    "memplex[embedding]",
     "chromadb>=0.4.0,<2",
-    "sentence-transformers>=2.0,<6",
 ]
 local-onnx = [
     "onnxruntime>=1.17.0,<2",
@@ -63,7 +63,7 @@ sync-crypto = [
     "cryptography>=50,<52",
 ]
 all = [
-    "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres]",
+    "memplex[embedding,extractors,vector,local-onnx,graph,http,llm,postgres,sync-crypto]",
 ]
 dev = [
     "build>=1.2,<2",
@@ -73,9 +73,13 @@ dev = [
     "setuptools>=83,<84",  # PYSEC-2026-3447
     "wheel>=0.48,<1",  # pair with setuptools 83 (dependabot PR pending)
     "mypy>=1.13,<2",
+    # PyYAML stubs: unblock yaml-importing modules (config, wiki/compiler,
+    # adapters/yaml_edit, core/dictionaries) for the mypy gate.
+    "types-PyYAML>=6.0,<7",
     "pytest>=9.0.3,<10",  # PYSEC-2026-1845
     "pytest-asyncio>=0.21",
     "pytest-cov>=4.0",
+    "pytest-timeout>=2.3,<3",  # per-test hard stop; CI passes --timeout=120
     # ruff 0.16 broadened default rule selection; the codebase is lint-clean on
     # the 0.15 line. Cap until the codebase is migrated to the newer defaults.
     "ruff>=0.1.0,<0.16",
@@ -92,10 +96,12 @@ dev = [
 ]
 
 [tool.mypy]
-# Keep the first type gate focused on the typed PostgreSQL lifecycle boundary:
-# pool readiness, durable task persistence, and the public task repository.
-# Imported dependencies stay opaque until their own contracts are admitted to
-# the gate, so this check stays both actionable and bounded.
+# The type gate covers the typed PostgreSQL lifecycle boundary, the G008 host
+# contract cluster, the service/engine/sync surface, and every fully-annotated
+# leaf module. ``disallow_untyped_defs`` keeps admitted files honest: a new
+# unannotated def fails CI. Imported dependencies stay opaque until their own
+# contracts are admitted to the gate, so this check stays actionable and
+# bounded.
 files = [
     "memplex/storage/postgres_resources.py",
     "memplex/storage/postgres_tasks.py",
@@ -122,10 +128,139 @@ files = [
     "memplex/sync.py",
     "memplex/operations.py",
     "memplex/adapters/cli.py",
+    # Lite store + connection pool: near-fully-annotated storage boundary.
+    "memplex/storage/lite/store.py",
+    "memplex/storage/pool.py",
+    # G008 contract cluster: host-lifecycle files hashed into every host's
+    # readiness proof (see host_lifecycle._contract_files()).
+    "memplex/adapters/agent_installer.py",
+    "memplex/adapters/install_transaction.py",
+    "memplex/adapters/agent_assets.py",
+    "memplex/adapters/agent_runtime.py",
+    "memplex/adapters/managed_identity.py",
+    "memplex/adapters/runtime_status.py",
+    "memplex/adapters/_shared.py",
+    # Fully-annotated leaf modules admitted after the disallow_untyped_defs
+    # sweep: models, hooks, llm helpers, wiki, and storage leaves.
+    "memplex/models/memory.py",
+    "memplex/models/paragraph.py",
+    "memplex/storage/base.py",
+    "memplex/storage/changelog.py",
+    "memplex/storage/inbound.py",
+    "memplex/storage/vector.py",
+    "memplex/storage/lite/search_index.py",
+    "memplex/auth.py",
+    "memplex/sync_crypto.py",
+    "memplex/__main__.py",
+    "memplex/core/hooks/collector.py",
+    "memplex/core/hooks/hook_event.py",
+    "memplex/core/hooks/policy.py",
+    "memplex/core/hooks/registry.py",
+    "memplex/llm/enhancer.py",
+    "memplex/llm/fallback_chain.py",
+    "memplex/llm/sanitizer.py",
+    "memplex/llm/injection_guard.py",
+    "memplex/llm/provider.py",
+    "memplex/wiki/community.py",
+    "memplex/wiki/generator.py",
+    "memplex/wiki/search.py",
+    # Gate expansion: package roots, model leaves, and the query pipeline
+    # extracted from service.py (fully annotated).
+    "memplex/__init__.py",
+    "memplex/_plugin/__init__.py",
+    "memplex/models/__init__.py",
+    "memplex/models/feedback.py",
+    "memplex/models/graph.py",
+    "memplex/models/misc.py",
+    "memplex/models/search.py",
+    "memplex/models/source.py",
+    "memplex/models/task.py",
+    "memplex/query_pipeline.py",
+    # Top-level operational surfaces.
+    "memplex/config.py",
+    "memplex/host_lifecycle.py",
+    "memplex/logging_config.py",
+    "memplex/product.py",
+    "memplex/readiness_evidence.py",
+    "memplex/release.py",
+    "memplex/sync_dispatcher.py",
+    "memplex/sync_protocol.py",
+    "memplex/worker.py",
+    # Remaining clean adapters.  hermes_memory_provider stays out: it imports
+    # the external Hermes ``agent.memory_provider`` package.
+    "memplex/adapters/__init__.py",
+    "memplex/adapters/claude_skill.py",
+    "memplex/adapters/codex_plugin.py",
+    "memplex/adapters/jsonc_edit.py",
+    "memplex/adapters/mcp_server.py",
+    "memplex/adapters/openclaw_plugin.py",
+    "memplex/adapters/yaml_edit.py",
+    # Core associator/dictionary/handler leaves.  The docx/image/pdf
+    # extractors stay out: their ``extractors``-extra imports are not
+    # installed in the gate environment.
+    "memplex/core/__init__.py",
+    "memplex/core/associator/__init__.py",
+    "memplex/core/associator/domain_classifier.py",
+    "memplex/core/associator/entity_aligner.py",
+    "memplex/core/associator/ref_linker.py",
+    "memplex/core/dictionaries/__init__.py",
+    "memplex/core/extractors/__init__.py",
+    "memplex/core/extractors/markdown.py",
+    "memplex/core/extractors/vision_mapper.py",
+    "memplex/core/handlers/__init__.py",
+    "memplex/core/handlers/clipboard.py",
+    "memplex/core/handlers/file_handler.py",
+    "memplex/core/handlers/url_handler.py",
+    "memplex/core/hooks/__init__.py",
+    # LLM provider plumbing; anthropic.py/local.py stay out (optional
+    # ``llm``-extra imports).
+    "memplex/llm/__init__.py",
+    "memplex/llm/providers/__init__.py",
+    "memplex/llm/providers/_common.py",
+    "memplex/llm/providers/rule_based.py",
+    "memplex/operations_assets/__init__.py",
+    "memplex/processing/__init__.py",
+    "memplex/processing/function_builder.py",
+    "memplex/processing/graph_builder.py",
+    "memplex/processing/merger/__init__.py",
+    "memplex/processing/merger/confidence_calculator.py",
+    "memplex/processing/merger/conflict_resolver.py",
+    "memplex/retrieval/__init__.py",
+    # Remaining storage tree: feedback stores, the sync repositories, and the
+    # migration runners.
+    "memplex/storage/__init__.py",
+    "memplex/storage/_messages.py",
+    "memplex/storage/feedback.py",
+    "memplex/storage/lite/__init__.py",
+    "memplex/storage/lite/durability.py",
+    "memplex/storage/lite/sync_repository.py",
+    "memplex/storage/migrations/__init__.py",
+    "memplex/storage/migrations/_constants.py",
+    "memplex/storage/migrations/acl_verification.py",
+    "memplex/storage/migrations/catalogue_checks.py",
+    "memplex/storage/migrations/catalogue_snapshot.py",
+    "memplex/storage/migrations/ledger_state.py",
+    "memplex/storage/migrations/runner.py",
+    "memplex/storage/postgres.py",
+    "memplex/storage/postgres_backup.py",
+    "memplex/storage/postgres_sync.py",
+    "memplex/wiki/__init__.py",
+    "memplex/wiki/compiler.py",
 ]
+# Deliberately outside the gate: memplex/capacity_chaos.py (large legacy
+# annotation debt), memplex/retrieval/{embedding,dedup}.py (function-level
+# numpy use trips the numpy 2.x stubs' python_version>=3.12 syntax; faiss),
+# memplex/core/associator/term_mapper.py (sentence-transformers),
+# memplex/core/extractors/{docx,image,pdf}.py and
+# memplex/llm/providers/{anthropic,local}.py (optional-extra imports), and
+# memplex/adapters/hermes_memory_provider.py (external Hermes package).
 python_version = "3.11"
+# follow_imports stays "skip": "silent" pulls the numpy 2.x stubs into the
+# analysis (gate modules import numpy at module level) and their 3.12-only
+# ``type`` statement is a hard syntax error under python_version = "3.11".
 follow_imports = "skip"
 check_untyped_defs = true
+disallow_untyped_defs = true
 warn_unused_ignores = true
 
 [project.scripts]
@@ -137,7 +272,7 @@ include = ["memplex*"]
 [tool.setuptools.package-data]
 "memplex._plugin" = ["**/*", "**/.*", ".claude-plugin/*", ".codex-plugin/*"]
 "memplex.storage.migrations" = ["*.sql"]
-"memplex.operations_assets" = ["*.yml"]
+"memplex.operations_assets" = ["*.yml", "*.html"]
 
 [tool.setuptools.exclude-package-data]
 "memplex._plugin" = ["**/__pycache__/**", "**/*.pyc"]
@@ -145,6 +280,18 @@ include = ["memplex*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Per-test hard stop (pytest-timeout), matching the CI gate so local runs
+# hang-fail the same way; CI also passes --timeout=120 explicitly.
+timeout = 120
+markers = [
+    "unit: fast, no external dependencies",
+    "integration: requires optional dependencies or services",
+    "pg: real-PostgreSQL tests (pgserver or external DSN)",
+    "e2e: end-to-end user journey",
+]
+
+[tool.coverage.report]
+fail_under = 75
 
 [tool.ruff]
 line-length = 100
@@ -163,16 +310,18 @@ line-length = 100
 "tests/test_hooks.py" = ["E741"]
 
 [tool.ruff.lint.mccabe]
-# Complexity freeze-gate: 25 is the current ceiling; the per-file ignores
-# above pin existing known-debt functions so any NEW violation fails CI.
+# Complexity freeze-gate: 25 is the current ceiling; known-debt functions
+# carry inline "# noqa: C901" markers in source, so any NEW violation fails CI.
 max-complexity = 25
 
 [tool.importlinter]
 root_package = "memplex"
 
 [[tool.importlinter.contracts]]
-# Deliberate carve-outs (documented): memplex.service (SSE subscriber bridge)
-# and memplex.product (readiness surface) import adapters by design.
+# Deliberate carve-outs (documented, both pinned by narrower contracts below):
+# memplex.product (readiness surface) lazy-imports two adapter helper modules
+# by design; memplex.service is adapter-free but bridges into product, so it
+# carries its own direct-import contract rather than a seat in this one.
 name = "Domain and storage layers never import host adapters"
 type = "forbidden"
 source_modules = [
@@ -195,8 +344,64 @@ source_modules = [
     "memplex.backup",
     "memplex.query_explainer",
     "memplex.serialization",
+    # Top-level leaf modules verified adapter-free (direct + indirect).
+    # memplex.__main__ is the CLI entry shim and therefore stays out.
+    "memplex.auth",
+    "memplex.capacity_chaos",
+    "memplex.config",
+    "memplex.host_lifecycle",
+    "memplex.improve",
+    "memplex.logging_config",
+    "memplex.operations",
+    "memplex.query_pipeline",
+    "memplex.readiness_evidence",
+    "memplex.release",
+    "memplex.sleep_time",
+    "memplex.sync_crypto",
+    "memplex.task_repository",
+    "memplex.temporal",
+    "memplex.worker",
+    "memplex.working_memory",
 ]
 forbidden_modules = ["memplex.adapters"]
+
+[[tool.importlinter.contracts]]
+# The service layer is adapter-free (the SSE subscriber bridge is gone;
+# adapters now register a count-provider callback). This is pinned as a
+# direct-import contract because service.policy() deliberately lazy-imports
+# memplex.product, whose readiness surface holds the documented adapter
+# carve-out below — an indirect ban would reject that bridge.
+name = "Service layer never directly imports host adapters"
+type = "forbidden"
+source_modules = ["memplex.service"]
+allow_indirect_imports = true
+forbidden_modules = ["memplex.adapters"]
+
+[[tool.importlinter.contracts]]
+# The readiness surface keeps function-level lazy imports of exactly two
+# adapter modules (agent_runtime scope/manifest helpers and agent_installer
+# inspection); every other host adapter stays forbidden as a DIRECT import of
+# memplex.product (indirect reach through the two declared helpers is allowed).
+name = "Product readiness surface touches only its two declared adapter helpers"
+type = "forbidden"
+source_modules = ["memplex.product"]
+allow_indirect_imports = true
+forbidden_modules = [
+    "memplex.adapters.cli",
+    "memplex.adapters.http_api",
+    "memplex.adapters.mcp_server",
+    "memplex.adapters.claude_skill",
+    "memplex.adapters.codex_plugin",
+    "memplex.adapters.openclaw_plugin",
+    "memplex.adapters.hermes_memory_provider",
+    "memplex.adapters.agent_assets",
+    "memplex.adapters.install_transaction",
+    "memplex.adapters.jsonc_edit",
+    "memplex.adapters.managed_identity",
+    "memplex.adapters.runtime_status",
+    "memplex.adapters.yaml_edit",
+    "memplex.adapters._shared",
+]
 
 [tool.ruff.lint]
 # C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.
@@ -214,12 +419,18 @@ ignore = [
 [cosmic-ray]
 # Mutation-testing pilot on the frozen sync ingress validator. cosmic-ray
 # mutates the module IN PLACE (restoring afterwards), so results are real:
-# baseline = 75 killed / 35 survived / 1 incompetent of 111 mutants (~68%
-# kill rate) on 2026-08-14. The 35 survivors are the test-strength backlog.
+# baseline = 77 killed / 33 survived / 1 incompetent of 111 mutants (~70%
+# kill rate of the 110 competent mutants) on 2026-08-14. The 33 survivors
+# are mostly provably-equivalent mutants; see docs/mutation-testing.md.
 module-path = "memplex/sync_ingress.py"
 timeout = 30
 test-command = "pytest tests/test_sync_ingress.py -x -q --no-header -p no:cacheprovider"
 
 [cosmic-ray.distributor]
 name = "local"
+
+[dependency-groups]
+dev = [
+    "pytest-timeout>=2.3,<3",
+]
 

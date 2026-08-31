@@ -1,7 +1,7 @@
 """Memplex storage layer -- MemoryStore interface and backends."""
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.storage.base import MemoryStore
 from memplex.storage.changelog import ChangelogStore
@@ -48,8 +48,8 @@ def _unwrap_postgres_for_migration(
 
 
 def create_store(
-    config=None,
-    **kwargs,
+    config: Any = None,
+    **kwargs: Any,
 ) -> MemoryStore:
     """Factory: create a MemoryStore.
 
@@ -83,7 +83,9 @@ def create_store(
         # Keep the factory's historic standalone behaviour by making the
         # requirement opt-in for callers which do not carry a deployment
         # contract (for example local migration tools).
-        store = PostgresMemoryStore(
+        # NOTE: LiteMemoryStore/PostgresMemoryStore do not subclass the
+        # MemoryStore ABC (duck-typed by design), so keep the local Any.
+        store: Any = PostgresMemoryStore(
             dsn=str(storage_path),
             require_authorization=bool(kwargs.get("require_authorization", False)),
             ready_pool=ready_pool,
@@ -104,7 +106,7 @@ def create_store(
             sync_consumer_ttl_seconds=kwargs.get("sync_consumer_ttl_seconds", 86400),
             sync_retention_min_seconds=kwargs.get("sync_retention_min_seconds", 86400),
         )
-        capture_policy = kwargs.get("sync_capture_policy")
+        capture_policy: Any = kwargs.get("sync_capture_policy")
         if (
             type(capture_policy) is SyncCapturePolicy
             and capture_policy.mode == "required"

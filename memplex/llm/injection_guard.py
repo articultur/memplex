@@ -6,7 +6,7 @@ import logging
 import re
 from collections import deque
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from memplex.models import SearchResult
@@ -133,7 +133,7 @@ class IndirectInjectionGuard:
     def wrap_for_context(
         cls,
         memories: list[SearchResult],
-        store: object,
+        store: Any,
         risk_registry: "InjectionRiskRegistry | None" = None,
     ) -> str:
         """Wrap recalled memories in protective tags for LLM context injection.
@@ -179,7 +179,7 @@ class IndirectInjectionGuard:
     def filter_and_wrap(
         cls,
         memories: list[SearchResult],
-        store: object,
+        store: Any,
         risk_registry: "InjectionRiskRegistry | None" = None,
     ) -> str:
         """Filter out injection-suspected memories, then wrap the rest.
@@ -358,7 +358,7 @@ class InjectionRiskRegistry:
 
 def _result_is_injection_suspected(
     result: "SearchResult",
-    store: object,
+    store: Any,
     *,
     risk_registry: InjectionRiskRegistry | None = None,
 ) -> bool:
@@ -381,7 +381,7 @@ def _result_is_injection_suspected(
 
 def drop_injection_suspected(
     results: list["SearchResult"],
-    store: object,
+    store: Any,
     *,
     risk_registry: InjectionRiskRegistry | None = None,
 ) -> list["SearchResult"]:

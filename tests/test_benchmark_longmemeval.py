@@ -1,12 +1,16 @@
 """Tests for the LongMemEval benchmark module (loader / scoring / runner).
 
-Synthetic-corpus e2e runs through the real service; hit-rate expectations
+Synthetic-corpus e2e runs through the real service. Score expectations
 encode the honest failure mode: single-hop and knowledge-update questions
-are answerable by retrieval, the aggregation multi-hop question is not.
+retrieve answer-bearing evidence (positive token-F1, substring diagnostic
+hits), the aggregation multi-hop question does not. Token-F1 over
+concatenated retrieval snippets is far below 1.0 by construction — the
+prediction is evidence text, not a generated answer.
 """
 
 from __future__ import annotations
 
+import json
 import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
@@ -36,6 +40,9 @@ def test_registered_in_factory():
         ("Answer: Paris, France", ["paris"], True),  # normalisation
         ("", ["anything"], False),
         ("something", [""], False),  # empty gold never hits
+        # One-directional: a short prediction contained in a longer gold is
+        # NOT a hit (the old bidirectional check overestimated).
+        ("Neovim", ["The user prefers Neovim now"], False),
     ],
 )
 def test_answer_hit_normalisation(predicted, gold, expected):
@@ -61,7 +68,91 @@ def test_loader_rejects_bad_format(tmp_path):
         LongMemEvalDataset().load(str(bad))
 
 
-def test_runner_end_to_end_hit_rates(tmp_path):
+def test_loader_parses_official_schema(tmp_path):
+    """Official releases use `answer` + haystack_sessions; auto-detected."""
+    official = [
+        {
+            "question_id": "q001",
+            "question_type": "single-session-user",
+            "question": "Which instrument did the user start learning?",
+            "answer": "The user started learning the guitar.",
+            "question_date": "2023/4/10 14:00",
+            "haystack_session_ids": ["s1", "s2"],
+            "haystack_dates": ["2023/4/1 10:00", "2023/4/5 11:00"],
+            "haystack_sessions": [
+                [
+                    {"role": "user", "content": "I just bought a guitar.", "has_answer": True},
+                    {"role": "assistant", "content": "That is a great choice!"},
+                ],
+                [{"role": "user", "content": "I practised chords all evening."}],
+            ],
+            "answer_session_ids": ["s1"],
+        },
+        {
+            "question_id": "q002_abs",
+            "question_type": "multi-session",
+            "question": "Which two hobbies does the user combine on Sundays?",
+            "answer": "Cycling and photography.",
+            "question_date": "2023/5/2 9:30",
+            "haystack_session_ids": ["s3"],
+            "haystack_dates": ["2023/4/30 8:00"],
+            "haystack_sessions": [
+                [{"role": "user", "content": "Sunday ride, then photos at the lake."}],
+            ],
+            "answer_session_ids": ["s3"],
+        },
+    ]
+    path = tmp_path / "official.json"
+    path.write_text(json.dumps(official), encoding="utf-8")
+
+    dataset = LongMemEvalDataset()
+    samples = dataset.load(str(path))
+
+    # question_id gives stable sample ids; abstention entries load normally.
+    assert [s.id for s in samples] == ["longmemeval-q001", "longmemeval-q002_abs"]
+    first = samples[0]
+    assert first.query == "Which instrument did the user start learning?"
+    assert first.metadata["answers"] == ["The user started learning the guitar."]
+    assert first.metadata["question_type"] == "single-session-user"
+    assert first.metadata["question_date"] == "2023/4/10 14:00"
+    assert first.metadata["evidence_session_ids"] == ["s1"]
+    # The per-session haystack is flattened into one turn-level history.
+    history = first.metadata["session_history"]
+    assert [turn["role"] for turn in history] == ["user", "assistant", "user"]
+    assert history[0]["content"] == "I just bought a guitar."
+    assert len(dataset.to_memories(first)) == 3
+
+
+def test_loader_autodetects_per_entry_and_skips_answerless(tmp_path):
+    """Format detection is per entry; an empty official answer is malformed."""
+    mixed = [
+        {
+            "question": "What is the user's current preferred editor?",
+            "question_type": "knowledge-update",
+            "answers": ["Neovim"],
+            "question_date": "2025/5/2 15:30",
+            "session_history": [{"role": "user", "content": "I now prefer Neovim."}],
+        },
+        {
+            "question_id": "q003",
+            "question_type": "single-session-user",
+            "question": "Entry without a usable gold answer",
+            "answer": "",
+            "question_date": "2023/6/1 12:00",
+            "haystack_sessions": [[{"role": "user", "content": "nothing here"}]],
+            "answer_session_ids": [],
+        },
+    ]
+    path = tmp_path / "mixed.json"
+    path.write_text(json.dumps(mixed), encoding="utf-8")
+
+    samples = LongMemEvalDataset().load(str(path))
+
+    assert len(samples) == 1
+    assert samples[0].metadata["answers"] == ["Neovim"]
+
+
+def test_runner_end_to_end_scores(tmp_path):
     import tempfile
 
     os.environ["MEMPLEX_STORAGE_PATH"] = tempfile.mkdtemp()
@@ -76,11 +167,25 @@ def test_runner_end_to_end_hit_rates(tmp_path):
     finally:
         svc.stop()
 
-    by_dataset = {r.dataset: r for r in results}
-    overall = by_dataset["longmemeval"]
-    assert overall.samples == 3
-    assert overall.value == pytest.approx(2 / 3, abs=1e-3)
-    assert by_dataset["longmemeval::single-hop-user"].value == 1.0
-    assert by_dataset["longmemeval::knowledge-update"].value == 1.0
-    # Aggregation multi-hop is NOT retrieval-answerable: pinned as 0.
-    assert by_dataset["longmemeval::multi-hop"].value == 0.0
+    by_metric = {(r.dataset, r.metric): r for r in results}
+    overall_f1 = by_metric[("longmemeval", "token_f1")]
+    overall_em = by_metric[("longmemeval", "exact_match")]
+    overall_hit = by_metric[("longmemeval", "substring_hit_rate")]
+    assert overall_f1.samples == 3
+    # Primary metric: token-F1 over retrieved evidence. Answerable questions
+    # score above zero; the aggregation multi-hop question does not.
+    assert 0.0 < overall_f1.value < 1.0
+    # EM compares full normalised strings; concatenated snippets never equal
+    # a short gold answer — pinned at 0 for honesty.
+    assert overall_em.value == 0.0
+    # Auxiliary diagnostic keeps the old substring signal (one-directional).
+    assert overall_hit.value == pytest.approx(2 / 3, abs=1e-3)
+    assert by_metric[("longmemeval::single-hop-user", "token_f1")].value > 0.0
+    assert by_metric[("longmemeval::knowledge-update", "token_f1")].value > 0.0
+    assert by_metric[("longmemeval::multi-hop", "token_f1")].value == 0.0
+    # Latency is a float-millisecond mean with p50/p99 percentiles attached.
+    assert isinstance(overall_f1.latency_ms, float)
+    assert overall_f1.latency_ms > 0
+    assert overall_f1.latency_p50_ms is not None
+    assert overall_f1.latency_p99_ms is not None
+    assert overall_f1.latency_p50_ms <= overall_f1.latency_p99_ms

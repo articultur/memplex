@@ -64,6 +64,30 @@ def test_strip_fast_path_skips_when_no_tag_present():
     assert strip_private_tags(big) is big
 
 
+def test_strip_unclosed_tag_logs_warning(caplog):
+    """Fail-open keep of an unclosed tag must be observable: behaviour is
+    unchanged (nothing dropped) but a warning names the risk."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="memplex.privacy"):
+        out = strip_private_tags("start <private> never closed rest")
+    assert "never closed rest" in out  # fail-open behaviour preserved
+    assert any(
+        r.levelno >= logging.WARNING and "privacy_unclosed_private_tag" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_strip_closed_tags_emit_no_warning(caplog):
+    """Fully closed blocks redact silently -- no unclosed-tag warning."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="memplex.privacy"):
+        out = strip_private_tags("a <private>x</private> b")
+    assert out == "a  b"
+    assert not any("privacy_unclosed_private_tag" in r.getMessage() for r in caplog.records)
+
+
 # ── Service write path integration ───────────────────────────────────
 
 

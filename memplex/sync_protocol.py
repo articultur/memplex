@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from functools import total_ordering
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Any, Final, Mapping
 
 from memplex.sync_repository import SyncBatchRejected, SyncCursorExpired
 
@@ -492,7 +492,7 @@ class SyncEvent:
         }
 
 
-def _exact_dict(value: object, expected: set[str], name: str) -> dict[str, object]:
+def _exact_dict(value: object, expected: set[str], name: str) -> dict[str, Any]:
     if type(value) is not dict:
         raise TypeError(f"{name} must be an exact dict")
     actual = set(value)

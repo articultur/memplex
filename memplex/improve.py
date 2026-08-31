@@ -19,21 +19,24 @@ without a capability contributes a zeroed phase, never an exception).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from memplex import temporal
+
+if TYPE_CHECKING:
+    from memplex.models import Fact
 
 logger = logging.getLogger(__name__)
 
 
-def _slot(fact) -> tuple[str, str]:
+def _slot(fact: Fact) -> tuple[str, str]:
     return (
         (getattr(fact, "subject", "") or "").strip().lower(),
         (getattr(fact, "predicate", "") or "").strip().lower(),
     )
 
 
-def _updated(fact) -> str:
+def _updated(fact: Fact) -> str:
     return getattr(fact, "updated_at", "") or ""
 
 

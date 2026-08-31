@@ -63,6 +63,7 @@ class BenchmarkEvaluator:
         write_memories: bool = True,
         parallel: bool = False,
         max_workers: int = 4,
+        warmup_rounds: int = 1,
     ) -> Dict[str, List[BenchmarkResult]]:
         """Run all registered benchmarks.
 
@@ -80,6 +81,10 @@ class BenchmarkEvaluator:
             If True, run benchmarks in parallel across datasets.
         max_workers:
             Maximum parallel workers when ``parallel=True``.
+        warmup_rounds:
+            Untimed warmup queries issued after seeding and before the timed
+            run (default 1). Warms FTS/connection caches so first-call
+            overhead does not pollute the measured latencies. ``0`` disables.
 
         Returns
         -------
@@ -89,9 +94,13 @@ class BenchmarkEvaluator:
         results: Dict[str, List[BenchmarkResult]] = {}
 
         if parallel:
-            results = self._run_parallel(dataset_paths, retrieval_k, write_memories, max_workers)
+            results = self._run_parallel(
+                dataset_paths, retrieval_k, write_memories, max_workers, warmup_rounds
+            )
         else:
-            results = self._run_sequential(dataset_paths, retrieval_k, write_memories)
+            results = self._run_sequential(
+                dataset_paths, retrieval_k, write_memories, warmup_rounds
+            )
 
         # Write results to JSONL
         self._write_jsonl(results)
@@ -104,6 +113,7 @@ class BenchmarkEvaluator:
         dataset_path: str,
         retrieval_k: int = 10,
         write_memories: bool = True,
+        warmup_rounds: int = 1,
     ) -> List[BenchmarkResult]:
         """Run a single named benchmark.
 
@@ -117,12 +127,16 @@ class BenchmarkEvaluator:
             Top-K for retrieval benchmarks.
         write_memories:
             If True, seed memories before running (``warm`` mode).
+        warmup_rounds:
+            Untimed warmup queries before the timed run (``0`` disables).
 
         Returns
         -------
         List[BenchmarkResult]
         """
-        return self._run_benchmark(dataset_name, dataset_path, retrieval_k, write_memories)
+        return self._run_benchmark(
+            dataset_name, dataset_path, retrieval_k, write_memories, warmup_rounds
+        )
 
     def report(
         self,
@@ -154,6 +168,7 @@ class BenchmarkEvaluator:
         dataset_paths: Dict[str, str],
         retrieval_k: int,
         write_memories: bool,
+        warmup_rounds: int,
     ) -> Dict[str, List[BenchmarkResult]]:
         """Run benchmarks sequentially (one dataset at a time)."""
         results: Dict[str, List[BenchmarkResult]] = {}
@@ -161,7 +176,7 @@ class BenchmarkEvaluator:
         for dataset_name, dataset_path in dataset_paths.items():
             try:
                 dataset_results = self._run_benchmark(
-                    dataset_name, dataset_path, retrieval_k, write_memories
+                    dataset_name, dataset_path, retrieval_k, write_memories, warmup_rounds
                 )
                 results[dataset_name] = dataset_results
                 logger.info(
@@ -181,6 +196,7 @@ class BenchmarkEvaluator:
         retrieval_k: int,
         write_memories: bool,
         max_workers: int,
+        warmup_rounds: int,
     ) -> Dict[str, List[BenchmarkResult]]:
         """Run benchmarks in parallel across datasets."""
         results: Dict[str, List[BenchmarkResult]] = {}
@@ -193,6 +209,7 @@ class BenchmarkEvaluator:
                     path,
                     retrieval_k,
                     write_memories,
+                    warmup_rounds,
                 ): name
                 for name, path in dataset_paths.items()
             }
@@ -218,6 +235,7 @@ class BenchmarkEvaluator:
         dataset_path: str,
         retrieval_k: int,
         write_memories: bool,
+        warmup_rounds: int = 1,
     ) -> List[BenchmarkResult]:
         """Load dataset and run both retrieval and generation benchmarks."""
         # Create dataset and runner (raises KeyError for unknown datasets)
@@ -243,6 +261,10 @@ class BenchmarkEvaluator:
         if write_memories:
             self._seed_memories(dataset, samples)
 
+        # Warmup: untimed queries so first-call overhead (FTS cache, DB
+        # connection setup) does not pollute the runners' measured latencies.
+        self._warmup(samples, retrieval_k, warmup_rounds)
+
         # Run retrieval benchmark
         start_time = time.perf_counter()
         retrieval_results = runner.run_retrieval(self.service, samples, top_k=retrieval_k)
@@ -261,6 +283,26 @@ class BenchmarkEvaluator:
         )
 
         return results
+
+    def _warmup(
+        self,
+        samples: List[BenchmarkSample],
+        retrieval_k: int,
+        rounds: int,
+    ) -> None:
+        """Issue ``rounds`` untimed queries to warm caches before measurement.
+
+        Failures are logged at debug level and never abort the run — warmup
+        is a measurement-hygiene step, not part of the evaluated workload.
+        """
+        if rounds <= 0 or not samples:
+            return
+        for i in range(rounds):
+            sample = samples[i % len(samples)]
+            try:
+                self.service.query(sample.query, top_k=retrieval_k)
+            except Exception as exc:
+                logger.debug("Warmup query failed for sample %s: %s", sample.id, exc)
 
     def _seed_memories(
         self,
@@ -403,21 +445,44 @@ class BenchmarkEvaluator:
         if not results:
             return "_No results to display._"
 
-        lines: List[str] = [
-            "# Memplex Benchmark Results",
-            "",
-            f"_Generated: {datetime.utcnow().isoformat()}Z_",
-            "",
-            "## Summary",
-            "",
-            "| Dataset | Metric | Value | Samples | Latency (ms) |",
-            "|---------|--------|-------|---------|--------------|",
-        ]
+        has_percentiles = any(
+            r.latency_p50_ms is not None
+            for dataset_results in results.values()
+            for r in dataset_results
+        )
+        if has_percentiles:
+            lines: List[str] = [
+                "# Memplex Benchmark Results",
+                "",
+                f"_Generated: {datetime.utcnow().isoformat()}Z_",
+                "",
+                "## Summary",
+                "",
+                "| Dataset | Metric | Value | Samples | Latency mean/p50/p99 (ms) |",
+                "|---------|--------|-------|---------|---------------------------|",
+            ]
+        else:
+            lines = [
+                "# Memplex Benchmark Results",
+                "",
+                f"_Generated: {datetime.utcnow().isoformat()}Z_",
+                "",
+                "## Summary",
+                "",
+                "| Dataset | Metric | Value | Samples | Latency (ms) |",
+                "|---------|--------|-------|---------|--------------|",
+            ]
 
         for dataset_name, dataset_results in sorted(results.items()):
             for r in dataset_results:
+                if has_percentiles:
+                    p50 = f"{r.latency_p50_ms:.1f}" if r.latency_p50_ms is not None else "-"
+                    p99 = f"{r.latency_p99_ms:.1f}" if r.latency_p99_ms is not None else "-"
+                    latency_cell = f"{r.latency_ms:.1f}/{p50}/{p99}"
+                else:
+                    latency_cell = f"{r.latency_ms:.1f}"
                 lines.append(
-                    f"| {r.dataset} | {r.metric} | {r.value:.4f} | {r.samples} | {r.latency_ms} |"
+                    f"| {r.dataset} | {r.metric} | {r.value:.4f} | {r.samples} | {latency_cell} |"
                 )
 
         lines.append("")

@@ -7,7 +7,7 @@ Only when user manually resolves does one value become the "final" value.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -35,7 +35,7 @@ class ConflictResolver:
         conflicts = []
         conflict_id = 1
 
-        func_map = {}
+        func_map: Dict[str, List] = {}
         for func in functions:
             key = func.name_normalized
             if key not in func_map:
@@ -55,7 +55,7 @@ class ConflictResolver:
 
         return conflicts
 
-    def _compare_functions(self, func1, func2, conflict_id: int) -> Optional[Conflict]:
+    def _compare_functions(self, func1: Any, func2: Any, conflict_id: int) -> Optional[Conflict]:
         """Compare two functions for conflicts."""
         # Compare conditions (adapted for List[FieldValue])
         cond1_descs = [fv.desc for fv in func1.condition] if func1.condition else []
@@ -96,12 +96,12 @@ class ConflictResolver:
             return []
         return [v["content"] for v in conflict.values]
 
-    def mark_for_human_review(self, conflict: Conflict, suggestion: str = None):
+    def mark_for_human_review(self, conflict: Conflict, suggestion: Optional[str] = None) -> None:
         """Mark conflict for human review."""
         conflict.needs_human = True
         conflict.resolved = False
 
-    def apply_resolution(self, conflict: Conflict, value: str):
+    def apply_resolution(self, conflict: Conflict, value: str) -> None:
         """Apply human resolution."""
         if value not in self.get_all_values(conflict):
             raise ValueError(f"Resolution value '{value}' not in conflict values")

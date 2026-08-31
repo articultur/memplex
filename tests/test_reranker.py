@@ -1,4 +1,4 @@
-"""Test Reranker: 5-dimensional weighted scoring, each dimension's behaviour,
+"""Test Reranker: 6-dimensional weighted scoring, each dimension's behaviour,
 and CrossEncoderReranker degradation paths.
 """
 
@@ -91,7 +91,7 @@ def test_cosine_similarity_basic():
     assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) < 1e-6
 
 
-# ── 5-dimensional weighted scoring ────────────────────────────────────
+# ── 6-dimensional weighted scoring ────────────────────────────────────
 
 
 def test_weighted_sum_decides_ranking():

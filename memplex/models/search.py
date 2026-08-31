@@ -23,8 +23,10 @@ class SearchResult:
     relevance_score: float
     summary: str
     source_type: SourceType = SourceType.WIKI
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    # Producers pass ISO strings (Lite/Postgres stores) or datetimes
+    # (multi_path fusion); the field is a pass-through for display/JSON.
+    created_at: str | datetime | None = None
+    updated_at: str | datetime | None = None
     origin: str = ""
     vector_cache: Any = None
     token_estimate: int = 0

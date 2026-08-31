@@ -46,7 +46,7 @@ class LLMProvider(Protocol):
 
 
 def create_provider(
-    provider: str = "auto",
+    provider: str | None = "auto",
     *,
     anthropic_api_key: str | None = None,
     anthropic_model: str = "claude-sonnet-4-6",

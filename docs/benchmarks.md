@@ -2,10 +2,56 @@
 
 Memplex ships an evaluation harness (`benchmarks/`, **source checkout only** —
 it is not part of the installed distribution) that measures retrieval and
-memory-keeping quality across six datasets.
+memory-keeping quality across seven datasets.
 
-> **Read this first:** the numbers on this page are an **offline synthetic
-> baseline**. Every dataset was run with `--synthetic`, which generates a
+## Current worktree evidence (G003)
+
+The current G003 evidence is documented separately in
+[Current worktree benchmark](current-worktree-benchmark.md). It is an **E1,
+aggregate-only synthetic smoke run** from a dirty worktree based on commit
+`ef9aa8f`; it is not clean-SHA, public-dataset, raw-trace, capacity, or
+production evidence. The result tables below predate that run and remain
+historical baselines.
+
+The retained bundle was rerun for G008 after invalidating its old global
+`warm=true` claim: `config.warm_by_dataset` now records LongMemEval as cold
+and the other six datasets as warm. Creation and verification share strict
+result/provenance validation, redact URL query/fragment and libpq credentials,
+and require `raw.status=null` with a reason even for synthetic inputs. Exact
+new values, payload digests, and the invalidation note are in the
+[current worktree report](current-worktree-benchmark.md#g008-correction-and-invalidation).
+
+The strict runner requires explicit synthetic mode, refuses an existing output
+directory, records source/dataset/config/environment provenance, and writes a
+canonical four-file bundle:
+
+```bash
+G003_RUN_ROOT="$(mktemp -d)"
+.venv/bin/python scripts/run_g003_benchmark.py run \
+    --synthetic --dataset all --top-k 10 --seed 17 \
+    --run-dir "$G003_RUN_ROOT/bundle"
+.venv/bin/python scripts/run_g003_benchmark.py verify \
+    --run-dir "$G003_RUN_ROOT/bundle"
+```
+
+Verify the retained worktree artifact without rerunning benchmarks:
+
+```bash
+.venv/bin/python scripts/run_g003_benchmark.py verify \
+    --run-dir artifacts/g003-synthetic-worktree-ef9aa8f-k10
+```
+
+The bundle contains `manifest.json` (provenance, configuration, coverage, and
+limitations), `datasets.json` (embedded synthetic records), `results.jsonl`
+(one aggregate `BenchmarkResult` per line), and `checksums.sha256`. The
+checksums detect accidental corruption or an inconsistent bundle; because they
+are stored beside the files and are not signed, they do not prove who created
+the bundle and do not protect against a malicious rewrite of both payloads and
+checksums.
+
+> **Read this first:** the historical numbers on this page are an **offline
+> synthetic baseline across six datasets**. Every included dataset was run
+> with `--synthetic`, which generates a
 > handful (3–5) of hand-written samples per dataset — or, for
 > `memory_benchmark`, 59 programmatically generated memories. They verify
 > that the pipeline works end-to-end and give a reproducible smoke-level
@@ -38,13 +84,23 @@ MEMPLEX_STORAGE_BACKEND=lite memplex benchmark run \
 
 - `--synthetic` skips HuggingFace downloads and generates data locally
   (cached files are bypassed, so regeneration is deterministic).
-- `--dataset all` covers all concrete datasets: `locomo`, `longmemeval`,
-  `nq`, `triviaqa`, `popqa`, `hotpotqa`, `memory_benchmark`. The composite aliases
+- For the 2026-08-09 historical run, `--dataset all` covered six concrete
+  datasets: `locomo`, `nq`, `triviaqa`, `popqa`, `hotpotqa`, and
+  `memory_benchmark`. The composite aliases
   `nq_trivia` / `popqa_hotpot` run their two member datasets together.
 - Warm mode seeds each sample into a fresh `MemplexService` (default config)
   before querying, then the runner measures retrieval and, where applicable,
   generation.
 - Results are appended to the JSONL output file, one metric per line.
+- Query latency is timed per call with `time.perf_counter` and recorded as
+  float milliseconds; each result row carries the arithmetic mean plus
+  nearest-rank `latency_p50_ms` / `latency_p99_ms` percentiles
+  (`benchmarks/base.py::LatencyStats`; nearest-rank keeps small samples
+  interpretable — the p99 of three samples is simply the maximum). Seeding
+  is outside the timed block, and `warmup_rounds` (default 1) untimed
+  queries run before measurement so first-call overhead (FTS cache, DB
+  connection setup) does not pollute the samples. Warm vs cold seeding is
+  recorded per dataset as `config.warm_by_dataset` in the G003 manifest.
 
 ### Sample counts (synthetic)
 
@@ -57,22 +113,32 @@ MEMPLEX_STORAGE_BACKEND=lite memplex benchmark run \
 | hotpotqa | 3 | question + supporting facts (2-hop) |
 | memory_benchmark | 59 | 50 facts + 4 preferences + 5 observations, generated in code |
 
-### LongMemEval
+### LongMemEval (current worktree only)
 
-`longmemeval` loads the official LongMemEval question format
-(`question` / `question_type` / `answers` / `question_date` /
-`session_history`). Sessions are seeded as searchable Function records
-(the `memory_eval` recipe) and each question is scored by normalised
-answer-hit over the retrieved summaries, reported overall and per
-question type (`single-hop-user`, `single-hop-session`, `multi-hop`,
-`temporal-reasoning`, `knowledge-update`).
+LongMemEval was not part of the 2026-08-09 six-dataset baseline or the
+historical result tables below. Its only result on this page's evidence path is
+in the separate [current dirty-worktree E1 bundle](current-worktree-benchmark.md).
+
+`longmemeval` auto-detects two on-disk schemas per entry: the official
+LongMemEval release format (`question_id` / `question_type` / `question` /
+`answer` / `question_date` / `haystack_session_ids` / `haystack_dates` /
+`haystack_sessions` / `answer_session_ids`; the single gold `answer` is
+wrapped into a list and the per-session haystack flattened into one
+turn-level history) and the repo's synthetic format (`answers` list plus a
+flat `session_history`). `haystack_dates` are accepted but not yet
+materialised as per-session timestamps — every turn inherits the question
+date, so per-session temporal ordering is not reconstructed. Sessions are
+seeded as searchable Function records (the `memory_eval` recipe) and each
+question is scored over the retrieved summaries, reported overall and per
+question type.
 
 Honest scoring note: **multi-hop aggregation questions are not
 retrieval-answerable** — they require computation over multiple memories
 (`2 + 3 = 5`), which substring retrieval cannot produce. Expect ~0 on
 that type in retrieval-only mode; use a generation model over retrieved
 context for it. The synthetic fallback corpus pins exactly this split
-(single-hop 1.0 / knowledge-update 1.0 / multi-hop 0.0).
+(positive `token_f1` on single-hop-user and knowledge-update, `0.0` on
+multi-hop).
 
 ### Caveats
 
@@ -88,6 +154,10 @@ context for it. The synthetic fallback corpus pins exactly this split
 - `latency_ms` is mean per-query retrieval latency (~2.2 s on the M4 lite
   setup; the store is tiny, so this is dominated by fixed per-query cost,
   not corpus size).
+- The default embedder is local TF-IDF (`embedding.model = "default"`,
+  dim 384) — a lexical bag-of-words. These results measure the FTS5 /
+  lexical retrieval path; they do not reflect semantic (neural embedding)
+  retrieval quality.
 
 ## Metric definitions
 
@@ -110,13 +180,38 @@ Memplex-specific metrics:
 - **recency_ranking** — agreement between recency order and retrieval rank
   for memories of varying age (`memory_benchmark`; LoCoMo's
   `recency_accuracy` is the analogous pairwise check).
-- **hop_precision@k / hop_recall@k** — per retrieved slot / per required
-  hop coverage of HotpotQA supporting-fact entities in the top-k.
+- **hop_precision@k** — relevant retrieved slots divided by `k`; one slot that
+  mentions multiple supporting hops still counts as one relevant slot.
+- **hop_recall@k** — unique required supporting hops covered in the top-k,
+  divided by the number of unique required hops.
 - **hop_coverage** — fraction of required hops covered anywhere in the
   retrieved set.
 - **multihop_accuracy** — 1.0 only when *all* required hops are covered.
 
-## Baseline results
+LongMemEval answer-quality metrics (`benchmarks/longmemeval.py`; scored
+against the gold answers — max over golds, SQuAD convention — over the
+concatenated retrieved summaries):
+
+- **token_f1** — primary metric; token-overlap F1 between the prediction
+  and a gold answer.
+- **exact_match** — 1.0 when the normalised prediction equals a normalised
+  gold answer; near zero by construction for concatenated retrieval
+  snippets, reported for honesty rather than as a quality target.
+- **substring_hit_rate** — auxiliary diagnostic only; 1.0 when a
+  normalised gold answer is a substring of the prediction
+  (one-directional, so a short prediction contained in a longer gold does
+  not count). It supersedes the retired `answer_hit_rate`.
+
+Canonical G003 bundle creation and verification apply an explicit schema to
+known normalized metrics (including the metrics above): values must be finite
+and within `[0,1]`. Metrics not declared normalized, such as latency or
+throughput measurements, may legitimately exceed `1`.
+
+## Historical baseline results
+
+These tables contain only the six datasets measured on 2026-08-09. They do not
+contain LongMemEval, and current dirty-worktree results are not merged into
+them.
 
 ### top-k = 10 (CLI default)
 

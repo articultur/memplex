@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ try:
     _CHROMA_AVAILABLE = True
 except ImportError:
     _CHROMA_AVAILABLE = False
-    chromadb = None  # type: ignore[assignment]
+    chromadb = None
 
 
 class ChromaVectorStore:
@@ -172,7 +172,7 @@ class ChromaVectorStore:
         self._embedding_model = embedding_model
         self._model = None
 
-    def _get_model(self):
+    def _get_model(self) -> Any:
         if self._model is None:
             from sentence_transformers import SentenceTransformer  # type: ignore
 

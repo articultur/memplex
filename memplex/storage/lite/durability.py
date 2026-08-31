@@ -69,7 +69,7 @@ _SYNC_STATE_KEYS = {
     "snapshots",
     "snapshot_items",
 }
-_EMPTY_SYNC_STATE = {
+_EMPTY_SYNC_STATE: dict[str, Any] = {
     "tenant_binding": None,
     "next_stream_seq": 1,
     "retention_floor": 0,
@@ -629,10 +629,16 @@ def _fsync_dir(path: Path) -> None:
 def _write_and_fsync(path: Path, value: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with tmp.open("wb") as fh:
-        fh.write(_canonical_json(value))
-        fh.flush()
-        os.fsync(fh.fileno())
+    try:
+        with tmp.open("wb") as fh:
+            fh.write(_canonical_json(value))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        # A failed write/fsync must not leak the hidden tmp file: repeated
+        # retries on a full disk would otherwise accumulate them.
+        tmp.unlink(missing_ok=True)
+        raise
     return tmp
 
 
@@ -987,11 +993,10 @@ def _validate_sync_entity_versions_items(items: list, *,
 def _validate_sync_targets_items(items: list, *,
     payload: Any,
     label: Any,
-) -> None:
+) -> set[str]:
     """Validate every item of the sync collection."""
     target_ids: set[str] = set()
     seen: set[Any] = set()
-    target_ids: set[str] = set()
     for item in items:
         target_id = _require_str(item["target_id"], label="target target_id")
         _require_str(item["remote_node_id"], label="target remote_node_id")

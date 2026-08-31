@@ -34,7 +34,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 # Reserved attributes that should not leak into the JSON "extra" payload.
 _STDLOG_ATTRS = frozenset(
@@ -90,7 +90,7 @@ def _redact_text(value: str) -> str:
     return _URI_CREDENTIALS.sub(rf"\1{_REDACTED}@", value)
 
 
-def _redact_value(value, *, key: str = ""):
+def _redact_value(value: Any, *, key: str = "") -> Any:
     if key and _SENSITIVE_KEY.search(key):
         return _REDACTED
     if isinstance(value, str):
@@ -171,10 +171,10 @@ class JsonFormatter(logging.Formatter):
 
 
 def _truthy(value: Optional[str]) -> bool:
-    return bool(value) and value.lower() in ("1", "true", "yes", "on")
+    return value is not None and value.lower() in ("1", "true", "yes", "on")
 
 
-def configure_logging(json_mode: Optional[bool] = None) -> None:
+def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = None) -> None:
     """Configure the root logger.
 
     Parameters
@@ -183,6 +183,10 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
         When ``None`` (default), the mode is read from the
         ``MEMPLEX_LOG_JSON`` environment variable. Pass an explicit bool
         to override the env var (useful in tests).
+    level:
+        Fallback log-level name (e.g. from ``MemplexConfig.logging.level``).
+        The ``MEMPLEX_LOG_LEVEL`` environment variable takes precedence;
+        when neither is set the level defaults to ``INFO``.
 
     Idempotent in intent: re-configuring replaces the root logger's
     handlers rather than appending, so calling it more than once does not
@@ -191,8 +195,8 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
     if json_mode is None:
         json_mode = _truthy(os.environ.get("MEMPLEX_LOG_JSON"))
 
-    level_name = (os.environ.get("MEMPLEX_LOG_LEVEL") or "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    level_name = (os.environ.get("MEMPLEX_LOG_LEVEL") or (level or "INFO")).upper()
+    level_value = getattr(logging, level_name, logging.INFO)
 
     root = logging.getLogger()
     # Clear any handlers from a previous configure/basicConfig call so we
@@ -207,5 +211,5 @@ def configure_logging(json_mode: Optional[bool] = None) -> None:
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
-    root.setLevel(level)
+    root.setLevel(level_value)
     install_sensitive_data_filters()

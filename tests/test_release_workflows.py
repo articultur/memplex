@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github/workflows/ci.yml"
 RELEASE = ROOT / ".github/workflows/release.yml"
 G008_REAL_HOST = ROOT / ".github/workflows/g008-real-host-lifecycle.yml"
+MUTATION_NIGHTLY = ROOT / ".github/workflows/mutation-nightly.yml"
 OLD_NPM_RELEASE = ROOT / ".github/workflows/npm-release.yml"
 DEPENDABOT = ROOT / ".github/dependabot.yml"
 RELEASE_DOCS = ROOT / "docs/release-automation.md"
@@ -31,7 +32,7 @@ def _workflow(path: Path) -> dict:
 
 
 def test_all_actions_are_pinned_to_full_commit_shas() -> None:
-    for path in (CI, RELEASE, G008_REAL_HOST):
+    for path in (CI, RELEASE, G008_REAL_HOST, MUTATION_NIGHTLY):
         text = _text(path)
         uses_lines = [
             line for line in text.splitlines() if "uses:" in line and "uses: ./" not in line
@@ -96,6 +97,9 @@ def test_release_requires_a_non_skippable_real_host_g008_lifecycle_gate() -> Non
     job = workflow["jobs"]["verify-four-host-lifecycle"]
     assert job["runs-on"] == ["self-hosted", "macOS", "memplex-g008-real-host"]
     assert job["environment"] == "g008-real-host"
+    # Hard cap for the proof; a job queued on an offline runner must not
+    # look green, and the rerun path is digest-idempotent.
+    assert job["timeout-minutes"] == "30"
     assert "if" not in job
     assert "continue-on-error" not in _text(G008_REAL_HOST)
     assert (
@@ -297,6 +301,36 @@ def test_release_attests_artifacts_and_sbom() -> None:
     assert "release/release-manifest.json" in text
 
 
+def test_ci_runs_bench_smoke_and_prometheus_config_gates() -> None:
+    """Deterministic retrieval smoke and promtool checks must stay wired into CI."""
+    workflow = _workflow(CI)
+    jobs = workflow["jobs"]
+    bench_steps = json_steps(jobs["bench-smoke"])
+    assert "scripts/ci_bench_smoke.py" in bench_steps
+    assert jobs["bench-smoke"]["timeout-minutes"] == "15"
+    prometheus_steps = json_steps(jobs["prometheus-config"])
+    assert "promtool check rules deploy/prometheus/memplex-alerts.yml" in prometheus_steps
+    assert "promtool check config deploy/prometheus/prometheus.yml" in prometheus_steps
+    assert "deploy/prometheus/alertmanager.yml" in prometheus_steps
+
+
+def test_mutation_nightly_compares_against_the_cosmic_ray_baseline() -> None:
+    """The scheduled pilot must fail on drift from the recorded 77/33 baseline."""
+    text = _text(MUTATION_NIGHTLY)
+    workflow = _workflow(MUTATION_NIGHTLY)
+    assert workflow["on"]["schedule"] == [{"cron": "0 3 * * *"}]
+    assert "workflow_dispatch" in workflow["on"]
+    assert "pull_request" not in text
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["mutation-pilot"]
+    assert job["runs-on"] == "ubuntu-latest"
+    steps = json_steps(job)
+    assert "scripts/mutation_pilot.sh" in steps
+    assert "MUTATION_PILOT_REPORT" in steps
+    assert "BASELINE_KILLED = 77" in text
+    assert "BASELINE_SURVIVED = 33" in text
+
+
 def test_ci_has_dependency_review_lock_drift_and_audit() -> None:
     text = _text(CI)
     assert "actions/dependency-review-action" in text
@@ -337,14 +371,129 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/sync.py",
         "memplex/operations.py",
         "memplex/adapters/cli.py",
+        "memplex/storage/lite/store.py",
+        "memplex/storage/pool.py",
+        "memplex/adapters/agent_installer.py",
+        "memplex/adapters/install_transaction.py",
+        "memplex/adapters/agent_assets.py",
+        "memplex/adapters/agent_runtime.py",
+        "memplex/adapters/managed_identity.py",
+        "memplex/adapters/runtime_status.py",
+        "memplex/adapters/_shared.py",
+        "memplex/models/memory.py",
+        "memplex/models/paragraph.py",
+        "memplex/storage/base.py",
+        "memplex/storage/changelog.py",
+        "memplex/storage/inbound.py",
+        "memplex/storage/vector.py",
+        "memplex/storage/lite/search_index.py",
+        "memplex/auth.py",
+        "memplex/sync_crypto.py",
+        "memplex/__main__.py",
+        "memplex/core/hooks/collector.py",
+        "memplex/core/hooks/hook_event.py",
+        "memplex/core/hooks/policy.py",
+        "memplex/core/hooks/registry.py",
+        "memplex/llm/enhancer.py",
+        "memplex/llm/fallback_chain.py",
+        "memplex/llm/sanitizer.py",
+        "memplex/llm/injection_guard.py",
+        "memplex/llm/provider.py",
+        "memplex/wiki/community.py",
+        "memplex/wiki/generator.py",
+        "memplex/wiki/search.py",
+        "memplex/__init__.py",
+        "memplex/_plugin/__init__.py",
+        "memplex/models/__init__.py",
+        "memplex/models/feedback.py",
+        "memplex/models/graph.py",
+        "memplex/models/misc.py",
+        "memplex/models/search.py",
+        "memplex/models/source.py",
+        "memplex/models/task.py",
+        "memplex/query_pipeline.py",
+        "memplex/config.py",
+        "memplex/host_lifecycle.py",
+        "memplex/logging_config.py",
+        "memplex/product.py",
+        "memplex/readiness_evidence.py",
+        "memplex/release.py",
+        "memplex/sync_dispatcher.py",
+        "memplex/sync_protocol.py",
+        "memplex/worker.py",
+        "memplex/adapters/__init__.py",
+        "memplex/adapters/claude_skill.py",
+        "memplex/adapters/codex_plugin.py",
+        "memplex/adapters/jsonc_edit.py",
+        "memplex/adapters/mcp_server.py",
+        "memplex/adapters/openclaw_plugin.py",
+        "memplex/adapters/yaml_edit.py",
+        "memplex/core/__init__.py",
+        "memplex/core/associator/__init__.py",
+        "memplex/core/associator/domain_classifier.py",
+        "memplex/core/associator/entity_aligner.py",
+        "memplex/core/associator/ref_linker.py",
+        "memplex/core/dictionaries/__init__.py",
+        "memplex/core/extractors/__init__.py",
+        "memplex/core/extractors/markdown.py",
+        "memplex/core/extractors/vision_mapper.py",
+        "memplex/core/handlers/__init__.py",
+        "memplex/core/handlers/clipboard.py",
+        "memplex/core/handlers/file_handler.py",
+        "memplex/core/handlers/url_handler.py",
+        "memplex/core/hooks/__init__.py",
+        "memplex/llm/__init__.py",
+        "memplex/llm/providers/__init__.py",
+        "memplex/llm/providers/_common.py",
+        "memplex/llm/providers/rule_based.py",
+        "memplex/operations_assets/__init__.py",
+        "memplex/processing/__init__.py",
+        "memplex/processing/function_builder.py",
+        "memplex/processing/graph_builder.py",
+        "memplex/processing/merger/__init__.py",
+        "memplex/processing/merger/confidence_calculator.py",
+        "memplex/processing/merger/conflict_resolver.py",
+        "memplex/retrieval/__init__.py",
+        "memplex/storage/__init__.py",
+        "memplex/storage/_messages.py",
+        "memplex/storage/feedback.py",
+        "memplex/storage/lite/__init__.py",
+        "memplex/storage/lite/durability.py",
+        "memplex/storage/lite/sync_repository.py",
+        "memplex/storage/migrations/__init__.py",
+        "memplex/storage/migrations/_constants.py",
+        "memplex/storage/migrations/acl_verification.py",
+        "memplex/storage/migrations/catalogue_checks.py",
+        "memplex/storage/migrations/catalogue_snapshot.py",
+        "memplex/storage/migrations/ledger_state.py",
+        "memplex/storage/migrations/runner.py",
+        "memplex/storage/postgres.py",
+        "memplex/storage/postgres_backup.py",
+        "memplex/storage/postgres_sync.py",
+        "memplex/wiki/__init__.py",
+        "memplex/wiki/compiler.py",
     ]
 
     workflow = _workflow(CI)
     test_steps = json_steps(workflow["jobs"]["test"])
     assert "uv run mypy" in test_steps
+    # Coverage floor is enforced in CI (pytest-cov ignores the pyproject
+    # fail_under unless the flag is passed) and matches pyproject.
+    assert "--cov-fail-under=75" in test_steps
+    assert metadata["tool"]["coverage"]["report"]["fail_under"] == 75
+    assert metadata["tool"]["pytest"]["ini_options"]["timeout"] == 120
     # Complexity freeze-gate and hexagonal architecture contract.
     assert "uv run ruff check memplex tests" in test_steps
     assert "uv run lint-imports" in test_steps
+    for local_g004_test in (
+        "tests/test_g004_cli_runner_contract.py",
+        "tests/test_g004_lite_real_value.py",
+        "tests/test_g004_agent_real_value.py",
+        "tests/test_g004_sync_real_loopback.py",
+    ):
+        assert local_g004_test in test_steps
+    assert "--ignore=tests/test_g004_postgres_backup_real_value.py" in test_steps
+    assert "--ignore=tests/test_g004_postgres_probe_isolation.py" in test_steps
 
     postgres_job = workflow["jobs"]["test-postgres"]
     assert postgres_job["services"]["postgres"]["image"] == (
@@ -362,6 +511,8 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "tests/test_sync_repository_contract.py",
         "tests/test_postgres_store.py",
         "tests/test_g014_postgres_task_repository.py",
+        "tests/test_g004_postgres_backup_real_value.py",
+        "tests/test_g004_postgres_probe_isolation.py",
     ):
         assert required_test in postgres_steps
 

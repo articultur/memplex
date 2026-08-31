@@ -170,20 +170,20 @@ class DualIndexSearch:
 
         results: List[SearchResult] = []
         for page_id, rrf_score in sorted_ids:
-            item = item_map.get(page_id)
-            if item is None:
+            existing = item_map.get(page_id)
+            if existing is None:
                 continue
             # Create a new result with the RRF score
             results.append(
                 SearchResult(
-                    func_id=item.func_id,
-                    name=item.name,
-                    domain=item.domain,
+                    func_id=existing.func_id,
+                    name=existing.name,
+                    domain=existing.domain,
                     relevance_score=rrf_score,
-                    summary=item.summary,
-                    source_type=item.source_type,
-                    created_at=item.created_at,
-                    updated_at=item.updated_at,
+                    summary=existing.summary,
+                    source_type=existing.source_type,
+                    created_at=existing.created_at,
+                    updated_at=existing.updated_at,
                 )
             )
         return results

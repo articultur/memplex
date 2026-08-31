@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from threading import Condition, RLock
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 from uuid import uuid4
 
 from memplex.auth import AuthorizationContext
@@ -23,7 +23,12 @@ from memplex.storage.migrations import (
     PostgresTargetIdentity,
     inspect_postgres_connection_target,
 )
-from memplex.storage.migrations.runner import VectorCapabilityRequest, VectorCapabilityStatus
+from memplex.storage.migrations.runner import (
+    _APPLICATION_ACL,
+    _APPLICATION_ACL_TABLES,
+    VectorCapabilityRequest,
+    VectorCapabilityStatus,
+)
 
 BindScope = Callable[[Any, AuthorizationContext], None]
 
@@ -124,6 +129,13 @@ class ReadyPostgresPool:
         "target",
         "_sealed",
     )
+
+    manager: PostgresPoolManager
+    request: VectorCapabilityRequest
+    status: VectorCapabilityStatus
+    effective_dim: int
+    target: PostgresTargetIdentity
+    _sealed: bool
 
     def __init__(
         self,
@@ -547,7 +559,7 @@ class _TransactionContext:
                 pass
             raise primary_error.with_traceback(primary_traceback)
 
-    def __exit__(self, exc_type: object, _value: object, _traceback: object) -> bool:
+    def __exit__(self, exc_type: object, _value: object, _traceback: object) -> Literal[False]:
         assert self._reservation is not None
         primary_error = _value if isinstance(_value, BaseException) else None
         cleanup_error: BaseException | None = None
@@ -1390,18 +1402,16 @@ class PostgresPoolManager:
         sequence_row = cursor.fetchone()
         if sequence_row is None or sequence_row[0] is not True:
             raise PermissionError("required changelog sequence privilege is absent")
-        sync_privileges = (
-            ("memplex_sync_outbox", "SELECT,INSERT,DELETE"),
-            ("memplex_sync_entity_versions", "SELECT,INSERT,UPDATE"),
-            ("memplex_sync_inbox", "SELECT,INSERT"),
-            ("memplex_sync_batches", "SELECT,INSERT"),
-            ("memplex_sync_targets", "SELECT,INSERT,UPDATE"),
-            ("memplex_sync_deliveries", "SELECT,INSERT,UPDATE,DELETE"),
-            ("memplex_sync_cursors", "SELECT,INSERT,UPDATE,DELETE"),
-            ("memplex_sync_stream_state", "SELECT,INSERT,UPDATE"),
-            ("memplex_sync_snapshots", "SELECT,INSERT,UPDATE,DELETE"),
-            ("memplex_sync_snapshot_items", "SELECT,INSERT,DELETE"),
-            ("memplex_background_tasks", "SELECT,INSERT,UPDATE,DELETE"),
+        # The probe matrix derives from the runner's application ACL (the
+        # single source of truth) so readiness can never drift from the
+        # granted least-privilege set.  The core/feedback tables are already
+        # probed above; empty-ACL tables (runner-owned principal state) are
+        # covered by the negative probes below instead.
+        probed_tables = frozenset(tables)
+        sync_privileges = tuple(
+            (table, ",".join(sorted(_APPLICATION_ACL[table])))
+            for table in _APPLICATION_ACL_TABLES
+            if table not in probed_tables and _APPLICATION_ACL[table]
         )
         cursor.execute(
             """
@@ -1435,12 +1445,17 @@ class PostgresPoolManager:
             if cursor.fetchone() != (True,):
                 raise PermissionError("required durable-sync function privilege is absent")
         if profile == "production":
-            cursor.execute(
-                "SELECT has_table_privilege(current_user, %s::regclass, 'SELECT,INSERT,UPDATE,DELETE')",
-                (f'"{schema}".memplex_sync_local_identity',),
-            )
-            if cursor.fetchone() != (False,):
-                raise PermissionError("application role can access local sync identity")
+            # Empty-ACL tables are runner-owned principal state: the
+            # application role must hold no table privilege on them at all.
+            for denied_table in (
+                table for table in _APPLICATION_ACL_TABLES if not _APPLICATION_ACL[table]
+            ):
+                cursor.execute(
+                    "SELECT has_table_privilege(current_user, %s::regclass, 'SELECT,INSERT,UPDATE,DELETE')",
+                    (f'"{schema}".{denied_table}',),
+                )
+                if cursor.fetchone() != (False,):
+                    raise PermissionError("application role can access runner-owned principal state")
             cursor.execute(
                 "SELECT has_function_privilege(current_user, %s::regprocedure, 'EXECUTE')",
                 (f'"{schema}".memplex_configure_sync_local_identity(text)',),
@@ -1578,7 +1593,9 @@ class PostgresPoolManager:
             raise PermissionError("function delete was not visible")
 
     @staticmethod
-    def _probe_verify_production_principal(cursor, profile: str, schema, tables) -> None:
+    def _probe_verify_production_principal(
+        cursor: Any, profile: str, schema: str, tables: tuple[str, ...]
+    ) -> None:
         """Production-only principal/ownership audit over the managed catalogue."""
         if profile == "production":
             cursor.execute(
@@ -1609,7 +1626,9 @@ class PostgresPoolManager:
 
 
     @staticmethod
-    def _probe_verify_vector_capability(cursor, profile: str, schema, vector_dim) -> None:
+    def _probe_verify_vector_capability(
+        cursor: Any, profile: str, schema: str, vector_dim: int
+    ) -> None:
         """The negotiated pgvector capability matches the requested dimension."""
         if vector_dim:
             cursor.execute(
@@ -1652,7 +1671,16 @@ class PostgresPoolManager:
 
 
     @staticmethod
-    def _probe_verify_feedback_rls(cursor, profile: str, tenant, subject, agent, session, workspace, feedback_id) -> bool:
+    def _probe_verify_feedback_rls(
+        cursor: Any,
+        profile: str,
+        tenant: str,
+        subject: str,
+        agent: str,
+        session: str,
+        workspace: str,
+        feedback_id: str,
+    ) -> None:
         """Cross-tenant feedback RLS isolation under savepoint round-trip."""
         if profile == "production":
             cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
@@ -1683,7 +1711,15 @@ class PostgresPoolManager:
 
 
     @staticmethod
-    def _probe_verify_function_rls(cursor, profile: str, tenant, function_a, insert_function, metadata, payload) -> bool:
+    def _probe_verify_function_rls(
+        cursor: Any,
+        profile: str,
+        tenant: str,
+        function_a: str,
+        insert_function: str,
+        metadata: tuple[str, ...],
+        payload: str,
+    ) -> None:
         """Cross-tenant function RLS isolation under savepoint round-trip."""
         if profile == "production":
             cursor.execute("SELECT set_config('memplex.tenant_id', %s, true)", (tenant + "-other",))
@@ -1711,7 +1747,18 @@ class PostgresPoolManager:
 
 
     @staticmethod
-    def _probe_publish_sync_event(cursor, profile: str, tenant, subject, workspace, agent, session, token, remote, consumer) -> Any:
+    def _probe_publish_sync_event(
+        cursor: Any,
+        profile: str,
+        tenant: str,
+        subject: str,
+        workspace: str,
+        agent: str,
+        session: str,
+        token: str,
+        remote: str,
+        consumer: str,
+    ) -> Any:
         """Insert one sync-v5 outbox event under its savepoint and verify visibility."""
         try:
             event_id = "event-" + token
@@ -1772,7 +1819,7 @@ class PostgresPoolManager:
 
 
     @staticmethod
-    def _probe_verify_background_task_crud(cursor, token: str) -> None:
+    def _probe_verify_background_task_crud(cursor: Any, token: str) -> None:
         """Insert/update/select/delete one background task row as the probe role."""
         task_id = "task-" + token
         cursor.execute(

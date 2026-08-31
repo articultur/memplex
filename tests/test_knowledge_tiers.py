@@ -96,7 +96,7 @@ def test_promote_rejects_unknown_tier_and_missing_memory(tmp_path):
     try:
         with pytest.raises(ValueError, match="tier"):
             svc.promote("whatever", "enterprise", authorization=_alice())
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="not found|missing|unknown"):
             svc.promote("does-not-exist", "team", authorization=_alice())
     finally:
         svc.stop()

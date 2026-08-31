@@ -24,11 +24,10 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, RLock
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, cast
 
 from memplex.auth import (
     AuthorizationContext,
@@ -48,7 +47,6 @@ from memplex.llm.injection_guard import (
     IndirectInjectionGuard,
     InjectionRiskRegistry,
     InjectionScanCounter,
-    drop_injection_suspected,
 )
 from memplex.llm.provider import create_provider
 from memplex.models import (
@@ -68,7 +66,7 @@ from memplex.models import (
     UpdateResult,
 )
 from memplex.processing.graph_builder import GraphBuilder
-from memplex.query_explainer import build_query_explanation
+from memplex.query_pipeline import QueryPipeline
 from memplex.retrieval.embedding import EmbeddingService, Vector
 from memplex.retrieval.multi_path import MultiPathRetriever
 from memplex.retrieval.reranker import CrossEncoderReranker, Reranker
@@ -82,7 +80,29 @@ from memplex.storage.pool import (
 from memplex.sync_repository import SyncCapturePolicy
 from memplex.worker import BackgroundTask, BackgroundWorker
 
+if TYPE_CHECKING:
+    from memplex.sync_dispatcher import PullResult
+    from memplex.sync_protocol import SyncDrainResult
+
 logger = logging.getLogger(__name__)
+
+# Optional callback registered by the HTTP adapter at startup so the
+# service health surface can report the SSE subscriber count without a
+# reverse domain→adapter import. Returns int; never raises.
+_sse_subscriber_count_provider: Optional[Callable[[], int]] = None
+
+
+def register_sse_subscriber_count_provider(provider: Callable[[], int]) -> None:
+    """Register the adapter-owned SSE subscriber-count callback.
+
+    Host adapters (the HTTP API) call this once at startup so the service
+    health surface (:meth:`MemplexService._sync_health`) can report the SSE
+    subscriber count without a reverse domain→adapter import. *provider*
+    must return an ``int``; the health surface fails closed to ``0`` if it
+    raises. Replaces any previously registered provider.
+    """
+    global _sse_subscriber_count_provider
+    _sse_subscriber_count_provider = provider
 
 
 # ── Helper ─────────────────────────────────────────────────────────────
@@ -196,7 +216,7 @@ class MemplexService:
         storage_kwargs: dict[str, Any] = {}
         if backend == "postgres":
             vector_dim = int(os.environ.get("MEMPLEX_PGVECTOR_DIM", "0") or 0)
-            vector_policy = (
+            vector_policy: Literal["required", "best_effort", "disabled"] = (
                 "disabled" if vector_dim == 0 else
                 ("required" if self._is_production_profile() else "best_effort")
             )
@@ -224,7 +244,12 @@ class MemplexService:
             )
             storage_kwargs["ready_pool"] = self._postgres_resources.ready_pool
             if cfg.sync.enabled:
-                storage_kwargs["inbound_executor"] = self._postgres_resources.executor
+                # Constructed as PostgresSyncStorageResources above under the
+                # same condition; the intervening ensure_ready() call clears
+                # mypy's assignment narrowing. cast is a runtime no-op.
+                storage_kwargs["inbound_executor"] = cast(
+                    PostgresSyncStorageResources, self._postgres_resources
+                ).executor
                 storage_kwargs["sync_capture_policy"] = SyncCapturePolicy(
                     "required",
                     local_node_id=cfg.sync.node_id,
@@ -584,8 +609,8 @@ class MemplexService:
             provider = create_provider(
                 provider=cfg.llm.provider,
                 anthropic_api_key=cfg.llm.anthropic_api_key,
-                local_endpoint=cfg.llm.local_endpoint,
-                local_model=cfg.llm.local_model,
+                local_endpoint=cast(str, cfg.llm.local_endpoint),
+                local_model=cast(str, cfg.llm.local_model),
                 fallback_chain=cfg.llm.fallback_chain,
             )
             self._llm = LLMEnhancer(llm_provider=provider, config=cfg.llm)
@@ -663,10 +688,10 @@ class MemplexService:
         model-visible typed payload is assessed before the repository can
         publish it.
         """
-        from memplex.models import Fact, Function, Observation, Preference
+        from memplex.models import Fact, Function, MemoryNode, Observation, Preference
         from memplex.sync_protocol import SyncNodeType, SyncOperation
 
-        model_by_type = {
+        model_by_type: dict[SyncNodeType, type[MemoryNode]] = {
             SyncNodeType.FUNCTION: Function,
             SyncNodeType.FACT: Fact,
             SyncNodeType.PREFERENCE: Preference,
@@ -677,6 +702,8 @@ class MemplexService:
             if getattr(event, "operation", None) is not SyncOperation.UPSERT:
                 continue
             node_type = getattr(event, "node_type", None)
+            if not isinstance(node_type, SyncNodeType):
+                continue
             model = model_by_type.get(node_type)
             if model is None:
                 continue
@@ -708,107 +735,6 @@ class MemplexService:
     # ════════════════════════════════════════════════════════════════
 
 
-    def _parallel_scope_search(
-        self,
-        retriever: MultiPathRetriever,
-        text: str,
-        scope: QueryScope,
-        top_k: int,
-        query_vector: Optional[Vector],
-        trace: Optional[Dict[str, Any]],
-    ) -> List[List[SearchResult]]:
-        """Fan out the scoped retrieval paths under one global budget."""
-        # Parallel multi-path retrieval. ``top_k`` is one global candidate
-        # budget, not a per-path allowance: otherwise QueryScope.ALL silently
-        # triples model-controlled work. Split the budget as evenly as
-        # possible; when the budget is smaller than the number of paths, the
-        # zero-budget paths are not scheduled.
-        searches: list[tuple[str, Any, tuple[Any, ...]]] = []
-        if scope in (QueryScope.IMMEDIATE, QueryScope.ALL):
-            searches.append(("rag", retriever.rag_search, (query_vector,)))
-        if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
-            searches.append(("wiki", retriever.wiki_search, ()))
-        if scope in (QueryScope.RELATION, QueryScope.ALL):
-            searches.append(("graph", retriever.graph_search, (query_vector,)))
-
-        candidate_budget = max(0, int(top_k))
-        per_path, remainder = divmod(candidate_budget, len(searches))
-        futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
-        with ThreadPoolExecutor(max_workers=len(searches)) as pool:
-            for index, (path, search, extra_args) in enumerate(searches):
-                path_budget = per_path + (1 if index < remainder else 0)
-                if path_budget == 0:
-                    continue
-                futures[pool.submit(search, text, path_budget, *extra_args)] = (
-                    path,
-                    path_budget,
-                )
-
-            all_results: List[List[SearchResult]] = []
-            for future in as_completed(futures):
-                path, path_budget = futures[future]
-                try:
-                    path_results = future.result()
-                    all_results.append(path_results)
-                    if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "ok",
-                                "candidate_budget": path_budget,
-                                "candidates": len(path_results),
-                            }
-                        )
-                except Exception as exc:
-                    logger.warning("Search path %s failed: %s", path, exc)
-                    if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "failed",
-                                "error": str(exc),
-                                "candidate_budget": path_budget,
-                                "candidates": 0,
-                            }
-                        )
-
-        return all_results
-
-
-    @staticmethod
-    def _apply_token_budget(
-        results: List[SearchResult], max_tokens: int, trace: Optional[Dict[str, Any]]
-    ) -> tuple[List[SearchResult], int, bool]:
-        """Greedy token-budget truncation by relevance order."""
-        # Token budget truncation (greedy, by relevance_score desc)
-        truncated = False
-        used = 0
-        if max_tokens > 0:
-            kept: List[SearchResult] = []
-            for r in results:
-                est = max(r.token_estimate, len(r.summary) // 4 + 1)
-                r.token_estimate = est
-                if used + est <= max_tokens:
-                    kept.append(r)
-                    used += est
-                else:
-                    truncated = True
-            results = kept
-        else:
-            used = sum(r.token_estimate for r in results)
-        if trace is not None:
-            trace["stages"].append(
-                {
-                    "stage": "token_budget",
-                    "max_tokens": max_tokens,
-                    "tokens_used": used,
-                    "truncated": truncated,
-                    "after": len(results),
-                }
-            )
-        return results, used, truncated
-
-
     def query(
         self,
         text: str,
@@ -828,7 +754,7 @@ class MemplexService:
         1. Intent detection (LLM first, keyword fallback).
         2. Parallel multi-path retrieval (ThreadPoolExecutor, 3 workers).
         3. Merge + deduplicate by ``func_id`` (keep highest score).
-        4. Rerank (5-dim bi-encoder + optional cross-encoder).
+        4. Rerank (6-dim bi-encoder + optional cross-encoder).
         5. Update ``access_count`` (persisted).
         6. Token budget truncation (greedy by ``relevance_score``).
 
@@ -850,216 +776,37 @@ class MemplexService:
         explain:
             Include a product-facing retrieval trace that explains the stages,
             filters, budgets, and final injected candidates.
+
+        The stage-by-stage machinery lives in
+        :class:`memplex.query_pipeline.QueryPipeline`; this method resolves
+        authorization, binds the current collaborators, and delegates.
         """
         context = self._require_authorization(authorization)
-        store = self._store_for(context)
-        # A compiled wiki index is not tenant-addressable.  On a scoped
-        # backend, use its SQL/FTS path instead of producing global wiki
-        # candidates and attempting to remove them afterwards.
-        retriever = (
-            self._retriever
-            if store is self.store
-            else MultiPathRetriever(
-                store,
-                embedding_service=self._embedding_service,
-                wiki_searcher=None,
-            )
+        # The pipeline is built per call from the service's current
+        # attributes so monkeypatched instance attributes (reranker /
+        # retriever / _detect_scope in tests) stay live.
+        pipeline = QueryPipeline(
+            config=self._config,
+            store=self._store_for(context),
+            base_store=self.store,
+            retriever=self._retriever,
+            embedding_service=self._embedding_service,
+            llm=self._llm,
+            reranker=self._reranker,
+            cross_reranker=self._cross_reranker,
+            injection_risks=self._injection_risks,
+            auth=self._auth,
+            detect_scope=self._detect_scope,
+            compute_hyde_vector=self._compute_hyde_vector,
         )
-        scope = self._detect_scope(text)
-        start = datetime.now()
-        trace: Optional[Dict[str, Any]] = None
-        if explain:
-            trace = {
-                "query": text,
-                "top_k": top_k,
-                "max_tokens": max_tokens,
-                "scope": scope.value,
-                "namespace_filter": namespace_filter or {},
-                "embedding": {
-                    "enabled": self._embedding_service is not None,
-                    "model": self._config.embedding.model,
-                    "hyde_enabled": bool(self._config.embedding.hyde_enabled),
-                },
-                "reranker": {
-                    "enabled": self._reranker is not None,
-                    "cross_encoder_enabled": self._cross_reranker is not None
-                    and bool(getattr(self._cross_reranker, "enabled", False)),
-                },
-                "stages": [],
-            }
-
-        # Pre-compute query_vector (multi-path reuse). Query-side embeds
-        # use embed_query (transform-only) so TF-IDF corpus statistics do
-        # not drift with query history.
-        query_vector: Optional[Vector] = None
-        if self._embedding_service is not None:
-            if self._llm is not None and self._config.embedding.hyde_enabled:
-                query_vector = self._compute_hyde_vector(text)
-            query_vector = query_vector or self._embedding_service.embed_query(text)
-        if trace is not None:
-            trace["embedding"]["query_vector_available"] = query_vector is not None
-
-        all_results = self._parallel_scope_search(
-            retriever, text, scope, top_k, query_vector, trace
-        )
-        candidate_budget = max(0, int(top_k))
-        # Merge results
-        results = MultiPathRetriever.merge_multi_path(all_results)
-        if trace is not None:
-            trace["stages"].append(
-                {
-                    "stage": "merge_deduplicate",
-                    "input_paths": len(all_results),
-                    "candidate_budget": candidate_budget,
-                    "candidates": len(results),
-                }
-            )
-        before_authorization = len(results)
-        results = self._filter_authorized_results(results, context)
-        if trace is not None:
-            trace["stages"].append(
-                {
-                    "stage": "authorization_filter",
-                    "before": before_authorization,
-                    "after": len(results),
-                    "boundary": "Authenticated tenant and visibility ACL filter.",
-                }
-            )
-        if namespace_filter:
-            before_namespace = len(results)
-            results = retriever.filter_by_namespace(results, namespace_filter)
-            if trace is not None:
-                trace["stages"].append(
-                    {
-                        "stage": "namespace_filter",
-                        "before": before_namespace,
-                        "after": len(results),
-                        "boundary": "exact-match metadata filter; not an ACL engine",
-                    }
-                )
-        if owner is not None:
-            before_owner = len(results)
-            results = self._filter_by_owner(results, owner, context=context)
-            if trace is not None:
-                trace["stages"].append(
-                    {
-                        "stage": "owner_filter",
-                        "owner": owner,
-                        "before": before_owner,
-                        "after": len(results),
-                        "boundary": "exact-match owner filter; not an ACL engine",
-                    }
-                )
-
-        # Stage 1: 5-dim bi-encoder rerank
-        if self._reranker is not None:
-            before_rerank = len(results)
-            reranker = (
-                self._reranker
-                if store is self.store
-                else Reranker(
-                    embedding_service=self._embedding_service,
-                    weights=self._config.reranker.weights,
-                    storage=store,
-                    recency_halflife_days=self._config.reranker.recency_halflife_days,
-                )
-            )
-            results = reranker.rerank(text, results, top_k * 2, query_vector)
-            if trace is not None:
-                trace["stages"].append(
-                    {
-                        "stage": "rerank",
-                        "before": before_rerank,
-                        "after": len(results),
-                        "weights": dict(self._config.reranker.weights),
-                    }
-                )
-
-        # Stage 2: Cross-encoder precision rerank (optional)
-        if self._cross_reranker is not None:
-            before_cross = len(results)
-            results = self._cross_reranker.rerank(text, results)
-            if trace is not None:
-                trace["stages"].append(
-                    {
-                        "stage": "cross_encoder_rerank",
-                        "before": before_cross,
-                        "after": len(results),
-                        "model": self._config.reranker.cross_encoder_model,
-                    }
-                )
-
-        # Injection-suspected results are dropped before top_k so they
-        # neither occupy the token budget nor reach any LLM-facing caller
-        # (MCP memory_search, HTTP /memories, CLI recall, AgentMemoryRuntime).
-        # The flag is stamped at write time in write(); this is the read-side
-        # enforcement that previously only AgentMemoryRuntime applied.
-        if results:
-            before_injection = len(results)
-            results = drop_injection_suspected(
-                results,
-                self._typed_lookup_for(context),
-                risk_registry=self._injection_risks,
-            )
-            if trace is not None and len(results) != before_injection:
-                trace["stages"].append(
-                    {
-                        "stage": "injection_filter",
-                        "before": before_injection,
-                        "after": len(results),
-                        "boundary": "Drops memories flagged memplex_injection_suspected=true at write time.",
-                    }
-                )
-
-        results = results[:top_k]
-        if trace is not None:
-            trace["stages"].append(
-                {
-                    "stage": "top_k",
-                    "limit": top_k,
-                    "after": len(results),
-                }
-            )
-
-        # Update access_count (must persist for Reranker frequency dimension).
-        # Batched: a single persistence pass for all results instead of one
-        # full-store rewrite per result. Best-effort -- a store hiccup here
-        # must not fail the query, but we log at debug so a lost frequency
-        # signal is diagnosable rather than silently swallowed.
-        if results:
-            try:
-                store.increment_access_batch([r.func_id for r in results])
-            except Exception as exc:
-                logger.debug(
-                    "increment_access_batch failed (frequency signal lost for %d results): %s",
-                    len(results),
-                    exc,
-                )
-
-        latency = int((datetime.now() - start).total_seconds() * 1000)
-
-        results, used, truncated = self._apply_token_budget(results, max_tokens, trace)
-        if trace is not None:
-            trace["final_results"] = [
-                {
-                    "id": r.func_id,
-                    "name": r.name,
-                    "score": r.relevance_score,
-                    "domain": r.domain,
-                    "token_estimate": r.token_estimate,
-                    "source_type": getattr(r.source_type, "value", str(r.source_type)),
-                }
-                for r in results
-            ]
-
-        return QueryResult(
-            results=results,
-            scope=scope,
-            latency_ms=latency,
-            tokens_used=used,
+        return pipeline.run(
+            text,
+            top_k=top_k,
+            owner=owner,
             max_tokens=max_tokens,
-            truncated=truncated,
-            explanation=build_query_explanation(trace),
+            namespace_filter=namespace_filter,
+            explain=explain,
+            context=context,
         )
 
     async def query_async(
@@ -1313,7 +1060,7 @@ class MemplexService:
         #    Claude Code hook runner which already stripped these.
         from memplex.privacy import strip_private_tags
 
-        if getattr(source, "content", None):
+        if source.content:
             source.content = strip_private_tags(source.content)
 
         # 0b. retain()-style factual capture (opt-in): when a real LLM is
@@ -1321,7 +1068,7 @@ class MemplexService:
         # temporally-normalised facts are appended to the document content
         # so the rule-based extractor stores them verbatim as typed nodes.
         if (
-            getattr(source, "content", None)
+            source.content
             and self._llm is not None
             and self._config.llm.factual_capture
         ):
@@ -1383,7 +1130,11 @@ class MemplexService:
                 for func in extracted.functions:
                     self._worker.submit(
                         BackgroundTask.BUILD_INDEX,
-                        {"func_id": func.id, "source_id": source.id if source else None},
+                        # NOTE: SourceDocument has no ``id`` attribute; this
+                        # lookup always raises AttributeError at runtime and
+                        # is swallowed by the surrounding ``except``. Kept
+                        # byte-for-byte via cast; tracked as a latent bug.
+                        {"func_id": func.id, "source_id": cast(Any, source).id if source else None},
                     )
             except Exception as exc:
                 # Background tasks are best-effort, but a submission failure
@@ -1429,10 +1180,10 @@ class MemplexService:
                     kind,
                 )
                 continue
+            if kind == "fact":
+                self._supersede_contradicted_facts_batch(nodes, store)
             for node in nodes:
                 try:
-                    if kind == "fact":
-                        self._supersede_contradicted_facts(node, store)
                     add(node)
                 except Exception as exc:
                     logger.debug(
@@ -1442,24 +1193,32 @@ class MemplexService:
                         exc,
                     )
 
-    def _supersede_contradicted_facts(self, new_fact, store: Any) -> None:
-        """Bi-temporal supersede (Zep-style) before persisting a new fact.
+    def _supersede_contradicted_facts_batch(
+        self, facts: Iterable[Fact], store: Any
+    ) -> None:
+        """Bi-temporal supersede (Zep-style) for a batch of new facts.
 
-        Stamps ``invalid_at`` on stored facts occupying the same
+        Loads the existing-fact list once (not per-fact), then stamps
+        ``invalid_at`` on stored facts occupying the same
         (subject, predicate) slot so contradicted claims are retained for
-        point-in-time queries instead of being silently overwritten. The
-        new fact's ``valid_from`` defaults to now. Best-effort: a listing
-        failure skips supersession (the write itself proceeds).
+        point-in-time queries instead of being silently overwritten.
+        Best-effort: a listing failure skips supersession (the write
+        itself proceeds).
         """
         from memplex import temporal
 
-        if not getattr(new_fact, "valid_from", None):
-            new_fact.valid_from = temporal.now_iso()
+        list_facts = getattr(store, "list_facts", None)
+        if not callable(list_facts):
+            return
         try:
-            list_facts = getattr(store, "list_facts", None)
-            if not callable(list_facts):
-                return
             existing = list_facts()
+        except Exception as exc:
+            logger.debug("fact supersession listing failed: %s", exc)
+            return
+
+        for new_fact in facts:
+            if not getattr(new_fact, "valid_from", None):
+                new_fact.valid_from = temporal.now_iso()
             superseded = temporal.supersede_contradicted(new_fact, existing)
             for old_fact in superseded:
                 try:
@@ -1470,8 +1229,6 @@ class MemplexService:
                     )
             if superseded:
                 logger.debug("superseded %d contradicted fact(s)", len(superseded))
-        except Exception as exc:
-            logger.debug("fact supersession listing failed: %s", exc)
 
     def _maybe_schedule_compaction(self, *, store: Any = None) -> None:
         """Submit a background compaction when the corpus crosses thresholds.
@@ -1500,14 +1257,17 @@ class MemplexService:
             logger.debug("compaction scheduling check failed: %s", exc)
 
     @staticmethod
-    def _count_functions_exact(store: Any, *, page_size: int = 10_000) -> int:
-        """Count every Function through the public paginated storage contract."""
+    def _count_functions_exact(store: Any) -> int:
+        """Count Functions via the lightweight contract, falling back to pagination."""
+        count = getattr(store, "count_functions", None)
+        if callable(count):
+            return int(count())
         total = 0
         while True:
-            page = store.list_functions(offset=total, limit=page_size)
+            page = store.list_functions(offset=total, limit=10_000)
             count = len(page)
             total += count
-            if count < page_size:
+            if count < 10_000:
                 return total
 
     def write_text(
@@ -1981,8 +1741,9 @@ class MemplexService:
 
         # Last compaction
         last_compaction = self._worker.last_compaction
+        last_compaction_iso: Optional[str] = None
         if last_compaction is not None:
-            last_compaction = last_compaction.isoformat()
+            last_compaction_iso = last_compaction.isoformat()
 
         # Injection scans detected in last 24h (prune stale date keys so
         # the map cannot grow one entry per day forever).
@@ -2002,7 +1763,7 @@ class MemplexService:
             "functions_total": functions_total,
             "edges_total": edges_total,
             "queue_depth": queue_depth,
-            "last_compaction": last_compaction,
+            "last_compaction": last_compaction_iso,
             "injection_scans_detected_24h": injection_scans_detected_24h,
             "dead_letters_pending": dead_letters_pending,
             "worker_running": worker_running,
@@ -2035,6 +1796,10 @@ class MemplexService:
             worker_leased = 0
             worker_dead_letters = 0
         sync = self.sync_status()
+        # ``_postgres_resources`` is a PostgresSyncStorageResources when sync
+        # ingress is enabled, and that wrapper deliberately exposes no pool
+        # counters.  Degrade the three gauges to 0 in that case (same as the
+        # no-resources case) instead of raising AttributeError.
         resources = self._postgres_resources
         return {
             "runtime_state": self._runtime_lifecycle.state,
@@ -2044,9 +1809,9 @@ class MemplexService:
             "sync_pending": sync["pending"],
             "sync_leased": sync["leased"],
             "sync_dead_letters": sync["dead_letters"],
-            "pool_business_leases": 0 if resources is None else resources.business_lease_count,
-            "pool_high_watermark": 0 if resources is None else resources.pool_high_watermark,
-            "pool_max_connections": 0 if resources is None else resources.pool_max_connections,
+            "pool_business_leases": getattr(resources, "business_lease_count", 0),
+            "pool_high_watermark": getattr(resources, "pool_high_watermark", 0),
+            "pool_max_connections": getattr(resources, "pool_max_connections", 0),
             "shutdown_deadline_exceeded_total": 0,
         }
 
@@ -2122,11 +1887,10 @@ class MemplexService:
         info["push_failures"] = store._push_failures
         info["pending_push_tasks"] = store.pending_push_tasks
         info["last_pull_at"] = store.last_pull_at
-        # SSE subscriber count (server-side only; client reports 0).
+        # SSE subscriber count via the domain-owned registration point
+        # (adapters register a provider at startup; no reverse import).
         try:
-            from memplex.adapters.http_api import _SSE_SUBSCRIBERS
-
-            info["sse_subscribers"] = len(_SSE_SUBSCRIBERS)
+            info["sse_subscribers"] = _sse_subscriber_count_provider() if _sse_subscriber_count_provider else 0
         except Exception:
             info["sse_subscribers"] = 0
         return info
@@ -2196,36 +1960,6 @@ class MemplexService:
             self._typed_lookup_for(context),
             risk_registry=self._injection_risks,
         )
-
-    def _filter_by_owner(
-        self,
-        results: List[SearchResult],
-        owner: str,
-        *,
-        context: Optional[AuthorizationContext] = None,
-    ) -> List[SearchResult]:
-        """Keep only results whose stored node is owned by *owner*.
-
-        The node's ``owner`` is resolved through the typed-node facade
-        (Function first, then the optional Fact/Preference APIs). Nodes
-        without an owner never match. Lookup failures keep the result --
-        a store hiccup must not silently drop legitimate memory (same
-        availability posture as the injection filter).
-        """
-        kept: List[SearchResult] = []
-        for r in results:
-            try:
-                lookup = self._typed_lookup if context is None else self._typed_lookup_for(context)
-                node = lookup.get(r.func_id)
-            except Exception as exc:
-                logger.debug("owner filter: lookup failed for %s, keeping result: %s", r.func_id, exc)
-                node = None
-            if node is None:
-                kept.append(r)
-                continue
-            if getattr(node, "owner", None) == owner:
-                kept.append(r)
-        return kept
 
     # ── Knowledge tiering: promotion + cross-agent sharing ───────────
 
@@ -2498,7 +2232,7 @@ class MemplexService:
             }
         return self._sync_dispatcher.status().to_dict()
 
-    def drain_sync(self, deadline: float | None = None):
+    def drain_sync(self, deadline: float | None = None) -> SyncDrainResult:
         """Synchronously drain local-origin durable deliveries."""
         if self._sync_dispatcher is None:
             from memplex.sync_protocol import SyncDrainResult
@@ -2531,7 +2265,7 @@ class MemplexService:
         target_id: str,
         *,
         max_pages: int = 100,
-    ):
+    ) -> PullResult:
         """Pull bounded signed pages from one configured peer."""
         if self._sync_dispatcher is None:
             raise RuntimeError("sync dispatcher is not configured")

@@ -33,7 +33,7 @@ from memplex.auth import (
 )
 from memplex.core.hooks.policy import hash_event_payload
 from memplex.intent import classify_observation
-from memplex.models import Observation, QueryResult
+from memplex.models import ExtractedData, Function, Observation, QueryResult
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
@@ -576,7 +576,7 @@ class AgentMemoryRuntime:
     ) -> None:
         """Persist a turn as observation input without requiring manual writes."""
 
-        payload = {
+        payload: Dict[str, Any] = {
             "agent": self.agent,
             "user_id": self.user_id,
             "session_id": self.session_id,
@@ -619,7 +619,7 @@ class AgentMemoryRuntime:
         *,
         source_type: str = "text",
         visibility: str = DEFAULT_MEMORY_VISIBILITY,
-    ):
+    ) -> ExtractedData:
         """Write text through the runtime's identity and visibility boundary."""
 
         selected_visibility = str(visibility or DEFAULT_MEMORY_VISIBILITY).lower()
@@ -956,7 +956,7 @@ class AgentMemoryRuntime:
             return False
         return self._node_in_namespace(node)
 
-    def get_accessible_memory(self, memory_id: str):
+    def get_accessible_memory(self, memory_id: str) -> Optional[Function]:
         """Return a memory only when it is visible to this runtime."""
 
         node = self.service.get(memory_id, authorization=self.authorization_context)

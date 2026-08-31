@@ -84,7 +84,7 @@ compare identically for every reachable input).
 
 ### memplex/temporal.py (2026-08-15)
 
-81 mutants → **59 killed / 12 survived / 10 incomplete** (~83% kill rate).
+81 mutants → **59 killed / 12 survived / 10 incompetent** (~83% kill rate).
 Surviving mutation families:
 - `ReplaceContinueWithBreak` in `supersede_contradicted` (×4): the loop
   iterates a small list; break vs continue are equivalent when the
