@@ -42,7 +42,7 @@ http = [
     "uvicorn>=0.23.0,<1",
 ]
 llm = [
-    "anthropic>=0.30.0,<1",
+    "anthropic>=0.30.0,<2",
     "openai>=1.0.0,<3",
 ]
 postgres = [
