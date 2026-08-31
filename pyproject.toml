@@ -72,7 +72,7 @@ dev = [
     # locked development environment rather than arriving from ambient tools.
     "setuptools>=83,<84",  # PYSEC-2026-3447
     "wheel>=0.48,<1",  # pair with setuptools 83 (dependabot PR pending)
-    "mypy>=1.13,<2",
+    "mypy>=1.13,<3",
     # PyYAML stubs: unblock yaml-importing modules (config, wiki/compiler,
     # adapters/yaml_edit, core/dictionaries) for the mypy gate.
     "types-PyYAML>=6.0,<7",
