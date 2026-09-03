@@ -153,7 +153,21 @@ def _resolve_public_dataset(name: str, data_dir: Path, num_samples: int | None) 
             f"({local}) nor a HuggingFace mapping; refusing to silently "
             "substitute the synthetic generator"
         )
-    resolved = download_dataset(name, str(data_dir), num_samples=num_samples)
+    # Call the HuggingFace fetch directly: download_dataset would silently
+    # fall back to the synthetic generator when the fetch itself fails
+    # (network error, removed dataset), which must never wear a public label.
+    from benchmarks.loader import _fetch_from_huggingface
+
+    fetched = _fetch_from_huggingface(name, num_samples=num_samples)
+    if fetched is None:
+        raise ValueError(
+            f"public run: HuggingFace fetch for '{name}' failed; refusing "
+            "to silently substitute the synthetic generator"
+        )
+    import shutil
+
+    resolved = data_dir / f"{name}.json"
+    shutil.move(str(fetched), resolved)
     return resolved, "public_huggingface"
 
 

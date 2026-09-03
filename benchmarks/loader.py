@@ -58,7 +58,10 @@ def _fetch_from_huggingface(
         elif dataset_name == "triviaqa":
             ds = load_dataset("triviaqa", "rc", split=split)
         elif dataset_name == "popqa":
-            ds = load_dataset("mteb/popqa", split=split)
+            # mteb/popqa was removed from the Hub; akariasai/PopQA is the
+            # canonical release (subj/prop/obj -> subject/relation/object).
+            ds = load_dataset("akariasai/PopQA", split=split)
+            ds = ds.rename_columns({"subj": "subject", "prop": "relation", "obj": "object"})
         else:
             ds = load_dataset(hf_id, split=split)
 
