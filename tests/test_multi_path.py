@@ -10,11 +10,13 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from types import SimpleNamespace
 
-from memplex.models import SearchResult  # noqa: E402
-from memplex.retrieval.multi_path import MultiPathRetriever  # noqa: E402
+import pytest
+
+from memplex.models import SearchResult
+from memplex.retrieval.multi_path import MultiPathRetriever
 
 # ── Stub helpers ──────────────────────────────────────────────────────
 
@@ -218,7 +220,7 @@ def test_graph_search_converts_iso_string_timestamps_to_datetime():
 
 def test_graph_search_passes_through_datetime_timestamps_unchanged():
     seed = _sr("seed")
-    ts = datetime(2024, 5, 1)
+    ts = datetime(2024, 5, 1, tzinfo=UTC)
     nbr = _node("nbr", created_at=ts, updated_at=ts)
     store = _StubStore(vector_hits=[seed], neighbors_by_id={"seed": [nbr]})
     r = MultiPathRetriever(store).graph_search("q", top_k=5)
@@ -410,36 +412,77 @@ def test_filter_by_namespace_falls_back_to_get_when_get_many_raises():
 # ── merge_multi_path ──────────────────────────────────────────────────
 
 
-def test_merge_dedups_keeping_highest_score():
+def test_merge_fuses_paths_on_a_comparable_scale():
+    """Cross-path scale bias is removed: each list is normalized by its own
+    maximum, so a weak-magnitude path's rank-1 hit competes on equal
+    footing instead of losing to a large-magnitude path's every hit."""
+    bm25_path = [_sr("only_bm25", 8.0), _sr("both", 4.0)]
+    wiki_path = [_sr("both", 0.03), _sr("only_wiki", 0.02)]
+    out = MultiPathRetriever.merge_multi_path([bm25_path, wiki_path])
+    # "both" is rank 1 of the wiki list (normalized 1.0) and rank 2 of the
+    # BM25 list (4/8 = 0.5) -> fused 1.0; it ties with only_bm25 (8/8) and
+    # tie-breaks ahead by func_id.
+    assert out[0].func_id == "both"
+    assert out[0].relevance_score == pytest.approx(1.0)
+    assert out[1].relevance_score == pytest.approx(1.0)  # only_bm25, 8/8
+    assert out[2].relevance_score == pytest.approx(0.02 / 0.03)  # only_wiki
+    assert [r.func_id for r in out] == ["both", "only_bm25", "only_wiki"]
+
+
+def test_merge_preserves_within_path_magnitude_gradient():
+    """The within-path score gradient must survive the merge: it is the
+    lexical match-quality signal the Reranker's raw_relevance dimension
+    consumes. (Rank-only RRF fusion flattened it and collapsed paraphrase
+    high-overlap recall@1 from 0.88 to 0.40.)"""
+    path = [_sr("strong", 0.9), _sr("medium", 0.5), _sr("weak", 0.1)]
+    out = MultiPathRetriever.merge_multi_path([path])
+    assert [r.func_id for r in out] == ["strong", "medium", "weak"]
+    assert out[0].relevance_score == pytest.approx(1.0)
+    assert out[1].relevance_score == pytest.approx(0.5 / 0.9)
+    assert out[2].relevance_score == pytest.approx(0.1 / 0.9)
+
+
+def test_merge_ties_break_deterministically_by_func_id():
+    """Rank-1 hits from different paths fuse to the same normalized score;
+    the tie then breaks by func_id, not by parallel completion order."""
+    path_a = [_sr("z9", 8.0)]  # BM25-magnitude scale
+    path_b = [_sr("a1", 0.03)]  # wiki-RRF-magnitude scale
+    out = MultiPathRetriever.merge_multi_path([path_a, path_b])
+    assert out[0].relevance_score == out[1].relevance_score == pytest.approx(1.0)
+    assert [r.func_id for r in out] == ["a1", "z9"]
+
+
+def test_merge_dedups_by_func_id_across_paths():
     a_low = _sr("x", 0.3)
     a_high = _sr("x", 0.9)
     out = MultiPathRetriever.merge_multi_path([[a_low], [a_high]])
     assert len(out) == 1
-    assert out[0].relevance_score == 0.9
+    # Rank 1 in both single-hit lists -> normalized 1.0.
+    assert out[0].relevance_score == pytest.approx(1.0)
 
 
-def test_merge_combines_across_lists():
-    out = MultiPathRetriever.merge_multi_path([[_sr("a", 0.5)], [_sr("b", 0.7)]])
-    assert [x.func_id for x in out] == ["b", "a"]  # sorted desc
+def test_merge_within_list_dedup_keeps_highest_scored_object():
+    a1 = _sr("a", 0.2)
+    a2 = _sr("a", 0.8)
+    out = MultiPathRetriever.merge_multi_path([[a1, a2]])
+    assert len(out) == 1
+    # The higher-scored object is retained for metadata downstream.
+    assert out[0] is a2
+    # The duplicate's fused score is its best normalized contribution.
+    assert out[0].relevance_score == pytest.approx(1.0)
 
 
-def test_merge_sorts_descending_by_relevance():
-    out = MultiPathRetriever.merge_multi_path([[_sr("a", 0.1), _sr("b", 0.9), _sr("c", 0.5)]])
-    scores = [x.relevance_score for x in out]
-    assert scores == sorted(scores, reverse=True)
+def test_merge_overwrites_scores_with_fused_scale():
+    """The merged list's relevance_score carries the fused [0, 1] scale so
+    the downstream Reranker's raw_relevance dimension sees comparable
+    inputs instead of whichever path reported the largest raw numbers."""
+    out = MultiPathRetriever.merge_multi_path([[_sr("a", 8.0)]])
+    assert out[0].relevance_score == pytest.approx(1.0)
 
 
 def test_merge_empty_input_returns_empty():
     assert MultiPathRetriever.merge_multi_path([]) == []
     assert MultiPathRetriever.merge_multi_path([[], []]) == []
-
-
-def test_merge_within_list_dedup_also_keeps_highest():
-    a1 = _sr("a", 0.2)
-    a2 = _sr("a", 0.8)
-    out = MultiPathRetriever.merge_multi_path([[a1, a2]])
-    assert len(out) == 1
-    assert out[0].relevance_score == 0.8
 
 
 # ── wiki_search with injected wiki searcher (Wave 2a) ──────────────────

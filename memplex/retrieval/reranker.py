@@ -23,16 +23,16 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 
 def _ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
-def _recency_timestamp(value: "datetime | str | None") -> float:
+def _recency_timestamp(value: datetime | str | None) -> float:
     """Coerce an updated_at value into a comparable epoch-second float.
 
     Returns 0.0 for missing/unparseable values so they sort as oldest in
@@ -51,7 +51,7 @@ def _recency_timestamp(value: "datetime | str | None") -> float:
         return 0.0
 
 
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 from memplex.models import SearchResult, SourceType
 from memplex.retrieval.embedding import EmbeddingService, Vector
@@ -100,8 +100,7 @@ class Reranker:
         Optional :class:`MemoryStore` for reading *access_count*.
     """
 
-    _SOURCE_WEIGHTS: Dict[SourceType, float] = {
-        SourceType.REQUIREMENT: 1.0,
+    _SOURCE_WEIGHTS: ClassVar[dict[SourceType, float]] = {        SourceType.REQUIREMENT: 1.0,
         SourceType.MEETING: 0.8,
         SourceType.CODE: 0.6,
         SourceType.WIKI: 0.4,
@@ -110,8 +109,8 @@ class Reranker:
     def __init__(
         self,
         embedding_service: EmbeddingService,
-        weights: Optional[Dict[str, float]] = None,
-        storage: Optional["MemoryStore"] = None,
+        weights: dict[str, float] | None = None,
+        storage: MemoryStore | None = None,
         recency_halflife_days: float = 60.0,
     ) -> None:
         self.embedder = embedding_service
@@ -133,10 +132,10 @@ class Reranker:
     def rerank(
         self,
         query: str,
-        results: List[SearchResult],
+        results: list[SearchResult],
         top_k: int = 10,
-        query_vector: Optional[Vector] = None,
-    ) -> List[SearchResult]:
+        query_vector: Vector | None = None,
+    ) -> list[SearchResult]:
         """Re-rank *results* using the 6-dimensional scoring model.
 
         Parameters
@@ -159,14 +158,14 @@ class Reranker:
         # Pre-load all Function nodes in one batch (or per-id fallback),
         # avoiding a per-result storage round-trip that compounds on
         # backends with O(N) reads (2026-08 review).
-        node_map: dict[str, "Function"] = {}
+        node_map: dict[str, Function] = {}
         if self.storage is not None:
             unique_ids = list({r.func_id for r in results})
             get_many = getattr(self.storage, "get_many", None)
             if callable(get_many):
                 try:
                     node_map = {k: v for k, v in get_many(unique_ids).items() if v is not None}
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.debug("rerank: batch get_many failed (%s); falling back", exc)
                     node_map = {}
             for missing_id in unique_ids:
@@ -175,7 +174,7 @@ class Reranker:
                         node = self.storage.get(missing_id)
                         if node is not None:
                             node_map[missing_id] = node
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - logged degradation path
                         logger.debug("rerank: storage.get failed for %s: %s", missing_id, exc)
 
         scored: list[tuple[float, SearchResult]] = []
@@ -233,7 +232,7 @@ class Reranker:
             return embed_query(text)
         return self.embedder.embed(text)
 
-    def _recency_decay(self, updated_at: Optional[datetime] | str) -> float:
+    def _recency_decay(self, updated_at: datetime | None | str) -> float:
         """Exponential time decay, range (0, 1], 0.5 at ``halflife * ln 2`` days.
 
         ``score = exp(-days_since_update / halflife)`` where the half-life is
@@ -250,12 +249,12 @@ class Reranker:
                 return 0.5
         days_since = max(
             0.0,
-            (datetime.now(timezone.utc) - _ensure_aware(updated_at)).total_seconds() / 86400.0,
+            (datetime.now(UTC) - _ensure_aware(updated_at)).total_seconds() / 86400.0,
         )
         return min(1.0, math.exp(-days_since / self.recency_halflife_days))
 
     @staticmethod
-    def _confidence_score(func: Optional["Function"]) -> float:
+    def _confidence_score(func: Function | None) -> float:
         """Extraction-quality confidence persisted on the node, clamped [0, 1].
 
         Falls back to a neutral 0.5 when the node (or its confidence field)
@@ -268,7 +267,7 @@ class Reranker:
             value = float(confidence)
         except (TypeError, ValueError):
             return 0.5
-        if value != value:  # NaN guard
+        if value != value:  # noqa: PLR0124 - NaN guard
             return 0.5
         return min(1.0, max(0.0, value))
 
@@ -280,14 +279,23 @@ class Reranker:
         return self._SOURCE_WEIGHTS.get(source_type, 0.5)
 
     @staticmethod
-    def _frequency_score(func: "Function") -> float:
+    def _frequency_score(func: Function) -> float:
         """Access-frequency score combining count and recency.
 
         ``freq = log(1+count) / log(1+100)`` normalised to [0, 1].
         Combined with a last-access recency factor: 60% freq + 40% recency.
+
+        A node with no access evidence (count 0, never accessed) scores
+        the neutral 0.5 -- the same absence convention as
+        :meth:`_confidence_score` -- so the dimension cannot dominate by
+        absence. Without it, one earlier retrieval anywhere in history
+        swings the score by ~0.4, a rich-get-richer prior that punishes
+        never-recalled memories.
         """
         access_count = getattr(func, "access_count", 0)
         last_accessed = getattr(func, "last_accessed_at", None)
+        if not access_count and last_accessed is None:
+            return 0.5
 
         # Frequency factor: log-scaled, normalised
         freq = math.log1p(access_count) / math.log1p(100)
@@ -300,7 +308,7 @@ class Reranker:
                 except (ValueError, TypeError):
                     last_accessed = None
             if last_accessed is not None:
-                days = max(0, (datetime.now(timezone.utc) - _ensure_aware(last_accessed)).days)
+                days = max(0, (datetime.now(UTC) - _ensure_aware(last_accessed)).days)
                 recency = min(1.0, math.exp(-days / 60))
             else:
                 recency = 0.3
@@ -354,13 +362,13 @@ class CrossEncoderReranker:
                 "skipping precision re-ranking"
             )
             self.enabled = False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to load CrossEncoder %s: %s", self.model_name, exc)
             self.enabled = False
 
     # ── Public API ──────────────────────────────────────────────────
 
-    def rerank(self, query: str, results: List[SearchResult]) -> List[SearchResult]:
+    def rerank(self, query: str, results: list[SearchResult]) -> list[SearchResult]:
         """Re-score *results* with the cross-encoder.
 
         Returns results sorted by cross-encoder score (descending).

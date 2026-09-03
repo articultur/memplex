@@ -6,12 +6,14 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import sys  # noqa: E402
-from datetime import datetime, timedelta, timezone  # noqa: E402
-from types import SimpleNamespace  # noqa: E402
+import sys
+from datetime import UTC, datetime, timedelta, timezone
+from types import SimpleNamespace
 
-from memplex.models import SearchResult, SourceType  # noqa: E402
-from memplex.retrieval.reranker import (  # noqa: E402
+import pytest
+
+from memplex.models import SearchResult, SourceType
+from memplex.retrieval.reranker import (
     CrossEncoderReranker,
     Reranker,
     cosine_similarity,
@@ -96,7 +98,7 @@ def test_cosine_similarity_basic():
 
 def test_weighted_sum_decides_ranking():
     """Same candidates, different weights -> different winner."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = now - timedelta(days=365)
     a = _sr("a", score=0.9, summary="alpha", updated_at=old)  # high raw, old
     b = _sr("b", score=0.1, summary="beta", updated_at=now)  # low raw, fresh
@@ -132,7 +134,7 @@ def test_rerank_respects_top_k_and_empty_input():
 
 
 def test_recency_decay_values():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # _recency_decay is an instance method since the configurable half-life.
     r = Reranker(_FakeEmbedder())
     assert r._recency_decay(None) == 0.5
@@ -148,7 +150,7 @@ def test_recency_decay_values():
 
 
 def test_recency_dimension_prefers_newer_result():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     fresh = _sr("fresh", updated_at=now)
     stale = _sr("stale", updated_at=now - timedelta(days=120))
     r = Reranker(_FakeEmbedder(), weights=_weights(recency_decay=1.0))
@@ -169,8 +171,8 @@ def test_source_authority_orders_requirement_over_wiki():
 
 
 def test_frequency_score_grows_with_access_count():
-    hot = SimpleNamespace(access_count=100, last_accessed_at=datetime.now(timezone.utc))
-    warm = SimpleNamespace(access_count=5, last_accessed_at=datetime.now(timezone.utc))
+    hot = SimpleNamespace(access_count=100, last_accessed_at=datetime.now(UTC))
+    warm = SimpleNamespace(access_count=5, last_accessed_at=datetime.now(UTC))
     cold = SimpleNamespace(access_count=0, last_accessed_at=None)
     assert (
         Reranker._frequency_score(hot)
@@ -179,8 +181,28 @@ def test_frequency_score_grows_with_access_count():
     )
 
 
+def test_frequency_absence_of_access_evidence_is_neutral():
+    """A present-but-never-accessed node must not be punished for absence:
+    neutral 0.5, the same convention as the confidence dimension.
+
+    Regression: the old formula scored never-accessed nodes 0.12 while a
+    single recent retrieval scored ~0.49, so any document an earlier query
+    happened to touch permanently outranked never-recalled memories
+    (~0.4 swing at weight 0.10 -- a rich-get-richer prior that decided
+    rankings, observed flipping the longmemeval knowledge-update case).
+    """
+    never = SimpleNamespace(access_count=0, last_accessed_at=None)
+    once = SimpleNamespace(access_count=1, last_accessed_at=datetime.now(UTC))
+    assert Reranker._frequency_score(never) == 0.5
+    # A single recent access sits in the neutral band, not on a cliff
+    # above it; only accumulated counts lift the dimension.
+    once_score = Reranker._frequency_score(once)
+    assert pytest.approx(0.49, abs=0.02) == once_score
+    assert abs(once_score - 0.5) < 0.02
+
+
 def test_frequency_dimension_uses_storage_access_count():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     storage = SimpleNamespace(
         get=lambda fid: SimpleNamespace(
             access_count=100 if fid == "hot" else 0,
