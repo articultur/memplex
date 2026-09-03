@@ -138,7 +138,17 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep reload, COW mutation, and journal decision in one flock scope."""
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         with self._durability.writer_lock():
-            return method(self, *args, **kwargs)
+            try:
+                return method(self, *args, **kwargs)
+            except BaseException:
+                # A mutation may have escaped mid-way, leaving resident state
+                # ahead of the durable pair.  Invalidate the cached pair /
+                # fingerprint so the next reload re-reads from disk instead
+                # of building on the speculative state.
+                self._pair_fingerprint = None
+                self._committed_pair = None
+                self._committed_record = None
+                raise
 
     wrapped.__name__ = method.__name__
     wrapped.__doc__ = method.__doc__
@@ -546,6 +556,14 @@ class LiteMemoryStore:
         # (mtime_ns, size) fingerprint of both pair files, set after each
         # successful publish so unchanged reads skip the O(N) reload.
         self._pair_fingerprint: Optional[tuple] = None
+        # Raw pair exactly as last published (== the durable on-disk state at
+        # that moment).  Lets the commit path reuse the authoritative base
+        # without a second full disk read while the flock is held.
+        self._committed_pair: Optional[LitePair] = None
+        # Digest record of ``_committed_pair`` when it came from a local
+        # commit (None after any disk reload); reused as the next commit's
+        # journal base_record to skip re-encoding the base digests.
+        self._committed_record: Optional[dict[str, Any]] = None
         self._sync_state: dict[str, Any] = durability_module._empty_sync_state()
         self._generation = 0
         changelog_path = (
@@ -717,7 +735,8 @@ class LiteMemoryStore:
                 transaction_id=uuid.uuid4().hex,
             )
             self._decode_pair(target)
-            committed = self._durability.commit_locked(base, target)
+            # The flock has been held continuously since ``base`` was read.
+            committed = self._durability.commit_locked(base, target, base_verified=True)
             self._publish_pair(committed)
             self._fts_index.rebuild()
 
@@ -845,7 +864,7 @@ class LiteMemoryStore:
             self._commit_current_state()
         except BaseException:
             try:
-                self._reload_for_mutation()
+                self._reload_for_mutation(force=True)
             except BaseException:
                 pass
             raise
@@ -855,7 +874,15 @@ class LiteMemoryStore:
     def add(self, func: Function, source: SourceDocument) -> None:
         """Add under one cross-process critical section (no lost update)."""
         with self._durability.writer_lock():
-            self._add_unlocked(func, source)
+            try:
+                self._add_unlocked(func, source)
+            except BaseException:
+                # See _with_writer_lock: never let a speculative mutation
+                # survive behind the fingerprint short-circuit.
+                self._pair_fingerprint = None
+                self._committed_pair = None
+                self._committed_record = None
+                raise
 
     def _add_unlocked(self, func: Function, source: SourceDocument) -> None:
         self._reload_for_mutation()
@@ -1643,17 +1670,24 @@ class LiteMemoryStore:
         """Commit one complete pair.
 
         Public mutators call this only after all in-memory validation.  The
-        authoritative pair is reloaded while holding the process lock; a
-        failed pre-decision commit republished that pair and a post-decision
-        failure is recovered/republished before its exception escapes.
+        authoritative base is the last published pair: the flock is held
+        continuously from reload to commit, so a fingerprint-verified
+        resident base cannot be stale and the O(N) disk reload is skipped.
+        A failed pre-decision commit republishes that pair and a
+        post-decision failure is recovered/republished before its exception
+        escapes.
         """
         self._validate_resident_graph()
         try:
             with self._durability.writer_lock():
-                base = self._durability._load_authoritative_locked()
+                base = self._committed_pair
+                base_verified = base is not None and self._pair_files_unchanged()
+                if base is None or not base_verified:
+                    base = self._durability._load_authoritative_locked()
+                    base_verified = False
                 target = LitePair(
-                    memory=copy.deepcopy(self._raw_memory()),
-                    changelog=copy.deepcopy(self._raw_changelog()),
+                    memory=self._raw_memory(),
+                    changelog=self._raw_changelog(),
                     generation=base.generation + 1,
                     transaction_id=uuid.uuid4().hex,
                 )
@@ -1674,22 +1708,31 @@ class LiteMemoryStore:
                     # model/changelog deserialization used by publication and
                     # must succeed before a journal can become durable.
                     self._decode_pair(target)
-                    # Canonical durable bytes reject NaN/Infinity.  Check
-                    # them before ``commit_locked`` can publish a journal.
-                    durability_module._canonical_json(target.memory)
-                    durability_module._canonical_json(target.changelog)
                 except Exception as exc:
                     self._publish_pair(base)
                     raise LiteStorageIntegrityError(
                         "invalid Lite target payload before durable decision"
                     ) from exc
                 try:
-                    committed = self._durability.commit_locked(base, target)
+                    # Canonical-byte validation (NaN/Infinity rejection)
+                    # happens inside commit_locked via the digest encodes,
+                    # still strictly before any journal can be published.
+                    committed = self._durability.commit_locked(
+                        base,
+                        target,
+                        base_verified=base_verified,
+                        base_record=self._committed_record if base_verified else None,
+                        # ``target`` just passed this store's ``_decode_pair``
+                        # — the same callable registered as the durability
+                        # semantic validator — so the in-commit revalidation
+                        # would be a third identical full decode.
+                        target_validated=True,
+                    )
                 except Exception:
                     # Never retain a speculative state after a failed write.
                     self._publish_pair(self._durability._load_authoritative_locked())
                     raise
-                self._publish_pair(committed)
+                self._publish_committed_locally(committed)
         except PermissionError as exc:
             raise PermissionError(
                 f"Cannot write to storage path {self._path.parent}. "
@@ -1697,8 +1740,34 @@ class LiteMemoryStore:
                 f"Original error: {exc}"
             ) from exc
 
-    def _reload_for_mutation(self) -> None:
-        """Refresh a pre-opened instance before it derives a write target."""
+    def _pair_files_unchanged(self) -> bool:
+        """Stat-based check: both pair files unchanged since the last publish."""
+        if self._pair_fingerprint is None:
+            return False
+        try:
+            memory_stat = self._path.stat()
+            changelog_stat = self._path.with_name("changelog.json").stat()
+        except OSError:
+            return False  # stat failure → caller falls back to the authoritative load
+        current = (
+            memory_stat.st_mtime_ns,
+            memory_stat.st_size,
+            changelog_stat.st_mtime_ns,
+            changelog_stat.st_size,
+        )
+        return current == self._pair_fingerprint
+
+    def _reload_for_mutation(self, *, force: bool = False) -> None:
+        """Refresh a pre-opened instance before it derives a write target.
+
+        Short-circuits when both files are unchanged since the last publish
+        (same fingerprint contract as ``_refresh_for_read``): the resident
+        state is already the authoritative base, so the O(N) reload is
+        skipped.  ``force=True`` is used by rollback paths that must discard
+        a speculative resident state even when the files are unchanged.
+        """
+        if not force and self._committed_pair is not None and self._pair_files_unchanged():
+            return
         with self._durability.writer_lock():
             self._publish_pair(self._durability._load_authoritative_locked())
 
@@ -1709,20 +1778,8 @@ class LiteMemoryStore:
         publish (stat-based fingerprint), so a scope=ALL query that
         triggers 6-10 read calls performs 1 full load instead of 6-10.
         """
-        if self._pair_fingerprint is not None:
-            try:
-                memory_stat = self._path.stat()
-                changelog_stat = self._path.with_name("changelog.json").stat()
-                current = (
-                    memory_stat.st_mtime_ns,
-                    memory_stat.st_size,
-                    changelog_stat.st_mtime_ns,
-                    changelog_stat.st_size,
-                )
-                if current == self._pair_fingerprint:
-                    return
-            except OSError:
-                pass  # stat failure → fall through to the authoritative load
+        if self._pair_files_unchanged():
+            return
         with self._durability.writer_lock():
             self._publish_pair(self._durability._load_authoritative_locked())
 
@@ -1789,7 +1846,7 @@ class LiteMemoryStore:
                         decoded, pair.generation + 1, uuid.uuid4().hex
                     )
                     self._decode_pair(target)
-                    pair = self._durability.commit_locked(pair, target)
+                    pair = self._durability.commit_locked(pair, target, base_verified=True)
                 elif needs_inbound_cursor_upgrade:
                     # Cursor direction was not persisted by early v2 pairs.
                     # Existing rows are deliberately retained as outbound
@@ -1804,7 +1861,7 @@ class LiteMemoryStore:
                         transaction_id=uuid.uuid4().hex,
                     )
                     self._decode_pair(target)
-                    pair = self._durability.commit_locked(pair, target)
+                    pair = self._durability.commit_locked(pair, target, base_verified=True)
                 self._publish_pair(pair)
         except LiteStorageIntegrityError:
             raise
@@ -2012,7 +2069,17 @@ class LiteMemoryStore:
         if pair.generation != getattr(self, "_generation", 0):
             self._fts_index._signature = None
         self._generation = pair.generation
-        # Record the (mtime, size) fingerprint so unchanged reads skip reload.
+        self._refresh_fingerprint()
+        # Every published pair is the durable on-disk state at this moment;
+        # the commit path reuses it as the authoritative base while the
+        # fingerprint confirms the files are untouched.  The digest record
+        # is only valid for a locally committed pair, so it is cleared here
+        # and rebound by the commit path after a successful commit.
+        self._committed_pair = pair
+        self._committed_record = None
+
+    def _refresh_fingerprint(self) -> None:
+        """Record the (mtime, size) fingerprint so unchanged reads skip reload."""
         try:
             memory_stat = self._path.stat()
             changelog_stat = self._path.with_name("changelog.json").stat()
@@ -2024,6 +2091,30 @@ class LiteMemoryStore:
             )
         except OSError:
             self._pair_fingerprint = None
+
+    def _publish_committed_locally(self, committed: LitePair) -> None:
+        """Bind commit results without re-decoding the freshly written pair.
+
+        The resident models are exactly what ``_raw_memory`` /
+        ``_raw_changelog`` serialized into ``committed``, and that payload
+        passed the full decode validation twice before the durable decision,
+        so re-decoding it here would rebuild equivalent objects at O(N) cost
+        per write.  Only the commit metadata and caches need updating.
+        """
+        self._rebuild_edge_index()
+        # The index keeps a reference to the functions dict; the resident
+        # dict identity is unchanged, but keep the rebind for parity with
+        # ``_publish_pair``.
+        self._fts_index._functions = self._functions
+        # A commit always advances the generation: drop the FTS signature so
+        # the next read rebuilds the incremental index once.
+        self._fts_index._signature = None
+        self._generation = committed.generation
+        self._refresh_fingerprint()
+        self._committed_pair = committed
+        # The record of the pair just committed becomes the next commit's
+        # journal base_record without re-encoding the base digests.
+        self._committed_record = self._durability._last_commit_target_record
 
     @property
     def generation(self) -> int:

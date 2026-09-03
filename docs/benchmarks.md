@@ -106,12 +106,18 @@ MEMPLEX_STORAGE_BACKEND=lite memplex benchmark run \
 
 | Dataset | Samples | Shape |
 |---------|---------|-------|
-| locomo | 3 | conversation turns + ground-truth memories |
-| nq | 5 | question → short answer |
-| triviaqa | 5 | question → answer + aliases |
+| locomo | 3 | multi-turn conversations; two timestamped ground-truth facts (dates relative to run time) + a follow-up question |
+| nq | 5 | question → short answer, with an answer-bearing context sentence |
+| triviaqa | 5 | question → answer + aliases, with an answer-bearing snippet |
 | popqa | 5 | subject / relation / object triples |
 | hotpotqa | 3 | question + supporting facts (2-hop) |
 | memory_benchmark | 59 | 50 facts + 4 preferences + 5 observations, generated in code |
+
+Synthetic NQ/TriviaQA samples seed an answer-bearing context (previously
+only the question text was seeded, so the answer could never be retrieved
+by construction). Synthetic LoCoMo memories carry real per-turn timestamps
+and the query is not verbatim any memory, so the recency dimension is
+actually exercised.
 
 ### LongMemEval (current worktree only)
 
@@ -144,16 +150,27 @@ multi-hop).
 
 - With 3–5 samples per dataset, a single sample swings a metric by
   0.2–0.33. Treat the tables as smoke signals, not rankings.
-- Some metrics vary between runs (e.g. LoCoMo `recency_accuracy`,
-  `mrr`) because access counts and timestamps shift with repeated seeding
-  into the default store.
+- Benchmark runs use an isolated temporary lite store
+  (`benchmarks.evaluator.make_benchmark_service`), so repeated runs no
+  longer accumulate access counts or stale timestamps from the user's
+  default `~/.memplex` store. Postgres runs keep their configured DSN.
+- NQ/TriviaQA recall@k is binary per question (1.0 when any answer alias
+  appears in the top-k — the standard QA convention, aligned with popqa).
+  The historical tables below used an alias-count denominator (often 10–30
+  aliases), which capped recall near 0.1 even on perfect retrieval.
+- LoCoMo `recency_accuracy` compares the retrieved order of ground-truth
+  memories against their temporal order (most recent first), ignoring
+  distractor positions. `memory_benchmark` `recency_ranking` expects
+  newest-first NDCG. Earlier revisions had both the inverted expected
+  order and an annotation-order expectation; the historical tables below
+  predate those fixes.
 - NQ/TriviaQA/PopQA/HotpotQA runners always compute metrics at
   k ∈ {1, 5, 10}, regardless of `--top-k`; with `--top-k 5` only 5
   candidates are retrieved, so `@10` columns there mean "over the 5
   retrieved". LoCoMo reports only the requested k.
-- `latency_ms` is mean per-query retrieval latency (~2.2 s on the M4 lite
-  setup; the store is tiny, so this is dominated by fixed per-query cost,
-  not corpus size).
+- `latency_ms` is mean per-query retrieval latency (tens of ms on the M4
+  lite setup after the 2026-08 store optimizations; the ~2.2 s figure in
+  older revisions predates them).
 - The default embedder is local TF-IDF (`embedding.model = "default"`,
   dim 384) — a lexical bag-of-words. These results measure the FTS5 /
   lexical retrieval path; they do not reflect semantic (neural embedding)
@@ -299,11 +316,88 @@ per-metric latency and sample count).
   guarantee.
 - PopQA/LoCoMo recall@10 of 1.0 on synthetic data confirms the
   FTS5 + reranker path returns seeded content for near-verbatim queries.
-- Near-zero NQ numbers reflect the synthetic NQ samples querying for
-  general-knowledge answers that were never seeded as memories — expected
-  on this data, not a retrieval regression.
+- NQ/TriviaQA recall is now meaningful on synthetic data (answer-bearing
+  contexts are seeded); the historical near-zero numbers below predate
+  that fix and measured an impossible task (answer never in corpus).
 - Low generation metrics (BLEU/ROUGE/F1/exact_match) are expected with no
   LLM: the "answer" is raw retrieved content, not a synthesized response.
+
+## Real-data evidence: PopQA (2026-08-31)
+
+The first real-distribution run: 200 questions sampled (seed 17) from the
+original 14k popQA release (`data/popQA.tsv`, fetched from the
+[adaptive-retrieval mirror](https://github.com/AlexTMallen/adaptive-retrieval/blob/main/data/popQA.tsv)
+because huggingface.co was unreachable; converted to the benchmark JSONL
+shape). Lite backend, TF-IDF embedder, LLM off, warm seeding, top-k 10:
+
+| Metric | Value |
+|--------|-------|
+| recall@1 | 0.640 |
+| recall@5 | 0.915 |
+| recall@10 | 0.940 |
+| mrr | 0.764 |
+| exact_match | 0.640 |
+| f1 | 0.295 |
+
+Raw artifact: `.memplex/benchmarks/goal_popqa_real.jsonl`. This measures
+the lexical retrieval path on real long-tail entity questions; it is not
+comparable to the synthetic tables below.
+
+## Write-path throughput on lite (2026-09-02)
+
+Seeding 1000 popQA documents one `write()` at a time (lite backend, same
+machine, cumulative wall seconds):
+
+| Docs | Before (HEAD) | After optimization | Ratio |
+|------|---------------|--------------------|-------|
+| 100 | 7.7 | 2.3 | 30% |
+| 200 | 59.5 | 17.1 | 29% |
+| 300 | 208.5 | 61.4 | 29% |
+| 500 | 1063.3 | 323.8 | 30% |
+| 750 | 4531.1 | 1100.8 | 24% |
+| 1000 | ≥ 7998.9 (lower bound) | 2703.8 | ≤ 34% |
+
+The old path re-read and re-decoded the full pair from disk three times per
+write plus a deep equality compare; marginal per-write cost grew strictly
+with N (measured per-100-write deltas 7.7 → 51.8 → 149.0 → 854.8 → 3467.8s),
+so the 1000-doc baseline is bounded below by 4531.1 + 3467.8 = 7998.9s and
+the measured ratio is at most 34%. The optimization keeps the durability
+protocol byte-identical (journal, envelopes, digests, recovery semantics
+unchanged; `tests/test_lite_durability.py` fully green) and removes only
+redundant work: the base reload while the flock is continuously held
+(fingerprint-verified), the redundant deepcopy of freshly serialized dicts,
+re-encoding the same canonical bytes for envelopes/records/digests, the
+third identical semantic decode of the target, and the full re-decode of the
+pair just committed.
+
+## Paraphrase gap: lexical vs semantic retrieval (2026-09-01)
+
+25 facts × 4 phrasings (100 queries, 230-doc corpus with popQA
+distractors), lite + default TF-IDF embedder, layered by lexical overlap
+between query and fact text:
+
+| recall | overall | high overlap (n=25) | medium (n=38) | low / zero-overlap (n=37) |
+|--------|---------|--------------------|---------------|---------------------------|
+| @1 | 0.58 | 0.88 | 0.92 | 0.03 |
+| @5 | 0.64 | 0.96 | 0.97 | 0.08 |
+| @10 | 0.67 | 0.96 | 0.97 | 0.16 |
+
+The lexical arm is near-saturated when query and fact share content words,
+but collapses on zero-overlap paraphrases (recall@1 = 3%) — the quantified
+case for enabling a local semantic embedding arm. The ONNX arm
+(`MEMPLEX_LOCAL_ONNX_MODEL`) could not be exercised: `onnxruntime` /
+`tokenizers` are not installed (adding them is a new dependency), no local
+model file exists, and huggingface.co is unreachable from this network.
+Dataset and runner: `benchmarks/paraphrase_data.py`,
+`benchmarks/paraphrase_eval.py`; result artifact:
+`.memplex/benchmarks/paraphrase_baseline.json`.
+
+Per-query observability: benchmark runs now export
+`{output}.traces.jsonl` with per-path candidate IDs, scores, ranks,
+duration, and candidate counts (controlled references only, no content),
+and the candidate budget is decoupled from `top_k` via
+`retrieval.retrieval_budget_multiplier` (default 4) clamped by
+`retrieval.max_retrieval_budget` (default 500).
 
 ## Reproduce
 

@@ -167,7 +167,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                 self._store._commit_current_state()
             except BaseException:
                 try:
-                    self._store._reload_for_mutation()
+                    self._store._reload_for_mutation(force=True)
                 except BaseException:
                     pass
                 raise

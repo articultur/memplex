@@ -189,9 +189,17 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def _pair_record(pair: LitePair) -> dict[str, Any]:
-    memory_digest = _digest(pair.memory)
-    changelog_digest = _digest(pair.changelog)
+def _pair_record(
+    pair: LitePair,
+    *,
+    memory_digest: Optional[str] = None,
+    changelog_digest: Optional[str] = None,
+) -> dict[str, Any]:
+    # Digests may be precomputed by the caller: each is a full canonical
+    # encode of the payload, and a commit needs them for both the envelopes
+    # and this record.
+    memory_digest = memory_digest if memory_digest is not None else _digest(pair.memory)
+    changelog_digest = changelog_digest if changelog_digest is not None else _digest(pair.changelog)
     return {
         "generation": pair.generation,
         "transaction_id": pair.transaction_id,
@@ -675,6 +683,9 @@ class LiteDurability:
         self._local = threading.local()
         self._poisoned = False
         self._semantic_validator = semantic_validator
+        # Digest record of the last committed target (== the next commit's
+        # base); lets the commit path skip re-encoding the base record.
+        self._last_commit_target_record: Optional[dict[str, Any]] = None
         # Fail at persistent construction, not module import.  This is also a
         # useful early guard for factories which historically hid this error.
         try:
@@ -721,12 +732,20 @@ class LiteDurability:
                     self._local.depth = 0
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
-    def _envelopes(self, pair: LitePair) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _envelopes(
+        self,
+        pair: LitePair,
+        *,
+        memory_digest: Optional[str] = None,
+        changelog_digest: Optional[str] = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         _validate_memory_payload(
             pair.memory, allow_legacy_missing_schema=pair.transaction_id == "legacy"
         )
-        memory_digest = _digest(pair.memory)
-        changelog_digest = _digest(pair.changelog)
+        memory_digest = memory_digest if memory_digest is not None else _digest(pair.memory)
+        changelog_digest = (
+            changelog_digest if changelog_digest is not None else _digest(pair.changelog)
+        )
         common = {
             "format_version": _FORMAT_VERSION,
             "generation": pair.generation,
@@ -912,24 +931,56 @@ class LiteDurability:
     def after_final_parent_dir_fsync(self) -> None:
         return None
 
-    def commit_locked(self, base: LitePair, target: LitePair) -> LitePair:
-        current = self._load_authoritative_locked()
-        if current != base:
-            raise LiteStorageIntegrityError("Lite authoritative state changed before commit")
+    def commit_locked(
+        self,
+        base: LitePair,
+        target: LitePair,
+        *,
+        base_verified: bool = False,
+        base_record: Optional[dict[str, Any]] = None,
+        target_validated: bool = False,
+    ) -> LitePair:
+        # ``base_verified`` is only passed by callers holding this flock
+        # continuously since ``base`` was observed (fingerprint-checked), so
+        # the pair files cannot have changed in between and the O(N)
+        # reload + deep compare is redundant.  ``base_record`` is the digest
+        # record cached from the commit that produced ``base``; it is trusted
+        # only together with ``base_verified``.  ``target_validated`` marks
+        # that the caller already ran this instance's semantic validator on
+        # the identical target payload, so the third full decode is skipped.
+        if not base_verified:
+            current = self._load_authoritative_locked()
+            if current != base:
+                raise LiteStorageIntegrityError("Lite authoritative state changed before commit")
         _validate_memory_payload(
             base.memory, allow_legacy_missing_schema=base.transaction_id == "legacy"
         )
         _validate_memory_payload(target.memory)
         _validate_transition(base, target)
-        self._validate_semantics(target)
-        memory_doc, changelog_doc = self._envelopes(target)
+        if not target_validated:
+            self._validate_semantics(target)
+        # The canonical encodes below reject NaN/Infinity before any file is
+        # written; computing them once keeps the failure ahead of the journal
+        # while avoiding a second full encode per payload.
+        target_memory_digest = _digest(target.memory)
+        target_changelog_digest = _digest(target.changelog)
+        memory_doc, changelog_doc = self._envelopes(
+            target,
+            memory_digest=target_memory_digest,
+            changelog_digest=target_changelog_digest,
+        )
+        target_record = _pair_record(
+            target,
+            memory_digest=target_memory_digest,
+            changelog_digest=target_changelog_digest,
+        )
         journal = {
             "format_version": _FORMAT_VERSION,
-            "base_record": _pair_record(base),
+            "base_record": base_record if (base_verified and base_record is not None) else _pair_record(base),
             "base_memory": base.memory,
             "base_changelog": base.changelog,
             "target": {"memory": target.memory, "changelog": target.changelog, "generation": target.generation, "transaction_id": target.transaction_id},
-            "target_record": _pair_record(target),
+            "target_record": target_record,
         }
         self.before_journal_durable_publish()
         tmp = _write_and_fsync(self._journal_path, journal)
@@ -956,6 +1007,9 @@ class LiteDurability:
         self.after_journal_unlink()
         _fsync_dir(self._memory_path.parent)
         self.after_final_parent_dir_fsync()
+        # Cache the target record: the next commit's base is this target, so
+        # its digest record need not be re-encoded.
+        self._last_commit_target_record = target_record
         return target
 
 def _validate_sync_entity_versions_items(items: list, *,
