@@ -23,9 +23,10 @@ import sqlite3
 import tarfile
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from memplex.backup import (
     BackupArtifactWriter,
@@ -68,6 +69,7 @@ from memplex.storage.changelog import ChangelogStore
 from memplex.storage.lite import durability as durability_module
 from memplex.storage.lite.durability import LiteDurability, LitePair, LiteStorageIntegrityError
 from memplex.storage.lite.search_index import SQLiteFTSIndex, local_bm25_search
+from memplex.storage.lite.vector_index import VectorSearchIndex
 from memplex.sync_protocol import (
     SyncApplyResult,
     SyncBatch,
@@ -220,26 +222,26 @@ def _validate_node_for_read(node: Any) -> None:
     for name in ("id", "name"):
         _require_exact_string(getattr(node, name), f"node {name}")
     _require_exact_string(getattr(node, "domain", None), "node domain", optional=True)
-    _require_finite_number(getattr(node, "confidence"), "node confidence")
-    if not isinstance(getattr(node, "source_type"), SourceType):
-        raise ValueError("invalid Lite node source_type")
+    _require_finite_number(node.confidence, "node confidence")
+    if not isinstance(node.source_type, SourceType):
+        raise ValueError("invalid Lite node source_type")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     for name in (
         "owner", "tenant_id", "owner_subject_id", "workspace_id", "visibility",
         "created_at", "updated_at", "origin_session", "last_accessed_at",
         "needs_review_until", "content_hash",
     ):
         _require_exact_string(getattr(node, name, None), f"node {name}", optional=True)
-    if type(getattr(node, "version")) is not int or getattr(node, "version") < 0:
+    if type(node.version) is not int or node.version < 0:
         raise ValueError("invalid Lite node version")
-    if type(getattr(node, "access_count")) is not int or getattr(node, "access_count") < 0:
+    if type(node.access_count) is not int or node.access_count < 0:
         raise ValueError("invalid Lite node access_count")
-    if type(getattr(node, "needs_review")) is not bool:
+    if type(node.needs_review) is not bool:
         raise ValueError("invalid Lite node needs_review")
-    if type(getattr(node, "source_paragraphs")) is not list or any(
+    if type(node.source_paragraphs) is not list or any(
         type(value) is not str for value in node.source_paragraphs
     ):
         raise ValueError("invalid Lite node source_paragraphs")
-    if type(getattr(node, "provenance")) is not dict or type(getattr(node, "namespace")) is not dict:
+    if type(node.provenance) is not dict or type(node.namespace) is not dict:
         raise ValueError("invalid Lite node mappings")
 
 
@@ -493,9 +495,9 @@ def _validate_raw_edge(raw: Any, *, legacy: bool) -> None:
 
 
 def _merge_field_values(
-    existing: List[FieldValue],
-    incoming: List[FieldValue],
-) -> List[FieldValue]:
+    existing: list[FieldValue],
+    incoming: list[FieldValue],
+) -> list[FieldValue]:
     """Merge incoming FieldValues into existing.  Duplicates (by desc) are
     skipped; weight and observation are taken from the newer entry.
     """
@@ -529,7 +531,7 @@ class LiteMemoryStore:
 
     def __init__(
         self,
-        path: Optional[Path] = None,
+        path: Path | None = None,
         *,
         sync_capture_policy: SyncCapturePolicy | None = None,
         sync_max_pending_events: int = 100000,
@@ -546,24 +548,24 @@ class LiteMemoryStore:
             raise BackupConfigurationError("lite_backup_profile_invalid")
         self._deployment_profile = deployment_profile
         self._path = path or Path("~/.memplex/memory.json").expanduser()
-        self._functions: Dict[str, Function] = {}
-        self._name_index: Dict[str, str] = {}  # name_normalized -> func_id
-        self._edges: List[GraphEdge] = []
-        self._edges_by_node: Dict[str, Dict[str, List[GraphEdge]]] = {}
-        self._observations: List[Observation] = []
-        self._facts: Dict[str, Fact] = {}
-        self._preferences: Dict[str, Preference] = {}
+        self._functions: dict[str, Function] = {}
+        self._name_index: dict[str, str] = {}  # name_normalized -> func_id
+        self._edges: list[GraphEdge] = []
+        self._edges_by_node: dict[str, dict[str, list[GraphEdge]]] = {}
+        self._observations: list[Observation] = []
+        self._facts: dict[str, Fact] = {}
+        self._preferences: dict[str, Preference] = {}
         # (mtime_ns, size) fingerprint of both pair files, set after each
         # successful publish so unchanged reads skip the O(N) reload.
-        self._pair_fingerprint: Optional[tuple] = None
+        self._pair_fingerprint: tuple | None = None
         # Raw pair exactly as last published (== the durable on-disk state at
         # that moment).  Lets the commit path reuse the authoritative base
         # without a second full disk read while the flock is held.
-        self._committed_pair: Optional[LitePair] = None
+        self._committed_pair: LitePair | None = None
         # Digest record of ``_committed_pair`` when it came from a local
         # commit (None after any disk reload); reused as the next commit's
         # journal base_record to skip re-encoding the base digests.
-        self._committed_record: Optional[dict[str, Any]] = None
+        self._committed_record: dict[str, Any] | None = None
         self._sync_state: dict[str, Any] = durability_module._empty_sync_state()
         self._generation = 0
         changelog_path = (
@@ -578,6 +580,11 @@ class LiteMemoryStore:
             functions=self._functions,
             text_factory=self._function_to_search_text,
         )
+        # Semantic retrieval leg (lite mirror of the postgres pgvector
+        # hybrid). Lights up only when the service injects an embedder
+        # via set_embedder; vectors are a lazy in-memory cache, never a
+        # source of truth.
+        self._vector_index = VectorSearchIndex()
         self._durability.set_semantic_validator(self._decode_pair)
         self._load()
         from memplex.storage.lite.sync_repository import LiteSyncRepository
@@ -633,13 +640,12 @@ class LiteMemoryStore:
                 prefix=".lite-backup-", dir=destination_path
             ) as capture_directory:
                 payload = Path(capture_directory) / "payload.dump"
-                with payload.open("xb") as raw:
-                    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-                        for member, contents in (
-                            self._lite_tar_member("memory.json", memory_bytes),
-                            self._lite_tar_member("changelog.json", changelog_bytes),
-                        ):
-                            archive.addfile(member, io.BytesIO(contents))
+                with payload.open("xb") as raw, tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                    for member, contents in (
+                        self._lite_tar_member("memory.json", memory_bytes),
+                        self._lite_tar_member("changelog.json", changelog_bytes),
+                    ):
+                        archive.addfile(member, io.BytesIO(contents))
                 writer = BackupArtifactWriter(
                     destination_path,
                     key=signing_key,
@@ -650,7 +656,7 @@ class LiteMemoryStore:
                     manifest_fields={
                         "format_version": 1,
                         "backup_id": backup_id,
-                        "created_at": datetime.now(timezone.utc).strftime(
+                        "created_at": datetime.now(UTC).strftime(
                             "%Y-%m-%dT%H:%M:%S.%fZ"
                         ),
                         "backend": "lite",
@@ -865,8 +871,8 @@ class LiteMemoryStore:
         except BaseException:
             try:
                 self._reload_for_mutation(force=True)
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise
 
     # ── Public: Write ───────────────────────────────────────────────
@@ -889,7 +895,7 @@ class LiteMemoryStore:
         func, source = copy.deepcopy(func), copy.deepcopy(source)
         self._validate_resident_graph()
         if not isinstance(func, Function):
-            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="LiteMemoryStore"))
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="LiteMemoryStore"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         # Dataclasses are mutable: revalidate here so a caller cannot mutate
         # an otherwise valid Function into GraphBuilder's virtual namespace.
         validate_func_id(func.id)
@@ -908,7 +914,7 @@ class LiteMemoryStore:
             for sp in func.source_paragraphs:
                 if sp not in existing.source_paragraphs:
                     existing.source_paragraphs.append(sp)
-            existing.updated_at = datetime.now(timezone.utc).isoformat()
+            existing.updated_at = datetime.now(UTC).isoformat()
             existing.version += 1
             # Carry lifecycle fields from the incoming node (promote /
             # share_with re-add): the merge above intentionally keeps the
@@ -931,7 +937,7 @@ class LiteMemoryStore:
             self._changelog.append(
                 ChangelogEvent(
                     func_id=existing.id,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(UTC),
                     event_type="updated",
                     description="Merged fields from source",
                     source=getattr(source, "source_path", None) or getattr(source, "url", "") or "",
@@ -945,7 +951,7 @@ class LiteMemoryStore:
             self._changelog.append(
                 ChangelogEvent(
                     func_id=func.id,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(UTC),
                     event_type="created",
                     description=f"Created function: {func.name}",
                     source=getattr(source, "source_path", None) or getattr(source, "url", "") or "",
@@ -960,15 +966,15 @@ class LiteMemoryStore:
 
     def add_batch(
         self,
-        funcs: List[Function],
-        sources: List[SourceDocument],
+        funcs: list[Function],
+        sources: list[SourceDocument],
     ) -> BatchResult:
         result = BatchResult(total=len(funcs))
         for func, src in zip(funcs, sources):
             try:
                 self.add(func, src)
                 result.succeeded += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
                 result.failed_items.append(
                     {
                         "func_id": func.id,
@@ -1002,7 +1008,7 @@ class LiteMemoryStore:
         fact = copy.deepcopy(fact)
         self._validate_resident_graph()
         event_type = "updated" if fact.id in self._facts else "created"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if not fact.created_at:
             fact.created_at = now
         if not fact.updated_at:
@@ -1011,7 +1017,7 @@ class LiteMemoryStore:
         self._changelog.append(
             ChangelogEvent(
                 func_id=fact.id,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type=event_type,
                 description=f"{event_type.capitalize()} fact: {fact.name or fact.subject}",
                 source="",
@@ -1034,7 +1040,7 @@ class LiteMemoryStore:
         preference = copy.deepcopy(preference)
         self._validate_resident_graph()
         event_type = "updated" if preference.id in self._preferences else "created"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if not preference.created_at:
             preference.created_at = now
         if not preference.updated_at:
@@ -1043,7 +1049,7 @@ class LiteMemoryStore:
         self._changelog.append(
             ChangelogEvent(
                 func_id=preference.id,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type=event_type,
                 description=(
                     f"{event_type.capitalize()} preference: "
@@ -1058,12 +1064,12 @@ class LiteMemoryStore:
         )
 
     @_with_writer_lock
-    def get_fact(self, fact_id: str) -> Optional[Fact]:
+    def get_fact(self, fact_id: str) -> Fact | None:
         self._refresh_for_read()
         return copy.deepcopy(self._facts.get(fact_id))
 
     @_with_writer_lock
-    def get_preference(self, preference_id: str) -> Optional[Preference]:
+    def get_preference(self, preference_id: str) -> Preference | None:
         self._refresh_for_read()
         return copy.deepcopy(self._preferences.get(preference_id))
 
@@ -1072,8 +1078,8 @@ class LiteMemoryStore:
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Fact]:
+        owner: str | None = None,
+    ) -> list[Fact]:
         self._refresh_for_read()
         facts = list(self._facts.values())
         if owner is not None:
@@ -1085,8 +1091,8 @@ class LiteMemoryStore:
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Preference]:
+        owner: str | None = None,
+    ) -> list[Preference]:
         self._refresh_for_read()
         prefs = list(self._preferences.values())
         if owner is not None:
@@ -1098,9 +1104,9 @@ class LiteMemoryStore:
         self,
         offset: int = 0,
         limit: int = 1000,
-        category: Optional[str] = None,
-        owner: Optional[str] = None,
-    ) -> List[Observation]:
+        category: str | None = None,
+        owner: str | None = None,
+    ) -> list[Observation]:
         """Paginated Observation listing, optionally filtered by category/owner."""
         self._refresh_for_read()
         obs = list(self._observations)
@@ -1111,7 +1117,7 @@ class LiteMemoryStore:
         return copy.deepcopy(obs[offset : offset + limit])
 
     @_with_writer_lock
-    def get_observation(self, observation_id: str) -> Optional[Observation]:
+    def get_observation(self, observation_id: str) -> Observation | None:
         self._refresh_for_read()
         return copy.deepcopy(
             next((item for item in self._observations if item.id == observation_id), None)
@@ -1166,13 +1172,13 @@ class LiteMemoryStore:
         if func is None:
             return
         func.access_count += 1
-        func.last_accessed_at = datetime.now(timezone.utc).isoformat()
+        func.last_accessed_at = datetime.now(UTC).isoformat()
         self._commit_sync_changes(
             nodes=[(func, SyncNodeType.FUNCTION, SyncOperation.UPSERT)]
         )
 
     @_with_writer_lock
-    def increment_access_batch(self, func_ids: List[str]) -> None:
+    def increment_access_batch(self, func_ids: list[str]) -> None:
         """Update access_count for many funcs with a SINGLE persistence pass.
 
         Overrides the base default (which would call increment_access N
@@ -1182,7 +1188,7 @@ class LiteMemoryStore:
         """
         self._reload_for_mutation()
         self._validate_resident_graph()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         touched: list[Function] = []
         for func_id in func_ids:
             func = self._functions.get(func_id)
@@ -1202,13 +1208,125 @@ class LiteMemoryStore:
     # ── Public: Retrieval ───────────────────────────────────────────
 
     @_with_writer_lock
-    def vector_search(self, text: str, top_k: int = 5) -> List[SearchResult]:
-        """Local SQLite FTS5/BM25 + trigram search over Function text."""
+    def vector_search(self, text: str, top_k: int = 5) -> list[SearchResult]:
+        """Hybrid search: FTS5/BM25+trigram fused with a semantic vector leg.
+
+        The vector leg is the lite mirror of the postgres
+        tsvector+pgvector hybrid: it activates only when an embedder was
+        injected via :meth:`set_embedder`, embeds corpus documents lazily
+        on first search, and fuses with the lexical leg on a per-leg
+        normalized scale (each leg's best hit scores 1.0; a document
+        found by both legs takes its best contribution; ties break by
+        ``func_id`` deterministically). Without an embedder the behaviour
+        is exactly the FTS path.
+        """
         self._refresh_for_read()
-        return self._search_with_fallback(text, top_k=top_k)
+        results = self._search_with_fallback(text, top_k=top_k)
+        if not self._vector_index.enabled:
+            return results
+        vector_results = self._vector_search_leg(text, top_k=top_k)
+        if not vector_results:
+            return results
+        return self._fuse_search_legs([results, vector_results], top_k)
+
+    def set_embedder(self, embedder: Any) -> None:
+        """Inject (or replace) the embedder powering the vector search leg.
+
+        Duck-typed mirror of the postgres backend's ``set_embedder``: the
+        shared service layer injects its EmbeddingService after store
+        construction, so swapping the embedding model drops cached
+        vectors from the previous model.
+        """
+        self._vector_index.set_embedder(embedder)
+
+    def _vector_search_leg(self, text: str, top_k: int) -> list[SearchResult]:
+        """Cosine-search every resident node's embedding for *text*.
+
+        Covers Functions (search-text projection shared with the FTS
+        sidecar) plus Facts and Preferences (projection shared with the
+        pure-Python BM25 path), so low-lexical-overlap queries can reach
+        typed memories the lexical legs structurally miss. Embedding
+        failures degrade to an empty leg -- lexical results stand.
+        """
+        documents: list[tuple] = [
+            (func.id, self._function_to_search_text(func))
+            for func in self._functions.values()
+        ]
+        nodes: dict[str, Any] = {**self._facts, **self._preferences}
+        for node in nodes.values():
+            documents.append((node.id, self._fact_pref_to_search_text(node)))
+        if not documents:
+            return []
+
+        ranked = self._vector_index.search(documents, text, top_k)
+        results: list[SearchResult] = []
+        for node_id, similarity in ranked:
+            func = self._functions.get(node_id)
+            if func is not None:
+                results.append(
+                    SearchResult(
+                        func_id=func.id,
+                        name=func.name,
+                        domain=func.domain or "",
+                        relevance_score=similarity,
+                        summary=self._function_to_search_text(func),
+                        source_type=func.source_type,
+                        created_at=func.created_at,
+                        updated_at=func.updated_at,
+                        origin=func.origin_session or "",
+                    )
+                )
+                continue
+            node = nodes.get(node_id)
+            if node is None:
+                continue
+            node_text = self._fact_pref_to_search_text(node)
+            results.append(
+                SearchResult(
+                    func_id=node.id,
+                    name=node.name or node_text[:50],
+                    domain=node.domain or "",
+                    relevance_score=similarity,
+                    summary=node_text,
+                    source_type=node.source_type,
+                    created_at=node.created_at,
+                    updated_at=node.updated_at,
+                    origin=node.origin_session or "",
+                )
+            )
+        return results
+
+    @staticmethod
+    def _fuse_search_legs(legs: list[list[SearchResult]], top_k: int) -> list[SearchResult]:
+        """Fuse retrieval legs on a comparable per-leg normalized scale.
+
+        Same convention as ``MultiPathRetriever.merge_multi_path`` (kept
+        local because storage must not import the retrieval layer): each
+        leg is normalized by its own maximum -- rank-1 scores 1.0, weaker
+        hits keep their relative magnitude -- and a document found by
+        several legs takes its best normalized contribution. Equal fused
+        scores tie-break by ``func_id`` so output order is deterministic.
+        """
+        best: dict[str, SearchResult] = {}
+        fused: dict[str, float] = {}
+        for leg in legs:
+            leg_max = max((r.relevance_score for r in leg), default=0.0)
+            scale = leg_max if leg_max > 0.0 else 1.0
+            for result in leg:
+                contribution = result.relevance_score / scale
+                if contribution > fused.get(result.func_id, 0.0):
+                    fused[result.func_id] = contribution
+                    best[result.func_id] = result
+        merged = [
+            best[func_id]
+            for func_id in sorted(fused, key=lambda fid: (-fused[fid], fid))
+        ]
+        for result in merged:
+            result.relevance_score = fused[result.func_id]
+        return merged[:top_k]
 
     @_with_writer_lock
-    def fts_search(self, text: str, top_k: int = 10) -> List[SearchResult]:
+    def fts_search(self, text: str, top_k: int = 10) -> list[SearchResult]:
         """Local full-text search using FTS5 BM25, phrase, and trigram matching.
 
         Covers Functions (FTS5 sidecar / local fallback) plus Fact and
@@ -1218,9 +1336,9 @@ class LiteMemoryStore:
         return self._search_with_fallback(text, top_k=top_k)
 
     @_with_writer_lock
-    def filter(self, filters: SearchFilters) -> List[Function]:
+    def filter(self, filters: SearchFilters) -> list[Function]:
         self._refresh_for_read()
-        results: List[Function] = []
+        results: list[Function] = []
         for func in self._functions.values():
             if not self._matches_filter(func, filters):
                 continue
@@ -1230,7 +1348,7 @@ class LiteMemoryStore:
     # ── Public: Read ────────────────────────────────────────────────
 
     @_with_writer_lock
-    def get(self, func_id: str) -> Optional[Function]:
+    def get(self, func_id: str) -> Function | None:
         self._refresh_for_read()
         return copy.deepcopy(self._functions.get(func_id))
 
@@ -1250,10 +1368,10 @@ class LiteMemoryStore:
     def get_neighbors(
         self,
         func_id: str,
-        edge_types: Optional[List[str]] = None,
+        edge_types: list[str] | None = None,
         max_hops: int = 1,
-        limit: Optional[int] = None,
-    ) -> List[Function]:
+        limit: int | None = None,
+    ) -> list[Function]:
         self._refresh_for_read()
         if max_hops < 1 or (limit is not None and limit <= 0):
             return []
@@ -1263,10 +1381,10 @@ class LiteMemoryStore:
         # candidate limit is reached.
         visited: set = {func_id}
         current_level = [func_id]
-        neighbor_ids: List[str] = []
+        neighbor_ids: list[str] = []
 
         for _ in range(max_hops):
-            next_level: List[str] = []
+            next_level: list[str] = []
             for fid in current_level:
                 buckets = self._edges_by_node.get(fid, {})
                 selected_types = edge_types if edge_types else list(buckets)
@@ -1291,7 +1409,7 @@ class LiteMemoryStore:
         return copy.deepcopy([self._functions[fid] for fid in neighbor_ids if fid in self._functions])
 
     @_with_writer_lock
-    def get_graph(self, func_ids: Optional[List[str]] = None) -> GraphData:
+    def get_graph(self, func_ids: list[str] | None = None) -> GraphData:
         self._refresh_for_read()
         if func_ids is None:
             nodes = list(self._functions.values())
@@ -1303,7 +1421,7 @@ class LiteMemoryStore:
         return copy.deepcopy(GraphData(nodes=nodes, edges=edges))
 
     @_with_writer_lock
-    def get_timeline(self, func_id: str, limit: int = 20) -> List[ChangelogEvent]:
+    def get_timeline(self, func_id: str, limit: int = 20) -> list[ChangelogEvent]:
         self._refresh_for_read()
         return self._changelog.get_timeline(func_id, limit)
 
@@ -1317,8 +1435,8 @@ class LiteMemoryStore:
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Function]:
+        owner: str | None = None,
+    ) -> list[Function]:
         self._refresh_for_read()
         funcs = list(self._functions.values())
         if owner is not None:
@@ -1327,8 +1445,8 @@ class LiteMemoryStore:
 
     @_with_writer_lock
     def list_changes_since(
-        self, since: Optional[str] = None, limit: int = 100000
-    ) -> List[Function]:
+        self, since: str | None = None, limit: int = 100000
+    ) -> list[Function]:
         """Incremental sync query: filter by updated_at at the dict level.
 
         Avoids serializing all Functions when only a few changed since the
@@ -1383,7 +1501,7 @@ class LiteMemoryStore:
         seen_node_ids: set[str] = set()
         for node in nodes:
             if not isinstance(node, Function):
-                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="LiteMemoryStore"))
+                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="LiteMemoryStore"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
             validate_func_id(node.id)
             validate_domain(node.domain)
             if node.id in seen_node_ids:
@@ -1409,7 +1527,7 @@ class LiteMemoryStore:
                 existing.condition = _merge_field_values(existing.condition, node.condition)
                 existing.action = _merge_field_values(existing.action, node.action)
                 existing.benefit = _merge_field_values(existing.benefit, node.benefit)
-                existing.updated_at = datetime.now(timezone.utc).isoformat()
+                existing.updated_at = datetime.now(UTC).isoformat()
                 existing.version += 1
                 result.updated_functions += 1
             else:
@@ -1509,11 +1627,11 @@ class LiteMemoryStore:
         )
 
     @_with_writer_lock
-    def annotate(self, memory_ids: List[str], *, attributes: Optional[Dict[str, Any]] = None,
-                 needs_review: Optional[bool] = None) -> List[Function]:
+    def annotate(self, memory_ids: list[str], *, attributes: dict[str, Any] | None = None,
+                 needs_review: bool | None = None) -> list[Function]:
         """Atomically apply operator metadata without exposing live objects."""
         self._reload_for_mutation()
-        result: List[Function] = []
+        result: list[Function] = []
         for memory_id in memory_ids:
             func = self._functions.get(memory_id)
             if func is None:
@@ -1535,10 +1653,10 @@ class LiteMemoryStore:
     @_with_writer_lock
     def annotate_nodes(
         self,
-        memory_ids: List[str],
+        memory_ids: list[str],
         *,
-        attributes: Optional[Dict[str, Any]] = None,
-        needs_review: Optional[bool] = None,
+        attributes: dict[str, Any] | None = None,
+        needs_review: bool | None = None,
     ) -> list[Any]:
         """Atomically annotate a mixed Function/Fact/Preference batch."""
         self._reload_for_mutation()
@@ -1585,9 +1703,9 @@ class LiteMemoryStore:
     def apply_compaction(
         self,
         *,
-        replacements: List[Function],
-        delete_ids: List[str],
-        expected_generation: Optional[int] = None,
+        replacements: list[Function],
+        delete_ids: list[str],
+        expected_generation: int | None = None,
     ) -> None:
         """Apply all Lite compaction effects as exactly one pair commit."""
         self._reload_for_mutation()
@@ -1786,14 +1904,14 @@ class LiteMemoryStore:
     def _canonical_historical_pair(
         self,
         decoded: tuple[
-            Dict[str, Function],
-            Dict[str, str],
-            List[Observation],
-            Dict[str, Fact],
-            Dict[str, Preference],
-            List[GraphEdge],
-            List[ChangelogEvent],
-            Dict[str, Any],
+            dict[str, Function],
+            dict[str, str],
+            list[Observation],
+            dict[str, Fact],
+            dict[str, Preference],
+            list[GraphEdge],
+            list[ChangelogEvent],
+            dict[str, Any],
         ],
         generation: int,
         transaction_id: str,
@@ -1870,11 +1988,11 @@ class LiteMemoryStore:
 
 
     @staticmethod
-    def _decode_typed_collections(raw: dict, legacy: bool) -> tuple[List[Observation], Dict[str, Fact], Dict[str, Preference]]:
+    def _decode_typed_collections(raw: dict, legacy: bool) -> tuple[list[Observation], dict[str, Fact], dict[str, Preference]]:
         """Decode + validate Observation/Fact/Preference collections in isolation."""
-        loaded_observations: List[Observation] = []
-        loaded_facts: Dict[str, Fact] = {}
-        loaded_preferences: Dict[str, Preference] = {}
+        loaded_observations: list[Observation] = []
+        loaded_facts: dict[str, Fact] = {}
+        loaded_preferences: dict[str, Preference] = {}
         for od in raw.get("observations", []):
             _validate_raw_observation(od, legacy=legacy)
             observation = Observation.from_dict(od)
@@ -1913,14 +2031,14 @@ class LiteMemoryStore:
     def _decode_pair(
         self, pair: LitePair
     ) -> tuple[
-        Dict[str, Function],
-        Dict[str, str],
-        List[Observation],
-        Dict[str, Fact],
-        Dict[str, Preference],
-        List[GraphEdge],
-        List[ChangelogEvent],
-        Dict[str, Any],
+        dict[str, Function],
+        dict[str, str],
+        list[Observation],
+        dict[str, Fact],
+        dict[str, Preference],
+        list[GraphEdge],
+        list[ChangelogEvent],
+        dict[str, Any],
     ]:
         """Fully deserialize a pair without touching published resident state."""
         raw = pair.memory
@@ -1928,15 +2046,15 @@ class LiteMemoryStore:
         # Decode into detached collections first.  A corrupted or reserved
         # Function ID must not leave a half-loaded in-memory graph (including
         # an edge/index referring to data that was rejected later).
-        loaded_functions: Dict[str, Function] = {}
-        loaded_name_index: Dict[str, str] = {}
-        loaded_edges: List[GraphEdge] = []
+        loaded_functions: dict[str, Function] = {}
+        loaded_name_index: dict[str, str] = {}
+        loaded_edges: list[GraphEdge] = []
         loaded_edge_keys: set[tuple[str, str, str]] = set()
         legacy = pair.transaction_id == "legacy"
         g002_historical = not legacy and _is_recognized_g002_enveloped_v1(raw)
-        loaded_observations: List[Observation] = []
-        loaded_facts: Dict[str, Fact] = {}
-        loaded_preferences: Dict[str, Preference] = {}
+        loaded_observations: list[Observation] = []
+        loaded_facts: dict[str, Fact] = {}
+        loaded_preferences: dict[str, Preference] = {}
 
         for fd in raw.get("functions", []):
             memory_type = fd.get("memory_type") if type(fd) is dict else None
@@ -2123,7 +2241,7 @@ class LiteMemoryStore:
         return self._generation
 
     @_with_writer_lock
-    def compaction_snapshot(self) -> tuple[int, List[Function]]:
+    def compaction_snapshot(self) -> tuple[int, list[Function]]:
         """Return one detached function snapshot bound to its generation."""
         self._refresh_for_read()
         return self._generation, copy.deepcopy(list(self._functions.values()))
@@ -2134,7 +2252,7 @@ class LiteMemoryStore:
 
     # ── Internal helpers ────────────────────────────────────────────
 
-    def _search_with_fallback(self, text: str, top_k: int) -> List[SearchResult]:
+    def _search_with_fallback(self, text: str, top_k: int) -> list[SearchResult]:
         """Search with SQLite FTS5 first, then pure-Python local search.
 
         Facts and preferences are always searched with the pure-Python
@@ -2157,13 +2275,13 @@ class LiteMemoryStore:
         merged.sort(key=lambda r: r.relevance_score, reverse=True)
         return merged[:top_k]
 
-    def _search_facts_preferences(self, text: str, top_k: int) -> List[SearchResult]:
+    def _search_facts_preferences(self, text: str, top_k: int) -> list[SearchResult]:
         """Pure-Python BM25 over Fact/Preference content (no sidecar index).
 
         Mirrors the Function local-search scoring (``score / (score + 1)``)
         so results merge cleanly with Function hits.
         """
-        nodes: Dict[str, Any] = {**self._facts, **self._preferences}
+        nodes: dict[str, Any] = {**self._facts, **self._preferences}
         if not nodes:
             return []
         ranked = local_bm25_search(
@@ -2172,7 +2290,7 @@ class LiteMemoryStore:
             text_factory=self._fact_pref_to_search_text,
             top_k=top_k,
         )
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for node, node_text, score in ranked:
             relevance = score / (score + 1.0)
             results.append(
@@ -2199,10 +2317,10 @@ class LiteMemoryStore:
             parts = [node.name, node.domain or "", node.aspect, node.preference]
         return " ".join(p for p in parts if p)
 
-    def _sqlite_fts_search(self, text: str, top_k: int) -> List[SearchResult]:
+    def _sqlite_fts_search(self, text: str, top_k: int) -> list[SearchResult]:
         """Search the SQLite FTS5 sidecar using bm25() plus trigram overlap."""
         ranked = self._fts_index.search(text, top_k=top_k)
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for func_id, score in ranked:
             func = self._functions.get(func_id)
             if func is None:
@@ -2224,7 +2342,7 @@ class LiteMemoryStore:
             )
         return results
 
-    def _local_search(self, text: str, top_k: int) -> List[SearchResult]:
+    def _local_search(self, text: str, top_k: int) -> list[SearchResult]:
         """Search Functions with local BM25 and fuzzy character overlap."""
         ranked = local_bm25_search(
             text=text,
@@ -2232,7 +2350,7 @@ class LiteMemoryStore:
             text_factory=self._function_to_search_text,
             top_k=top_k,
         )
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for func, func_text, score in ranked:
             relevance = score / (score + 1.0)
             results.append(
@@ -2267,14 +2385,12 @@ class LiteMemoryStore:
             return False
         if filters.source_type and func.source_type not in filters.source_type:
             return False
-        if filters.confidence_min is not None:
-            if func.confidence < filters.confidence_min:
-                return False
+        if filters.confidence_min is not None and func.confidence < filters.confidence_min:
+            return False
         if filters.owner is not None and func.owner != filters.owner:
             return False
-        if filters.needs_review is not None:
-            if func.needs_review != filters.needs_review:
-                return False
+        if filters.needs_review is not None and func.needs_review != filters.needs_review:
+            return False
         # Datetime filters: compare ISO strings lexicographically
         if filters.updated_after is not None:
             after = (
