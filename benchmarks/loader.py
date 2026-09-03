@@ -69,6 +69,11 @@ def _fetch_from_huggingface(
             ds = ds.select(range(min(num_samples, len(ds))))
 
         records = [dict(row) for row in ds]
+        # Evidence provenance requires string sample identities; integer ids
+        # from upstream releases are normalised here rather than rejected.
+        for record in records:
+            if isinstance(record.get("id"), int):
+                record["id"] = str(record["id"])
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fh:
             json.dump(records, fh, indent=2, default=str)
