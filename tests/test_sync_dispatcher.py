@@ -4,7 +4,8 @@ import json
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
+from typing import ClassVar
 
 import pytest
 
@@ -31,7 +32,7 @@ from memplex.sync_repository import SyncCapturePolicy, SyncDeadLetterEntry
 
 def _event(identifier: str, *, origin: str = "node-local") -> SyncEvent:
     event_id = str(uuid.uuid4())
-    occurred_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    occurred_at = datetime(2026, 8, 11, tzinfo=UTC)
     return SyncEvent(
         1,
         event_id,
@@ -76,7 +77,7 @@ class _Repository:
                     row["event"],
                     row["attempt"],
                     str(uuid.uuid4()),
-                    datetime.now(timezone.utc) + timedelta(seconds=30),
+                    datetime.now(UTC) + timedelta(seconds=30),
                 )
             )
         return claimed
@@ -215,7 +216,7 @@ def test_dispatch_once_posts_one_canonical_batch_and_acks_every_delivery() -> No
         lease_seconds=30,
     )
 
-    result = dispatcher.dispatch_once(datetime.now(timezone.utc))
+    result = dispatcher.dispatch_once(datetime.now(UTC))
 
     assert result == DispatchResult(claimed=2, delivered=2, failed=0)
     assert repository.sync_dispatch_status().delivered == 2
@@ -268,8 +269,8 @@ def test_ack_loss_retries_the_same_batch_and_remote_duplicate_is_acked() -> None
         lease_seconds=30,
     )
 
-    first = dispatcher.dispatch_once(datetime.now(timezone.utc))
-    second = dispatcher.dispatch_once(datetime.now(timezone.utc))
+    first = dispatcher.dispatch_once(datetime.now(UTC))
+    second = dispatcher.dispatch_once(datetime.now(UTC))
 
     assert first.failed == 1
     assert second.delivered == 1
@@ -318,7 +319,7 @@ def test_terminal_http_rejection_moves_delivery_to_dlq_and_replay_is_durable() -
         lease_seconds=30,
     )
 
-    result = dispatcher.dispatch_once(datetime.now(timezone.utc))
+    result = dispatcher.dispatch_once(datetime.now(UTC))
 
     assert result.failed == 1
     assert repository.sync_dispatch_status().dead_letters == 1
@@ -664,7 +665,7 @@ def test_background_workers_enforce_global_batch_cap_and_drain() -> None:
                         target_events[target_id],
                         self.attempts[target_id],
                         str(uuid.uuid4()),
-                        datetime.now(timezone.utc) + timedelta(seconds=30),
+                        datetime.now(UTC) + timedelta(seconds=30),
                     )
                 ]
 
@@ -785,8 +786,7 @@ def test_stop_uses_one_absolute_deadline_for_all_thread_joins() -> None:
     # the invariant under test is that every join shares ONE absolute
     # deadline (each timeout <= the budget, never cumulative), which a
     # wall-clock bound cannot prove reliably on shared macOS runners.
-        timeouts: list[float] = []
-
+        timeouts: ClassVar[list[float]] = []
         def join(self, timeout):
             SlowJoin.timeouts.append(timeout)
 
@@ -878,7 +878,7 @@ def test_stop_deadline_releases_queued_unissued_leases() -> None:
             "remote-a",
             "https://remote.example",
             deliveries,
-            datetime.now(timezone.utc),
+            datetime.now(UTC),
         )
     )
 

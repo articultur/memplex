@@ -13,12 +13,11 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from benchmarks.base import BenchmarkResult
-
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONTRACT_FILES = (
@@ -92,12 +91,12 @@ def _sha256(payload: bytes) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _git(*args: str) -> bytes:
     try:
-        return subprocess.run(
+        return subprocess.run(  # noqa: UP022 - explicit PIPE form documents both streams
             ("git", *args),
             cwd=_PROJECT_ROOT,
             check=True,
@@ -135,13 +134,13 @@ def _source_provenance() -> dict[str, object]:
 
 def _sample_provenance(records: object) -> tuple[int, str]:
     if not isinstance(records, list):
-        raise ValueError("dataset JSON must be a list of samples")
+        raise ValueError("dataset JSON must be a list of samples")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
 
     sample_ids: list[str] = []
     seen_sample_ids: set[str] = set()
     for record in records:
         if not isinstance(record, dict):
-            raise ValueError("every dataset sample must be a JSON object")
+            raise ValueError("every dataset sample must be a JSON object")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         identity_key = next(
             (key for key in ("id", "question_id", "conversation_id") if key in record),
             None,
@@ -172,7 +171,7 @@ def _embedded_provenance(dataset: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(source_kind, str) or not source_kind:
         raise ValueError("dataset source_kind must be a non-empty string")
     if not isinstance(synthetic, bool):
-        raise ValueError("dataset synthetic must be a boolean")
+        raise ValueError("dataset synthetic must be a boolean")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     sample_count, sample_ids_digest = _sample_provenance(records)
     return {
         "digest": _sha256(_canonical_json(records)),
@@ -198,7 +197,7 @@ def _embed_dataset(
     if not isinstance(source_kind, str) or not source_kind:
         raise ValueError("dataset source_kind must be a non-empty string")
     if not isinstance(synthetic, bool):
-        raise ValueError("dataset synthetic must be a boolean")
+        raise ValueError("dataset synthetic must be a boolean")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
 
     path = Path(raw_path).resolve(strict=True)
     if not path.is_file() or path.is_symlink():
@@ -278,7 +277,7 @@ def _redact_config(value: object, *, key: str | None = None) -> object:
         redacted: dict[str, object] = {}
         for nested_key, nested_value in value.items():
             if not isinstance(nested_key, str):
-                raise ValueError("config keys must be strings")
+                raise ValueError("config keys must be strings")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
             redacted[nested_key] = _redact_config(nested_value, key=nested_key)
         return redacted
     if isinstance(value, (list, tuple)):
@@ -293,7 +292,7 @@ def _redact_command(command: Sequence[str]) -> list[str]:
     hide_next = False
     for argument in command:
         if not isinstance(argument, str):
-            raise ValueError("command arguments must be strings")
+            raise ValueError("command arguments must be strings")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         if hide_next:
             redacted.append("<redacted>")
             hide_next = False
@@ -360,7 +359,7 @@ def _require_text(value: object, name: str) -> None:
 def _require_timestamp(value: object, name: str, *, require_timezone: bool = True) -> datetime:
     _require_text(value, name)
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value))
     except ValueError as exc:
         raise ValueError(f"{name} must be an ISO timestamp") from exc
     if require_timezone and parsed.tzinfo is None:
@@ -388,7 +387,7 @@ def _require_non_negative_number(value: object, name: str) -> None:
 
 def _validate_result(value: object) -> None:
     if not isinstance(value, dict):
-        raise ValueError("result must contain exactly the required fields")
+        raise ValueError("result must contain exactly the required fields")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     optional = {k: value[k] for k in _OPTIONAL_RESULT_FIELDS if k in value}
     row = _require_fields(
         {k: v for k, v in value.items() if k not in _OPTIONAL_RESULT_FIELDS},
@@ -455,7 +454,7 @@ def _validate_manifest(value: object) -> None:
             raise ValueError("dataset synthetic/sample_count types are invalid")
     coverage = manifest["coverage"]
     if not isinstance(coverage, dict):
-        raise ValueError("manifest coverage is invalid")
+        raise ValueError("manifest coverage is invalid")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     _validated_coverage(coverage)
     command = manifest["command"]
     if not isinstance(command, list) or not command or _redact_command(command) != command:
@@ -465,7 +464,7 @@ def _validate_manifest(value: object) -> None:
         raise ValueError("manifest config is invalid or contains unredacted secrets")
     limitations = manifest["limitations"]
     if not isinstance(limitations, list):
-        raise ValueError("manifest limitations must be a list")
+        raise ValueError("manifest limitations must be a list")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     for reason in limitations:
         _require_text(reason, "limitation reason")
     _validate_raw(manifest["raw"])
@@ -619,7 +618,7 @@ def verify_bundle(run_dir: str | os.PathLike[str]) -> dict[str, object]:
 
     manifest = _load_canonical_json(payloads["manifest.json"], "manifest.json")
     if not isinstance(manifest, dict):
-        raise ValueError("manifest must be a JSON object")
+        raise ValueError("manifest must be a JSON object")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     _validate_manifest(manifest)
     embedded_datasets = _load_canonical_json(payloads["datasets.json"], "datasets.json")
     if not isinstance(embedded_datasets, list) or any(

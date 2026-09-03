@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any
 
 
 class BackgroundTask(Enum):
@@ -28,16 +28,16 @@ class TaskInfo:
     task_type: BackgroundTask
     status: TaskStatus
     created_at: datetime
-    completed_at: Optional[datetime] = None
-    payload: Optional[dict] = None
+    completed_at: datetime | None = None
+    payload: dict | None = None
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     retry_count: int = 0
     max_retries: int = 3
-    next_attempt_at: Optional[datetime] = None
-    lease_until: Optional[datetime] = None
-    lease_id: Optional[str] = None
-    last_error_code: Optional[str] = None
+    next_attempt_at: datetime | None = None
+    lease_until: datetime | None = None
+    lease_id: str | None = None
+    last_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,5 +90,5 @@ class CompactionResult:
     total_removed: int
     total_merged: int
     duration_ms: int
-    stages: List[CompactionStageResult] = field(default_factory=list)
+    stages: list[CompactionStageResult] = field(default_factory=list)
     skipped: bool = False

@@ -90,7 +90,8 @@ def test_hermes_official_cli_discovers_installed_provider_in_isolated_home(
         "678c9150852f2018182e08622ae25b495360fd5099747f823c35e00cce08d8dd"
     )
     version_result = subprocess.run(
-        [str(cli), "--version"], capture_output=True, text=True, timeout=30
+        [str(cli), "--version"], capture_output=True, text=True, timeout=30, check=False
+    
     )
     assert version_result.returncode == 0, version_result.stderr
     assert "Hermes Agent v0.20.0 (2026.8.3)" in version_result.stdout
@@ -106,7 +107,8 @@ def test_hermes_official_cli_discovers_installed_provider_in_isolated_home(
         capture_output=True,
         text=True,
         timeout=30,
-        env=os.environ.copy(),
+        env=os.environ.copy(),check=False
+    
     )
     assert status.returncode == 0, status.stderr
     assert "Provider:  memplex" in status.stdout
@@ -367,7 +369,8 @@ raise SystemExit(0)
             **os.environ,
             "MEMPLEX_PLUGIN_ENTRY": str(plugin_dir / "__init__.py"),
             "MEMPLEX_SOURCE_ROOT": str(PROJECT_ROOT),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 7
@@ -400,7 +403,8 @@ def test_hermes_bootstrap_rejects_identity_for_another_host_before_sys_path(tmp_
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(plugin_dir / "__init__.py")},
+        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(plugin_dir / "__init__.py")},check=False
+    
     )
 
     assert result.returncode != 0

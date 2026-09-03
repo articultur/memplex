@@ -40,10 +40,11 @@ import json
 import os
 import sys
 import traceback
+from collections.abc import Sequence
 from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from memplex.adapters._shared import dataclass_to_dict as _dataclass_to_dict
 
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
-def _make_service(config_path: Optional[str] = None) -> MemplexService:
+def _make_service(config_path: str | None = None) -> MemplexService:
     """Create and return a MemplexService instance."""
     from memplex.config import load_config
     from memplex.service import MemplexService
@@ -152,7 +153,7 @@ class _AuthorizedStore:
 
 
 def _cli_authorization(
-    config_path: Optional[str] = None, *, agent_id: str = "cli"
+    config_path: str | None = None, *, agent_id: str = "cli"
 ) -> AuthorizationContext:
     """Resolve the sole trusted identity source for CLI memory commands.
 
@@ -175,7 +176,7 @@ def _cli_authorization(
 
 
 def _make_authorized_service(
-    config_path: Optional[str] = None, *, agent_id: str = "cli"
+    config_path: str | None = None, *, agent_id: str = "cli"
 ) -> tuple[Any, _AuthorizedService]:
     """Authorize before constructing a service, then return its scoped facade."""
     authorization = _cli_authorization(config_path, agent_id=agent_id)
@@ -730,12 +731,12 @@ class _MigrationCommandContext:
         mutation_outcome_unknown = False
         try:
             mutation = self._runner.apply(**self._options())
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             mutation_outcome_unknown = True
 
         try:
             fresh = self._fresh_strict_readback()
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             if mutation_outcome_unknown:
                 raise _MigrationCommandError(
                     "migration_outcome_requires_readback",
@@ -765,7 +766,7 @@ class _MigrationCommandContext:
         )
 
 
-def _build_migration_command_context(config_path: Optional[str] = None) -> _MigrationCommandContext:
+def _build_migration_command_context(config_path: str | None = None) -> _MigrationCommandContext:
     """Resolve and validate migration/application connections without a service."""
     from memplex.config import load_config, normalize_deployment_contract
     from memplex.storage.migrations import (
@@ -818,7 +819,7 @@ def _build_migration_command_context(config_path: Optional[str] = None) -> _Migr
         )
     except _MigrationCommandError:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch, re-raised/wrapped below
         _ = exc
         raise _MigrationCommandError(
             "migration_context_unavailable",
@@ -1023,7 +1024,7 @@ class _BackupCommandContext:
 
 
 def _build_backup_command_context(
-    config_path: Optional[str] = None, *, allow_missing_schema: bool = False
+    config_path: str | None = None, *, allow_missing_schema: bool = False
 ) -> _BackupCommandContext:
     """Build backup collaborators without constructing MemplexService.
 
@@ -1139,7 +1140,7 @@ def _build_backup_command_context(
         )
     except _BackupCommandError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
         raise _BackupCommandError(
             "backup_config_invalid",
             "确认备份配置、签名密钥与数据库工具后重试。",
@@ -1147,7 +1148,7 @@ def _build_backup_command_context(
 
 
 def _build_backup_verification_context(
-    config_path: Optional[str] = None,
+    config_path: str | None = None,
 ) -> _BackupCommandContext:
     """Build the offline artifact verifier without database or service access."""
     from memplex.backup import load_backup_signing_key
@@ -1161,7 +1162,7 @@ def _build_backup_verification_context(
             key_id=str(config.backup.key_id),
             default_destination=Path(config.backup.directory).expanduser(),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
         raise _BackupCommandError(
             "backup_config_invalid",
             "确认备份签名密钥与配置后重试。",
@@ -1249,7 +1250,7 @@ def _cmd_storage_backup(args: argparse.Namespace) -> int:
         return 0
     except _BackupCommandError as error:
         return _print_backup_error(args, error)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return _print_backup_error(
             args,
             _BackupCommandError(
@@ -1302,7 +1303,7 @@ def cmd_storage(args: argparse.Namespace) -> int:
         return 0
     except _MigrationCommandError as error:
         return _print_migration_error(args, error)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         _ = exc
         return _print_migration_error(
             args,
@@ -1722,7 +1723,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
                         session_id=getattr(args, "session_id", "default"),
                         project_path=getattr(args, "project_path", None),
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
                     failed = True
                     reports[name] = {
                         "schema_version": 1,
@@ -2171,7 +2172,7 @@ def _add_one_setup_parser(
     name: str,
     *,
     uninstall: bool = False,
-    help: Optional[str] = None,
+    help: str | None = None,
 ) -> argparse.ArgumentParser:
     help_text = help or (
         "Uninstall Memplex from local agent hosts"
@@ -2305,7 +2306,7 @@ def _add_benchmark_parsers(sub: argparse._SubParsersAction) -> None:
 # ── Entry point ─────────────────────────────────────────────────────
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point.
 
     Parameters
@@ -2370,7 +2371,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         return handler(args)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         if getattr(args, "verbose", False) or os.environ.get("MEMPLEX_DEBUG"):
             traceback.print_exc()
         else:

@@ -7,12 +7,17 @@ catalogue and negotiated optional vector capability.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from collections import deque
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from threading import Condition, RLock
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Literal, Self
 from uuid import uuid4
 
 from memplex.auth import AuthorizationContext
@@ -91,8 +96,8 @@ _READY_POOL_AUTHORITY_LOCK = RLock()
 class _ReadyPoolAuthority:
     """Snapshot of a seal that a live Resource instance has published."""
 
-    seal: "ReadyPostgresPool"
-    manager: "PostgresPoolManager"
+    seal: ReadyPostgresPool
+    manager: PostgresPoolManager
     request: VectorCapabilityRequest
     request_dim: int
     request_policy: str
@@ -122,12 +127,12 @@ class ReadyPostgresPool:
     """
 
     __slots__ = (
+        "_sealed",
+        "effective_dim",
         "manager",
         "request",
         "status",
-        "effective_dim",
         "target",
-        "_sealed",
     )
 
     manager: PostgresPoolManager
@@ -140,7 +145,7 @@ class ReadyPostgresPool:
     def __init__(
         self,
         *,
-        manager: "PostgresPoolManager",
+        manager: PostgresPoolManager,
         request: VectorCapabilityRequest,
         status: VectorCapabilityStatus,
         effective_dim: int,
@@ -277,7 +282,7 @@ class PooledReadCursor:
     """A read cursor whose lease is released exactly once on every exit path."""
 
     def __init__(
-        self, manager: "PostgresPoolManager", token: object, connection: Any, cursor: Any
+        self, manager: PostgresPoolManager, token: object, connection: Any, cursor: Any
     ) -> None:
         self._manager = manager
         self._token = token
@@ -295,21 +300,21 @@ class PooledReadCursor:
     def _fetch(self, method: str, *args: Any) -> Any:
         try:
             result = getattr(self._cursor, method)(*args)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             primary_error = exc
             primary_traceback = exc.__traceback__
             try:
                 try:
                     self.close()
-                except BaseException:
-                    pass
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
                 finally:
                     try:
                         self.close()
-                    except BaseException:
-                        pass
-            except BaseException:
-                pass
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                        logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise primary_error.with_traceback(primary_traceback)
         self.close()
         return result
@@ -342,21 +347,21 @@ class PooledReadCursor:
                     try:
                         self._connection.rollback()
                         self._rolled_back = True
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         self._manager._mark_fault(exc)
                         cleanup_error = exc
                 if not self._cursor_closed:
                     try:
                         self._cursor.close()
                         self._cursor_closed = True
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         self._manager._mark_fault(exc)
                         cleanup_error = cleanup_error or exc
                 if not self._returned:
                     try:
                         self._manager.release(self._token, rollback=False)
                         self._returned = True
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
             finally:
                 self._state = "CLOSED" if self._returned else "OPEN"
@@ -373,12 +378,12 @@ class _BorrowCapacityReservation:
     exceptions strand later borrowers.
     """
 
-    def __init__(self, manager: "PostgresPoolManager") -> None:
+    def __init__(self, manager: PostgresPoolManager) -> None:
         self._manager = manager
         self._token = object()
         self._connection: Any | None = None
 
-    def __enter__(self) -> "_BorrowCapacityReservation":
+    def __enter__(self) -> Self:
         try:
             self._manager._reserve_capacity(self._token)
             return self
@@ -394,37 +399,37 @@ class _BorrowCapacityReservation:
         if exc_type is None:
             try:
                 self._manager.commit_publish(self._token)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 primary_error = exc
                 primary_traceback = exc.__traceback__
                 try:
                     try:
                         self._manager.release(self._token)
-                    except BaseException:
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                        logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
                     finally:
                         try:
                             self._manager.release(self._token)
-                        except BaseException:
-                            pass
-                except BaseException:
-                    pass
+                        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                            logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
                 raise primary_error.with_traceback(primary_traceback)
         else:
             try:
                 try:
                     self._manager.release(self._token)
-                except BaseException:
-                    pass
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
                 finally:
                     try:
                         self._manager.release(self._token)
-                    except BaseException:
-                        pass
-            except BaseException:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                        logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # The body/return interruption is primary; a driver cleanup
                 # fault is recorded by the manager but must not mask it.
-                pass
+                logger.debug("suppressed BaseException: %s", exc)
 
     def borrow(self) -> Any:
         """Acquire and validate one connection under this reservation."""
@@ -442,13 +447,13 @@ class _BorrowCapacityReservation:
             # call boundary cannot replace the borrow primary or strand it.
             try:
                 self._manager.release(self._token, fallback_connection=connection)
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             finally:
                 try:
                     self._manager.release(self._token, fallback_connection=connection)
-                except BaseException:
-                    pass
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise
 
     def publish(self, connection: Any) -> None:
@@ -492,7 +497,7 @@ class _TransactionContext:
     """Explicit transaction context with an exception-safe enter hand-off."""
 
     def __init__(
-        self, manager: "PostgresPoolManager", bind_scope: BindScope, context: AuthorizationContext
+        self, manager: PostgresPoolManager, bind_scope: BindScope, context: AuthorizationContext
     ) -> None:
         self._manager = manager
         self._bind_scope = bind_scope
@@ -520,7 +525,7 @@ class _TransactionContext:
             self._bind_scope(cursor, self._context)
             reservation.publish(connection)
             return connection, cursor
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             primary_error = exc
             primary_traceback = exc.__traceback__
             # Every cleanup phase has a second route in a nested ``finally``.
@@ -529,34 +534,34 @@ class _TransactionContext:
             try:
                 try:
                     self._close_pre_enter_cursor(cursor)
-                except BaseException:
-                    pass
+                except BaseException as close_exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", close_exc)
                 finally:
                     try:
                         if reservation_context is not None:
                             try:
                                 reservation_context.__exit__(type(exc), exc, exc.__traceback__)
-                            except BaseException:
-                                pass
+                            except BaseException as exit_exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exit_exc)
                     finally:
                         try:
                             self._close_pre_enter_cursor(cursor)
-                        except BaseException:
-                            pass
+                        except BaseException as close_exc2:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                            logger.debug("suppressed BaseException in cleanup/degradation path: %s", close_exc2)
                         finally:
                             try:
                                 self._release_pre_enter_fallback(reservation, connection)
-                            except BaseException:
-                                pass
+                            except BaseException as nested_exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                                logger.debug("suppressed BaseException in cleanup/degradation path: %s", nested_exc)
                             finally:
                                 try:
                                     self._release_pre_enter_fallback(reservation, connection)
-                                except BaseException:
-                                    pass
-            except BaseException:
+                                except BaseException as nested_exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", nested_exc)
+            except BaseException as cascade_exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # The first failure is already the semantic cause.  A traced
                 # cleanup gate is secondary after the nested fallbacks ran.
-                pass
+                logger.debug("suppressed BaseException: %s", cascade_exc)
             raise primary_error.with_traceback(primary_traceback)
 
     def __exit__(self, exc_type: object, _value: object, _traceback: object) -> Literal[False]:
@@ -573,7 +578,7 @@ class _TransactionContext:
             else:
                 assert self._connection is not None
                 self._connection.rollback()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             cleanup_error = exc
             self._manager._mark_fault(exc)
         finally:
@@ -582,28 +587,28 @@ class _TransactionContext:
             # close attempt and two manager-authoritative release attempts.
             try:
                 cleanup_error = self._close_transaction_cursor(cleanup_error)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 cleanup_error = cleanup_error or exc
             finally:
                 try:
                     if self._reservation_context is not None:
                         self._reservation_context.__exit__(None, None, None)
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cleanup_error = cleanup_error or exc
                 finally:
                     try:
                         cleanup_error = self._close_transaction_cursor(cleanup_error)
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
                     finally:
                         try:
                             self._release_transaction_fallback()
-                        except BaseException as exc:
+                        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                             cleanup_error = cleanup_error or exc
                         finally:
                             try:
                                 self._release_transaction_fallback()
-                            except BaseException as exc:
+                            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                                 cleanup_error = cleanup_error or exc
         if primary_error is None and cleanup_error is not None:
             raise cleanup_error
@@ -615,7 +620,7 @@ class _TransactionContext:
             if cursor is not None and id(cursor) not in self._closed_cursor_ids:
                 cursor.close()
                 self._closed_cursor_ids.add(id(cursor))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             self._manager._mark_fault(exc)
 
     def _release_pre_enter_fallback(
@@ -636,7 +641,7 @@ class _TransactionContext:
                 cursor = self._cursor
                 cursor.close()
                 self._cursor = None
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             self._manager._mark_fault(exc)
             return cleanup_error or exc
         return cleanup_error
@@ -721,10 +726,10 @@ class PostgresPoolManager:
         if callback is not None:
             try:
                 callback(error)
-            except BaseException:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # A resource callback only mirrors an already-terminal pool
                 # fault.  It must not replace the primary database failure.
-                pass
+                logger.debug("suppressed BaseException: %s", exc)
 
     @property
     def business_lease_count(self) -> int:
@@ -785,7 +790,7 @@ class PostgresPoolManager:
         close_error: BaseException | None = None
         try:
             self._pool.closeall()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             close_error = exc
             self._mark_fault(exc)
             with self._condition:
@@ -799,7 +804,7 @@ class PostgresPoolManager:
         if self._on_closed is not None:
             try:
                 self._on_closed(close_error)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 self._mark_fault(exc)
                 if close_error is None:
                     close_error = exc
@@ -869,7 +874,7 @@ class PostgresPoolManager:
             if cursor is not None:
                 try:
                     cursor.close()
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     self._mark_fault(exc)
                     cleanup_error = exc
             if primary_error is None and cleanup_error is not None:
@@ -1013,8 +1018,8 @@ class PostgresPoolManager:
                 if record.state is _LeaseState.QUEUED:
                     try:
                         self._borrow_queue.remove(token)
-                    except ValueError:
-                        pass
+                    except ValueError as exc:
+                        logger.debug("suppressed ValueError in cleanup/degradation path: %s", exc)
                     if record.connection is None:
                         record.state = _LeaseState.RETURNED
                         self._notify_locked(suppress=True)
@@ -1051,13 +1056,13 @@ class PostgresPoolManager:
             if rollback:
                 try:
                     connection.rollback()
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     self._mark_fault(exc)
             # Keep the attempt flag and driver call on one trace line.  A
             # trace/cancellation before this line remains retryable; once the
             # call has begun, even a driver error is at-most-once and logical
             # ownership is cleared in ``finally``.
-            put_attempted = True; self._pool.putconn(connection)  # noqa: E702
+            put_attempted = True; self._pool.putconn(connection)  # noqa: E702 - one trace line: at-most-once atomicity
         except BaseException as exc:
             self._mark_fault(exc)
             raise
@@ -1083,8 +1088,8 @@ class PostgresPoolManager:
             # driver failure above remains the primary exception.
             try:
                 self._finalize_if_idle()
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
 
     def _return_once(self, connection: Any) -> None:
         with self._condition:
@@ -1097,7 +1102,7 @@ class PostgresPoolManager:
         return_error: BaseException | None = None
         try:
             self._pool.putconn(connection)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             self._mark_fault(exc)
             return_error = exc
         finally:
@@ -1131,14 +1136,14 @@ class PostgresPoolManager:
             if not state.rolled_back:
                 connection.rollback()
                 state.rolled_back = True
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             self._mark_fault(exc)
             cleanup_error = exc
         try:
             if cursor is not None and not state.cursor_closed:
                 cursor.close()
                 state.cursor_closed = True
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             self._mark_fault(exc)
             cleanup_error = cleanup_error or exc
         return cleanup_error
@@ -1157,7 +1162,7 @@ class PostgresPoolManager:
                 cleanup_error = self._cleanup_reservation_local_resources(
                     connection, cursor, state
                 )
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 cleanup_error = exc
             finally:
                 try:
@@ -1165,19 +1170,19 @@ class PostgresPoolManager:
                         connection, cursor, state
                     )
                     cleanup_error = cleanup_error or retry_error
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cleanup_error = cleanup_error or exc
                 finally:
                     try:
                         reservation.release()
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
                     finally:
                         try:
                             reservation.release()
-                        except BaseException as exc:
+                        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                             cleanup_error = cleanup_error or exc
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             cleanup_error = cleanup_error or exc
         return cleanup_error
 
@@ -1190,7 +1195,7 @@ class PostgresPoolManager:
                 bind_scope(cursor, context)
                 wrapped = PooledReadCursor(self, reservation._token, connection, cursor)
                 reservation.publish(connection)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 primary_error = exc
                 primary_traceback = exc.__traceback__
                 cleanup_state = _ReservationCleanupState()
@@ -1203,11 +1208,11 @@ class PostgresPoolManager:
                         self._cleanup_reservation_with_fallback(
                             reservation, connection, cursor, cleanup_state
                         )
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     # This is a secondary cleanup interruption.  The outer
                     # reservation context has an additional idempotent return
                     # path, and the failed bind/scope remains primary.
-                    pass
+                    logger.debug("suppressed BaseException: %s", exc)
                 raise primary_error.with_traceback(primary_traceback)
             return wrapped
 
@@ -1233,7 +1238,7 @@ class PostgresPoolManager:
                     cleanup_error = self._cleanup_reservation_with_fallback(
                         reservation, connection, cursor, cleanup_state
                     )
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cleanup_error = exc
                 finally:
                     try:
@@ -1241,7 +1246,7 @@ class PostgresPoolManager:
                             reservation, connection, cursor, cleanup_state
                         )
                         cleanup_error = cleanup_error or retry_error
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
                 if primary_error is None and cleanup_error is not None:
                     raise cleanup_error
@@ -1276,7 +1281,7 @@ class PostgresPoolManager:
                 ):
                     raise MigrationIntegrityError("PostgreSQL application principal is invalid")
                 return PostgresApplicationPrincipal(role=row[0], session_role=row[1])
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 primary_error = exc
                 raise MigrationIntegrityError(
                     "PostgreSQL application principal is invalid"
@@ -1286,7 +1291,7 @@ class PostgresPoolManager:
                     cleanup_error = self._cleanup_reservation_with_fallback(
                         reservation, connection, cursor, cleanup_state
                     )
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cleanup_error = exc
                 finally:
                     try:
@@ -1294,7 +1299,7 @@ class PostgresPoolManager:
                             reservation, connection, cursor, cleanup_state
                         )
                         cleanup_error = cleanup_error or retry_error
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
                 if primary_error is None and cleanup_error is not None:
                     raise RuntimeError("PostgreSQL application principal cleanup failed") from None
@@ -1326,14 +1331,14 @@ class PostgresPoolManager:
             try:
                 cursor = connection.cursor()
                 self._probe_application_access(cursor, target, profile, vector_dim)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 primary_error = exc
             finally:
                 try:
                     cleanup_error = self._cleanup_reservation_with_fallback(
                         reservation, connection, cursor, cleanup_state
                     )
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cleanup_error = exc
                 finally:
                     try:
@@ -1341,7 +1346,7 @@ class PostgresPoolManager:
                             reservation, connection, cursor, cleanup_state
                         )
                         cleanup_error = cleanup_error or retry_error
-                    except BaseException as exc:
+                    except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                         cleanup_error = cleanup_error or exc
         if primary_error is not None:
             # Do not disclose driver SQL, DSNs or random probe principals.
@@ -1700,7 +1705,7 @@ class PostgresPoolManager:
                         '{"agent_id":"' + agent + '","session_id":"' + session + '"}',
                     ),
                 )
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 rejected = True
             finally:
                 cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_feedback_rls")
@@ -1736,7 +1741,7 @@ class PostgresPoolManager:
                     insert_function,
                     (metadata[0], function_a + "-rls", payload, *metadata[1:]),
                 )
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 rejected = True
             finally:
                 cursor.execute("ROLLBACK TO SAVEPOINT memplex_probe_function_rls")
@@ -1890,7 +1895,7 @@ class PostgresPoolManager:
 # (and monkeypatches of ``pool.PostgresStorageResources`` /
 # ``pool.PostgresPoolManager``) keep working. Placed last so every symbol
 # ``postgres_resources`` needs from this module is already defined above.
-from memplex.storage.postgres_resources import (  # noqa: E402,F401
+from memplex.storage.postgres_resources import (
     PostgresStorageResources,
     PostgresSyncStorageResources,
 )

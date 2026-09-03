@@ -22,7 +22,6 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 
 @dataclass
@@ -32,7 +31,7 @@ class WorkingMemoryEntry:
     content: str
     category: str = "note"
     pinned: bool = False
-    expires_at: Optional[float] = None  # monotonic deadline; None = pinned-only
+    expires_at: float | None = None  # monotonic deadline; None = pinned-only
     created_at: float = field(default_factory=time.monotonic)
 
 
@@ -51,12 +50,12 @@ class WorkingMemory:
         self._max_entries = max(1, int(max_entries))
         self._default_ttl = float(default_ttl_seconds)
         self._lock = threading.Lock()
-        self._entries: Dict[str, WorkingMemoryEntry] = {}
+        self._entries: dict[str, WorkingMemoryEntry] = {}
 
     # ── Capture ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _scoped_key(key: str, scope: Optional[str]) -> str:
+    def _scoped_key(key: str, scope: str | None) -> str:
         """Namespacer: ``scope:key`` (or bare key when scope is None)."""
         if not scope:
             return key
@@ -68,9 +67,9 @@ class WorkingMemory:
         content: str,
         *,
         category: str = "note",
-        ttl_seconds: Optional[float] = None,
+        ttl_seconds: float | None = None,
         pinned: bool = False,
-        scope: Optional[str] = None,
+        scope: str | None = None,
     ) -> None:
         """Add or refresh one entry; evicts the oldest unpinned entry at cap.
 
@@ -107,7 +106,7 @@ class WorkingMemory:
             entry.expires_at = None
             return True
 
-    def unpin(self, key: str, ttl_seconds: Optional[float] = None) -> bool:
+    def unpin(self, key: str, ttl_seconds: float | None = None) -> bool:
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -137,7 +136,7 @@ class WorkingMemory:
         for key in expired:
             self._entries.pop(key, None)
 
-    def recall_context(self, limit: int = 8, scope: Optional[str] = None) -> List[str]:
+    def recall_context(self, limit: int = 8, scope: str | None = None) -> list[str]:
         """Live entries for *scope*, most-recent first, as context lines.
 
         Scope-filtered: a recall under scope A never returns entries pinned

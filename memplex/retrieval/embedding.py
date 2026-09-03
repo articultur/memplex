@@ -24,7 +24,7 @@ import logging
 import os
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 from memplex.models import Function, RefreshResult
 
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Type alias for embedding vectors
-Vector = List[float]
+Vector = list[float]
 
 
 # ── Embedding strategies ────────────────────────────────────────────
@@ -66,7 +66,7 @@ class _SentenceTransformerEmbedder:
     def encode(self, text: str) -> Vector:
         return self._model.encode([text])[0].tolist()
 
-    def encode_batch(self, texts: List[str], batch_size: int = 32) -> List[Vector]:
+    def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
         embeddings = self._model.encode(texts, batch_size=batch_size)
         return [e.tolist() for e in embeddings]
 
@@ -130,7 +130,7 @@ class _SimpleTFIDFEmbedder:
             vec = [x / norm for x in vec]
         return vec
 
-    def encode_batch(self, texts: List[str], batch_size: int = 32) -> List[Vector]:
+    def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
         return [self.encode(t) for t in texts]
 
 
@@ -141,7 +141,7 @@ class _LocalONNXEmbedder:
         self,
         model_path: str,
         dimension: int,
-        tokenizer_path: Optional[str] = None,
+        tokenizer_path: str | None = None,
         max_length: int = 256,
     ) -> None:
         import numpy as np
@@ -176,7 +176,7 @@ class _LocalONNXEmbedder:
         outputs = self._session.run(None, inputs)
         return self._normalize_output(outputs[0], inputs.get("attention_mask"))
 
-    def encode_batch(self, texts: List[str], batch_size: int = 32) -> List[Vector]:
+    def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
         return [self.encode(text) for text in texts]
 
     def _encode_inputs(self, text: str) -> dict:
@@ -262,11 +262,11 @@ class EmbeddingService:
         layer).
     """
 
-    _OFFLINE_MODELS = {"default", "tfidf", "offline", "lite", "local"}
+    _OFFLINE_MODELS: ClassVar[set[str]] = {"default", "tfidf", "offline", "lite", "local"}
     _HF_PREFIX = "hf:"
-    _LOCAL_ONNX_MODELS = {"local-onnx", "onnx"}
+    _LOCAL_ONNX_MODELS: ClassVar[set[str]] = {"local-onnx", "onnx"}
     _LOCAL_ONNX_PREFIXES = ("local-onnx:", "onnx:")
-    _MODEL_MAP = {
+    _MODEL_MAP: ClassVar[dict[str, str]] = {
         "minilm": "sentence-transformers/all-MiniLM-L6-v2",
         "bge-m3": "BAAI/bge-m3",
         "bge-small": "BAAI/bge-small-en-v1.5",
@@ -276,8 +276,8 @@ class EmbeddingService:
         self,
         model: str = "default",
         dimension: int = 384,
-        storage: Optional["MemoryStore"] = None,
-        vector_store: Optional["VectorStoreProtocol"] = None,
+        storage: MemoryStore | None = None,
+        vector_store: VectorStoreProtocol | None = None,
         batch_size: int = 32,
         contextual_retrieval: bool = True,
     ) -> None:
@@ -307,7 +307,7 @@ class EmbeddingService:
             return encode_query(text)
         return self._embedder.encode(text)
 
-    def embed_batch(self, texts: List[str], batch_size: Optional[int] = None) -> List[Vector]:
+    def embed_batch(self, texts: list[str], batch_size: int | None = None) -> list[Vector]:
         """Batch generate embedding vectors.
 
         *batch_size* defaults to the service-level default configured at
@@ -320,8 +320,8 @@ class EmbeddingService:
     def embed_function(
         self,
         func: Function,
-        source: Optional[object] = None,
-        use_contextual: Optional[bool] = None,
+        source: object | None = None,
+        use_contextual: bool | None = None,
     ) -> Vector:
         """Generate an embedding for a Function.
 
@@ -461,7 +461,7 @@ class EmbeddingService:
         except ImportError:
             logger.info("sentence-transformers not available, falling back to TF-IDF embedder")
             return _SimpleTFIDFEmbedder(dimension=dimension)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning(
                 "Failed to load sentence-transformers model %s: %s. "
                 "Falling back to TF-IDF embedder",

@@ -33,7 +33,8 @@ def _run_memplex(args: list[str], *, timeout: int = 30, env: dict | None = None)
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=env,
+        env=env,check=False
+    
     )
 
 
@@ -156,7 +157,8 @@ def test_codex_native_plugin_mcp_initializes_over_stdio(tmp_path):
             "MEMPLEX_PYTHON": sys.executable,
             "MEMPLEX_STORAGE_BACKEND": "lite",
             "MEMPLEX_STORAGE_PATH": str(tmp_path / "memory.json"),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -229,7 +231,8 @@ def test_codex_native_mcp_inherits_installed_identity(tmp_path):
             "MEMPLEX_PYTHON": sys.executable,
             "MEMPLEX_STORAGE_BACKEND": "lite",
             "MEMPLEX_STORAGE_PATH": str(storage_path),
-        },
+        },check=False
+    
     )
     assert result.returncode == 0, result.stderr
 
@@ -386,7 +389,8 @@ def test_mcp_hot_path_initializes_over_stdio(tmp_path):
             "MEMPLEX_PYTHON": sys.executable,
             "MEMPLEX_STORAGE_BACKEND": "lite",
             "MEMPLEX_CONFIG": str(cfg_path),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -488,7 +492,8 @@ def test_claude_hook_manifest_commands_are_implemented():
             capture_output=True,
             text=True,
             timeout=30,
-            env={"MEMPLEX_PROJECT_ROOT": str(PROJECT_ROOT)},
+            env={"MEMPLEX_PROJECT_ROOT": str(PROJECT_ROOT)},check=False
+        
         )
         assert result.returncode == 0, result.stderr
 
@@ -545,7 +550,8 @@ def test_claude_hook_manifest_commands_use_configured_python(tmp_path):
             capture_output=True,
             text=True,
             timeout=60,
-            env=env,
+            env=env,check=False
+        
         )
         assert result.returncode == 0, f"{event}: {result.stderr}"
 
@@ -612,12 +618,12 @@ def test_plugin_launchers_use_persisted_interpreter_and_fail_closed(tmp_path, la
         command.append("setup")
     else:
         command.append("setup")
-    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env, check=False)
     assert result.returncode == 0, result.stderr
     assert marker.read_text(encoding="utf-8") == "used"
 
     recorded_python.unlink()
-    failed = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env)
+    failed = subprocess.run(command, capture_output=True, text=True, timeout=30, env=base_env, check=False)
     assert failed.returncode != 0
     assert "recorded Python interpreter is unavailable" in failed.stderr
 
@@ -656,7 +662,8 @@ def test_plugin_launchers_reject_missing_or_weak_installation_identity(
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "PATH": "/usr/bin:/bin", root_variable: str(plugin_root)},
+        env={**os.environ, "PATH": "/usr/bin:/bin", root_variable: str(plugin_root)},check=False
+    
     )
 
     assert result.returncode != 0
@@ -722,7 +729,8 @@ def test_plugin_launchers_bind_runtime_to_identity_host_root(
             root_variable: str(plugin_root),
             host_variable: str(tmp_path / "polluted-host-root"),
             "MEMPLEX_TEST_HOST_ROOT": str(observed_root),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -788,7 +796,8 @@ def test_plugin_launchers_reject_identity_for_another_host_root(
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, root_variable: str(plugin_root)},
+        env={**os.environ, root_variable: str(plugin_root)},check=False
+    
     )
 
     assert result.returncode != 0
@@ -865,7 +874,8 @@ def test_claude_real_cli_strictly_validates_installed_plugin(tmp_path):
             **os.environ,
             "HOME": str(tmp_path / "home"),
             "CLAUDE_CONFIG_DIR": str(config_root),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, (result.stdout, result.stderr)
@@ -880,7 +890,8 @@ def test_claude_real_cli_strictly_validates_installed_plugin(tmp_path):
             **os.environ,
             "HOME": str(tmp_path / "home"),
             "CLAUDE_CONFIG_DIR": str(config_root),
-        },
+        },check=False
+    
     )
 
     assert listed.returncode == 0, (listed.stdout, listed.stderr)

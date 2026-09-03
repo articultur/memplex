@@ -1,7 +1,7 @@
 """Map Vision LLM components to L2 Function structures."""
 
 import re
-from typing import List, Optional
+from typing import ClassVar
 
 from memplex.models.memory import Function
 from memplex.models.misc import FieldValue
@@ -10,7 +10,7 @@ from memplex.models.misc import FieldValue
 class VisionMapper:
     """Converts Vision LLM output to L2 Function entities."""
 
-    COMPONENT_TYPE_MAP = {
+    COMPONENT_TYPE_MAP: ClassVar[dict[str, str]] = {
         "button": "button",
         "nav": "navigation",
         "navbar": "navigation",
@@ -41,7 +41,7 @@ class VisionMapper:
         "tab": "tab",
     }
 
-    def vision_to_functions(self, vision_result: dict, source_id: str = "vision") -> List[Function]:
+    def vision_to_functions(self, vision_result: dict, source_id: str = "vision") -> list[Function]:
         """Convert Vision LLM components to L2 Function objects."""
         components = vision_result.get("components", [])
         functions = []
@@ -55,7 +55,7 @@ class VisionMapper:
 
     def _component_to_function(
         self, component: dict, index: int, source_id: str, vision_result: dict
-    ) -> Optional[Function]:
+    ) -> Function | None:
         """Convert a single Vision component to Function."""
         comp_type = component.get("type", "unknown")
         label = component.get("label", "")

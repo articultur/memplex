@@ -17,9 +17,10 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
@@ -165,10 +166,10 @@ class MemplexMemoryProvider(MemoryProvider):
 
     def __init__(
         self,
-        identity: Optional[Dict[str, Any]] = None,
+        identity: dict[str, Any] | None = None,
         *,
-        service_factory: Optional[Callable[[], MemplexService]] = None,
-        runtime_factory: Optional[Callable[..., AgentMemoryRuntime]] = None,
+        service_factory: Callable[[], MemplexService] | None = None,
+        runtime_factory: Callable[..., AgentMemoryRuntime] | None = None,
     ) -> None:
         self._identity = dict(identity or {})
         self._service_factory = service_factory or self._create_service
@@ -208,10 +209,10 @@ class MemplexMemoryProvider(MemoryProvider):
         """Availability is local-only; never perform network I/O here."""
 
         try:
-            import memplex  # noqa: F401
+            import memplex
 
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort fallback value
             return False
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
@@ -287,7 +288,7 @@ class MemplexMemoryProvider(MemoryProvider):
         self._initialized = True
         self._ensure_worker()
 
-    def get_config_schema(self) -> List[Dict[str, Any]]:
+    def get_config_schema(self) -> list[dict[str, Any]]:
         return [
             {
                 "key": "user_id",
@@ -303,7 +304,7 @@ class MemplexMemoryProvider(MemoryProvider):
             },
         ]
 
-    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         path = Path(hermes_home).expanduser().resolve(strict=False) / "memplex.json"
         existing = _read_json(path)
         managed = existing.get("managed") or self._identity.get("managed")
@@ -329,16 +330,16 @@ class MemplexMemoryProvider(MemoryProvider):
             record_runtime_failure(
                 self._runtime_status_path(), agent="hermes", operation=operation, error=error
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
+            logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
     def _clear_runtime_status(self, operation: str) -> None:
         try:
             clear_runtime_status_on_success(
                 self._runtime_status_path(), agent="hermes", operation=operation, completed=True
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
+            logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         cleaned = _clean_text(query)
@@ -366,7 +367,7 @@ class MemplexMemoryProvider(MemoryProvider):
         assistant_content: str,
         *,
         session_id: str = "",
-        messages: Optional[List[Dict[str, Any]]] = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> None:
         if not self._writes_enabled():
             return
@@ -384,12 +385,12 @@ class MemplexMemoryProvider(MemoryProvider):
         )
         self._queue_capture(user, assistant, selected, metadata)
 
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         self._flush_or_warn("pre-compress")
         captured = self._capture_last_turn(messages, "on_pre_compress")
         return "Memplex preserved the latest completed turn." if captured else ""
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         self._flush_or_warn("session-end")
         self._capture_last_turn(messages, "on_session_end")
         self._flush_or_warn("session-end-final")
@@ -421,7 +422,7 @@ class MemplexMemoryProvider(MemoryProvider):
         action: str,
         target: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         cleaned = _clean_text(content)
         if action not in {"add", "replace"} or not cleaned or not self._writes_enabled():
@@ -464,7 +465,7 @@ class MemplexMemoryProvider(MemoryProvider):
             ),
         )
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             {
                 "name": "memplex_search",
@@ -497,7 +498,7 @@ class MemplexMemoryProvider(MemoryProvider):
             },
         ]
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         if tool_name == "memplex_search":
             runtime = self._ensure_runtime()
             query = _clean_text(args.get("query"))
@@ -533,7 +534,7 @@ class MemplexMemoryProvider(MemoryProvider):
             return json.dumps({"status": "stored"}, ensure_ascii=False)
         raise NotImplementedError(f"Unknown Memplex tool: {tool_name}")
 
-    def backup_paths(self) -> List[str]:
+    def backup_paths(self) -> list[str]:
         path = self._config.get("storage_path") or os.environ.get("MEMPLEX_STORAGE_PATH")
         return [str(Path(path).expanduser().resolve(strict=False))] if path else []
 
@@ -551,7 +552,7 @@ class MemplexMemoryProvider(MemoryProvider):
         if self._service is not None and self._owns_service:
             try:
                 self._service.stop()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.warning("Memplex service shutdown failed: %s", exc)
         self._service = None
         self._owns_service = False
@@ -668,7 +669,7 @@ class MemplexMemoryProvider(MemoryProvider):
                 elif item.kind == "prefetch":
                     self._runtime_for_session(item.session_id).prefetch(item.query)
                     self._clear_runtime_status("prefetch")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
                 item.error = exc
                 self._record_runtime_failure(
                     "capture" if item.kind == "capture" else "prefetch", exc
@@ -720,7 +721,7 @@ class MemplexMemoryProvider(MemoryProvider):
             self._mark_captured(turn_key)
             self._clear_runtime_status("capture")
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             self._record_runtime_failure("capture", exc)
             with self._capture_lock:
                 self._queued_turns.discard(turn_key)
@@ -779,7 +780,7 @@ class MemplexMemoryProvider(MemoryProvider):
             return 10.0
 
 
-def register(ctx: Any, identity: Optional[Dict[str, Any]] = None) -> None:
+def register(ctx: Any, identity: dict[str, Any] | None = None) -> None:
     """Register the provider through Hermes' official plugin context."""
 
     ctx.register_memory_provider(MemplexMemoryProvider(identity=identity))

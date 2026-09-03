@@ -6,23 +6,13 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import Fact, SourceType  # noqa: E402
-from memplex.service import MemplexService  # noqa: E402
+from memplex.config import MemplexConfig
+from memplex.models import Fact, SourceType
+from memplex.service import MemplexService
 
 
 def _fact(fid, subject, predicate, object_, updated_at, **kw):
-    base = dict(
-        id=fid,
-        tenant_id="t1",
-        owner_subject_id="alice",
-        workspace_id="w1",
-        subject=subject,
-        predicate=predicate,
-        object_=object_,
-        updated_at=updated_at,
-        valid_from=updated_at,
-    )
+    base = {"id": fid, "tenant_id": "t1", "owner_subject_id": "alice", "workspace_id": "w1", "subject": subject, "predicate": predicate, "object_": object_, "updated_at": updated_at, "valid_from": updated_at}
     base.update(kw)
     return Fact(**base)
 

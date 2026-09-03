@@ -6,16 +6,16 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import (  # noqa: E402
+from memplex.config import MemplexConfig
+from memplex.models import (
     Fact,
     Function,
     GraphData,
     GraphEdge,
     SourceType,
 )
-from memplex.service import MemplexService  # noqa: E402
-from memplex.sleep_time import SleepTimeAgent  # noqa: E402
+from memplex.service import MemplexService
+from memplex.sleep_time import SleepTimeAgent
 
 
 def _service(tmp_path, *, sleep_enabled=False, working_memory=True):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING
 
 from memplex.models import (
     GraphData,
@@ -39,7 +39,7 @@ class Community:
     """A detected community of function nodes."""
 
     community_id: int
-    node_ids: List[str] = field(default_factory=list)
+    node_ids: list[str] = field(default_factory=list)
     theme: str = ""
 
     @property
@@ -70,8 +70,8 @@ class GraphCommunityDetector:
     def detect_communities(
         self,
         graph: GraphData,
-        min_size: Optional[int] = None,
-    ) -> List[Community]:
+        min_size: int | None = None,
+    ) -> list[Community]:
         """Detect communities in the graph.
 
         Parameters
@@ -108,11 +108,11 @@ class GraphCommunityDetector:
             return self._fallback_domain_grouping(graph, threshold)
 
         partition = community_louvain.best_partition(G)
-        groups: Dict[int, List[str]] = {}
+        groups: dict[int, list[str]] = {}
         for node_id, comm_id in partition.items():
             groups.setdefault(comm_id, []).append(node_id)
 
-        communities: List[Community] = []
+        communities: list[Community] = []
         for comm_id, node_ids in groups.items():
             if len(node_ids) >= threshold:
                 communities.append(
@@ -126,9 +126,9 @@ class GraphCommunityDetector:
 
     def generate_concept_pages(
         self,
-        communities: List[Community],
+        communities: list[Community],
         store: MemoryStore,
-    ) -> List[WikiPage]:
+    ) -> list[WikiPage]:
         """Generate concept pages for detected communities.
 
         Each community gets a concept page listing its member functions.
@@ -144,7 +144,7 @@ class GraphCommunityDetector:
         -------
         List of WikiPage objects for the communities.
         """
-        pages: List[WikiPage] = []
+        pages: list[WikiPage] = []
 
         for community in communities:
             lines: list[str] = [
@@ -198,15 +198,15 @@ class GraphCommunityDetector:
         self,
         graph: GraphData,
         min_size: int,
-    ) -> List[Community]:
+    ) -> list[Community]:
         """Degraded community detection: group nodes by domain field."""
-        groups: Dict[str, List[str]] = {}
+        groups: dict[str, list[str]] = {}
         for node in graph.nodes:
             node_id = node.id if hasattr(node, "id") else str(node)
             domain = getattr(node, "domain", None) or "uncategorized"
             groups.setdefault(domain, []).append(node_id)
 
-        communities: List[Community] = []
+        communities: list[Community] = []
         for idx, (domain, node_ids) in enumerate(sorted(groups.items())):
             if len(node_ids) >= min_size:
                 communities.append(

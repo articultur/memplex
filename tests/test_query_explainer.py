@@ -9,7 +9,7 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.query_explainer import build_query_explanation  # noqa: E402
+from memplex.query_explainer import build_query_explanation
 
 # ── Base shape ────────────────────────────────────────────────────────
 

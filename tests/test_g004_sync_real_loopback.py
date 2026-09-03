@@ -21,7 +21,6 @@ from tests.g004_cli_runner import (
     wait_for_http_ready,
 )
 
-
 MEMPLEX = ".venv/bin/memplex"
 
 

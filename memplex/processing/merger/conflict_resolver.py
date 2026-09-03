@@ -7,7 +7,7 @@ Only when user manually resolves does one value become the "final" value.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -16,9 +16,9 @@ class Conflict:
     type: str  # field_value, missing_field, etc.
     severity: str  # high, medium, low
     field: str
-    values: List[Dict]  # [{"source": ..., "content": ..., "authority": ...}]
+    values: list[dict]  # [{"source": ..., "content": ..., "authority": ...}]
     resolved: bool = False
-    final_value: Optional[str] = None
+    final_value: str | None = None
     needs_human: bool = True
 
 
@@ -30,12 +30,12 @@ class ConflictResolver:
     All conflicting values are preserved, needs_human=True by default.
     """
 
-    def detect_conflicts(self, functions: List) -> List[Conflict]:
+    def detect_conflicts(self, functions: list) -> list[Conflict]:
         """Detect conflicts between functions."""
         conflicts = []
         conflict_id = 1
 
-        func_map: Dict[str, List] = {}
+        func_map: dict[str, list] = {}
         for func in functions:
             key = func.name_normalized
             if key not in func_map:
@@ -55,48 +55,47 @@ class ConflictResolver:
 
         return conflicts
 
-    def _compare_functions(self, func1: Any, func2: Any, conflict_id: int) -> Optional[Conflict]:
+    def _compare_functions(self, func1: Any, func2: Any, conflict_id: int) -> Conflict | None:
         """Compare two functions for conflicts."""
         # Compare conditions (adapted for List[FieldValue])
         cond1_descs = [fv.desc for fv in func1.condition] if func1.condition else []
         cond2_descs = [fv.desc for fv in func2.condition] if func2.condition else []
 
-        if cond1_descs and cond2_descs:
-            if cond1_descs != cond2_descs:
-                auth1 = func1.source_authority or "unknown"
-                auth2 = func2.source_authority or "unknown"
-                return Conflict(
-                    id=f"conflict_{conflict_id:03d}",
-                    type="field_value",
-                    severity="medium",
-                    field="condition",
-                    values=[
-                        {
-                            "source": func1.source_paragraphs[0]
-                            if func1.source_paragraphs
-                            else "unknown",
-                            "content": ", ".join(cond1_descs),
-                            "authority": auth1,
-                        },
-                        {
-                            "source": func2.source_paragraphs[0]
-                            if func2.source_paragraphs
-                            else "unknown",
-                            "content": ", ".join(cond2_descs),
-                            "authority": auth2,
-                        },
-                    ],
-                    needs_human=True,
-                )
+        if cond1_descs and cond2_descs and cond1_descs != cond2_descs:
+            auth1 = func1.source_authority or "unknown"
+            auth2 = func2.source_authority or "unknown"
+            return Conflict(
+                id=f"conflict_{conflict_id:03d}",
+                type="field_value",
+                severity="medium",
+                field="condition",
+                values=[
+                    {
+                        "source": func1.source_paragraphs[0]
+                        if func1.source_paragraphs
+                        else "unknown",
+                        "content": ", ".join(cond1_descs),
+                        "authority": auth1,
+                    },
+                    {
+                        "source": func2.source_paragraphs[0]
+                        if func2.source_paragraphs
+                        else "unknown",
+                        "content": ", ".join(cond2_descs),
+                        "authority": auth2,
+                    },
+                ],
+                needs_human=True,
+            )
         return None
 
-    def get_all_values(self, conflict: Conflict) -> List[str]:
+    def get_all_values(self, conflict: Conflict) -> list[str]:
         """Get all conflicting values."""
         if not conflict.values:
             return []
         return [v["content"] for v in conflict.values]
 
-    def mark_for_human_review(self, conflict: Conflict, suggestion: Optional[str] = None) -> None:
+    def mark_for_human_review(self, conflict: Conflict, suggestion: str | None = None) -> None:
         """Mark conflict for human review."""
         conflict.needs_human = True
         conflict.resolved = False
@@ -109,7 +108,7 @@ class ConflictResolver:
         conflict.resolved = True
         conflict.needs_human = False
 
-    def resolve_conflicts(self, conflicts: List[Conflict]) -> tuple:
+    def resolve_conflicts(self, conflicts: list[Conflict]) -> tuple:
         """Process conflicts, marking all for human review."""
         unresolved = []
         resolved = []

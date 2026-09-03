@@ -11,10 +11,11 @@ import math
 import re
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional, Type
+from datetime import UTC, datetime, timezone
+from typing import Any, ClassVar, Optional
 
 from memplex.models.source import SourceDocument
 from memplex.service import MemplexService
@@ -35,13 +36,13 @@ class LatencyStats:
     """
 
     def __init__(self) -> None:
-        self._samples: List[float] = []
+        self._samples: list[float] = []
 
     def add(self, elapsed_ms: float) -> None:
         """Record one latency sample (milliseconds, float)."""
         self._samples.append(float(elapsed_ms))
 
-    def extend(self, other: "LatencyStats") -> None:
+    def extend(self, other: LatencyStats) -> None:
         """Merge another collector's samples into this one."""
         self._samples.extend(other._samples)
 
@@ -141,9 +142,9 @@ class BenchmarkSample:
 
     id: str
     query: str
-    expected_ids: List[str] = field(default_factory=list)
-    expected_answer: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    expected_ids: list[str] = field(default_factory=list)
+    expected_answer: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -175,17 +176,17 @@ class BenchmarkResult:
     value: float
     latency_ms: float
     samples: int
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    latency_p50_ms: Optional[float] = None
-    latency_p99_ms: Optional[float] = None
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"))
+    latency_p50_ms: float | None = None
+    latency_p99_ms: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for JSON serialization.
 
         Percentile fields are omitted when unset so older result rows keep
         their exact key set (the evidence verifier enforces it).
         """
-        row: Dict[str, Any] = {
+        row: dict[str, Any] = {
             "benchmark": self.name,
             "dataset": self.dataset,
             "metric": self.metric,
@@ -213,7 +214,7 @@ class BenchmarkSourceDocument(SourceDocument):
     ``BenchmarkEvaluator._seed_memories`` alongside the document content.
     """
 
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class EvaluationDataset(ABC):
@@ -225,7 +226,7 @@ class EvaluationDataset(ABC):
     """
 
     @abstractmethod
-    def load(self, path: str) -> List[BenchmarkSample]:
+    def load(self, path: str) -> list[BenchmarkSample]:
         """Load benchmark samples from a file or directory path.
 
         Args:
@@ -260,9 +261,9 @@ class BenchmarkRunner(ABC):
     def run_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int = 10,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run retrieval benchmark.
 
         Args:
@@ -279,8 +280,8 @@ class BenchmarkRunner(ABC):
     def run_generation(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
-    ) -> List[BenchmarkResult]:
+        samples: list[BenchmarkSample],
+    ) -> list[BenchmarkResult]:
         """Run generation benchmark.
 
         Args:
@@ -303,11 +304,10 @@ class BenchmarkRunnerFactory:
     by name for use in BenchmarkEvaluator.
     """
 
-    _runners: Dict[str, Type[BenchmarkRunner]] = {}
-    _datasets: Dict[str, Type[EvaluationDataset]] = {}
-
+    _runners: ClassVar[dict[str, type[BenchmarkRunner]]] = {}
+    _datasets: ClassVar[dict[str, type[EvaluationDataset]]] = {}
     @classmethod
-    def register_runner(cls, name: str, runner_cls: Type[BenchmarkRunner]) -> None:
+    def register_runner(cls, name: str, runner_cls: type[BenchmarkRunner]) -> None:
         """Register a benchmark runner class.
 
         Args:
@@ -320,7 +320,7 @@ class BenchmarkRunnerFactory:
         logger.debug("Registered benchmark runner: %s", name)
 
     @classmethod
-    def register_dataset(cls, name: str, dataset_cls: Type[EvaluationDataset]) -> None:
+    def register_dataset(cls, name: str, dataset_cls: type[EvaluationDataset]) -> None:
         """Register a dataset class.
 
         Args:
@@ -376,12 +376,12 @@ class BenchmarkRunnerFactory:
         return cls._datasets[name]()
 
     @classmethod
-    def available_runners(cls) -> List[str]:
+    def available_runners(cls) -> list[str]:
         """Return list of registered runner names."""
         return list(cls._runners.keys())
 
     @classmethod
-    def available_datasets(cls) -> List[str]:
+    def available_datasets(cls) -> list[str]:
         """Return list of registered dataset names."""
         return list(cls._datasets.keys())
 
@@ -389,8 +389,8 @@ class BenchmarkRunnerFactory:
     def register_benchmark(
         cls,
         name: str,
-        runner_cls: Type[BenchmarkRunner],
-        dataset_cls: Type[EvaluationDataset],
+        runner_cls: type[BenchmarkRunner],
+        dataset_cls: type[EvaluationDataset],
     ) -> None:
         """Register both runner and dataset for a benchmark at once.
 

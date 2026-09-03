@@ -11,9 +11,9 @@ import os
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 
-from memplex.core.handlers.clipboard import ClipboardHandler  # noqa: E402
-from memplex.core.handlers.file_handler import FileHandler  # noqa: E402
-from memplex.core.handlers.url_handler import URLHandler  # noqa: E402
+from memplex.core.handlers.clipboard import ClipboardHandler
+from memplex.core.handlers.file_handler import FileHandler
+from memplex.core.handlers.url_handler import URLHandler
 
 # ── URLHandler.can_handle / resolve_type ─────────────────────────────
 

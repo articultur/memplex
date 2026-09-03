@@ -18,7 +18,7 @@ class DOCXExtractor:
         except ImportError:
             return False
 
-    def extract(self, path: str) -> Optional[str]:
+    def extract(self, path: str) -> str | None:
         """
         Extract text from a DOCX file.
 
@@ -51,7 +51,7 @@ class DOCXExtractor:
 
             return "\n\n".join(paragraphs)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("DOCX extraction failed for %s: %s", path, e)
             return None
 
@@ -100,6 +100,6 @@ class DOCXExtractor:
                 },
             }
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("DOCX full extraction failed for %s: %s", path, e)
             return None

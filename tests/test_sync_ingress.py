@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 import pytest
 
@@ -27,7 +27,7 @@ def _batch(*, payload: dict[str, object] | None = None) -> SyncBatch:
     event = SyncEvent(
         1, event_id, origin, SyncNodeType.FUNCTION, SyncEntityKey.node("gateway-fn"),
         SyncOperation.UPSERT,
-        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), origin, event_id)),
+        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), origin, event_id)),
         SyncScope("tenant-gateway", "owner-gateway", "workspace-gateway", "user", None, None),
         {"value": -4.288043741161912e17} if payload is None else payload,
     )

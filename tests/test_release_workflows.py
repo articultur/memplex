@@ -193,7 +193,8 @@ def test_real_host_bundle_verification_rejects_payload_tampering(tmp_path: Path)
     env = {**os.environ, "RUNNER_TEMP": str(tmp_path), "GITHUB_ENV": str(github_env)}
 
     accepted = subprocess.run(
-        ["bash"], input=step["run"], cwd=ROOT, env=env, capture_output=True, text=True
+        ["bash"], input=step["run"], cwd=ROOT, env=env, capture_output=True, text=True, check=False
+    
     )
     assert accepted.returncode == 0, accepted.stderr
     exported = github_env.read_text(encoding="utf-8")
@@ -202,7 +203,8 @@ def test_real_host_bundle_verification_rejects_payload_tampering(tmp_path: Path)
 
     (bundle / "memplex-3.3.0.tgz").write_bytes(b"Npm payload")
     rejected = subprocess.run(
-        ["bash"], input=step["run"], cwd=ROOT, env=env, capture_output=True, text=True
+        ["bash"], input=step["run"], cwd=ROOT, env=env, capture_output=True, text=True, check=False
+    
     )
     assert rejected.returncode != 0
     assert "digest mismatch" in rejected.stderr

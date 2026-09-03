@@ -20,7 +20,6 @@ import copy
 import hashlib
 import logging
 from enum import Enum
-from typing import Dict, List
 
 from memplex.models import DedupResult, Memory
 from memplex.retrieval.embedding import EmbeddingService
@@ -80,7 +79,7 @@ class MemoryDeduplicator:
 
     # ── Public API ──────────────────────────────────────────────────
 
-    def deduplicate(self, memories: List[Memory]) -> DedupResult:
+    def deduplicate(self, memories: list[Memory]) -> DedupResult:
         """Run dedup and return cleaned memories with statistics."""
         self._original_count = len(memories)
         self._exact_removed = 0
@@ -102,13 +101,13 @@ class MemoryDeduplicator:
 
     # ── Exact dedup ─────────────────────────────────────────────────
 
-    def _exact_dedup(self, memories: List[Memory]) -> List[Memory]:
+    def _exact_dedup(self, memories: list[Memory]) -> list[Memory]:
         """Remove exact duplicates by content hash.
 
         When two memories share the same hash, the *better* one is kept
         (see :meth:`_choose_better`).
         """
-        seen: Dict[str, Memory] = {}
+        seen: dict[str, Memory] = {}
         for m in memories:
             key = self._content_hash(m)
             if key not in seen:
@@ -146,7 +145,7 @@ class MemoryDeduplicator:
 
     # ── Semantic dedup (dispatcher) ─────────────────────────────────
 
-    def _semantic_dedup(self, memories: List[Memory]) -> List[Memory]:
+    def _semantic_dedup(self, memories: list[Memory]) -> list[Memory]:
         """Semantic dedup with automatic backend selection.
 
         Routing:
@@ -159,7 +158,7 @@ class MemoryDeduplicator:
         # 1. FAISS (best, unless disabled via ``use_faiss``)
         if self.use_faiss:
             try:
-                import faiss  # noqa: F401 -- check availability
+                import faiss
 
                 return self._semantic_dedup_faiss(memories)
             except ImportError:
@@ -168,11 +167,11 @@ class MemoryDeduplicator:
         # 2. NumPy (good for medium scale)
         if len(memories) > self.chunk_threshold:
             # Split by domain to keep memory bounded
-            grouped: Dict[str, List[Memory]] = {}
+            grouped: dict[str, list[Memory]] = {}
             for m in memories:
                 domain = getattr(m, "domain", "unknown") or "unknown"
                 grouped.setdefault(domain, []).append(m)
-            result: List[Memory] = []
+            result: list[Memory] = []
             for group in grouped.values():
                 result.extend(self._semantic_dedup_chunk(group))
             return result
@@ -181,7 +180,7 @@ class MemoryDeduplicator:
 
     # ── FAISS ANN dedup ─────────────────────────────────────────────
 
-    def _semantic_dedup_faiss(self, memories: List[Memory]) -> List[Memory]:
+    def _semantic_dedup_faiss(self, memories: list[Memory]) -> list[Memory]:
         """FAISS IndexFlatIP with Union-Find clustering.
 
         Steps:
@@ -230,12 +229,12 @@ class MemoryDeduplicator:
                     union(i, j)
 
         # Collect clusters
-        clusters: Dict[int, List[int]] = {}
+        clusters: dict[int, list[int]] = {}
         for i in range(len(memories)):
             root = find(i)
             clusters.setdefault(root, []).append(i)
 
-        result: List[Memory] = []
+        result: list[Memory] = []
         for idxs in clusters.values():
             cluster_mems = [memories[i] for i in idxs]
             merged = self._merge_memories(cluster_mems)
@@ -246,7 +245,7 @@ class MemoryDeduplicator:
 
     # ── NumPy matrix dedup ──────────────────────────────────────────
 
-    def _semantic_dedup_chunk(self, memories: List[Memory]) -> List[Memory]:
+    def _semantic_dedup_chunk(self, memories: list[Memory]) -> list[Memory]:
         """Dedup one chunk using NumPy cosine similarity matrix."""
         if not memories:
             return []
@@ -265,7 +264,7 @@ class MemoryDeduplicator:
         emb_normalized = emb_matrix / (norms + 1e-8)
         sim_matrix = emb_normalized @ emb_normalized.T
 
-        result: List[Memory] = []
+        result: list[Memory] = []
         used: set = set()
 
         for i, m in enumerate(memories):
@@ -292,10 +291,10 @@ class MemoryDeduplicator:
     # ── Pure-Python fallback dedup ──────────────────────────────────
 
     def _semantic_dedup_fallback(
-        self, memories: List[Memory], embeddings: List[list]
-    ) -> List[Memory]:
+        self, memories: list[Memory], embeddings: list[list]
+    ) -> list[Memory]:
         """O(n^2) pairwise cosine similarity, zero dependencies."""
-        result: List[Memory] = []
+        result: list[Memory] = []
         used: set = set()
 
         for i, m in enumerate(memories):
@@ -321,7 +320,7 @@ class MemoryDeduplicator:
     # ── Merge helpers ───────────────────────────────────────────────
 
     @staticmethod
-    def _merge_memories(memories: List[Memory]) -> Memory:
+    def _merge_memories(memories: list[Memory]) -> Memory:
         """Merge a list of similar memories into one.
 
         Strategy:

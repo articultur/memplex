@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 from memplex.sync_protocol import (
     SyncApplyResult,
@@ -142,7 +143,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
     def _require_datetime(value: object, name: str) -> datetime:
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise TypeError(f"{name} must be an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     def _tenant_id(self) -> str:
         context = self._authorization_context()
@@ -165,7 +166,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
 
     def _build_event(self, tenant_id: str, row: tuple[Any, ...]) -> SyncEvent:
         (
-            stream_seq,
+            _,
             event_id,
             origin_node_id,
             node_type,
@@ -716,7 +717,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
             self._bind_sync_scope(cur, context, remote_id, consumer_id)
             self._cleanup_expired_snapshots(cur, tenant_id)
 
-            if datetime.now(timezone.utc) >= cursor.expires_at:
+            if datetime.now(UTC) >= cursor.expires_at:
                 raise SyncCursorExpired("cursor is expired")
 
             cur.execute(
@@ -736,7 +737,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
                     raise ValueError("cursor remote/consumer binding mismatch")
                 if self._require_datetime(
                     snapshot_row[3], "expires_at"
-                ) <= datetime.now(timezone.utc):
+                ) <= datetime.now(UTC):
                     cur.execute(
                         "DELETE FROM memplex_sync_snapshots "
                         "WHERE tenant_id=%s AND snapshot_id=%s",
@@ -864,7 +865,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
         try:
             parsed = datetime.strptime(
                 created_at, "%Y-%m-%dT%H:%M:%S.%fZ"
-            ).replace(tzinfo=timezone.utc)
+            ).replace(tzinfo=UTC)
         except ValueError as exc:
             raise ValueError("edge created_at must be canonical UTC microseconds") from exc
         if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != created_at:
@@ -1250,7 +1251,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
 
         context = self._authorization_context()
         tenant_id = context.principal.tenant_id
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         lease_until = now + timedelta(seconds=lease_seconds)
 
         with self._pool.transaction(self._store._bind_transaction_scope, context) as (_, cur):
@@ -1369,7 +1370,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
             if lease_owner != delivery.lease_id:
                 raise SyncDeliveryBusy("delivery lease identity mismatch")
             lease_until = self._require_datetime(row[3], "lease_until")
-            if lease_until < datetime.now(timezone.utc):
+            if lease_until < datetime.now(UTC):
                 raise SyncDeliveryBusy("delivery lease is no longer active")
 
             cur.execute(
@@ -1377,7 +1378,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
                 "SET state='delivered', lease_owner=NULL, lease_until=NULL, last_error_code=NULL "
                 "WHERE tenant_id=%s AND target_id=%s AND stream_seq=%s "
                 "AND lease_owner=%s AND state='leased' AND lease_until > %s",
-                (tenant_id, delivery.target_id, stream_seq, delivery.lease_id, datetime.now(timezone.utc)),
+                (tenant_id, delivery.target_id, stream_seq, delivery.lease_id, datetime.now(UTC)),
             )
             if cur.rowcount < 1:
                 raise SyncDeliveryBusy("delivery lease is no longer active")
@@ -1444,7 +1445,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
                     raise SyncDeliveryBusy("delivery lease identity mismatch")
                 if self._require_datetime(
                     row[3], "lease_until"
-                ) < datetime.now(timezone.utc):
+                ) < datetime.now(UTC):
                     raise SyncDeliveryBusy(
                         "delivery lease is no longer active"
                     )
@@ -1506,7 +1507,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
             if lease_owner != delivery.lease_id:
                 raise SyncDeliveryBusy("delivery lease identity mismatch")
             lease_until = self._require_datetime(row[3], "lease_until")
-            if lease_until < datetime.now(timezone.utc):
+            if lease_until < datetime.now(UTC):
                 raise SyncDeliveryBusy("delivery lease is no longer active")
 
             if attempt_count >= self._max_attempts:
@@ -1569,7 +1570,7 @@ class PostgresSyncRepository(AbstractSyncRepository):
             if lease_owner != delivery.lease_id:
                 raise SyncDeliveryBusy("delivery lease identity mismatch")
             lease_until = self._require_datetime(row[3], "lease_until")
-            if lease_until < datetime.now(timezone.utc):
+            if lease_until < datetime.now(UTC):
                 raise SyncDeliveryBusy("delivery lease is no longer active")
             cur.execute(
                 "UPDATE memplex_sync_deliveries "

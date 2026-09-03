@@ -19,7 +19,8 @@ without a capability contributes a zeroed phase, never an exception).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List
+from datetime import UTC
+from typing import TYPE_CHECKING, Any
 
 from memplex import temporal
 
@@ -40,10 +41,10 @@ def _updated(fact: Fact) -> str:
     return getattr(fact, "updated_at", "") or ""
 
 
-def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
+def improve_facts(store: Any, *, now: str | None = None) -> dict[str, Any]:
     """Run the maintenance pass over a store's facts; returns a report."""
     stamp = now or temporal.now_iso()
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "deduplicated": 0,
         "expired": 0,
         "index_rebuilt": False,
@@ -57,14 +58,14 @@ def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
         )
         return report
     try:
-        facts: List = list(list_facts(limit=100000))
-    except Exception as exc:
+        facts: list = list(list_facts(limit=100000))
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.debug("improve: list_facts failed: %s", exc)
         return report
 
     # Phase 1+2 share one pass: bucket currently-valid facts by slot.
-    valid_by_slot: Dict[tuple[str, str], List] = {}
-    expired_updates: List = []
+    valid_by_slot: dict[tuple[str, str], list] = {}
+    expired_updates: list = []
     for fact in facts:
         if getattr(fact, "invalid_at", None) is not None:
             continue  # already superseded — history, not maintenance target
@@ -75,8 +76,8 @@ def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
             try:
                 when = datetime.fromisoformat(shelf)
                 if when.tzinfo is None:
-                    when = when.replace(tzinfo=timezone.utc)
-                if when <= datetime.now(timezone.utc) and not getattr(
+                    when = when.replace(tzinfo=UTC)
+                if when <= datetime.now(UTC) and not getattr(
                     fact, "invalid_at", None
                 ):
                     fact.invalid_at = stamp
@@ -87,8 +88,8 @@ def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
         valid_by_slot.setdefault(_slot(fact), []).append(fact)
 
     # Phase 1: newest per slot survives, the rest are superseded.
-    dedup_updates: List = []
-    for slot, bucket in valid_by_slot.items():
+    dedup_updates: list = []
+    for bucket in valid_by_slot.values():
         if len(bucket) < 2:
             continue
         bucket.sort(key=_updated, reverse=True)
@@ -99,7 +100,7 @@ def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
     for fact in [*dedup_updates, *expired_updates]:
         try:
             add_fact(fact)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("improve: supersede persist failed for %s: %s", fact.id, exc)
     report["deduplicated"] = len(dedup_updates)
     report["expired"] = len(expired_updates)
@@ -110,6 +111,6 @@ def improve_facts(store: Any, *, now: str | None = None) -> Dict[str, Any]:
         try:
             rebuild()
             report["index_rebuilt"] = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("improve: index rebuild failed: %s", exc)
     return report

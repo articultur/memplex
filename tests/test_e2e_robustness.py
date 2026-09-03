@@ -45,7 +45,8 @@ def _run_memplex(
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=env,
+        env=env,check=False
+    
     )
 
 

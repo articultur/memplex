@@ -1,7 +1,6 @@
 """Extract content from Markdown/Text documents."""
 
 import re
-from typing import List
 
 from memplex.models.paragraph import (
     Paragraph,
@@ -61,7 +60,7 @@ class MarkdownExtractor:
 
         return paragraphs
 
-    def _extract_sentences(self, text: str, para_id: str) -> List[Sentence]:
+    def _extract_sentences(self, text: str, para_id: str) -> list[Sentence]:
         """Extract sentences and their roles from text."""
         # Split on sentence-ending punctuation followed by whitespace and uppercase/Chinese
         # Also split on newlines (paragraph breaks)
@@ -165,7 +164,7 @@ class MarkdownExtractor:
 
         return "statement"
 
-    def _extract_relations(self, sentences: List[Sentence]) -> List[SentenceRelation]:
+    def _extract_relations(self, sentences: list[Sentence]) -> list[SentenceRelation]:
         """Extract relations between sentences."""
         relations = []
 

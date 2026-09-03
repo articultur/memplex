@@ -2,13 +2,13 @@
 
 import re
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Tuple
+from typing import Any, ClassVar
 
 
 class EntityAligner:
     """Aligns and merges entities from multiple sources."""
 
-    TERM_EQUIVALENCES = {
+    TERM_EQUIVALENCES: ClassVar[dict[str, list[str]]] = {
         "login": ["登录", "登入", "认证", "authenticate"],
         "logout": ["登出", "退出", "signout"],
         "register": ["注册", "登记", "signup"],
@@ -45,15 +45,14 @@ class EntityAligner:
             return 1.0
 
         for base, equivalents in self.TERM_EQUIVALENCES.items():
-            if norm1 in equivalents or norm1 == base:
-                if norm2 in equivalents or norm2 == base:
-                    return 0.85
+            if norm1 in equivalents or norm1 == base and norm2 in equivalents or norm2 == base:
+                return 0.85
 
         return SequenceMatcher(None, norm1, norm2).ratio()
 
     def find_similar(
-        self, target: str, entities: List, threshold: float = 0.6
-    ) -> List[Tuple[Any, float]]:
+        self, target: str, entities: list, threshold: float = 0.6
+    ) -> list[tuple[Any, float]]:
         """Find entities similar to target."""
         results = []
 
@@ -67,8 +66,8 @@ class EntityAligner:
         return results
 
     def find_merge_candidates(
-        self, entities: List[Dict], threshold: float = 0.9
-    ) -> List[List[Dict]]:
+        self, entities: list[dict], threshold: float = 0.9
+    ) -> list[list[dict]]:
         """
         Find groups of entities that should be merged.
 
@@ -77,7 +76,7 @@ class EntityAligner:
         groups = []
         used = set()
 
-        blocks: Dict[str, List[Dict]] = {}
+        blocks: dict[str, list[dict]] = {}
         for entity in entities:
             normalized = self.normalize(entity["name"])
             first_char = normalized[0] if normalized else "#"
@@ -85,7 +84,7 @@ class EntityAligner:
                 blocks[first_char] = []
             blocks[first_char].append(entity)
 
-        for block_key, block_entities in blocks.items():
+        for block_entities in blocks.values():
             for i, entity in enumerate(block_entities):
                 if entity["id"] in used:
                     continue
@@ -107,7 +106,7 @@ class EntityAligner:
 
         return groups
 
-    def suggest_merged_name(self, entities: List[Dict]) -> str:
+    def suggest_merged_name(self, entities: list[dict]) -> str:
         """Suggest a merged name from multiple entities."""
         if not entities:
             return ""

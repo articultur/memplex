@@ -84,8 +84,7 @@ class TestDistractorLoading:
     def _write_popqa(self, tmp_path, entries):
         path = tmp_path / "popqa.jsonl"
         with open(path, "w", encoding="utf-8") as handle:
-            for entry in entries:
-                handle.write(json.dumps(entry) + "\n")
+            handle.writelines(json.dumps(entry) + "\n" for entry in entries)
         return path
 
     def test_loads_up_to_limit(self, tmp_path):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
@@ -275,7 +275,7 @@ def test_host_lifecycle_evidence_writer_rejects_symlink_ancestor(tmp_path):
 
 def test_host_lifecycle_evidence_rejects_expired_and_future_reports(tmp_path):
     key = b"h" * 32
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for generated_at in (
         now - timedelta(hours=25),
         now + timedelta(minutes=6),

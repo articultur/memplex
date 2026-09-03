@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from benchmarks.base import BenchmarkResult
 from benchmarks.evaluator import BenchmarkEvaluator, make_benchmark_service
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # ── Dataset resolution ─────────────────────────────────────────────────────────
 
-_DATASET_ALIASES: Dict[str, List[str]] = {
+_DATASET_ALIASES: dict[str, list[str]] = {
     "nq_trivia": ["nq", "triviaqa"],
     "popqa_hotpot": ["popqa", "hotpotqa"],
 }
@@ -38,7 +37,7 @@ _DATASET_ALIASES: Dict[str, List[str]] = {
 _SELF_GENERATED_DATASETS = frozenset({"memory_benchmark"})
 
 
-def _resolve_datasets(dataset: str) -> List[str]:
+def _resolve_datasets(dataset: str) -> list[str]:
     """Resolve 'all' or composite names to individual dataset names."""
     if dataset == "all":
         # Every runnable benchmark: file-backed datasets plus self-generated
@@ -53,7 +52,7 @@ def _resolve_datasets(dataset: str) -> List[str]:
 
 def _resolve_path(
     dataset: str,
-    explicit_path: Optional[str],
+    explicit_path: str | None,
     auto_download: bool,
     force_synthetic: bool = False,
 ) -> str:
@@ -90,14 +89,14 @@ def _resolve_path(
 
 def run_benchmark_command(
     dataset: str,
-    path: Optional[str],
+    path: str | None,
     output: str = ".memplex/benchmarks/results.jsonl",
     warm: bool = True,
     retrieval_k: int = 10,
     parallel: bool = False,
     auto_download: bool = True,
     force_synthetic: bool = False,
-) -> Dict[str, List[BenchmarkResult]]:
+) -> dict[str, list[BenchmarkResult]]:
     """Run one or more benchmarks from the CLI.
 
     Parameters
@@ -202,7 +201,7 @@ def run_benchmark_command(
                 with open(p) as f:
                     raw = json.load(f)
                 count = len(raw) if isinstance(raw, list) else 1
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 count = "?"
             print(f"    - {name}: {count} samples ({p})", file=sys.stderr)
         print(file=sys.stderr)
@@ -224,7 +223,7 @@ def run_benchmark_command(
         svc.stop()
 
 
-def _print_sample_scores(results: Dict[str, List[BenchmarkResult]]) -> None:
+def _print_sample_scores(results: dict[str, list[BenchmarkResult]]) -> None:
     """Print a compact score summary to stdout."""
     if not results:
         print("\nNo results produced.")
@@ -236,7 +235,7 @@ def _print_sample_scores(results: Dict[str, List[BenchmarkResult]]) -> None:
             continue
         print(f"\n[{dataset_name}]")
         # Deduplicate by metric, show best value
-        seen: Dict[str, float] = {}
+        seen: dict[str, float] = {}
         for r in dataset_results:
             key = r.metric
             if key not in seen or r.value > seen[key]:

@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         return 0
-    except Exception:
+    except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
         print(
             json.dumps(
                 {

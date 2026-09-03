@@ -7,7 +7,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from memplex.readiness_evidence import read_industrial_gate_evidence
@@ -42,7 +42,7 @@ def _invoke(monkeypatch, args: list[str]) -> int:
 def _valid_verifier_result(gate_id: str) -> dict[str, object]:
     signer = _signer_module()
     verifier_id, required_checks = signer._VERIFIER_CONTRACTS[gate_id]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "schema_version": 1,
         "gate_id": gate_id,
@@ -119,7 +119,7 @@ def test_signs_only_complete_g003_and_g004_passed_verifier_results(
             expected_binding=evidence.binding(),
             expected_key_id="g012-operator-v1",
             signing_key=base64.b64decode(key),
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
             max_age=timedelta(minutes=1),
         )
 

@@ -16,21 +16,23 @@ from hashlib import sha256
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+from datetime import UTC, timezone
 
-from memplex.models import (  # noqa: E402
+import pytest
+
+from memplex.models import (
     FieldValue,
     Function,
     Observation,
     SourceDocument,
     SourceType,
 )
-from memplex.storage.migrations import MigrationIntegrityError, PostgresTargetIdentity  # noqa: E402
-from memplex.storage.migrations.runner import (  # noqa: E402
+from memplex.storage.migrations import MigrationIntegrityError, PostgresTargetIdentity
+from memplex.storage.migrations.runner import (
     VectorCapabilityRequest,
     VectorCapabilityStatus,
 )
-from memplex.storage.postgres import (  # noqa: E402
+from memplex.storage.postgres import (
     FunctionWriteBusy,
     PostgresMemoryStore,
     _func_from_json,
@@ -448,7 +450,7 @@ def test_pool_capacity_limits_live_leases_and_keeps_high_watermark_after_close()
             borrowed.append(
                 manager.read_cursor(lambda _cursor, _context: None, _authorization())
             )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             borrow_errors.append(exc)
 
     waiter = threading.Thread(target=wait_for_capacity)
@@ -607,7 +609,7 @@ def test_pool_fifo_capacity_waiters_and_driver_peak_are_bounded():
             cursor = manager.read_cursor(lambda _cursor, _context: None, _authorization())
             acquisition_order.append(index)
             cursor.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             failures.append(exc)
 
     for index in range(3):
@@ -646,7 +648,7 @@ def test_pool_terminal_state_wakes_capacity_waiters_without_leaking_tickets(term
     def wait_for_slot() -> None:
         try:
             manager.read_cursor(lambda _cursor, _context: None, _authorization())
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             failures.append(exc)
 
     waiter = threading.Thread(target=wait_for_slot)
@@ -747,11 +749,10 @@ def test_published_but_unreturned_handle_is_reclaimed_on_context_exception(inter
 
     raw_pool = _PoolMock()
     manager = PostgresPoolManager("dbname=fake", pool=raw_pool)
-    with pytest.raises(interrupt_type, match="before handle handoff"):
-        with manager._borrow_capacity_reservation() as reservation:
-            connection = reservation.borrow()
-            reservation.publish(connection)
-            raise interrupt_type("before handle handoff")
+    with pytest.raises(interrupt_type, match="before handle handoff"), manager._borrow_capacity_reservation() as reservation:
+        connection = reservation.borrow()
+        reservation.publish(connection)
+        raise interrupt_type("before handle handoff")
     assert raw_pool.put_calls == [raw_pool.connection]
     assert manager.business_lease_count == 0
     assert manager.business_lease_high_watermark == 0
@@ -831,9 +832,8 @@ def test_transaction_yield_boundary_interrupt_reclaims_unhanded_lease(interrupt_
     previous = sys.gettrace()
     sys.settrace(tracer)
     try:
-        with pytest.raises(interrupt_type, match="simulated transaction yield interruption"):
-            with manager.transaction(lambda _cursor, _context: None, _authorization()):
-                raise AssertionError("must not enter transaction body")
+        with pytest.raises(interrupt_type, match="simulated transaction yield interruption"), manager.transaction(lambda _cursor, _context: None, _authorization()):
+            raise AssertionError("must not enter transaction body")
     finally:
         sys.settrace(previous)
     assert injected
@@ -892,10 +892,9 @@ def test_transaction_body_error_remains_in_historical_peak_demand():
     from memplex.storage.pool import PostgresPoolManager
 
     manager = PostgresPoolManager("dbname=fake", pool=_PoolMock())
-    with pytest.raises(RuntimeError, match="body error"):
-        with manager.transaction(lambda _cursor, _context: None, _authorization()):
-            assert manager.business_lease_count == 1
-            raise RuntimeError("body error")
+    with pytest.raises(RuntimeError, match="body error"), manager.transaction(lambda _cursor, _context: None, _authorization()):
+        assert manager.business_lease_count == 1
+        raise RuntimeError("body error")
     assert manager.business_lease_count == 0
     assert manager.business_lease_high_watermark == 1
 
@@ -906,10 +905,9 @@ def test_transaction_body_baseexception_remains_in_historical_peak_demand(body_e
     from memplex.storage.pool import PostgresPoolManager
 
     manager = PostgresPoolManager("dbname=fake", pool=_PoolMock())
-    with pytest.raises(body_error, match="body interruption"):
-        with manager.transaction(lambda _cursor, _context: None, _authorization()):
-            assert manager.business_lease_count == 1
-            raise body_error("body interruption")
+    with pytest.raises(body_error, match="body interruption"), manager.transaction(lambda _cursor, _context: None, _authorization()):
+        assert manager.business_lease_count == 1
+        raise body_error("body interruption")
     assert manager.business_lease_count == 0
     assert manager.business_lease_high_watermark == 1
 
@@ -1013,26 +1011,25 @@ def test_transaction_body_primary_survives_every_cleanup_failure(
     raw_pool = _PoolMock()
     manager = PostgresPoolManager("dbname=fake", pool=raw_pool)
     transaction = manager.transaction(lambda _cursor, _context: None, _authorization())
-    with pytest.raises(body_error, match="body primary"):
-        with transaction:
-            if cleanup_stage == "handoff":
-                manager.commit_publish = lambda _token: (_ for _ in ()).throw(
-                    RuntimeError("handoff cleanup failed")
-                )
-            elif cleanup_stage == "rollback":
-                raw_pool.connection.rollback = lambda: (_ for _ in ()).throw(
-                    RuntimeError("rollback cleanup failed")
-                )
-            elif cleanup_stage == "cursor":
-                raw_pool.connection.cursor_instance.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("cursor cleanup failed")
-                )
-            else:
-                assert transaction._reservation is not None
-                transaction._reservation.release = lambda: (_ for _ in ()).throw(
-                    RuntimeError("release cleanup failed")
-                )
-            raise body_error("body primary")
+    with pytest.raises(body_error, match="body primary"), transaction:
+        if cleanup_stage == "handoff":
+            manager.commit_publish = lambda _token: (_ for _ in ()).throw(
+                RuntimeError("handoff cleanup failed")
+            )
+        elif cleanup_stage == "rollback":
+            raw_pool.connection.rollback = lambda: (_ for _ in ()).throw(
+                RuntimeError("rollback cleanup failed")
+            )
+        elif cleanup_stage == "cursor":
+            raw_pool.connection.cursor_instance.close = lambda: (_ for _ in ()).throw(
+                RuntimeError("cursor cleanup failed")
+            )
+        else:
+            assert transaction._reservation is not None
+            transaction._reservation.release = lambda: (_ for _ in ()).throw(
+                RuntimeError("release cleanup failed")
+            )
+        raise body_error("body primary")
 
 
 @pytest.mark.parametrize("interrupt_type", (KeyboardInterrupt, SystemExit, BaseException))
@@ -1373,9 +1370,8 @@ def test_transaction_body_primary_survives_finally_phase_interrupt(interrupt_typ
     previous = sys.gettrace()
     sys.settrace(tracer)
     try:
-        with pytest.raises(ValueError, match="body primary"):
-            with transaction:
-                raise ValueError("body primary")
+        with pytest.raises(ValueError, match="body primary"), transaction:
+            raise ValueError("body primary")
     finally:
         sys.settrace(previous)
     assert injected
@@ -2043,9 +2039,8 @@ def test_transaction_cleanup_failure_is_reported_after_successful_work():
         raise RuntimeError("cursor close failed")
 
     mock_pool.connection.cursor_instance.close = close_fails
-    with pytest.raises(RuntimeError, match="cursor close failed"):
-        with manager.transaction(lambda _cursor, _context: None, _authorization()):
-            pass
+    with pytest.raises(RuntimeError, match="cursor close failed"), manager.transaction(lambda _cursor, _context: None, _authorization()):
+        pass
 
     assert mock_pool.put_calls == [mock_pool.connection]
     with pytest.raises(RuntimeError, match="closed"):
@@ -2187,7 +2182,7 @@ def test_close_waits_for_an_inflight_borrower_before_closeall():
     def borrow():
         try:
             manager.read_cursor(lambda _cursor, _context: None, _authorization())
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             borrower_error.append(exc)
 
     borrower = threading.Thread(target=borrow)
@@ -2624,7 +2619,7 @@ def test_close_waits_for_target_probe_before_publish_or_physical_close():
     def borrow():
         try:
             manager.read_cursor(lambda _cursor, _context: None, _authorization())
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             borrower_errors.append(exc)
 
     borrower = threading.Thread(target=borrow)
@@ -2710,7 +2705,7 @@ def test_resources_staged_cleanup_failure_is_faulted_not_cleanly_closed(monkeypa
                     VectorCapabilityRequest(dim=0, policy="disabled"),
                     "development",
                 )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             errors.append(exc)
 
     worker = threading.Thread(target=ensure)
@@ -2845,7 +2840,7 @@ def test_resources_rejects_pool_target_mismatch_and_does_not_publish_seal(monkey
     assert resources.business_lease_count == 0
     assert resources.state == "FAULTED"
     with pytest.raises(RuntimeError, match="not ready"):
-        resources.ready_pool
+        _ = resources.ready_pool
 
 
 def test_resources_rejects_non_exact_target_identity_before_initialization():
@@ -2879,7 +2874,7 @@ def test_resources_fault_when_its_manager_is_closed_outside_the_owner():
     resources.pool_manager.close()
     assert resources.state == "FAULTED"
     with pytest.raises(RuntimeError, match="not ready"):
-        resources.ready_pool
+        _ = resources.ready_pool
 
 
 def test_resources_close_during_initializing_cancels_and_closes_staged_pool():
@@ -2905,7 +2900,7 @@ def test_resources_close_during_initializing_cancels_and_closes_staged_pool():
                     VectorCapabilityRequest(dim=8, policy="best_effort"),
                     "development",
                 )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             ensure_error.append(exc)
 
     worker = threading.Thread(target=ensure)
@@ -3637,7 +3632,7 @@ def test_postgres_store_rejects_non_exact_sync_capture_policy():
         PostgresMemoryStore(
             dsn="dbname=fake",
             ready_pool=_test_ready_pool(),
-            sync_capture_policy=_ExactPolicy("off"),  # noqa: E501
+            sync_capture_policy=_ExactPolicy("off"),
         )
 
 
@@ -3897,7 +3892,7 @@ def test_pgvector_embed_text_returns_literal_string(monkeypatch):
 
 def test_field_value_roundtrip_preserves_observation_created_at_status():
     """_fv_to_json previously dropped observation/created_at/status."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from memplex.storage.postgres import _fv_from_json, _fv_to_json
 
@@ -3907,7 +3902,7 @@ def test_field_value_roundtrip_preserves_observation_created_at_status():
         source_method="llm_semantic",
         weight=0.7,
         observation=0.42,
-        created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         status="disputed",
     )
     restored = _fv_from_json(json.loads(json.dumps(_fv_to_json(fv))))
@@ -4020,7 +4015,7 @@ def test_required_sync_capture_binds_observation_payload_during_upsert():
     assert json.loads(sync_payload) == _obs_to_json(observation)
 
     insert_payload = json.loads(
-        [p for s, p in conn._cursor.executed if "INSERT INTO memplex_observations" in s][0][1]
+        [p for s, p in conn._cursor.executed if "INSERT INTO memplex_observations" in s][0][1]  # noqa: RUF015 - first-match positional access is intentional
     )
     assert json.loads(sync_payload) == insert_payload
 
@@ -4317,7 +4312,7 @@ def test_required_sync_capture_merge_same_name_updates_emit_unique_event_per_fun
 
 
 def test_required_sync_capture_edge_only_merge_binds_full_edge_payload_before_upsert():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from memplex.models import GraphData, GraphEdge
     from memplex.sync_protocol import SyncEntityKey
@@ -4326,7 +4321,7 @@ def test_required_sync_capture_edge_only_merge_binds_full_edge_payload_before_up
     source = _sample_func("edge-source", "Source")
     target = _sample_func("edge-target", "Target")
     identity = store._row_identity_values(store._authorization_context(), source)
-    created_at = datetime(2026, 8, 11, 1, 2, 3, 456789, tzinfo=timezone.utc)
+    created_at = datetime(2026, 8, 11, 1, 2, 3, 456789, tzinfo=UTC)
     edge = GraphEdge(
         source=source.id,
         target=target.id,
@@ -4617,7 +4612,7 @@ def test_add_merges_into_existing_same_name_function(pg_store):
 def test_add_batch_returns_batch_result(pg_store):
     from memplex.models import BatchResult
 
-    store, conn = pg_store
+    store, _ = pg_store
     funcs = [_sample_func("pg-b1", "alpha"), _sample_func("pg-b2", "beta")]
     sources = [
         SourceDocument(type="text", source_type=SourceType.WIKI),
@@ -4719,7 +4714,7 @@ def test_get_neighbors_pushes_limit_before_function_join(pg_store):
 
 
 def test_filter_supports_all_search_filters_fields(pg_store):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from memplex.models import SearchFilters
 
@@ -4729,8 +4724,8 @@ def test_filter_supports_all_search_filters_fields(pg_store):
         domain=["auth"],
         source_type=[SourceType.CODE],
         confidence_min=0.5,
-        updated_after=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        updated_before=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        updated_after=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_before=datetime(2026, 2, 1, tzinfo=UTC),
         needs_review=True,
         owner="alice",
     )
@@ -4838,7 +4833,7 @@ def test_postgres_feedback_get_pending(pg_feedback_store):
     from datetime import datetime
 
     store, conn = pg_feedback_store
-    conn._cursor._result = [("mem-1", "trigger", "user", datetime(2026, 1, 1))]
+    conn._cursor._result = [("mem-1", "trigger", "user", datetime(2026, 1, 1, tzinfo=UTC))]
     pending = store.get_pending()
     assert len(pending) == 1
     assert pending[0].memory_id == "mem-1"
@@ -4865,7 +4860,7 @@ def test_postgres_feedback_get_history_maps_rows(pg_feedback_store):
             "correct",
             "ok",
             "user",
-            datetime(2026, 1, 1),
+            datetime(2026, 1, 1, tzinfo=UTC),
             None,
             "field_value",
             None,

@@ -57,9 +57,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -88,12 +88,12 @@ class LongMemEvalSample:
     """One LongMemEval question over its full session history."""
 
     question: str
-    answers: List[str]
+    answers: list[str]
     question_type: str
     question_date: str
-    session_history: List[Dict[str, str]]
-    evidence_session_ids: List[Any] = field(default_factory=list)
-    question_id: Optional[str] = None
+    session_history: list[dict[str, str]]
+    evidence_session_ids: list[Any] = field(default_factory=list)
+    question_id: str | None = None
 
     def to_benchmark_sample(self) -> BenchmarkSample:
         slug = self.question_id or f"{abs(hash(self.question)) & 0xFFFFFF:06x}"
@@ -113,7 +113,7 @@ class LongMemEvalSample:
         )
 
 
-def _parse_synthetic_entry(item: Dict[str, Any]) -> LongMemEvalSample:
+def _parse_synthetic_entry(item: dict[str, Any]) -> LongMemEvalSample:
     """Parse the repo's synthetic schema (``answers`` list, flat history)."""
     return LongMemEvalSample(
         question=str(item.get("question", "")),
@@ -125,7 +125,7 @@ def _parse_synthetic_entry(item: Dict[str, Any]) -> LongMemEvalSample:
     )
 
 
-def _parse_official_entry(item: Dict[str, Any]) -> LongMemEvalSample:
+def _parse_official_entry(item: dict[str, Any]) -> LongMemEvalSample:
     """Parse the official schema (``answer`` string + ``haystack_sessions``).
 
     The single gold ``answer`` is wrapped into the answers list and the
@@ -160,10 +160,10 @@ class LongMemEvalDataset(EvaluationDataset):
     of ``haystack_sessions``.
     """
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path
 
-    def load(self, path: str) -> List[BenchmarkSample]:
+    def load(self, path: str) -> list[BenchmarkSample]:
         load_path = path or self.path
         if not load_path:
             raise ValueError("No path provided for LongMemEvalDataset.load()")
@@ -173,8 +173,8 @@ class LongMemEvalDataset(EvaluationDataset):
         with open(p, encoding="utf-8") as fh:
             raw = json.load(fh)
         if not isinstance(raw, list):
-            raise ValueError("LongMemEval top level must be a list of questions")
-        samples: List[BenchmarkSample] = []
+            raise ValueError("LongMemEval top level must be a list of questions")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
+        samples: list[BenchmarkSample] = []
         for item in raw:
             sample = (
                 _parse_official_entry(item)
@@ -214,7 +214,7 @@ def _normalise(text: str) -> str:
     return stripped
 
 
-def answer_hit(predicted: str, gold_answers: List[str]) -> bool:
+def answer_hit(predicted: str, gold_answers: list[str]) -> bool:
     """Auxiliary diagnostic: normalised gold-as-substring-of-prediction hit.
 
     One-directional on purpose: the previous bidirectional version also
@@ -251,7 +251,7 @@ class LongMemEvalRunner(BenchmarkRunner):
 
     DATASET_NAME = "longmemeval"
 
-    def __init__(self, dataset: Optional[LongMemEvalDataset] = None):
+    def __init__(self, dataset: LongMemEvalDataset | None = None):
         self.dataset = dataset or LongMemEvalDataset()
 
     def _seed(self, service, observations) -> None:
@@ -282,7 +282,7 @@ class LongMemEvalRunner(BenchmarkRunner):
             service.store.add(func, source)
 
     @staticmethod
-    def _score_sample(predicted: str, gold_answers: List[str]) -> Dict[str, float]:
+    def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
         """Score one prediction against its gold answers (max over golds)."""
         f1 = max((token_f1(predicted, gold) for gold in gold_answers), default=0.0)
         norm_pred = normalize_answer_text(predicted)
@@ -301,10 +301,10 @@ class LongMemEvalRunner(BenchmarkRunner):
         }
 
     def run_retrieval(
-        self, service, samples: List[BenchmarkSample], top_k: int = 10
-    ) -> List[BenchmarkResult]:
-        timestamp = datetime.utcnow().isoformat() + "Z"
-        per_type: Dict[str, List[Dict[str, float]]] = {}
+        self, service, samples: list[BenchmarkSample], top_k: int = 10
+    ) -> list[BenchmarkResult]:
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        per_type: dict[str, list[dict[str, float]]] = {}
         latencies = LatencyStats()
 
         for sample in samples:
@@ -319,7 +319,7 @@ class LongMemEvalRunner(BenchmarkRunner):
         all_scores = [score for scores in per_type.values() for score in scores]
         total = len(all_scores)
 
-        results: List[BenchmarkResult] = []
+        results: list[BenchmarkResult] = []
         for metric in ("token_f1", "exact_match", "substring_hit_rate"):
             key = "substring_hit" if metric == "substring_hit_rate" else metric
             value = sum(s[key] for s in all_scores) / total if total else 0.0
@@ -353,12 +353,12 @@ class LongMemEvalRunner(BenchmarkRunner):
             )
         return results
 
-    def run_generation(self, service, samples: List[BenchmarkSample]):
+    def run_generation(self, service, samples: list[BenchmarkSample]):
         """LongMemEval is retrieval-scored; generation delegates to retrieval."""
         return self.run_retrieval(service, samples)
 
 
-from benchmarks.base import BenchmarkRunnerFactory  # noqa: E402
+from benchmarks.base import BenchmarkRunnerFactory
 
 BenchmarkRunnerFactory.register_benchmark(
     name="longmemeval",

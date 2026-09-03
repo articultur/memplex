@@ -14,7 +14,7 @@ import re
 import stat
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_hex
 from typing import Any, NoReturn
@@ -79,7 +79,7 @@ def _key_id(value: object) -> str:
 def _timestamp(value: object) -> datetime:
     text = _exact_text(value)
     try:
-        parsed = datetime.strptime(text, _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(text, _TIMESTAMP_FORMAT).replace(tzinfo=UTC)
     except ValueError:
         _fail()
     if parsed.strftime(_TIMESTAMP_FORMAT) != text:
@@ -90,7 +90,7 @@ def _timestamp(value: object) -> datetime:
 def _timestamp_from_datetime(value: object) -> str:
     if type(value) is not datetime or value.tzinfo is None:
         _fail()
-    return value.astimezone(timezone.utc).strftime(_TIMESTAMP_FORMAT)
+    return value.astimezone(UTC).strftime(_TIMESTAMP_FORMAT)
 
 
 def _signing_key(value: object) -> bytes:
@@ -368,7 +368,7 @@ class IndustrialGateEvidence:
                 _fail()
             if type(max_age) is not timedelta or max_age <= timedelta(0):
                 _fail()
-            checked_at = now.astimezone(timezone.utc)
+            checked_at = now.astimezone(UTC)
             generated_at = _timestamp(self.generated_at)
             if generated_at > checked_at or checked_at - generated_at > max_age:
                 _fail()

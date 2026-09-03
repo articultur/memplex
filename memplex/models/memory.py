@@ -1,7 +1,9 @@
 """Memory node types: MemoryNode base + Function, Fact, Preference, Observation."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List, Optional
+from datetime import UTC
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from .graph import GraphEdge, domain_node_id
 from .misc import FieldValue, validate_domain, validate_func_id
@@ -46,33 +48,33 @@ class MemoryNode:
     id: str = ""
     memory_type: str = ""  # function | fact | preference | observation
     name: str = ""
-    domain: Optional[str] = None
+    domain: str | None = None
     confidence: float = 1.0
     source_type: SourceType = SourceType.WIKI
-    owner: Optional[str] = None
-    tenant_id: Optional[str] = None
-    owner_subject_id: Optional[str] = None
-    workspace_id: Optional[str] = None
-    visibility: Optional[str] = None
-    provenance: Dict[str, str] = field(default_factory=dict)
+    owner: str | None = None
+    tenant_id: str | None = None
+    owner_subject_id: str | None = None
+    workspace_id: str | None = None
+    visibility: str | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
     version: int = 1
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    origin_session: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    origin_session: str | None = None
     access_count: int = 0
-    last_accessed_at: Optional[str] = None
-    source_paragraphs: List[str] = field(default_factory=list)
+    last_accessed_at: str | None = None
+    source_paragraphs: list[str] = field(default_factory=list)
     needs_review: bool = False
-    needs_review_until: Optional[str] = None
-    content_hash: Optional[str] = None
-    namespace: Dict[str, str] = field(default_factory=dict)
+    needs_review_until: str | None = None
+    content_hash: str | None = None
+    namespace: dict[str, str] = field(default_factory=dict)
     # Knowledge tier: None = plain personal memory (capture pipeline);
     # "personal" | "domain" | "team" = curated knowledge promoted from
     # memory through the review workflow. Tier drives default read scope
     # (team tier ⇒ workspace-visible) and survives sync as ordinary data.
-    knowledge_tier: Optional[str] = None
+    knowledge_tier: str | None = None
 
-    def _base_to_dict(self) -> Dict[str, Any]:
+    def _base_to_dict(self) -> dict[str, Any]:
         """Serialize the MemoryNode base fields shared by all memory types."""
         return {
             "id": self.id,
@@ -105,17 +107,17 @@ class MemoryNode:
             "knowledge_tier": self.knowledge_tier,
         }
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-safe dict (implemented by every concrete node)."""
         raise NotImplementedError
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "MemoryNode":
+    def from_dict(cls, d: dict[str, Any]) -> "MemoryNode":
         """Deserialize from a JSON-safe dict (implemented by every concrete node)."""
         raise NotImplementedError
 
     @staticmethod
-    def _base_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    def _base_from_dict(d: dict[str, Any]) -> dict[str, Any]:
         """Build constructor kwargs for MemoryNode base fields from a dict."""
         memory_type = d.get("memory_type")
         if memory_type is not None and memory_type not in MEMORY_TYPES:
@@ -165,15 +167,15 @@ class Function(MemoryNode):
     """Procedural memory: actions/flows/interfaces with trigger/condition/action/benefit."""
 
     memory_type: str = "function"
-    trigger: List[FieldValue] = field(default_factory=list)
-    condition: List[FieldValue] = field(default_factory=list)
-    action: List[FieldValue] = field(default_factory=list)
-    benefit: List[FieldValue] = field(default_factory=list)
+    trigger: list[FieldValue] = field(default_factory=list)
+    condition: list[FieldValue] = field(default_factory=list)
+    action: list[FieldValue] = field(default_factory=list)
+    benefit: list[FieldValue] = field(default_factory=list)
     name_normalized: str = ""
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    cross_references: List[Dict] = field(default_factory=list)
-    priority_from_source: Optional[str] = None
-    source_authority: Optional[str] = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+    cross_references: list[dict] = field(default_factory=list)
+    priority_from_source: str | None = None
+    source_authority: str | None = None
 
     MAX_VALUES_PER_FIELD: ClassVar[int] = 20
 
@@ -183,11 +185,11 @@ class Function(MemoryNode):
         if not self.created_at:
             from datetime import datetime, timezone
 
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
         if not self.updated_at:
             self.updated_at = self.created_at
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Standard serialization covering every field.
 
         This is the convergence target for the per-backend serializers
@@ -212,7 +214,7 @@ class Function(MemoryNode):
         return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Function":
+    def from_dict(cls, d: dict[str, Any]) -> "Function":
         """Inverse of :meth:`to_dict`; tolerant of missing keys."""
         kwargs = cls._base_from_dict(d)
         kwargs.update(
@@ -243,16 +245,16 @@ def validate_belongs_to_edges(
     domain-node mapping. Other edge referential-integrity policy is outside
     this narrow helper.
     """
-    by_id: Dict[str, Function] = {}
+    by_id: dict[str, Function] = {}
     for function in functions:
         if not isinstance(function, Function):
-            raise ValueError("BELONGS_TO source 必须是 Function")
+            raise ValueError("BELONGS_TO source 必须是 Function")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         validate_func_id(function.id)
         validate_domain(function.domain)
         by_id[function.id] = function
     for edge in edges:
         if not isinstance(edge, GraphEdge):
-            raise ValueError("BELONGS_TO edge 必须是 GraphEdge")
+            raise ValueError("BELONGS_TO edge 必须是 GraphEdge")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         if edge.edge_type != "BELONGS_TO":
             continue
         source = by_id.get(edge.source)
@@ -271,16 +273,16 @@ class Fact(MemoryNode):
     subject: str = ""
     predicate: str = ""
     object_: str = ""
-    valid_until: Optional[str] = None
+    valid_until: str | None = None
     # Bi-temporal validity (Zep/Graphiti-style): the business-time interval
     # the fact is TRUE for. ``valid_from`` defaults to write time;
     # ``invalid_at`` is set when a contradicting fact supersedes this one —
     # the row is retained (not deleted) so point-in-time queries with
     # ``as_of`` stay answerable.
-    valid_from: Optional[str] = None
-    invalid_at: Optional[str] = None
+    valid_from: str | None = None
+    invalid_at: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Standard serialization covering every field (base + fact).
 
         The ``object_`` field is serialized under the key ``"object"``
@@ -301,7 +303,7 @@ class Fact(MemoryNode):
         return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Fact":
+    def from_dict(cls, d: dict[str, Any]) -> "Fact":
         """Inverse of :meth:`to_dict`; tolerant of missing keys.
 
         Accepts both ``"object"`` (canonical, emitted by
@@ -329,9 +331,9 @@ class Preference(MemoryNode):
     memory_type: str = "preference"
     aspect: str = ""
     preference: str = ""
-    subject_id: Optional[str] = None
+    subject_id: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Standard serialization covering every field (base + preference)."""
         d = self._base_to_dict()
         d.update(
@@ -344,7 +346,7 @@ class Preference(MemoryNode):
         return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Preference":
+    def from_dict(cls, d: dict[str, Any]) -> "Preference":
         """Inverse of :meth:`to_dict`; tolerant of missing keys."""
         kwargs = cls._base_from_dict(d)
         kwargs.update(
@@ -365,14 +367,14 @@ class Observation(MemoryNode):
     memory_type: str = "observation"
     event: str = ""
     context: str = ""
-    observed_at: Optional[str] = None
+    observed_at: str | None = None
     actor: str = "system"
     # Structured category (see OBSERVATION_CATEGORIES): bugfix | decision |
     # change | discovery | note.  Defaults to "note"; older serialized data
     # without the key loads as "note" via from_dict.
     category: str = DEFAULT_OBSERVATION_CATEGORY
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Standard serialization covering every field (base + observation)."""
         d = self._base_to_dict()
         d.update(
@@ -387,7 +389,7 @@ class Observation(MemoryNode):
         return d
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Observation":
+    def from_dict(cls, d: dict[str, Any]) -> "Observation":
         """Inverse of :meth:`to_dict`; tolerant of missing keys."""
         kwargs = cls._base_from_dict(d)
         kwargs.update(

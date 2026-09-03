@@ -17,9 +17,10 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from datetime import UTC, datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from memplex.llm.injection_guard import drop_injection_suspected
 from memplex.models import QueryResult, QueryScope, SearchResult
@@ -58,14 +59,14 @@ class QueryPipeline:
         store: Any,
         base_store: Any,
         retriever: MultiPathRetriever,
-        embedding_service: Optional[EmbeddingService],
-        llm: Optional[LLMEnhancer],
-        reranker: Optional[Reranker],
-        cross_reranker: Optional[CrossEncoderReranker],
+        embedding_service: EmbeddingService | None,
+        llm: LLMEnhancer | None,
+        reranker: Reranker | None,
+        cross_reranker: CrossEncoderReranker | None,
         injection_risks: InjectionRiskRegistry,
         auth: AuthorizationGate,
         detect_scope: Callable[[str], QueryScope],
-        compute_hyde_vector: Callable[[str], Optional[Vector]],
+        compute_hyde_vector: Callable[[str], Vector | None],
     ) -> None:
         self._config = config
         self._store = store
@@ -84,11 +85,9 @@ class QueryPipeline:
         self,
         text: str,
         top_k: int = 10,
-        owner: Optional[str] = None,
+        owner: str | None = None,
         max_tokens: int = 4000,
-        namespace_filter: Optional[
-            Dict[str, Optional[str]] | List[Dict[str, Optional[str]]]
-        ] = None,
+        namespace_filter: dict[str, str | None] | list[dict[str, str | None]] | None = None,
         explain: bool = False,
         *,
         context: AuthorizationContext,
@@ -117,8 +116,8 @@ class QueryPipeline:
             )
         )
         scope = self._detect_scope(text)
-        start = datetime.now()
-        trace: Optional[Dict[str, Any]] = None
+        start = datetime.now(UTC)
+        trace: dict[str, Any] | None = None
         if explain:
             trace = {
                 "query": text,
@@ -142,7 +141,7 @@ class QueryPipeline:
         # Pre-compute query_vector (multi-path reuse). Query-side embeds
         # use embed_query (transform-only) so TF-IDF corpus statistics do
         # not drift with query history.
-        query_vector: Optional[Vector] = None
+        query_vector: Vector | None = None
         if self._embedding_service is not None:
             if self._llm is not None and self._config.embedding.hyde_enabled:
                 query_vector = self._compute_hyde_vector(text)
@@ -290,14 +289,14 @@ class QueryPipeline:
         if results:
             try:
                 store.increment_access_batch([r.func_id for r in results])
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug(
                     "increment_access_batch failed (frequency signal lost for %d results): %s",
                     len(results),
                     exc,
                 )
 
-        latency = int((datetime.now() - start).total_seconds() * 1000)
+        latency = int((datetime.now(UTC) - start).total_seconds() * 1000)
 
         results, used, truncated = self._apply_token_budget(results, max_tokens, trace)
         if trace is not None:
@@ -336,9 +335,9 @@ class QueryPipeline:
         text: str,
         scope: QueryScope,
         candidate_budget: int,
-        query_vector: Optional[Vector],
-        trace: Optional[Dict[str, Any]],
-    ) -> List[List[SearchResult]]:
+        query_vector: Vector | None,
+        trace: dict[str, Any] | None,
+    ) -> list[list[SearchResult]]:
         """Fan out the scoped retrieval paths under one global budget."""
         # Parallel multi-path retrieval. ``candidate_budget`` is one global
         # budget, not a per-path allowance: otherwise QueryScope.ALL silently
@@ -354,7 +353,7 @@ class QueryPipeline:
             searches.append(("graph", retriever.graph_search, (query_vector,)))
 
         per_path, remainder = divmod(candidate_budget, len(searches))
-        futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
+        futures: dict[concurrent.futures.Future, tuple[str, int]] = {}
         with ThreadPoolExecutor(max_workers=len(searches)) as pool:
             for index, (path, search, extra_args) in enumerate(searches):
                 path_budget = per_path + (1 if index < remainder else 0)
@@ -367,7 +366,7 @@ class QueryPipeline:
                     path_budget,
                 )
 
-            all_results: List[List[SearchResult]] = []
+            all_results: list[list[SearchResult]] = []
             for future in as_completed(futures):
                 path, path_budget = futures[future]
                 try:
@@ -376,7 +375,7 @@ class QueryPipeline:
                     if trace is not None:
                         # Candidate refs carry controlled references only
                         # (id/score/rank) -- never memory content.
-                        stage: Dict[str, Any] = {
+                        stage: dict[str, Any] = {
                             "stage": f"{path}_search",
                             "status": "ok" if path_results else "empty",
                             "duration_ms": round(duration_ms, 3),
@@ -394,7 +393,7 @@ class QueryPipeline:
                         if not path_results:
                             stage["degraded_reason"] = "path returned no candidates"
                         trace["stages"].append(stage)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.warning("Search path %s failed: %s", path, exc)
                     if trace is not None:
                         trace["stages"].append(
@@ -413,11 +412,11 @@ class QueryPipeline:
 
     @staticmethod
     def _timed_path_search(
-        search: Callable[..., List[SearchResult]],
+        search: Callable[..., list[SearchResult]],
         text: str,
         path_budget: int,
         extra_args: tuple[Any, ...],
-    ) -> tuple[List[SearchResult], float]:
+    ) -> tuple[list[SearchResult], float]:
         """Run one path search and report its wall-clock duration in ms."""
         started = time.perf_counter()
         results = search(text, path_budget, *extra_args)
@@ -425,14 +424,14 @@ class QueryPipeline:
 
     @staticmethod
     def _apply_token_budget(
-        results: List[SearchResult], max_tokens: int, trace: Optional[Dict[str, Any]]
-    ) -> tuple[List[SearchResult], int, bool]:
+        results: list[SearchResult], max_tokens: int, trace: dict[str, Any] | None
+    ) -> tuple[list[SearchResult], int, bool]:
         """Greedy token-budget truncation by relevance order."""
         # Token budget truncation (greedy, by relevance_score desc)
         truncated = False
         used = 0
         if max_tokens > 0:
-            kept: List[SearchResult] = []
+            kept: list[SearchResult] = []
             for r in results:
                 est = max(r.token_estimate, len(r.summary) // 4 + 1)
                 r.token_estimate = est
@@ -458,11 +457,11 @@ class QueryPipeline:
 
     def _filter_by_owner(
         self,
-        results: List[SearchResult],
+        results: list[SearchResult],
         owner: str,
         *,
         context: AuthorizationContext,
-    ) -> List[SearchResult]:
+    ) -> list[SearchResult]:
         """Keep only results whose stored node is owned by *owner*.
 
         The node's ``owner`` is resolved through the typed-node facade
@@ -471,12 +470,12 @@ class QueryPipeline:
         a store hiccup must not silently drop legitimate memory (same
         availability posture as the injection filter).
         """
-        kept: List[SearchResult] = []
+        kept: list[SearchResult] = []
         for r in results:
             try:
                 lookup = self._auth.typed_lookup_for(context)
                 node = lookup.get(r.func_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("owner filter: lookup failed for %s, keeping result: %s", r.func_id, exc)
                 node = None
             if node is None:

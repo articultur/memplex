@@ -14,11 +14,11 @@ from types import SimpleNamespace
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.adapters import cli  # noqa: E402
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.service import MemplexService  # noqa: E402
+from memplex.adapters import cli
+from memplex.config import MemplexConfig
+from memplex.service import MemplexService
 
 
 @pytest.fixture
@@ -307,7 +307,7 @@ def test_cmd_corpus_preview(tmp_path, capsys):
     (root / "guide.md").write_text("corpus-canary: canonical doc.", encoding="utf-8")
     manifest = root / "m.toml"
     manifest.write_text(
-        "\n".join(["[corpus]", 'name = "docs"', 'include = ["*.md"]']),
+        '[corpus]\nname = "docs"\ninclude = ["*.md"]',
         encoding="utf-8",
     )
     rc = cli.cmd_corpus(_ns(corpus_command="preview", manifest=str(manifest), limit=10))
@@ -323,7 +323,7 @@ def test_cmd_corpus_index_then_recall(service, tmp_path, capsys):
     (root / "guide.md").write_text("corpus-recall-canary: canonical doc.", encoding="utf-8")
     manifest = root / "m.toml"
     manifest.write_text(
-        "\n".join(["[corpus]", 'name = "docs"', 'include = ["*.md"]']),
+        '[corpus]\nname = "docs"\ninclude = ["*.md"]',
         encoding="utf-8",
     )
     # Index
@@ -345,7 +345,7 @@ def test_cmd_corpus_index_dry_run(service, tmp_path, capsys):
     root.mkdir()
     (root / "g.md").write_text("dry-run-canary content", encoding="utf-8")
     manifest = root / "m.toml"
-    manifest.write_text("\n".join(["[corpus]", 'name="d"', 'include=["*.md"]']), encoding="utf-8")
+    manifest.write_text('[corpus]\nname="d"\ninclude=["*.md"]', encoding="utf-8")
     rc = cli.cmd_corpus(_ns(corpus_command="index", manifest=str(manifest), dry_run=True))
     assert rc == 0
     payload = json.loads(_out(capsys))

@@ -16,13 +16,13 @@ import pytest
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 
-import memplex.compaction as compaction_module  # noqa: E402
-from memplex.compaction import (  # noqa: E402
+import memplex.compaction as compaction_module
+from memplex.compaction import (
     CompactionPipeline,
     FileLock,
 )
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import CompactionScope  # noqa: E402
+from memplex.config import MemplexConfig
+from memplex.models import CompactionScope
 
 
 def _run(coro):
@@ -137,12 +137,12 @@ def test_pipeline_builds_file_lock_for_enterprise_backend():
 
 # ── Stage behaviour against a real lite store (Wave 1 fixes) ─────────
 
-import json  # noqa: E402
-from datetime import datetime, timedelta, timezone  # noqa: E402
+import json
+from datetime import UTC, datetime, timedelta, timezone
 
-from memplex.models import FieldValue, Function  # noqa: E402
-from memplex.retrieval.embedding import EmbeddingService  # noqa: E402
-from memplex.storage.lite.store import LiteMemoryStore  # noqa: E402
+from memplex.models import FieldValue, Function
+from memplex.retrieval.embedding import EmbeddingService
+from memplex.storage.lite.store import LiteMemoryStore
 
 
 def _make_pipeline(tmp_path, **cfg_overrides):
@@ -285,7 +285,7 @@ def test_archive_stage_writes_full_function_body(tmp_path, monkeypatch):
     """Archive JSON must contain the complete Function, not an id/name stub."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func(
         "old1", "ancient memory", updated_at=old, access_count=0,
         trigger=[FieldValue(desc="when deploy starts")],
@@ -314,7 +314,7 @@ def test_archive_new_directories_fsync_each_new_parent_entry(tmp_path, monkeypat
     """A newly-created archive directory is durable before a source can go."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func("old-parent", "ancient", updated_at=old, access_count=0))
     fsynced: list[Path] = []
     real_fsync_dir = compaction_module._fsync_directory
@@ -334,7 +334,7 @@ def test_archive_new_directories_fsync_each_new_parent_entry(tmp_path, monkeypat
 def test_archive_parent_directory_fsync_failure_keeps_source(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func("old-parent-fail", "ancient", updated_at=old, access_count=0))
     monkeypatch.setattr(
         compaction_module,
@@ -352,7 +352,7 @@ def test_archive_fsync_failure_never_deletes_source(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
     (tmp_path / ".memplex" / "archive").mkdir(parents=True)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func("old-fsync", "ancient", updated_at=old, access_count=0))
     real_fsync = os.fsync
     calls = 0
@@ -375,7 +375,7 @@ def test_archive_every_durable_stage_failure_keeps_source(tmp_path, monkeypatch,
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
     (tmp_path / ".memplex" / "archive").mkdir(parents=True)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func("old-stage", "ancient", updated_at=old, access_count=0))
     if fault == "write":
         monkeypatch.setattr(json, "dump", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write")))
@@ -401,7 +401,7 @@ def test_archive_every_durable_stage_failure_keeps_source(tmp_path, monkeypatch,
 def test_archive_stale_snapshot_rejects_without_deleting_or_counting(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     pipe, store = _make_pipeline(tmp_path)
-    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
     _insert(store, _func("old-stale", "ancient", updated_at=old, access_count=0))
     original = pipe._function_snapshot
 

@@ -11,9 +11,9 @@ import os
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 
-from memplex.core.hooks.collector import ObservationCollector  # noqa: E402
-from memplex.core.hooks.hook_event import HookEvent  # noqa: E402
-from memplex.core.hooks.policy import (  # noqa: E402
+from memplex.core.hooks.collector import ObservationCollector
+from memplex.core.hooks.hook_event import HookEvent
+from memplex.core.hooks.policy import (
     NARRATIVE_LIMIT,
     RateLimiter,
     hash_event_payload,
@@ -21,7 +21,7 @@ from memplex.core.hooks.policy import (  # noqa: E402
     tool_event_key,
     tool_narrative,
 )
-from memplex.core.hooks.registry import HookRegistry, get_default_registry  # noqa: E402
+from memplex.core.hooks.registry import HookRegistry, get_default_registry
 
 # ── HookEvent enum ───────────────────────────────────────────────────
 

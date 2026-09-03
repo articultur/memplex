@@ -13,7 +13,7 @@ import os
 import shlex
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -197,8 +197,8 @@ class StorageConfig:
 
     backend: str = "lite"  # lite (development) | postgres (production)
     path: str = field(default="~/.memplex", repr=False)
-    migration_dsn: Optional[str] = field(default=None, repr=False)
-    inbound_dsn: Optional[str] = field(default=None, repr=False)
+    migration_dsn: str | None = field(default=None, repr=False)
+    inbound_dsn: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -216,7 +216,7 @@ class EmbeddingConfig:
 class RerankerConfig:
     """Reranker scoring configuration."""
 
-    weights: Dict[str, float] = field(
+    weights: dict[str, float] = field(
         default_factory=lambda: {
             "raw_relevance": 0.25,
             "semantic_similarity": 0.30,
@@ -243,7 +243,7 @@ class AgentDomainConfig:
     default) means unscoped — the agent sees everything its ACL allows.
     """
 
-    agent_domains: Dict[str, List[str]] = field(default_factory=dict)
+    agent_domains: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -350,10 +350,10 @@ class LLMConfig:
     # temporal normalisation); requires a real LLM provider, off by default.
     factual_capture: bool = False
     provider: str = "anthropic"
-    anthropic_api_key: Optional[str] = None  # falls back to ANTHROPIC_API_KEY env var
-    local_endpoint: Optional[str] = None
-    local_model: Optional[str] = None
-    fallback_chain: List[str] = field(default_factory=lambda: ["anthropic"])
+    anthropic_api_key: str | None = None  # falls back to ANTHROPIC_API_KEY env var
+    local_endpoint: str | None = None
+    local_model: str | None = None
+    fallback_chain: list[str] = field(default_factory=lambda: ["anthropic"])
     max_input_length: int = 10000
 
 
@@ -630,7 +630,7 @@ class MemplexConfig:
 # Keys not listed here are still resolved dynamically in
 # ``_apply_env_overrides()`` using the same naming convention.
 
-_ENV_TYPE_COERCIONS: Dict[str, type] = {
+_ENV_TYPE_COERCIONS: dict[str, type] = {
     # StorageConfig
     "storage.backend": str,
     "storage.path": str,
@@ -837,7 +837,7 @@ class _ConfigYamlShapeError(ValueError):
     """A present YAML file must have a mapping root for production."""
 
 
-def _parse_yaml(path: Path) -> Optional[Dict[str, Any]]:
+def _parse_yaml(path: Path) -> dict[str, Any] | None:
     """Try to parse a YAML file; return ``None`` if pyyaml is not available."""
     try:
         import yaml  # optional dependency
@@ -865,14 +865,14 @@ def _parse_yaml(path: Path) -> Optional[Dict[str, Any]]:
     return data
 
 
-def _dict_to_dataclass(cls: type, data: Dict[str, Any]) -> Any:
+def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
     """Recursively convert a plain dict to a dataclass instance.
 
     Only keys that match known fields are used; unknown keys are silently
     ignored so that config files with extra sections don't crash.
     """
     known_fields = {f.name for f in fields(cls)}
-    kwargs: Dict[str, Any] = {}
+    kwargs: dict[str, Any] = {}
 
     for f in fields(cls):
         if f.name not in data:
@@ -908,7 +908,7 @@ def _dict_to_dataclass(cls: type, data: Dict[str, Any]) -> Any:
 _DEFAULT_CONFIG_PATH = Path("~/.memplex/config.yaml").expanduser()
 
 
-def _unknown_storage_yaml_fields(data: Dict[str, Any]) -> tuple[str, ...]:
+def _unknown_storage_yaml_fields(data: dict[str, Any]) -> tuple[str, ...]:
     """Return only unknown storage field names, never their configured values."""
     storage = data.get("storage")
     if not isinstance(storage, dict):
@@ -917,7 +917,7 @@ def _unknown_storage_yaml_fields(data: Dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(str(name) for name in storage if name not in known))
 
 
-def load_config(path: Optional[str] = None) -> MemplexConfig:
+def load_config(path: str | None = None) -> MemplexConfig:
     """Load Memplex configuration.
 
     Resolution order (highest priority first):

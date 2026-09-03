@@ -17,8 +17,8 @@ Usage::
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from datetime import UTC, datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.models import (
     EdgeType,
@@ -57,12 +57,12 @@ class GraphBuilder:
     def __init__(
         self,
         store: MemoryStore,
-        config: Optional[MemplexConfig] = None,
-        embedding_service: Optional[Any] = None,
+        config: MemplexConfig | None = None,
+        embedding_service: Any | None = None,
     ) -> None:
         self._store = store
         self._config = config
-        self._graph_config: Optional[GraphConfig] = config.graph if config else None
+        self._graph_config: GraphConfig | None = config.graph if config else None
         self._embedding_service = embedding_service
 
     # ── Public API ──────────────────────────────────────────────────
@@ -70,8 +70,8 @@ class GraphBuilder:
     def process(
         self,
         func: Function,
-        existing_graph: Optional[GraphData] = None,
-    ) -> List[GraphEdge]:
+        existing_graph: GraphData | None = None,
+    ) -> list[GraphEdge]:
         """Detect and return edges for a single Function.
 
         Parameters
@@ -84,7 +84,7 @@ class GraphBuilder:
             computed from scratch.
         """
         validate_domain(func.domain)
-        edges: List[GraphEdge] = []
+        edges: list[GraphEdge] = []
         existing_set = self._edge_set(existing_graph)
 
         # 1. REFERENCES -- from cross_references field
@@ -197,14 +197,14 @@ class GraphBuilder:
 
     def build_from_batch(
         self,
-        funcs: List[Function],
-    ) -> List[GraphEdge]:
+        funcs: list[Function],
+    ) -> list[GraphEdge]:
         """Build edges for a batch of Functions.
 
         The graph is built incrementally: each Function sees edges
         from previously processed Functions in the same batch.
         """
-        all_edges: List[GraphEdge] = []
+        all_edges: list[GraphEdge] = []
         accumulated_graph = GraphData(nodes=[], edges=[])
 
         for func in funcs:
@@ -248,9 +248,9 @@ class GraphBuilder:
     def _detect_semantic_similar(
         self,
         func: Function,
-        all_funcs: List[Function],
-        existing_set: Set[tuple],
-    ) -> List[GraphEdge]:
+        all_funcs: list[Function],
+        existing_set: set[tuple],
+    ) -> list[GraphEdge]:
         """Detect SEMANTIC_SIMILAR edges via embedding cosine similarity.
 
         Inactive unless an embedding service was injected.  Candidate
@@ -271,7 +271,7 @@ class GraphBuilder:
         if func_vec is None:
             return []
 
-        scored: List[tuple] = []
+        scored: list[tuple] = []
         for other in all_funcs:
             if other.id == func.id:
                 continue
@@ -287,7 +287,7 @@ class GraphBuilder:
                 scored.append((similarity, other))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        edges: List[GraphEdge] = []
+        edges: list[GraphEdge] = []
         for similarity, other in scored[:max_edges]:
             edges.append(
                 self._make_edge(
@@ -301,10 +301,10 @@ class GraphBuilder:
             existing_set.add((func.id, other.id, EdgeType.SEMANTIC_SIMILAR.value))
         return edges
 
-    def _embed_func(self, func: Function) -> Optional[List[float]]:
+    def _embed_func(self, func: Function) -> list[float] | None:
         """Embed a Function's text (cached per build batch)."""
         if not hasattr(self, "_embedding_cache"):
-            self._embedding_cache: Dict[str, Optional[List[float]]] = {}
+            self._embedding_cache: dict[str, list[float] | None] = {}
         if func.id in self._embedding_cache:
             return self._embedding_cache[func.id]
         try:
@@ -323,14 +323,14 @@ class GraphBuilder:
                 )
             )
             vector = list(service.embed(text))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("semantic-similar: embed failed for %s: %s", func.id, exc)
             vector = None
         self._embedding_cache[func.id] = vector
         return vector
 
     @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""
         dot = sum(x * y for x, y in zip(a, b))
         norm_a = sum(x * x for x in a) ** 0.5
@@ -347,7 +347,7 @@ class GraphBuilder:
         target: str,
         edge_type: str,
         weight: float = 1.0,
-        evidence: Optional[List[str]] = None,
+        evidence: list[str] | None = None,
     ) -> GraphEdge:
         return GraphEdge(
             source=source,
@@ -355,7 +355,7 @@ class GraphBuilder:
             edge_type=edge_type,
             weight=weight,
             evidence=evidence or [],
-            created_at=datetime.now(),
+            created_at=datetime.now(UTC),
         )
 
     @staticmethod
@@ -363,12 +363,12 @@ class GraphBuilder:
         return (edge.source, edge.target, edge.edge_type)
 
     @staticmethod
-    def _edge_set(graph: Optional[GraphData]) -> Set[tuple]:
+    def _edge_set(graph: GraphData | None) -> set[tuple]:
         if graph is None:
             return set()
         return {(e.source, e.target, e.edge_type) for e in graph.edges}
 
-    def _resolve_by_name(self, name: str) -> Optional[str]:
+    def _resolve_by_name(self, name: str) -> str | None:
         """Look up a Function ID by its name via the store."""
         try:
             funcs = self._store.list_functions(limit=100000)
@@ -379,12 +379,12 @@ class GraphBuilder:
             logger.debug("graph name lookup failed for %r", name, exc_info=True)
         return None
 
-    def _get_all_funcs(self) -> List[Function]:
+    def _get_all_funcs(self) -> list[Function]:
         """Retrieve all stored Functions (cached per build batch)."""
         if not hasattr(self, "_funcs_cache"):
             try:
                 self._funcs_cache = self._store.list_functions(limit=100000)
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 self._funcs_cache = []
         return self._funcs_cache
 
@@ -399,7 +399,7 @@ class GraphBuilder:
 # ── Rule-based fallback (no store) ───────────────────────────────────
 
 
-def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
+def build_edges_rule_based(functions: list[Function]) -> list[GraphEdge]:
     """Simple rule-based edge detection when no store is available.
 
     Detects REFERENCES edges from ``func.cross_references`` (matching by
@@ -407,7 +407,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
     Used by :class:`CoreEngine._build_graph` as the fallback when the
     store-aware :class:`GraphBuilder` cannot run (no store available).
     """
-    edges: List[GraphEdge] = []
+    edges: list[GraphEdge] = []
     seen: set = set()
 
     for func in functions:
@@ -432,7 +432,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
                                 edge_type="REFERENCES",
                                 weight=1.0,
                                 evidence=[f"cross-reference: {func.name} -> {other.name}"],
-                                created_at=datetime.now(),
+                                created_at=datetime.now(UTC),
                             )
                         )
 
@@ -453,7 +453,7 @@ def build_edges_rule_based(functions: List[Function]) -> List[GraphEdge]:
                                 edge_type="ASSOCIATED_WITH",
                                 weight=0.5,
                                 evidence=[f"shared domain: {func.domain}"],
-                                created_at=datetime.now(),
+                                created_at=datetime.now(UTC),
                             )
                         )
 

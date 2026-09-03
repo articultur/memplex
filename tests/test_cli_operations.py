@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
-import memplex.adapters.cli as cli
+from memplex.adapters import cli
 from memplex.config import MemplexConfig
 from memplex.operations import OperationsReadinessBinding, create_operations_evidence
 from tests.test_storage_migrations import (
@@ -40,7 +40,7 @@ def _report(
     key = b"o" * 32
     config = MemplexConfig()
     config.operations.report_key_id = "ops-key"
-    generated_at = datetime.now(timezone.utc) - timedelta(seconds=evidence_age_seconds)
+    generated_at = datetime.now(UTC) - timedelta(seconds=evidence_age_seconds)
     window_ended_at = generated_at - timedelta(seconds=1)
     window_started_at = window_ended_at - timedelta(seconds=window_seconds)
     report = create_operations_evidence(

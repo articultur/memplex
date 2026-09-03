@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 
@@ -280,7 +280,7 @@ def test_real_tcp_page_snapshot_does_not_skip_concurrent_remote_write(
         if not page_queried.is_set():
             page_queried.set()
             assert release_response.wait(timeout=5)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         token = f"cursor-{len(cursors) + 1}"
         cursors[token] = SyncCursorClaims(
             1,

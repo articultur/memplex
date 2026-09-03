@@ -11,7 +11,6 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -20,7 +19,6 @@ from benchmarks.base import BenchmarkResult
 from benchmarks.benchmark_cli import run_benchmark_command
 from benchmarks.evidence import create_bundle, verify_bundle
 from benchmarks.loader import download_dataset
-
 
 CONCRETE_DATASETS = (
     "hotpotqa",

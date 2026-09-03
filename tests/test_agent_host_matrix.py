@@ -147,7 +147,8 @@ def _run_claude_hook(
         text=True,
         timeout=30,
         cwd=str(project_root),
-        env=env,
+        env=env,check=False
+    
     )
 
 
@@ -233,7 +234,8 @@ def _recall_with_codex(
         | {
             "PLUGIN_ROOT": str(plugin_root),
             "PLUGIN_DATA": str(plugin_data),
-        },
+        },check=False
+    
     )
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout or "{}")
@@ -265,7 +267,8 @@ def _capture_with_codex(
         text=True,
         timeout=30,
         env=_bridge_env(storage_path)
-        | {"PLUGIN_ROOT": str(plugin_root), "PLUGIN_DATA": str(plugin_data)},
+        | {"PLUGIN_ROOT": str(plugin_root), "PLUGIN_DATA": str(plugin_data)},check=False
+    
     )
     assert submit.returncode == 0, submit.stderr
 
@@ -283,7 +286,8 @@ def _capture_with_codex(
         text=True,
         timeout=30,
         env=_bridge_env(storage_path)
-        | {"PLUGIN_ROOT": str(plugin_root), "PLUGIN_DATA": str(plugin_data)},
+        | {"PLUGIN_ROOT": str(plugin_root), "PLUGIN_DATA": str(plugin_data)},check=False
+    
     )
     assert stop.returncode == 0, stop.stderr
     assert json.loads(stop.stdout or "{}") == {}
@@ -296,7 +300,8 @@ def _run_openclaw_bridge(action: str, payload: dict[str, Any], storage_path: Pat
         capture_output=True,
         text=True,
         timeout=30,
-        env=_bridge_env(storage_path),
+        env=_bridge_env(storage_path),check=False
+    
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

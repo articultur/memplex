@@ -24,7 +24,7 @@ memplex or third-party dependency so tests can validate dataset integrity cheapl
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 #: Bumped whenever facts/queries/labels change so baselines stay attributable.
 DATASET_VERSION = "1.0.0"
@@ -36,7 +36,7 @@ OVERLAP_LEVELS = ("high", "medium", "low")
 # Each fact: {"id": "pf01", "subject": <canonical subject phrase>, "text": <statement>}
 # ``subject`` is used by the eval script to filter colliding distractor documents.
 
-FACTS: List[Dict[str, str]] = [
+FACTS: list[dict[str, str]] = [
     {
         "id": "pf01",
         "subject": "Eiffel Tower",
@@ -170,7 +170,7 @@ FACTS: List[Dict[str, str]] = [
 # split so the strata stay roughly balanced (odd-numbered facts get an extra
 # ``medium``, even-numbered facts an extra ``low``).
 
-_QUERIES: List[Dict[str, str]] = [
+_QUERIES: list[dict[str, str]] = [
     # pf01 — Eiffel Tower
     {"fact_id": "pf01", "overlap": "high",
      "text": "When was the Eiffel Tower completed?"},
@@ -399,13 +399,13 @@ _QUERIES: List[Dict[str, str]] = [
 ]
 
 #: Materialized query list with stable IDs (``pf01_q1`` ... per fact order).
-QUERIES: List[Dict[str, Any]] = []
+QUERIES: list[dict[str, Any]] = []
 
 
 def _build_queries() -> None:
     """Assign stable per-fact query IDs and validate referential integrity."""
     fact_ids = {f["id"] for f in FACTS}
-    counters: Dict[str, int] = {}
+    counters: dict[str, int] = {}
     for entry in _QUERIES:
         fact_id = entry["fact_id"]
         if fact_id not in fact_ids:
@@ -426,7 +426,7 @@ def _build_queries() -> None:
 _build_queries()
 
 
-def fact_by_id(fact_id: str) -> Dict[str, str]:
+def fact_by_id(fact_id: str) -> dict[str, str]:
     """Return the fact dict for *fact_id* (raises KeyError when unknown)."""
     for fact in FACTS:
         if fact["id"] == fact_id:
@@ -434,7 +434,7 @@ def fact_by_id(fact_id: str) -> Dict[str, str]:
     raise KeyError(fact_id)
 
 
-def queries_by_overlap(level: str) -> List[Dict[str, Any]]:
+def queries_by_overlap(level: str) -> list[dict[str, Any]]:
     """Return all queries annotated with overlap *level*."""
     if level not in OVERLAP_LEVELS:
         raise ValueError(f"unknown overlap level {level!r}")

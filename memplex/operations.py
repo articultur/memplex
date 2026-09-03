@@ -18,9 +18,10 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from importlib import resources
 from pathlib import Path
+from typing import ClassVar
 
 
 class OperationsEvidenceError(ValueError):
@@ -102,7 +103,7 @@ def _require_string(value: object) -> str:
 def _require_timestamp(value: object) -> str:
     raw = _require_string(value)
     try:
-        parsed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ")
+        parsed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
     except ValueError as exc:
         raise OperationsEvidenceError("operations_report_invalid") from exc
     if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != raw:
@@ -113,8 +114,8 @@ def _require_timestamp(value: object) -> str:
 def _timestamp_datetime(value: object) -> datetime:
     timestamp = _require_timestamp(value)
     try:
-        return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-            tzinfo=timezone.utc
+        return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC).replace(
+            tzinfo=UTC
         )
     except ValueError as exc:
         raise OperationsEvidenceError("operations_report_invalid") from exc
@@ -213,7 +214,7 @@ class OperationsEvidenceReport:
         alert_rules_sha256: str,
         key_id: str,
         signing_key: bytes,
-    ) -> "OperationsEvidenceReport":
+    ) -> OperationsEvidenceReport:
         started = _timestamp_datetime(window_started_at)
         ended = _timestamp_datetime(window_ended_at)
         generated = _timestamp_datetime(generated_at)
@@ -268,7 +269,7 @@ class OperationsEvidenceReport:
         return replace(validated, signature=signature)
 
     @classmethod
-    def from_dict(cls, raw: object) -> "OperationsEvidenceReport":
+    def from_dict(cls, raw: object) -> OperationsEvidenceReport:
         try:
             if type(raw) is not dict or set(raw) != _REPORT_KEYS:
                 raise OperationsEvidenceError("operations_report_invalid")
@@ -368,7 +369,7 @@ class OperationsEvidenceReport:
             raise OperationsEvidenceError("operations_report_invalid") from exc
 
     @classmethod
-    def from_json(cls, payload: bytes) -> "OperationsEvidenceReport":
+    def from_json(cls, payload: bytes) -> OperationsEvidenceReport:
         try:
             if type(payload) is not bytes:
                 raise OperationsEvidenceError("operations_report_invalid")
@@ -421,11 +422,11 @@ class OperationsEvidenceReport:
                 if type(value) is not int or value <= 0:
                     raise OperationsEvidenceError("operations_report_invalid")
             if now is None:
-                observed_now = datetime.now(timezone.utc)
+                observed_now = datetime.now(UTC)
             elif type(now) is str:
                 observed_now = _timestamp_datetime(now)
             elif isinstance(now, datetime) and now.tzinfo is not None:
-                observed_now = now.astimezone(timezone.utc)
+                observed_now = now.astimezone(UTC)
             else:
                 raise OperationsEvidenceError("operations_report_invalid")
             self.verify(signing_key)
@@ -610,7 +611,7 @@ def create_operations_evidence(
 ) -> OperationsEvidenceReport:
     """Build signed evidence from bounded metrics and a completed drain."""
     try:
-        operations = getattr(config, "operations")
+        operations = getattr(config, "operations")  # noqa: B009 - duck-typed object param
         request_count = metrics_snapshot["request_count"]
         successful_requests = metrics_snapshot["successful_requests"]
         latency_sample_count = metrics_snapshot["latency_sample_count"]
@@ -661,7 +662,7 @@ def create_operations_evidence(
 
 
 def utc_timestamp_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def write_operations_report_atomic(
@@ -672,7 +673,7 @@ def write_operations_report_atomic(
         raise OperationsEvidenceError("operations_report_output_invalid")
     file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = -1
-    temp_name = ".%s.%s.tmp" % (path.name, uuid.uuid4().hex)
+    temp_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
     temp_created = False
     try:
         directory_fd = _open_pinned_parent(
@@ -723,7 +724,7 @@ def write_operations_report_atomic(
 class RuntimeLifecycle:
     """单向、线程安全的进程生命周期。"""
 
-    _ALLOWED = {
+    _ALLOWED: ClassVar[dict[str, frozenset[str]]] = {
         "starting": frozenset({"ready", "draining", "stopped", "faulted"}),
         "ready": frozenset({"draining", "faulted"}),
         "draining": frozenset({"stopped", "faulted"}),
@@ -916,8 +917,7 @@ class OperationsMetrics:
             for method in self._METHODS:
                 for status in self._STATUS_CLASSES:
                     lines.append(
-                        'memplex_http_requests_total{method="%s",status_class="%s"} %d'
-                        % (method, status, self._requests[(method, status)])
+                        f'memplex_http_requests_total{{method="{method}",status_class="{status}"}} {self._requests[(method, status)]}'
                     )
             lines.extend(
                 [
@@ -928,20 +928,16 @@ class OperationsMetrics:
             for method in self._METHODS:
                 for index, bucket in enumerate(self._BUCKETS):
                     lines.append(
-                        'memplex_http_request_duration_seconds_bucket{method="%s",le="%s"} %d'
-                        % (method, format(bucket, "g"), self._bucket_counts[method][index])
+                        f'memplex_http_request_duration_seconds_bucket{{method="{method}",le="{format(bucket, "g")}"}} {self._bucket_counts[method][index]}'
                     )
                 lines.append(
-                    'memplex_http_request_duration_seconds_bucket{method="%s",le="+Inf"} %d'
-                    % (method, self._bucket_counts[method][-1])
+                    f'memplex_http_request_duration_seconds_bucket{{method="{method}",le="+Inf"}} {self._bucket_counts[method][-1]}'
                 )
                 lines.append(
-                    'memplex_http_request_duration_seconds_sum{method="%s"} %s'
-                    % (method, self._number(self._duration_sum[method]))
+                    f'memplex_http_request_duration_seconds_sum{{method="{method}"}} {self._number(self._duration_sum[method])}'
                 )
                 lines.append(
-                    'memplex_http_request_duration_seconds_count{method="%s"} %d'
-                    % (method, self._duration_count[method])
+                    f'memplex_http_request_duration_seconds_count{{method="{method}"}} {self._duration_count[method]}'
                 )
             lines.extend(
                 [
@@ -950,7 +946,7 @@ class OperationsMetrics:
                     f"memplex_http_in_flight {self._in_flight}",
                     "# HELP memplex_runtime_state One when runtime is ready",
                     "# TYPE memplex_runtime_state gauge",
-                    "memplex_runtime_state %d" % (1 if runtime.get("runtime_state") == "ready" else 0),
+                    f"memplex_runtime_state {1 if runtime.get('runtime_state') == 'ready' else 0}",
                 ]
             )
             for name, help_text in (

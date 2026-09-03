@@ -35,20 +35,9 @@ def _service(tmp_path, **cfg_over):
 
 
 def _private_fact(fid, owner="alice", **kw):
-    base = dict(
-        id=fid,
-        tenant_id="t1",
-        owner_subject_id=owner,
-        workspace_id="w1",
-        subject="deploy",
-        predicate="uses",
-        object_="blue-green",
-        updated_at="2026-08-15T00:00:00+00:00",
-        valid_from="2026-08-15T00:00:00+00:00",
-        visibility="user",
-    )
-    base.update(kw)
-    return Fact(**base)
+    defaults = {"id": fid, "tenant_id": "t1", "owner_subject_id": owner, "workspace_id": "w1", "subject": "deploy", "predicate": "uses", "object_": "blue-green", "updated_at": "2026-08-15T00:00:00+00:00", "valid_from": "2026-08-15T00:00:00+00:00", "visibility": "user"}
+    defaults.update(kw)
+    return Fact(**defaults)
 
 
 
@@ -286,7 +275,7 @@ def test_v1_grant_holder_cannot_promote(tmp_path):
     """V1 fix: a cross-agent grant holder can read but NEVER widen —
     promoting someone else's private memory to team would leak it
     workspace-wide through a read-only grant."""
-    from memplex.auth import AuthorizationContext, Principal, MemoryNotFoundError
+    from memplex.auth import AuthorizationContext, MemoryNotFoundError, Principal
 
     svc = _service(tmp_path)
     try:

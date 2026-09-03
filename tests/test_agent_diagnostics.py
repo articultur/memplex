@@ -356,7 +356,7 @@ def test_agent_status_all_returns_partial_reports_on_one_host_failure(
     monkeypatch,
     capsys,
 ):
-    import memplex.product as product
+    from memplex import product
 
     stopped = []
     fake_service = SimpleNamespace(stop=lambda: stopped.append(True))

@@ -9,10 +9,10 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models import FieldValue, Function  # noqa: E402
-from memplex.processing.merger.conflict_resolver import Conflict, ConflictResolver  # noqa: E402
+from memplex.models import FieldValue, Function
+from memplex.processing.merger.conflict_resolver import Conflict, ConflictResolver
 
 
 def _func(fid, name, conditions, authority=None, paragraphs=None):

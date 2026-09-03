@@ -5,4 +5,4 @@ from .entity_aligner import EntityAligner
 from .ref_linker import RefLinker
 from .term_mapper import TermMapper
 
-__all__ = ["TermMapper", "RefLinker", "EntityAligner", "DomainClassifier"]
+__all__ = ["DomainClassifier", "EntityAligner", "RefLinker", "TermMapper"]

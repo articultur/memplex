@@ -13,13 +13,15 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import Enum
 from functools import total_ordering
+from itertools import pairwise
 from types import MappingProxyType
-from typing import Any, Final, Mapping
+from typing import Any, Final
 
 from memplex.sync_repository import SyncBatchRejected, SyncCursorExpired
 
@@ -214,7 +216,7 @@ def _serialize_jcs_float(value: float) -> str:
         return "0"
     rendered = repr(value)
     if "e" not in rendered and "E" not in rendered:
-        return rendered[:-2] if rendered.endswith(".0") else rendered
+        return rendered.removesuffix(".0")
     mantissa, exponent_text = rendered.lower().split("e", maxsplit=1)
     exponent = int(exponent_text)
     magnitude = abs(value)
@@ -227,8 +229,7 @@ def _serialize_jcs_float(value: float) -> str:
         if decimal_position >= len(digits):
             return sign + digits + "0" * (decimal_position - len(digits))
         return sign + digits[:decimal_position] + "." + digits[decimal_position:]
-    if mantissa.endswith(".0"):
-        mantissa = mantissa[:-2]
+    mantissa = mantissa.removesuffix(".0")
     exponent_sign = "+" if exponent >= 0 else ""
     return f"{mantissa}e{exponent_sign}{exponent}"
 
@@ -278,18 +279,18 @@ def _b64url_decode(value: object, name: str) -> bytes:
 def _canonical_time(value: object, name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise TypeError(f"{name} must be an aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _time_to_wire(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _time_from_wire(value: object, name: str) -> datetime:
     text = _require_exact_string(value, name)
     if not _VERSION_TIME_RE.fullmatch(text):
         raise ValueError(f"{name} must use canonical UTC microseconds")
-    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,7 +743,7 @@ class SyncCursorCodec:
                 raise ValueError("binding mismatch")
             if claims.consumer_binding != _require_exact_string(consumer_binding, "consumer_binding"):
                 raise ValueError("binding mismatch")
-            current = _canonical_time(now or datetime.now(timezone.utc), "now")
+            current = _canonical_time(now or datetime.now(UTC), "now")
             if current >= claims.expires_at:
                 raise ValueError("cursor expired")
             return claims
@@ -845,7 +846,7 @@ class SyncSnapshotPage:
         if self.next_anchor is not None and type(self.next_anchor) is not SyncSnapshotAnchor:
             raise TypeError("next_anchor must be SyncSnapshotAnchor or None")
         anchors = tuple(SyncSnapshotAnchor.from_event(event) for event in self.events)
-        if any(left >= right for left, right in zip(anchors, anchors[1:])):
+        if any(left >= right for left, right in pairwise(anchors)):
             raise ValueError("snapshot events must be strictly canonical ordered")
         if self.has_more:
             if not anchors or self.next_anchor != anchors[-1]:

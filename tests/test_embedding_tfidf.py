@@ -10,9 +10,9 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.retrieval.embedding import (  # noqa: E402
+from memplex.retrieval.embedding import (
     EmbeddingService,
     EmbeddingStrategy,
     _SimpleTFIDFEmbedder,

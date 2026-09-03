@@ -8,9 +8,10 @@ import socket
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from typing import Self
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -63,7 +64,7 @@ class HttpFaultProxy:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+            def do_POST(self) -> None:
                 if self.path != "/sync/v1/batches":
                     self.send_error(404)
                     return
@@ -87,7 +88,7 @@ class HttpFaultProxy:
                     return
                 try:
                     result = owner._apply_batch(body)
-                except Exception as exc:  # pragma: no cover - asserted via errors
+                except Exception as exc:  # pragma: no cover - asserted via errors  # noqa: BLE001 - broad catch with explicit fallback handling
                     owner.errors.append(type(exc).__name__)
                     self._send_json(500, {"error": "apply_failed"})
                     return
@@ -102,7 +103,7 @@ class HttpFaultProxy:
                     time.sleep(float(action.delay_seconds))
                 self._send_json(200, result)
 
-            def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+            def do_GET(self) -> None:
                 parsed = urlsplit(self.path)
                 if parsed.path != "/sync/v1/changes" or owner._get_page is None:
                     self.send_error(404)
@@ -115,7 +116,7 @@ class HttpFaultProxy:
                 }
                 try:
                     result = owner._get_page(query)
-                except Exception as exc:  # pragma: no cover - asserted via errors
+                except Exception as exc:  # pragma: no cover - asserted via errors  # noqa: BLE001 - broad catch with explicit fallback handling
                     owner.errors.append(type(exc).__name__)
                     self._send_json(500, {"error": "page_failed"})
                     return
@@ -169,7 +170,7 @@ class HttpFaultProxy:
         self._server.server_close()
         self._thread.join(timeout=5.0)
 
-    def __enter__(self) -> HttpFaultProxy:
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, *_exc: object) -> None:
@@ -181,7 +182,7 @@ class UrllibResponse:
 
     def __init__(self, response: object) -> None:
         self._response = response
-        self.status_code = int(getattr(response, "status"))
+        self.status_code = int(response.status)
 
     def iter_content(self, chunk_size: int):
         while True:

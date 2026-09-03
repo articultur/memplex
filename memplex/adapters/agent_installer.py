@@ -11,10 +11,11 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from memplex.adapters._shared import get_plugin_source_dir as _get_plugin_source_dir
 from memplex.adapters._shared import marketplace_json as _marketplace_json
@@ -367,7 +368,7 @@ def inspect_agent_installation(
 
 # Re-export the split-out install-transaction machinery so existing
 # imports and bare-name calls in this module keep resolving.
-from memplex.adapters.install_transaction import (  # noqa: F401,E402
+from memplex.adapters.install_transaction import (
     _agent_install_mutation_paths,
     _agent_installation_paths,
     _cleanup_snapshot_root,
@@ -572,7 +573,7 @@ def _install_codex(
                 marker_path,
                 {
                     "version": _package_version(),
-                    "installed_at": datetime.now().isoformat(),
+                    "installed_at": datetime.now(UTC).isoformat(),
                     "managed": managed,
                 },
             )
@@ -714,7 +715,7 @@ def _install_claude_code(
         }
 
     market_source = str(market_dir)
-    now = datetime.now().isoformat()
+    now = datetime.now(UTC).isoformat()
     installed_settings = set_jsonc_path(
         current_texts["settings"],
         ("extraKnownMarketplaces", "articultur", "source"),
@@ -740,7 +741,7 @@ def _install_claude_code(
     installed_plugins["version"] = 2
     plugin_records = installed_plugins.setdefault("plugins", {})
     if not isinstance(plugin_records, dict):
-        raise ValueError("Claude Code installed_plugins.json plugins must be an object.")
+        raise ValueError("Claude Code installed_plugins.json plugins must be an object.")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     plugin_records["memplex@articultur"] = [
         {
             "scope": "user",
@@ -964,11 +965,11 @@ def _install_openclaw(
     config = _read_json(config_path)
     plugins = config.get("plugins", {})
     if not isinstance(plugins, dict):
-        raise ValueError("OpenClaw plugins config must be an object.")
+        raise ValueError("OpenClaw plugins config must be an object.")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     slots = plugins.get("slots", {})
     entries = plugins.get("entries", {})
     if not isinstance(slots, dict) or not isinstance(entries, dict):
-        raise ValueError("OpenClaw plugins.slots and plugins.entries must be objects.")
+        raise ValueError("OpenClaw plugins.slots and plugins.entries must be objects.")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     previous_memory_slot = slots.get("memory")
     existing_entry = entries.get("memplex")
     if existing_entry and not _is_managed_openclaw_entry(existing_entry):
@@ -994,7 +995,7 @@ def _install_openclaw(
     }
     allow = plugins.get("allow", [])
     if not isinstance(allow, list):
-        raise ValueError("OpenClaw plugins.allow must be an array when present.")
+        raise ValueError("OpenClaw plugins.allow must be an array when present.")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     existing_allow_entry = "memplex" in allow
     if previous_memory_slot and previous_memory_slot != "memplex":
         managed["previousMemorySlot"] = previous_memory_slot
@@ -1548,7 +1549,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
 
 
 # Re-export the split-out embedded asset writers.
-from memplex.adapters.agent_assets import (  # noqa: F401,E402
+from memplex.adapters.agent_assets import (
     _openclaw_plugin_javascript,
     _write_hermes_provider_plugin,
     _write_openclaw_extension,
@@ -1618,14 +1619,14 @@ def _is_managed_claude_marketplace(market_dir: Path) -> bool:
     if state_path.exists():
         try:
             return _is_managed_payload(_read_json(state_path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort fallback value
             return False
     legacy_marker = market_dir / ".install-version"
     if not legacy_marker.exists():
         return False
     try:
         marker = _read_json(legacy_marker)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return False
     # Older Memplex installers wrote a version-only marker.
     return bool(marker.get("version"))
@@ -1636,7 +1637,7 @@ def _is_managed_json_file(path: Path) -> bool:
         return False
     try:
         return _is_managed_payload(_read_json(path))
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return False
 
 
@@ -1661,7 +1662,7 @@ def _package_version() -> str:
 
     try:
         return pkg_version("memplex")
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return "unknown"
 
 

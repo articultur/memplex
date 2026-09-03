@@ -57,7 +57,8 @@ def test_codex_real_cli_discovers_plugin_in_isolated_home(tmp_path):
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "HOME": str(home), "CODEX_HOME": str(config_root)},
+        env={**os.environ, "HOME": str(home), "CODEX_HOME": str(config_root)},check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -105,7 +106,8 @@ def _run_hook(plugin_root, plugin_data, storage_path, payload):
             "PLUGIN_DATA": str(plugin_data),
             "MEMPLEX_STORAGE_BACKEND": "lite",
             "MEMPLEX_STORAGE_PATH": str(storage_path),
-        },
+        },check=False
+    
     )
 
 

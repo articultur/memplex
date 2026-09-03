@@ -90,7 +90,7 @@ _SKILL_MD_TEMPLATE = textwrap.dedent("""\
 """)
 
 
-def generate_skill_md(output_path: Optional[str] = None) -> str:
+def generate_skill_md(output_path: str | None = None) -> str:
     content = _SKILL_MD_TEMPLATE.strip() + "\n"
 
     if output_path is not None:
@@ -190,7 +190,7 @@ _HOOK_SH_TEMPLATE = textwrap.dedent("""\
 """)
 
 
-def generate_hook_sh(output_path: Optional[str] = None) -> str:
+def generate_hook_sh(output_path: str | None = None) -> str:
     content = _HOOK_SH_TEMPLATE.strip() + "\n"
 
     if output_path is not None:

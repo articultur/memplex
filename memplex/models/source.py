@@ -15,9 +15,9 @@ class SourceType(Enum):
 @dataclass
 class SourceDocument:
     type: str  # text | file | url | clipboard
-    content: Optional[str] = None
-    source_path: Optional[str] = None
-    content_hash: Optional[str] = None
-    url: Optional[str] = None
-    vision: Optional[dict] = None
+    content: str | None = None
+    source_path: str | None = None
+    content_hash: str | None = None
+    url: str | None = None
+    vision: dict | None = None
     source_type: SourceType = SourceType.WIKI

@@ -1,6 +1,6 @@
 """DomainClassifier - classifies functions into domain categories."""
 
-from typing import Dict, List
+from typing import ClassVar
 
 from memplex.models.memory import Function
 
@@ -8,8 +8,7 @@ from memplex.models.memory import Function
 class DomainClassifier:
     """Classifies functions into domain categories based on keyword matching."""
 
-    DOMAIN_KEYWORDS: Dict[str, List[str]] = {
-        "认证模块": [
+    DOMAIN_KEYWORDS: ClassVar[dict[str, list[str]]] = {        "认证模块": [
             "登录",
             "登出",
             "注册",
@@ -122,7 +121,7 @@ class DomainClassifier:
         for fv in func.benefit:
             text_parts.append(("benefit", fv.desc))
 
-        scores: Dict[str, float] = {}
+        scores: dict[str, float] = {}
         for domain, keywords in self.DOMAIN_KEYWORDS.items():
             score = 0.0
             for priority_label, text in text_parts:

@@ -11,12 +11,12 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import json  # noqa: E402
+import json
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.config import LLMConfig  # noqa: E402
-from memplex.llm.enhancer import LLMEnhancer  # noqa: E402
+from memplex.config import LLMConfig
+from memplex.llm.enhancer import LLMEnhancer
 
 # ── Construction with a stub provider ───────────────────────────────
 

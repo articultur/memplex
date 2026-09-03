@@ -8,10 +8,11 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 import json
 import logging
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
-import benchmarks  # noqa: F401  (import triggers benchmark registration)
+import benchmarks
 from benchmarks.base import (
     BenchmarkResult,
     BenchmarkRunnerFactory,
@@ -52,7 +53,7 @@ def service(tmp_path):
 
 
 class TestFactoryRegistration:
-    EXPECTED = {
+    EXPECTED: ClassVar[set[str]] = {
         "locomo",
         "nq",
         "triviaqa",

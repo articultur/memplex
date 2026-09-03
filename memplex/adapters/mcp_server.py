@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import traceback
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Optional
 
 from memplex.adapters._shared import (
     MAX_MODEL_COLLECTION_RESULTS,
@@ -425,7 +425,7 @@ class MCPServer:
 
     # ── JSON-RPC I/O ─────────────────────────────────────────────
 
-    def _read_request(self) -> Optional[dict]:
+    def _read_request(self) -> dict | None:
         """Read a single JSON-RPC request from stdin.
 
         Returns ``None`` only on EOF. Blank lines are skipped, and a
@@ -503,7 +503,7 @@ class MCPServer:
             ],
         }
 
-    def _handle_request(self, request: dict) -> Optional[dict]:
+    def _handle_request(self, request: dict) -> dict | None:
         """Route a JSON-RPC request to the correct handler."""
         method = request.get("method", "")
         params = request.get("params", {})
@@ -533,7 +533,7 @@ class MCPServer:
             # Unknown tool name -> Invalid params (JSON-RPC -32602).
             logger.error("Error handling %s: %s", method, exc)
             return self._make_error(-32602, str(exc), req_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.error("Error handling %s: %s", method, exc)
             traceback.print_exc(file=sys.stderr)
             return self._make_error(-32603, str(exc), req_id)
@@ -914,8 +914,7 @@ class MCPServer:
         return {"status": "captured", "agent": runtime.agent}
 
     # Map tool names to handler methods
-    _tool_handlers: Dict[str, Any] = {
-        "memory_search": _tool_memory_search,
+    _tool_handlers: ClassVar[dict[str, Any]] = {        "memory_search": _tool_memory_search,
         "memory_add": _tool_memory_add,
         "memory_get": _tool_memory_get,
         "memory_update": _tool_memory_update,

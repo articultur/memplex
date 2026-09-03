@@ -17,16 +17,16 @@ import threading
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from memplex.adapters.agent_runtime import AgentMemoryRuntime  # noqa: E402
-from memplex.adapters.http_api import create_app  # noqa: E402
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import (  # noqa: E402
+from memplex.adapters.agent_runtime import AgentMemoryRuntime
+from memplex.adapters.http_api import create_app
+from memplex.config import MemplexConfig
+from memplex.models import (
     Fact,
     FieldValue,
     Function,
@@ -35,11 +35,11 @@ from memplex.models import (  # noqa: E402
     SourceDocument,
     SourceType,
 )
-from memplex.service import MemplexService  # noqa: E402
-from memplex.storage import _unwrap_postgres_for_migration  # noqa: E402
-from memplex.storage.lite.store import LiteMemoryStore  # noqa: E402
-from memplex.storage.postgres import PostgresMemoryStore  # noqa: E402
-from memplex.sync import RemoteSyncConfig, SyncableStore, maybe_wrap_sync  # noqa: E402
+from memplex.service import MemplexService
+from memplex.storage import _unwrap_postgres_for_migration
+from memplex.storage.lite.store import LiteMemoryStore
+from memplex.storage.postgres import PostgresMemoryStore
+from memplex.sync import RemoteSyncConfig, SyncableStore, maybe_wrap_sync
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

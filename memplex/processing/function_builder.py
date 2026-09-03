@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import List
 
 from memplex.models import FieldValue, Function, SourceDocument
 from memplex.models.paragraph import ParagraphCollection
@@ -44,7 +43,7 @@ def normalize_name(name: str) -> str:
 def build_functions_from_paragraphs(
     paragraphs: ParagraphCollection,
     source: SourceDocument,
-) -> List[Function]:
+) -> list[Function]:
     """Convert L1 Paragraphs to L2 Functions with multi-value fields.
 
     For each paragraph:
@@ -54,7 +53,7 @@ def build_functions_from_paragraphs(
       trigger (first) then action (rest)
     - stamp ``content_hash`` for downstream dedup
     """
-    functions: List[Function] = []
+    functions: list[Function] = []
     source_id = source.type
 
     for para in paragraphs.paragraphs:
@@ -69,10 +68,10 @@ def build_functions_from_paragraphs(
         name_normalized = normalize_name(para.section if para.section else para.raw_text[:50])
 
         # Classify FieldValues from sentences
-        triggers: List[FieldValue] = []
-        conditions: List[FieldValue] = []
-        actions: List[FieldValue] = []
-        benefits: List[FieldValue] = []
+        triggers: list[FieldValue] = []
+        conditions: list[FieldValue] = []
+        actions: list[FieldValue] = []
+        benefits: list[FieldValue] = []
 
         for sent in para.sentences:
             fv = FieldValue(

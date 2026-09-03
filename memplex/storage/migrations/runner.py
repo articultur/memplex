@@ -386,7 +386,7 @@ def _declared_dsn_diagnostics(conn: Any) -> tuple[str | None, str | None, str | 
         declared_host = _declared_dsn_value(parameters, "host")
         declared_hostaddr = _declared_dsn_value(parameters, "hostaddr")
         declared_port_text = _declared_dsn_value(parameters, "port")
-    except Exception:  # noqa: BLE001 - optional diagnostics must never gate the actual target.
+    except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
         declared_database = None
         declared_host = None
         declared_hostaddr = None
@@ -570,7 +570,7 @@ def _vector_extension_type(cur: Any) -> tuple[str, int] | None:
 # ``runner._EDGE_TARGET_FUNCTION_EXPRESSION`` paths and bare-name
 # references in this module keep resolving.  Shared schema constants and
 # data classes come from ``_constants`` (imported at the top).
-from memplex.storage.migrations.catalogue_checks import (  # noqa: F401
+from memplex.storage.migrations.catalogue_checks import (
     _EDGE_FOREIGN_KEY_SHAPES,
     _EDGE_TARGET_FUNCTION_EXPRESSION,
     _FIXED_AUDITED_ADOPTION_VARIANTS,
@@ -631,7 +631,7 @@ from memplex.storage.migrations.catalogue_checks import (  # noqa: F401
     _variant_digest,
     _vector_parameter_digest,
 )
-from memplex.storage.migrations.catalogue_snapshot import (  # noqa: F401,E402
+from memplex.storage.migrations.catalogue_snapshot import (
     _catalog_snapshot,
 )
 
@@ -744,7 +744,7 @@ def schema_fingerprint(
 
 # Re-export the split-out ACL verification entry points so existing
 # ``from ...runner import _verify_acl_contracts`` paths keep resolving.
-from memplex.storage.migrations.acl_verification import (  # noqa: F401
+from memplex.storage.migrations.acl_verification import (
     _verify_acl_contracts,
     _verify_application_acl,
     _verify_ingress_acl,
@@ -754,7 +754,7 @@ from memplex.storage.migrations.acl_verification import (  # noqa: F401
 # ``from ...runner import _read_ledger_if_present`` paths and the class's
 # bare-name calls (and the test suite's monkeypatch of
 # ``runner._read_ledger_if_present``) keep resolving.
-from memplex.storage.migrations.ledger_state import (  # noqa: F401
+from memplex.storage.migrations.ledger_state import (
     _plan_from_observed_state,
     _read_ledger_if_present,
     _validate_ledger,
@@ -793,12 +793,12 @@ class PostgresMigrationRunner:
         except BaseException:
             try:
                 conn.rollback()
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # The original catalogue/migration failure is the useful one.
                 _ = cleanup_error
             try:
                 conn.close()
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 _ = cleanup_error
             raise
         else:
@@ -806,7 +806,7 @@ class PostgresMigrationRunner:
                 rollback_error: BaseException | None = None
                 try:
                     conn.rollback()
-                except BaseException as exc:  # noqa: BLE001
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     rollback_error = exc
                 try:
                     conn.close()
@@ -833,7 +833,7 @@ class PostgresMigrationRunner:
         except BaseException:
             try:
                 self._close_cursor(cursor)
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 _ = cleanup_error
             raise
         else:
@@ -1118,7 +1118,7 @@ class PostgresMigrationRunner:
             except BaseException:
                 try:
                     self._close_cursor(cur)
-                except BaseException as cleanup_error:  # noqa: BLE001
+                except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     _ = cleanup_error
                 raise
             self._close_cursor(cur)
@@ -1126,17 +1126,17 @@ class PostgresMigrationRunner:
         except BaseException:
             try:
                 conn.rollback()
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 _ = cleanup_error
             try:
                 conn.close()
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 _ = cleanup_error
             raise
         else:
             try:
                 conn.close()
-            except BaseException as cleanup_error:  # noqa: BLE001
+            except BaseException as cleanup_error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # Commit has made ``final`` authoritative.  Close is best effort.
                 _ = cleanup_error
             return final
@@ -1189,7 +1189,7 @@ class PostgresMigrationRunner:
                 cur.execute("SAVEPOINT memplex_vector_capability")
                 try:
                     cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-                except BaseException:  # noqa: BLE001
+                except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                     cur.execute("ROLLBACK TO SAVEPOINT memplex_vector_capability")
                     cur.execute("RELEASE SAVEPOINT memplex_vector_capability")
                     if request.policy == "required":

@@ -1,7 +1,6 @@
 """Term dictionary for association mapping."""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 import yaml
 
@@ -9,13 +8,13 @@ import yaml
 class TermDictionary:
     """Term dictionary for association mapping."""
 
-    def __init__(self, base_path: Optional[str] = None):
+    def __init__(self, base_path: str | None = None):
         if base_path is None:
             self.base_path = Path(__file__).parent / "base_terms.yaml"
         else:
             self.base_path = Path(base_path)
-        self.terms: Dict[str, List[str]] = {}
-        self.reverse_map: Dict[str, str] = {}  # synonym -> canonical
+        self.terms: dict[str, list[str]] = {}
+        self.reverse_map: dict[str, str] = {}  # synonym -> canonical
         self._load()
 
     def _load(self) -> None:
@@ -35,12 +34,12 @@ class TermDictionary:
         """Get canonical form of a term."""
         return self.reverse_map.get(term.lower(), term.lower())
 
-    def get_synonyms(self, term: str) -> List[str]:
+    def get_synonyms(self, term: str) -> list[str]:
         """Get all synonyms for a term."""
         canonical = self.get_canonical(term)
         return self.terms.get(canonical, [term])
 
-    def find_matching_terms(self, text: str) -> Set[str]:
+    def find_matching_terms(self, text: str) -> set[str]:
         """Find all matching terms in text."""
         text_lower = text.lower()
         matches = set()

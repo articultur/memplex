@@ -28,7 +28,7 @@ import uuid
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from threading import Barrier, BrokenBarrierError
 
 import pytest
@@ -643,7 +643,7 @@ def _install_runtime_v1_core_fixture(dsn: str, dim: int) -> None:
                     "ALTER TABLE memplex_functions "
                     f"ADD COLUMN IF NOT EXISTS embedding vector({dim})"
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - deliberate best-effort suppression
                 pass
         conn.commit()
     except Exception:
@@ -1287,7 +1287,7 @@ def pgvector_available(pg_dsn):
         conn.commit()
         cur.close()
         return True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         conn.rollback()
         if os.environ.get("MEMPLEX_REQUIRE_PGVECTOR") == "1":
             pytest.fail(f"pgvector is required by this CI gate: {exc}")
@@ -3001,7 +3001,7 @@ def test_v5_sync_repository_page_delivery_and_lease_lifecycle_real_postgres(
         delivery = deliveries[0]
         assert scoped.sync_status().leased == 1
 
-        scoped.sync_fail(delivery, "remote_unavailable", datetime.now(timezone.utc))
+        scoped.sync_fail(delivery, "remote_unavailable", datetime.now(UTC))
         status = scoped.sync_status()
         assert status.dead_letters == 1
         assert status.pending == 0
@@ -3026,7 +3026,7 @@ def test_v5_sync_repository_page_delivery_and_lease_lifecycle_real_postgres(
             "WHERE tenant_id=%s AND remote_id=%s AND consumer_id=%s",
             (tenant_id, remote_id, consumer_id),
         ) == [(0,)]
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         confirmed = SyncCursorClaims(
             1,
             "test-key",
@@ -3082,7 +3082,7 @@ def test_v5_sync_repository_page_delivery_and_lease_lifecycle_real_postgres(
             "Repository Snapshot After",
         )
         scoped.add(post_snapshot_function, SRC)
-        snapshot_now = datetime.now(timezone.utc)
+        snapshot_now = datetime.now(UTC)
         snapshot_cursor = SyncCursorClaims(
             1,
             "test-key",
@@ -3338,7 +3338,7 @@ def test_v5_sync_apply_page_is_atomic_mixed_origin_and_relay_safe_real_postgres(
             SyncOperation.UPSERT,
             str(
                 SyncVersion.create(
-                    datetime(2026, 8, 11, 0, 0, index, tzinfo=timezone.utc),
+                    datetime(2026, 8, 11, 0, 0, index, tzinfo=UTC),
                     origin,
                     event_id,
                 )
@@ -3432,7 +3432,7 @@ def test_v5_sync_apply_page_is_atomic_mixed_origin_and_relay_safe_real_postgres(
         assert [
             item.event.origin_node_id for item in downstream_page.items
         ] == ["origin-a", "origin-b"]
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         downstream_confirmed = SyncCursorClaims(
             1,
             "test-key",
@@ -3602,7 +3602,7 @@ def test_v5_sync_apply_page_is_atomic_mixed_origin_and_relay_safe_real_postgres(
                 SyncOperation.UPSERT,
                 str(
                     SyncVersion.create(
-                        datetime(2026, 8, 11, 0, 1, 1, tzinfo=timezone.utc),
+                        datetime(2026, 8, 11, 0, 1, 1, tzinfo=UTC),
                         "origin-a",
                         str(uuid.UUID(int=2001)),
                     )
@@ -3626,7 +3626,7 @@ def test_v5_sync_apply_page_is_atomic_mixed_origin_and_relay_safe_real_postgres(
                 SyncOperation.UPSERT,
                 str(
                     SyncVersion.create(
-                        datetime(2026, 8, 11, 0, 1, 2, tzinfo=timezone.utc),
+                        datetime(2026, 8, 11, 0, 1, 2, tzinfo=UTC),
                         "origin-b",
                         str(uuid.UUID(int=2002)),
                     )
@@ -3744,7 +3744,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             "WHERE tenant_id=%s",
             (tenant_id,),
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cursor = SyncCursorClaims(
             1,
             "test-key",
@@ -3759,7 +3759,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             now + timedelta(minutes=5),
         )
         scoped.sync_page("compact-reader", "compact-consumer", cursor, 10)
-        assert scoped.sync_compact(datetime.now(timezone.utc), limit=10) == 2
+        assert scoped.sync_compact(datetime.now(UTC), limit=10) == 2
         assert _admin_query(
             migration_dsn,
             "SELECT stream_seq FROM memplex_sync_outbox WHERE tenant_id=%s ORDER BY stream_seq",
@@ -3801,7 +3801,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             "WHERE tenant_id=%s",
             (tenant_id,),
         )
-        assert scoped.sync_compact(datetime.now(timezone.utc), limit=10) == 1
+        assert scoped.sync_compact(datetime.now(UTC), limit=10) == 1
         assert _admin_query(
             migration_dsn,
             "SELECT stream_seq FROM memplex_sync_outbox WHERE tenant_id=%s ORDER BY stream_seq",
@@ -3813,7 +3813,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             "WHERE tenant_id=%s",
             (tenant_id,),
         )
-        assert scoped.sync_compact(datetime.now(timezone.utc), limit=10) == 1
+        assert scoped.sync_compact(datetime.now(UTC), limit=10) == 1
 
         fifth = _func(
             f"compact-function-4-{uuid.uuid4().hex}",
@@ -3821,7 +3821,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
         )
         scoped.add(fifth, SRC)
         fifth_delivery = scoped.sync_claim(target_id, limit=1, lease_seconds=30)[0]
-        scoped.sync_fail(fifth_delivery, "permanent", datetime.now(timezone.utc))
+        scoped.sync_fail(fifth_delivery, "permanent", datetime.now(UTC))
         fifth_stream_seq = _admin_query(
             migration_dsn,
             "SELECT stream_seq FROM memplex_sync_outbox "
@@ -3834,9 +3834,9 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             "WHERE tenant_id=%s",
             (tenant_id,),
         )
-        assert scoped.sync_compact(datetime.now(timezone.utc), limit=10) == 0
+        assert scoped.sync_compact(datetime.now(UTC), limit=10) == 0
         scoped.sync_set_target_enabled(target_id, False)
-        assert scoped.sync_compact(datetime.now(timezone.utc), limit=10) == 1
+        assert scoped.sync_compact(datetime.now(UTC), limit=10) == 1
         assert _admin_query(
             migration_dsn,
             "SELECT retention_floor, compacted_through FROM memplex_sync_stream_state "
@@ -3848,7 +3848,7 @@ def test_v5_sync_compact_preserves_cursor_snapshot_and_dead_letter_pins_real_pos
             "SELECT count(*) FROM memplex_sync_outbox WHERE tenant_id=%s",
             (tenant_id,),
         ) == [(0,)]
-        expired_now = datetime.now(timezone.utc)
+        expired_now = datetime.now(UTC)
         expired_cursor = SyncCursorClaims(
             1,
             "test-key",
@@ -6106,14 +6106,7 @@ def _fv(desc, **kw):
 
 
 def _func(fid, name, **kw):
-    defaults = dict(
-        name_normalized=name.strip().lower(),
-        domain="auth",
-        confidence=0.9,
-        source_type=SourceType.CODE,
-        trigger=[_fv(f"{name} trigger")],
-        action=[_fv(f"{name} action")],
-    )
+    defaults = {"name_normalized": name.strip().lower(), "domain": "auth", "confidence": 0.9, "source_type": SourceType.CODE, "trigger": [_fv(f"{name} trigger")], "action": [_fv(f"{name} action")]}
     defaults.update(kw)
     return Function(id=fid, name=name, **defaults)
 
@@ -6849,7 +6842,7 @@ class TestAddGetRoundtrip:
         assert got.created_at and got.updated_at
 
     def test_fieldvalue_created_at_roundtrip(self, store):
-        ts = datetime(2025, 5, 6, 7, 8, 9, tzinfo=timezone.utc)
+        ts = datetime(2025, 5, 6, 7, 8, 9, tzinfo=UTC)
         f = _func("rt-2", "Stamped", trigger=[_fv("t", created_at=ts)])
         store.add(f, SRC)
         got = store.get("rt-2")
@@ -7783,13 +7776,13 @@ class TestFilter:
 
     def test_filter_updated_after(self, filtered_store):
         got = filtered_store.filter(
-            SearchFilters(updated_after=datetime(2025, 2, 1, tzinfo=timezone.utc))
+            SearchFilters(updated_after=datetime(2025, 2, 1, tzinfo=UTC))
         )
         assert [f.id for f in got] == ["f-2"]
 
     def test_filter_updated_before(self, filtered_store):
         got = filtered_store.filter(
-            SearchFilters(updated_before=datetime(2025, 2, 1, tzinfo=timezone.utc))
+            SearchFilters(updated_before=datetime(2025, 2, 1, tzinfo=UTC))
         )
         assert [f.id for f in got] == ["f-1"]
 
@@ -8199,21 +8192,7 @@ class TestPgvectorHybrid:
 
 class TestPostgresFeedbackStore:
     def _fb(self, memory_id="fb-m1", role="trigger", **kw):
-        defaults = dict(
-            memory_id=memory_id,
-            field_role=role,
-            value_index=0,
-            verdict=FeedbackVerdict.WRONG,
-            reason="wrong value",
-            source="user",
-            timestamp=datetime(2025, 4, 1, 12, 0, 0),
-            owner="alice",
-            feedback_type="field_value",
-            old_value="old",
-            new_value="new",
-            needs_review=True,
-            needs_review_until=datetime(2025, 5, 1, tzinfo=timezone.utc),
-        )
+        defaults = {"memory_id": memory_id, "field_role": role, "value_index": 0, "verdict": FeedbackVerdict.WRONG, "reason": "wrong value", "source": "user", "timestamp": datetime(2025, 4, 1, 12, 0, 0, tzinfo=UTC), "owner": "alice", "feedback_type": "field_value", "old_value": "old", "new_value": "new", "needs_review": True, "needs_review_until": datetime(2025, 5, 1, tzinfo=UTC)}
         defaults.update(kw)
         return MemoryFeedback(**defaults)
 
@@ -8243,7 +8222,7 @@ class TestPostgresFeedbackStore:
             self._fb(
                 memory_id="fb-m3",
                 needs_review=False,
-                resolved_at=datetime(2025, 4, 2),
+                resolved_at=datetime(2025, 4, 2, tzinfo=UTC),
                 resolution="accepted",
             )
         )
@@ -8264,7 +8243,7 @@ class TestPostgresFeedbackStore:
     def test_history_limit_and_clear(self, feedback_store):
         for i in range(5):
             feedback_store.record(
-                self._fb(timestamp=datetime(2025, 4, 1, 12, i, 0))
+                self._fb(timestamp=datetime(2025, 4, 1, 12, i, 0, tzinfo=UTC))
             )
         assert len(feedback_store.get_history("fb-m1", limit=3)) == 3
         feedback_store.clear()
@@ -8527,10 +8506,10 @@ def test_v5_ingress_apply_inbound_accepts_verified_canonical_batch(migration_dsn
     finally:
         owner.close()
     event_id = "123e4567-e89b-42d3-a456-426614174001"
-    event = SyncEvent(1, event_id, "remote-node", SyncNodeType.FUNCTION, SyncEntityKey.node("fn"), SyncOperation.UPSERT, str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), "remote-node", event_id)), SyncScope("tenant-inbound", "owner-inbound", "workspace-inbound", "user", None, None), {"id": "fn"})
+    event = SyncEvent(1, event_id, "remote-node", SyncNodeType.FUNCTION, SyncEntityKey.node("fn"), SyncOperation.UPSERT, str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), "remote-node", event_id)), SyncScope("tenant-inbound", "owner-inbound", "workspace-inbound", "user", None, None), {"id": "fn"})
     batch = SyncBatch(1, "123e4567-e89b-42d3-a456-426614174002", "remote-node", (event,))
     pretty = json.dumps(batch.to_dict(), indent=2).encode("utf-8")
-    forged_event = SyncEvent(1, event_id, "other-remote", SyncNodeType.FUNCTION, SyncEntityKey.node("fn"), SyncOperation.UPSERT, str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), "other-remote", event_id)), SyncScope("tenant-inbound", "owner-inbound", "workspace-inbound", "user", None, None), {"id": "fn"})
+    forged_event = SyncEvent(1, event_id, "other-remote", SyncNodeType.FUNCTION, SyncEntityKey.node("fn"), SyncOperation.UPSERT, str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), "other-remote", event_id)), SyncScope("tenant-inbound", "owner-inbound", "workspace-inbound", "user", None, None), {"id": "fn"})
     forged_origin = SyncBatch(1, "123e4567-e89b-42d3-a456-426614174003", "other-remote", (forged_event,))
     conn = psycopg2.connect(psycopg2.extensions.make_dsn(migration_dsn, user=role))
     try:
@@ -8562,7 +8541,7 @@ def test_v5_ingress_apply_inbound_accepts_verified_canonical_batch(migration_dsn
         changed_event = SyncEvent(
             1, event_id, "remote-node", SyncNodeType.FUNCTION, SyncEntityKey.node("fn"),
             SyncOperation.UPSERT,
-            str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), "remote-node", event_id)),
+            str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), "remote-node", event_id)),
             SyncScope("tenant-inbound", "owner-inbound", "workspace-inbound", "user", None, None),
             {"id": "changed"},
         )
@@ -8601,7 +8580,7 @@ def test_sync_resources_publish_verified_inbound_executor_on_real_postgres(migra
         SyncOperation.UPSERT,
         str(
             SyncVersion.create(
-                datetime(2026, 8, 11, tzinfo=timezone.utc),
+                datetime(2026, 8, 11, tzinfo=UTC),
                 "remote-resource",
                 event_id,
             )
@@ -8702,7 +8681,7 @@ def _codec_test_batch(
         if entity_key is not None
         else SyncEntityKey.node("fn-codec"),
         SyncOperation.UPSERT,
-        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), origin, event_id)),
+        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), origin, event_id)),
         SyncScope("tenant-codec", "owner-codec", "workspace-codec", "user", None, None),
         (
             {
@@ -8822,7 +8801,7 @@ def test_v5_codec_helper_accepts_task1_control_and_unicode_fixed_arrays(migratio
     edge = SyncEntityKey.edge("control\\x01", "\u2028\u2029", "astral-😀")
     version = str(
         SyncVersion.create(
-            datetime(2026, 8, 11, tzinfo=timezone.utc),
+            datetime(2026, 8, 11, tzinfo=UTC),
             "origin-\u2028😀",
             "123e4567-e89b-42d3-a456-426614174203",
         )
@@ -8973,7 +8952,7 @@ def _edge_payload_test_context(migration_dsn):
         migration_dsn,
         f"SELECT memplex_configure_sync_ingress_principal('{role}', '{origin}')",
     )
-    base = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    base = datetime(2026, 8, 11, tzinfo=UTC)
 
     def event(number, kind, key, payload, second=0):
         event_id = f"123e4567-e89b-42d3-a456-426614174{number:03d}"
@@ -9040,7 +9019,7 @@ def test_v5_ingress_edge_payload_projects_weight_evidence_and_created_at(migrati
         assert _admin_query(
             migration_dsn,
             "SELECT weight, evidence, created_at FROM memplex_edges WHERE source='edge-left'",
-        ) == [(2.5, ["first", "U+2028\u2029😀"], datetime(2024, 2, 29, 12, 34, 56, 123456, tzinfo=timezone.utc))]
+        ) == [(2.5, ["first", "U+2028\u2029😀"], datetime(2024, 2, 29, 12, 34, 56, 123456, tzinfo=UTC))]
         second = SyncBatch(
             1,
             "123e4567-e89b-42d3-a456-426614174244",
@@ -9063,7 +9042,7 @@ def test_v5_ingress_edge_payload_projects_weight_evidence_and_created_at(migrati
         assert _admin_query(
             migration_dsn,
             "SELECT weight, evidence, created_at FROM memplex_edges WHERE source='edge-left'",
-        ) == [(-0.25, [], datetime(2026, 8, 11, 0, 0, 0, 1, tzinfo=timezone.utc))]
+        ) == [(-0.25, [], datetime(2026, 8, 11, 0, 0, 0, 1, tzinfo=UTC))]
     finally:
         _drop_unprivileged_role(migration_dsn, role)
 
@@ -9136,7 +9115,7 @@ def test_v5_ingress_apply_inbound_preserves_all_node_kinds_lww_and_explicit_edge
 
     scope = SyncScope("tenant-matrix", "owner-matrix", "workspace-matrix", "user", None, None)
     origin = "remote-matrix"
-    base = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    base = datetime(2026, 8, 11, tzinfo=UTC)
 
     def event(number: int, kind: SyncNodeType, key: SyncEntityKey, operation: SyncOperation, payload: dict[str, object] | None, second: int = 0) -> SyncEvent:
         event_id = f"123e4567-e89b-42d3-a456-426614174{number:03d}"
@@ -9228,7 +9207,7 @@ def test_v5_ingress_preflight_rejects_later_bad_event_without_outbox_sequence_le
         events.append(SyncEvent(
             1, event_id, origin, SyncNodeType.FUNCTION, SyncEntityKey.node(node_id),
             SyncOperation.UPSERT,
-            str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), origin, event_id)),
+            str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), origin, event_id)),
             scope, {"id": node_id},
         ))
     batch = SyncBatch(1, "123e4567-e89b-42d3-a456-426614174123", origin, tuple(events))

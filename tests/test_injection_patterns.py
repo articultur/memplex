@@ -12,7 +12,7 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.llm.injection_guard import IndirectInjectionGuard  # noqa: E402
+from memplex.llm.injection_guard import IndirectInjectionGuard
 
 # ── Each bypass class that was previously missed ─────────────────────
 

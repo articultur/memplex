@@ -11,10 +11,10 @@ from threading import Barrier
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models import FeedbackVerdict, MemoryFeedback  # noqa: E402
-from memplex.storage.feedback import (  # noqa: E402
+from memplex.models import FeedbackVerdict, MemoryFeedback
+from memplex.storage.feedback import (
     LiteFeedbackStore,
     SQLiteFeedbackStore,
     create_feedback_store,

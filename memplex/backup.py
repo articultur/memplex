@@ -15,9 +15,9 @@ import stat
 import sys
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path, PurePath
-from typing import Any
+from typing import Any, Self
 
 
 class BackupIntegrityError(RuntimeError):
@@ -89,7 +89,7 @@ def _require_utc_microsecond(value: object) -> str:
     if _UTC_MICROSECOND_RE.fullmatch(text) is None:
         raise _invalid_manifest()
     try:
-        parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ")
+        parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
     except ValueError as exc:
         raise _invalid_manifest() from exc
     if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != text:
@@ -118,7 +118,7 @@ class BackupManifest:
     signature: str
 
     @classmethod
-    def from_dict(cls, raw: object) -> "BackupManifest":
+    def from_dict(cls, raw: object) -> BackupManifest:
         try:
             if type(raw) is not dict or set(raw) != _MANIFEST_KEYS:
                 raise _invalid_manifest()
@@ -216,7 +216,7 @@ class BackupManifest:
     def canonical_bytes(self) -> bytes:
         return self._canonical_bytes(self.to_dict())
 
-    def signed(self, key: bytes) -> "BackupManifest":
+    def signed(self, key: bytes) -> BackupManifest:
         if type(key) is not bytes or len(key) != 32:
             raise BackupConfigurationError("backup_signing_key_invalid")
         signature = hmac.new(key, self.canonical_unsigned_bytes(), hashlib.sha256).hexdigest()
@@ -260,7 +260,7 @@ class OpenedBackupArtifact:
         self.manifest = manifest
         self.verification = verification
 
-    def __enter__(self) -> "OpenedBackupArtifact":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, *_exc: object) -> None:
@@ -277,7 +277,7 @@ class OpenedBackupArtifact:
         if payload_fd >= 0:
             try:
                 os.close(payload_fd)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 primary = exc
         if directory_fd >= 0:
             try:
@@ -393,7 +393,7 @@ class DisasterRecoveryDrillResult:
     signature: str
 
     @classmethod
-    def from_dict(cls, raw: object) -> "DisasterRecoveryDrillResult":
+    def from_dict(cls, raw: object) -> DisasterRecoveryDrillResult:
         keys = {
             "backup_id",
             "backup_completed_at",
@@ -590,10 +590,10 @@ def run_restore_drill(
             raise _invalid_manifest()
         validated_key_id = _require_string(key_id)
         key = _require_signing_key(signing_key)
-        completed = datetime.strptime(completed_text, "%Y-%m-%dT%H:%M:%S.%fZ")
-        cutoff = datetime.strptime(cutoff_text, "%Y-%m-%dT%H:%M:%S.%fZ")
-        started = datetime.strptime(started_text, "%Y-%m-%dT%H:%M:%S.%fZ")
-        verified = datetime.strptime(verified_text, "%Y-%m-%dT%H:%M:%S.%fZ")
+        completed = datetime.strptime(completed_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        cutoff = datetime.strptime(cutoff_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        started = datetime.strptime(started_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        verified = datetime.strptime(verified_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
         observed_rpo = (cutoff - completed).total_seconds()
         observed_rto = (verified - started).total_seconds()
         if observed_rpo < 0 or observed_rto < 0:

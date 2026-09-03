@@ -10,8 +10,8 @@ The collector is enabled by calling ``attach()`` which registers its
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, List, Optional
+from datetime import UTC, datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from memplex.core.hooks.hook_event import HookEvent
 from memplex.core.hooks.policy import (
@@ -59,8 +59,8 @@ class ObservationCollector:
 
     def __init__(
         self,
-        store: "MemoryStore",
-        registry: Optional[HookRegistry] = None,
+        store: MemoryStore,
+        registry: HookRegistry | None = None,
         max_per_minute: int = MAX_OBS_PER_MINUTE,
         session_id: str = "default",
     ) -> None:
@@ -73,10 +73,10 @@ class ObservationCollector:
         self._rate_limiter = RateLimiter(max_per_minute)
 
         # Deduplication: skip consecutive identical tool+input pairs
-        self._last_event_key: Optional[str] = None
+        self._last_event_key: str | None = None
 
         # Currently attached registry (for detach)
-        self._attached_registry: Optional[HookRegistry] = None
+        self._attached_registry: HookRegistry | None = None
 
     # ── Attach / Detach ───────────────────────────────────────────────
 
@@ -158,13 +158,13 @@ class ObservationCollector:
             ),
             actor="system",
             origin_session=session_id,
-            observed_at=datetime.now(timezone.utc).isoformat(),
+            observed_at=datetime.now(UTC).isoformat(),
         )
 
         try:
             self._store.add_observation(obs)
             logger.debug("Observation persisted: %s — %s", tool_name, narrative[:80])
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to persist observation: %s", exc)
 
     # ── Extraction helpers ─────────────────────────────────────────────
@@ -193,7 +193,7 @@ class ObservationCollector:
         tool_result: Any,
         mode: str,
         tool_name: str = "",
-    ) -> List[str]:
+    ) -> list[str]:
         """Extract file paths touched by a tool (read or modified).
 
         This is a best-effort heuristic based on tool name and input keys.
@@ -201,7 +201,7 @@ class ObservationCollector:
         known writing tools (Write/Edit) only to ``mode="modified"``; other
         tools keep the previous behavior of reporting ``file_path`` for both.
         """
-        paths: List[str] = []
+        paths: list[str] = []
         # For Read/Write/Edit, check file_path
         if tool_input.get("file_path"):
             if tool_name in self._READ_ONLY_TOOLS:

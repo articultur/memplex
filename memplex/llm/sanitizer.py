@@ -28,7 +28,7 @@ class LLMPromptSanitizer:
         """
         text = unicodedata.normalize("NFKC", text)
         # Remove zero-width characters
-        text = re.sub(r"[​‌‍﻿]", "", text)
+        text = re.sub("[\u200b\u200c\u200d\ufeff]", "", text)
         if len(text) > max_length:
             text = text[:max_length] + "...(truncated)"
         return text
@@ -37,7 +37,7 @@ class LLMPromptSanitizer:
     def build_structured_prompt(
         instruction: str,
         user_input: str,
-        output_schema: Optional[dict] = None,
+        output_schema: dict | None = None,
         max_length: int = 10000,
     ) -> str:
         """Build a structured JSON prompt for safe LLM interaction.

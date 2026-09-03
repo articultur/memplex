@@ -7,9 +7,9 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.config import LLMConfig  # noqa: E402
-from memplex.llm.enhancer import LLMEnhancer  # noqa: E402
-from memplex.llm.providers.rule_based import RuleBasedProvider  # noqa: E402
+from memplex.config import LLMConfig
+from memplex.llm.enhancer import LLMEnhancer
+from memplex.llm.providers.rule_based import RuleBasedProvider
 
 
 class _FakeProvider:

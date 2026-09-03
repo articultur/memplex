@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from memplex.release import (  # noqa: E402
+from memplex.release import (
     ReleaseIntegrityError,
     build_checksum_document,
     build_cyclonedx_sbom,
@@ -157,9 +157,8 @@ def _normalize_tar_gz(source: Path, destination: Path, *, epoch: int) -> None:
                 else:
                     output.addfile(member)
         raw_tar.seek(0)
-        with destination.open("wb") as target:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=target, compresslevel=9, mtime=epoch) as zipped:
-                shutil.copyfileobj(raw_tar, zipped)
+        with destination.open("wb") as target, gzip.GzipFile(filename="", mode="wb", fileobj=target, compresslevel=9, mtime=epoch) as zipped:
+            shutil.copyfileobj(raw_tar, zipped)
 
 
 def _normalize_wheel(source: Path, destination: Path, *, epoch: int) -> None:

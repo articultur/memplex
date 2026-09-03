@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any, Optional
 
 # Truncation ceiling for a single tool-input field (e.g. a Bash command)
@@ -36,7 +36,7 @@ def hash_event_payload(payload: dict) -> str:
     ).hexdigest()[:12]
 
 
-def tool_event_key(tool_name: str, tool_input: Optional[dict]) -> str:
+def tool_event_key(tool_name: str, tool_input: dict | None) -> str:
     """Deduplication key for a tool-use event.
 
     Two events with the same key are considered consecutive duplicates; the
@@ -63,7 +63,7 @@ def summarize_tool_input(tool_input: dict, max_len: int = 80) -> str:
 
 def tool_narrative(
     tool_name: str,
-    tool_input: Optional[dict],
+    tool_input: dict | None,
     tool_result: Any = None,
     max_length: int = NARRATIVE_LIMIT,
 ) -> str:
@@ -109,13 +109,13 @@ class RateLimiter:
 
     def __init__(self, max_per_minute: int = 20) -> None:
         self._max_per_minute = max_per_minute
-        self._window_start = datetime.now(timezone.utc)
+        self._window_start = datetime.now(UTC)
         self._count_this_window = 0
         self._lock = threading.RLock()
 
     def allow(self) -> bool:
         """Return True if this event is within the rate limit; otherwise drop."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._lock:
             # Reset window if minute has passed
             if (now - self._window_start).total_seconds() >= 60:

@@ -15,10 +15,10 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 from pathlib import Path
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.adapters import agent_installer  # noqa: E402
-from memplex.adapters.agent_installer import (  # noqa: E402
+from memplex.adapters import agent_installer
+from memplex.adapters.agent_installer import (
     _INSTALLERS,
     AgentInstallerSpec,
     _install_one,
@@ -27,7 +27,7 @@ from memplex.adapters.agent_installer import (  # noqa: E402
     install_agent,
     uninstall_agent,
 )
-from memplex.adapters.agent_runtime import AGENT_PROFILES  # noqa: E402
+from memplex.adapters.agent_runtime import AGENT_PROFILES
 
 # ── Registry completeness ────────────────────────────────────────────
 

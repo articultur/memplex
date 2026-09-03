@@ -13,11 +13,11 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import ExtractedData, Fact, SourceDocument, SourceType  # noqa: E402
-from memplex.service import MemplexService  # noqa: E402
+from memplex.config import MemplexConfig
+from memplex.models import ExtractedData, Fact, SourceDocument, SourceType
+from memplex.service import MemplexService
 
 
 @pytest.fixture

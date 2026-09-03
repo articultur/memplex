@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import UTC, datetime, timedelta, timezone
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -49,8 +48,8 @@ class FactBuilder:
         subject: str = "",
         predicate: str = "",
         sample_id: str = "",
-        created_at: Optional[datetime] = None,
-    ) -> Tuple[Fact, str, str]:
+        created_at: datetime | None = None,
+    ) -> tuple[Fact, str, str]:
         """Build a Fact memory.
 
         Returns (Fact, query, memory_id)
@@ -61,7 +60,7 @@ class FactBuilder:
         if not sample_id:
             sample_id = f"fact_{hash(question) % 1000000}"
 
-        ts = created_at or datetime.utcnow()
+        ts = created_at or datetime.now(UTC)
         fact = Fact(
             id=f"fact_{sample_id}",
             name=question,
@@ -86,8 +85,8 @@ class PreferenceBuilder:
         preference: str,
         subject_id: str = "",
         sample_id: str = "",
-        created_at: Optional[datetime] = None,
-    ) -> Tuple[Preference, str, str]:
+        created_at: datetime | None = None,
+    ) -> tuple[Preference, str, str]:
         """Build a Preference memory.
 
         Returns (Preference, query, memory_id)
@@ -95,7 +94,7 @@ class PreferenceBuilder:
         if not sample_id:
             sample_id = f"pref_{hash(aspect) % 1000000}"
 
-        ts = created_at or datetime.utcnow()
+        ts = created_at or datetime.now(UTC)
         pref = Preference(
             id=f"pref_{sample_id}",
             name=f"Preference: {aspect}",
@@ -120,8 +119,8 @@ class ObservationBuilder:
         context: str = "",
         actor: str = "system",
         sample_id: str = "",
-        created_at: Optional[datetime] = None,
-    ) -> Tuple[Observation, str, str]:
+        created_at: datetime | None = None,
+    ) -> tuple[Observation, str, str]:
         """Build an Observation memory.
 
         Returns (Observation, query, memory_id)
@@ -129,7 +128,7 @@ class ObservationBuilder:
         if not sample_id:
             sample_id = f"obs_{hash(event) % 1000000}"
 
-        ts = created_at or datetime.utcnow()
+        ts = created_at or datetime.now(UTC)
         obs = Observation(
             id=f"obs_{sample_id}",
             name=f"Observed: {event[:50]}",
@@ -150,8 +149,8 @@ class ObservationBuilder:
 
 
 def _recency_ndcg(
-    query_result_ids: List[str],
-    items_by_recency: List[str],
+    query_result_ids: list[str],
+    items_by_recency: list[str],
     top_k: int,
 ) -> float:
     """NDCG score for recency ranking. 1.0 = perfect recency ordering."""
@@ -192,9 +191,9 @@ class MemoryBenchmarkDataset(EvaluationDataset):
         self.num_facts = num_facts
         self.num_prefs = num_prefs
         self.num_obs = num_obs
-        self._memory_ids: Dict[str, str] = {}
+        self._memory_ids: dict[str, str] = {}
 
-    def load(self, path: str) -> List[BenchmarkSample]:  # pylint: disable=unused-argument
+    def load(self, path: str) -> list[BenchmarkSample]:  # pylint: disable=unused-argument
         """Generate synthetic memory test samples.
 
         Since this is a memory benchmark (not RAG), we generate samples
@@ -205,7 +204,7 @@ class MemoryBenchmarkDataset(EvaluationDataset):
         # Generate fact samples with varying recency
         for i in range(self.num_facts):
             hours_old = i * 2
-            created = datetime.utcnow() - timedelta(hours=hours_old)
+            created = datetime.now(UTC) - timedelta(hours=hours_old)
 
             question = f"What is the capital of country_{i}?"
             answer = f"Capital_{i}"
@@ -313,7 +312,7 @@ class MemoryBenchmarkDataset(EvaluationDataset):
             },
         )
 
-    def get_memory_id(self, sample_id: str) -> Optional[str]:
+    def get_memory_id(self, sample_id: str) -> str | None:
         """Get the stored memory ID for a sample."""
         return self._memory_ids.get(sample_id)
 
@@ -333,15 +332,15 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
 
     DATASET_NAME = "memory_benchmark"
 
-    def __init__(self, dataset: Optional[MemoryBenchmarkDataset] = None):
+    def __init__(self, dataset: MemoryBenchmarkDataset | None = None):
         self.dataset = dataset or MemoryBenchmarkDataset()
 
     def run_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int = 10,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run memory retrieval benchmarks.
 
         Tests:
@@ -350,8 +349,8 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         - Preference persistence: Can we retrieve preferences?
         - Observation tracking: Can we retrieve observations?
         """
-        results: List[BenchmarkResult] = []
-        timestamp = datetime.utcnow().isoformat()
+        results: list[BenchmarkResult] = []
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         fact_samples = [s for s in samples if s.metadata.get("memory_type") == "fact"]
         pref_samples = [s for s in samples if s.metadata.get("memory_type") == "preference"]
@@ -369,7 +368,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def _seed_memories(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
     ) -> None:
         """Seed memories directly into the store using proper memory types.
 
@@ -396,7 +395,7 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
                     # Fallback: use write() for generic function
                     source_doc = self.dataset.to_memories(sample)
                     service.write(source_doc)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.warning("Failed to seed sample %s: %s", sample.id, exc)
 
     def _seed_fact(self, service: MemplexService, fact: Fact) -> None:
@@ -459,10 +458,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def _run_fact_retention_test(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Test fact retention: Can we retrieve seeded facts?"""
         if not samples:
             return []
@@ -526,10 +525,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def _run_recency_decay_test(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Test recency decay: Do recent memories rank higher than older ones?
 
         This tests the recency_decay dimension of the 6-dim reranker.
@@ -585,10 +584,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def _run_preference_persistence_test(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Test preference persistence: Can we retrieve stored preferences?"""
         if not samples:
             return []
@@ -633,10 +632,10 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def _run_observation_tracking_test(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Test observation tracking: Can we retrieve runtime observations?"""
         if not samples:
             return []
@@ -681,8 +680,8 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
     def run_generation(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
-    ) -> List[BenchmarkResult]:
+        samples: list[BenchmarkSample],
+    ) -> list[BenchmarkResult]:
         """Memory benchmarks don't have a separate generation phase."""
         return []
 

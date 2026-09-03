@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,7 @@ from memplex.readiness_evidence import (
 
 KEY = b"k" * 32
 KEY_ID = "g012-deployment-evidence-v1"
-NOW = datetime(2026, 8, 12, 8, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 12, 8, 30, tzinfo=UTC)
 
 
 def _binding() -> DeploymentEvidenceBinding:

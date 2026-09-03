@@ -7,11 +7,12 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Iterable, NoReturn
+from typing import NoReturn
 
 _SCHEMA_VERSION = 3
 _HOSTS = ("claude-code", "codex", "hermes", "openclaw")
@@ -124,7 +125,7 @@ def _sha256_text(value: object) -> str:
 def _timestamp(value: object) -> datetime:
     text = _exact_text(value)
     try:
-        parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
     except ValueError as exc:
         raise HostLifecycleIntegrityError() from exc
     if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != text:
@@ -434,11 +435,11 @@ class HostLifecycleEvidence:
             _fail("host_lifecycle_binding_invalid")
         if self.key_id != expected_binding.expected_key_id:
             _fail("host_lifecycle_key_id_mismatch")
-        checked_at = datetime.now(timezone.utc) if now is None else now
+        checked_at = datetime.now(UTC) if now is None else now
         if type(checked_at) is not datetime or checked_at.tzinfo is None:
             _fail("host_lifecycle_freshness_invalid")
         generated_at = _timestamp(self.generated_at)
-        checked_at = checked_at.astimezone(timezone.utc)
+        checked_at = checked_at.astimezone(UTC)
         if (
             generated_at > checked_at + _MAX_FUTURE_SKEW
             or checked_at - generated_at > _MAX_EVIDENCE_AGE
@@ -504,7 +505,7 @@ class HostLifecycleEvidence:
             _fail("host_lifecycle_matrix_incomplete")
         for proof in host_proofs:
             proof.verify_runtime_binding()
-        generated = datetime.now(timezone.utc) if generated_at is None else generated_at
+        generated = datetime.now(UTC) if generated_at is None else generated_at
         if type(generated) is not datetime or generated.tzinfo is None:
             _fail("host_lifecycle_freshness_invalid")
         unsigned = cls(
@@ -514,7 +515,7 @@ class HostLifecycleEvidence:
             artifact_sha256=binding.artifact_sha256,
             deployment_id=binding.deployment_id,
             target_identity_sha256=binding.target_identity_sha256,
-            generated_at=generated.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            generated_at=generated.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             hermes_source_revision=_HERMES_REVISION,
             hermes_provider_sha256=_HERMES_PROVIDER_SHA256,
             hosts=host_proofs,

@@ -11,14 +11,14 @@ import os
 import re
 import stat
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from memplex.readiness_evidence import (  # noqa: E402
+from memplex.readiness_evidence import (
     DeploymentEvidenceBinding,
     IndustrialGateEvidence,
     ReadinessEvidenceError,
@@ -124,7 +124,7 @@ def _sha256(value: object) -> str:
 def _timestamp(value: object) -> datetime:
     text = _exact_text(value)
     try:
-        parsed = datetime.strptime(text, _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(text, _TIMESTAMP_FORMAT).replace(tzinfo=UTC)
     except ValueError:
         _fail()
     if parsed.strftime(_TIMESTAMP_FORMAT) != text:
@@ -320,7 +320,7 @@ def _signed_evidence(args: argparse.Namespace) -> IndustrialGateEvidence:
             gate_id=args.gate_id,
             binding=binding,
             installed_version=installed_version,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         )
         return IndustrialGateEvidence.create(
             gate_id=args.gate_id,
@@ -328,7 +328,7 @@ def _signed_evidence(args: argparse.Namespace) -> IndustrialGateEvidence:
             run_result_sha256=hashlib.sha256(payload).hexdigest(),
             key_id=args.key_id,
             signing_key=signing_key,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
     except (ReadinessEvidenceError, TypeError, ValueError, OverflowError):
         _fail()

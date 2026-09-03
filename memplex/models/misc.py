@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
 
 from memplex.models.graph import GraphData
 
@@ -16,7 +15,7 @@ _FUNC_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 def validate_func_id(func_id: str) -> str:
     if not isinstance(func_id, str):
-        raise ValueError("Function ID 必须是字符串")
+        raise ValueError("Function ID 必须是字符串")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     # ``domain_`` is GraphBuilder's virtual-node namespace.  It must never
     # become durable Function state, otherwise a graph edge can be confused
     # with a real memory row.  This is deliberately case-sensitive to retain
@@ -45,14 +44,14 @@ def validate_domain(domain: object) -> str | None:
 @dataclass
 class FieldValue:
     desc: str
-    sources: List[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
     source_method: str = "rule_based"  # rule_based | llm_semantic | manual
     weight: float = 1.0
-    observation: Optional[float] = None
-    created_at: Optional[datetime] = None
+    observation: float | None = None
+    created_at: datetime | None = None
     status: str = "active"  # active | deprecated | disputed
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Standard serialization covering every field.
 
         This is the convergence target for the per-backend serializers
@@ -74,7 +73,7 @@ class FieldValue:
         }
 
     @classmethod
-    def from_dict(cls, d: Dict) -> "FieldValue":
+    def from_dict(cls, d: dict) -> "FieldValue":
         """Inverse of :meth:`to_dict`; tolerant of missing keys."""
         created_at = d.get("created_at")
         if isinstance(created_at, str):
@@ -118,14 +117,14 @@ class MergeResult:
 class BatchResult:
     total: int = 0
     succeeded: int = 0
-    failed_items: List[Dict] = field(default_factory=list)
+    failed_items: list[dict] = field(default_factory=list)
 
 
 @dataclass
 class ParagraphDelta:
-    added: List[str] = field(default_factory=list)
-    removed: List[str] = field(default_factory=list)
-    modified: List[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    modified: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -146,19 +145,19 @@ class RefreshResult:
 @dataclass
 class ValidationResult:
     valid: bool
-    issue: Optional[str] = None
-    truncated_content: Optional[str] = None
+    issue: str | None = None
+    truncated_content: str | None = None
 
 
 @dataclass
 class UpdateResult:
     memory_id: str
     role: str
-    old_value: Optional[str] = None
+    old_value: str | None = None
     new_value: str = ""
     version: int = 0
     success: bool = False
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -167,7 +166,7 @@ class StorageStats:
     total_edges: int
     total_observations: int
     storage_size_mb: float
-    last_compaction: Optional[datetime] = None
+    last_compaction: datetime | None = None
 
 
 # ── Changelog types ─────────────────────────────────────────────
@@ -196,15 +195,15 @@ class IntentType(Enum):
 @dataclass
 class EnhancedQuery:
     original: str
-    expanded: List[str] = field(default_factory=list)
+    expanded: list[str] = field(default_factory=list)
     intent: str = "search"
 
 
 @dataclass
 class Summary:
-    key_points: List[str] = field(default_factory=list)
-    patterns: List[str] = field(default_factory=list)
-    changes: List[str] = field(default_factory=list)
+    key_points: list[str] = field(default_factory=list)
+    patterns: list[str] = field(default_factory=list)
+    changes: list[str] = field(default_factory=list)
 
 
 # ── Incremental types ──────────────────────────────────────────
@@ -213,9 +212,9 @@ class Summary:
 @dataclass
 class IncrementalState:
     source_id: str
-    last_hash: Optional[str] = None
-    last_paragraphs: List[str] = field(default_factory=list)
-    processed_at: Optional[datetime] = None
+    last_hash: str | None = None
+    last_paragraphs: list[str] = field(default_factory=list)
+    processed_at: datetime | None = None
 
 
 # ── Wiki types ─────────────────────────────────────────────────
@@ -230,7 +229,7 @@ class WikiPage:
 
 @dataclass
 class WikiIndex:
-    pages: List[WikiPage] = field(default_factory=list)
+    pages: list[WikiPage] = field(default_factory=list)
     total: int = 0
 
 
@@ -244,5 +243,5 @@ class LintIssue:
 @dataclass
 class LintResult:
     total_pages: int
-    issues: List[LintIssue] = field(default_factory=list)
+    issues: list[LintIssue] = field(default_factory=list)
     passed: bool = True

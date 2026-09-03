@@ -15,7 +15,7 @@ import pytest
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex import sync_crypto  # noqa: E402
+from memplex import sync_crypto
 
 pytest.importorskip("cryptography", reason="sync-crypto extra not installed")
 

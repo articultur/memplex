@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier, Event
 from urllib.error import HTTPError, URLError
@@ -296,7 +296,7 @@ def test_two_uvicorn_processes_share_postgres_inbox_and_business_state(
         SyncNodeType.FUNCTION,
         SyncEntityKey.node(identifier),
         SyncOperation.UPSERT,
-        str(SyncVersion.create(datetime.now(timezone.utc), "remote-a", event_id)),
+        str(SyncVersion.create(datetime.now(UTC), "remote-a", event_id)),
         SyncScope(
             tenant_id,
             "remote-owner",
@@ -516,7 +516,7 @@ def test_postgres_pages_100001_mixed_events_with_bounded_monotonic_cursor(
                 )
             if not page.has_more:
                 break
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cursor = SyncCursorClaims(
                 1,
                 "backlog-key",

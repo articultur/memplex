@@ -16,15 +16,6 @@ from typing import Any
 
 from memplex.models import domain_node_id
 
-# Catalogue-check helpers live in ``catalogue_checks`` (one-directional).
-from memplex.storage.migrations.catalogue_checks import (
-    _allowed_adoption_baselines,
-    _is_background_tasks_current_variant,
-    _is_edge_integrity_current_variant,
-    _is_reliable_sync_current_variant,
-    _variant_digest,
-)
-
 # Data classes and the ledger-table constant live in ``_constants`` (the
 # dependency-free shared module for this migration cluster).
 from memplex.storage.migrations._constants import (
@@ -34,6 +25,15 @@ from memplex.storage.migrations._constants import (
     MigrationPlan,
     SchemaFingerprint,
     _LedgerEntry,
+)
+
+# Catalogue-check helpers live in ``catalogue_checks`` (one-directional).
+from memplex.storage.migrations.catalogue_checks import (
+    _allowed_adoption_baselines,
+    _is_background_tasks_current_variant,
+    _is_edge_integrity_current_variant,
+    _is_reliable_sync_current_variant,
+    _variant_digest,
 )
 
 
@@ -352,7 +352,7 @@ def _validate_legacy_belongs_to_edges(cur: Any) -> None:
         for table_name in reversed(force_disabled):
             try:
                 cur.execute(f"ALTER TABLE {table_name} FORCE ROW LEVEL SECURITY")
-            except BaseException as error:
+            except BaseException as error:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 if cleanup_error is None:
                     cleanup_error = error
         if primary_error is None and cleanup_error is not None:

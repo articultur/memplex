@@ -21,9 +21,11 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from datetime import UTC
 
-from memplex.adapters.http_api import create_app  # noqa: E402
+from fastapi.testclient import TestClient
+
+from memplex.adapters.http_api import create_app
 
 
 @pytest.fixture
@@ -163,7 +165,7 @@ def _sync_v1_batch(
                 SyncOperation.UPSERT,
                 str(
                     SyncVersion.create(
-                        datetime.now(timezone.utc), "memplex", event_id
+                        datetime.now(UTC), "memplex", event_id
                     )
                 ),
                 SyncScope(
@@ -216,7 +218,7 @@ def _tenant_sync_v1_batch(identifier: str, *, origin: str, tenant_id: str):
         SyncNodeType.FUNCTION,
         SyncEntityKey.node(identifier),
         SyncOperation.UPSERT,
-        str(SyncVersion.create(datetime.now(timezone.utc), origin, event_id)),
+        str(SyncVersion.create(datetime.now(UTC), origin, event_id)),
         SyncScope(tenant_id, subject, workspace, "workspace", origin, None),
         node.to_dict(),
     )
@@ -428,7 +430,7 @@ def test_sync_v1_changes_accepts_previous_cursor_key_and_rotates_to_active(
         content=batch.canonical_bytes,
         headers={"Content-Type": "application/json"},
     ).status_code == 200
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = SyncCursorCodec("old", "o" * 32).encode(
         SyncCursorClaims(
             1,
@@ -559,7 +561,7 @@ def test_sync_v1_changes_collapses_all_untrusted_cursor_faults(
 
     from memplex.sync_protocol import SyncCursorClaims, SyncCursorCodec
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims = SyncCursorClaims(
         1,
         "active",
@@ -698,7 +700,7 @@ def test_sync_v1_snapshot_expiry_is_distinct_and_releases_durable_state(
     store = sync_v1_client.app.state.memplex_service.store
     with store._sync_repository._mutation():
         store._sync_state["snapshots"][0]["expires_at"] = (
-            datetime.now(timezone.utc) - timedelta(seconds=1)
+            datetime.now(UTC) - timedelta(seconds=1)
         ).isoformat()
 
     response = sync_v1_client.get(

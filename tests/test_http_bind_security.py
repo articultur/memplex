@@ -13,11 +13,11 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
 pytest.importorskip("fastapi")
 
-from memplex.adapters.http_api import _check_bind_security  # noqa: E402
+from memplex.adapters.http_api import _check_bind_security
 
 
 def _clear_bind_env(monkeypatch):
@@ -105,7 +105,7 @@ def test_create_app_refuses_non_local_bind_without_credentials(monkeypatch, tmp_
 # ── Request-time defense-in-depth: _is_remote_peer ───────────────────
 
 
-from memplex.adapters.http_api import _is_remote_peer  # noqa: E402
+from memplex.adapters.http_api import _is_remote_peer
 
 
 def test_is_remote_peer_recognises_local_addresses():

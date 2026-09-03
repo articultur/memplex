@@ -9,10 +9,10 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models.paragraph import Paragraph, Sentence  # noqa: E402
-from memplex.processing.merger.confidence_calculator import ConfidenceCalculator  # noqa: E402
+from memplex.models.paragraph import Paragraph, Sentence
+from memplex.processing.merger.confidence_calculator import ConfidenceCalculator
 
 
 def _para(sentences=None, section="1.2", raw_text="x" * 60):

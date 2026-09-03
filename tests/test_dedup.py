@@ -9,10 +9,12 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+from datetime import UTC
 
-from memplex.models import DedupResult, FieldValue, Function  # noqa: E402
-from memplex.retrieval.dedup import DedupStrategy, MemoryDeduplicator  # noqa: E402
+import pytest
+
+from memplex.models import DedupResult, FieldValue, Function
+from memplex.retrieval.dedup import DedupStrategy, MemoryDeduplicator
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -134,9 +136,9 @@ def test_semantic_dedup_fallback_keeps_orthogonal():
 
 
 def test_choose_better_prefers_more_recent():
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
-    now = datetime.now()
+    now = datetime.now(UTC)
     older = _mem("a", desc="x")
     older.updated_at = now - timedelta(days=5)
     newer = _mem("b", desc="x")

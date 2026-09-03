@@ -12,12 +12,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-import memplex.adapters.http_api as http_api  # noqa: E402
-from memplex.adapters.http_api import create_app  # noqa: E402
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.operations import load_operations_report  # noqa: E402
+from memplex.adapters import http_api
+from memplex.adapters.http_api import create_app
+from memplex.config import MemplexConfig
+from memplex.operations import load_operations_report
 
 
 def _config(tmp_path) -> MemplexConfig:

@@ -20,7 +20,6 @@ import yaml
 from tests import g004_cli_runner
 from tests.g004_cli_runner import parse_json_stdout, run_cli
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_VALUE_GUIDE = REPO_ROOT / "docs/guides/real-value-cli.md"
 COMMUNITY_FILES = (
@@ -895,13 +894,12 @@ def test_http_readiness_exit_diagnostic_never_emits_environment_secrets() -> Non
         [sys.executable, "-c", script, "--sslpassword", argv_secret, argv_uri],
         env={"G004_READINESS_SECRET": secret},
         local=False,
-    ) as process:
-        with pytest.raises(AssertionError) as raised:
-            g004_cli_runner.wait_for_http_ready(
-                "http://127.0.0.1:1/ready",
-                process,
-                timeout=2,
-            )
+    ) as process, pytest.raises(AssertionError) as raised:
+        g004_cli_runner.wait_for_http_ready(
+            "http://127.0.0.1:1/ready",
+            process,
+            timeout=2,
+        )
 
     diagnostic = str(raised.value)
     assert secret not in diagnostic
@@ -933,13 +931,12 @@ def test_http_timeout_diagnostic_uses_the_same_argv_sanitizer() -> None:
         "probe",
     ]
 
-    with g004_cli_runner.running_process(args, local=False) as process:
-        with pytest.raises(AssertionError) as raised:
-            g004_cli_runner.wait_for_http_ready(
-                "http://127.0.0.1:1/ready",
-                process,
-                timeout=0.01,
-            )
+    with g004_cli_runner.running_process(args, local=False) as process, pytest.raises(AssertionError) as raised:
+        g004_cli_runner.wait_for_http_ready(
+            "http://127.0.0.1:1/ready",
+            process,
+            timeout=0.01,
+        )
 
     diagnostic = str(raised.value)
     assert process.args == args
@@ -999,7 +996,6 @@ def test_reserved_loopback_listener_is_handed_to_real_child_process() -> None:
         [sys.executable, "-c", script, str(descriptor)],
         local=False,
         pass_fds=(descriptor,),
-    ):
-        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
-            client.sendall(b"ping")
-            assert client.recv(9) == b"pong:ping"
+    ), socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+        client.sendall(b"ping")
+        assert client.recv(9) == b"pong:ping"

@@ -10,6 +10,9 @@ from unittest.mock import Mock
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
+from datetime import UTC
+from typing import ClassVar
+
 import pytest
 
 from memplex.authorization import AuthorizationGate
@@ -691,8 +694,7 @@ class TestPostgresBackendSelection:
         cfg.sync.targets = {"remote-a": "https://remote.example"}
 
         class Store:
-            registered: list[str] = []
-
+            registered: ClassVar[list[str]] = []
             def authorized(self, _context):
                 return self
 
@@ -1173,7 +1175,7 @@ def test_service_stop_is_single_owner_for_concurrent_callers(service, monkeypatc
     def stop_service():
         try:
             service.stop()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             errors.append(exc)
 
     first = Thread(target=stop_service)
@@ -1349,7 +1351,7 @@ class TestMixedMetadataAnnotation:
         )
         store.add_fact(Fact(id="atomic-fact", name="fact", subject="s", predicate="is", object_="o"))
         before = store.generation
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 - any error on missing node is the contract
             service.annotate_memories(
                 ["atomic-func", "missing", "atomic-fact"],
                 attributes={"memplex_tag": "should-not-write"},
@@ -1430,9 +1432,9 @@ class TestHealthSemantics:
         assert service.runtime_status()["lifecycle"] == "stopped"
 
     def test_injection_scans_pruned_to_today(self, service):
-        from datetime import datetime
+        from datetime import datetime, timezone
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         # InjectionScanCounter is the service's delegated collaborator; seed its
         # internal map with a stale date plus today to exercise pruning.
         service._injection_scans._counts = {"2020-01-01": 5, today: 2}

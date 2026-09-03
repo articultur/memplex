@@ -42,9 +42,9 @@ class TestLLMPromptSanitizer:
         assert "Hello" in result
 
     def test_sanitize_removes_zero_width(self):
-        text = "hello​world"  # zero-width space
+        text = "hello\u200bworld"  # zero-width space
         result = LLMPromptSanitizer.sanitize(text)
-        assert "​" not in result
+        assert "\u200b" not in result
 
     def test_sanitize_truncates_long_input(self):
         text = "a" * 20000

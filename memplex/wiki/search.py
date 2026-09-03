@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING
 
 from memplex.models import (
     SearchResult,
@@ -51,9 +51,9 @@ class DualIndexSearch:
         self.vector_threshold = vector_threshold
 
         # In-memory FTS index: page_id -> content (lowercased)
-        self._fts_index: Dict[str, str] = {}
+        self._fts_index: dict[str, str] = {}
         # In-memory vector index: page_id -> embedding vector
-        self._vector_index: Dict[str, List[float]] = {}
+        self._vector_index: dict[str, list[float]] = {}
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -79,7 +79,7 @@ class DualIndexSearch:
                 exc_info=True,
             )
 
-    def search(self, query: str, top_k: int = 10) -> List[SearchResult]:
+    def search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """Execute hybrid FTS + vector search with RRF merging.
 
         Steps:
@@ -138,10 +138,10 @@ class DualIndexSearch:
 
     @staticmethod
     def _reciprocal_rank_fusion(
-        fts_results: List[SearchResult],
-        vector_results: List[SearchResult],
+        fts_results: list[SearchResult],
+        vector_results: list[SearchResult],
         k: int = 60,
-    ) -> List[SearchResult]:
+    ) -> list[SearchResult]:
         """Merge FTS and vector results using Reciprocal Rank Fusion.
 
         RRF score = sum of 1/(k + rank_i) across both result sets.
@@ -156,11 +156,11 @@ class DualIndexSearch:
             RRF constant (default 60).  Higher k dampens the effect
             of individual rank positions.
         """
-        item_map: Dict[str, SearchResult] = {}
+        item_map: dict[str, SearchResult] = {}
         for item in fts_results + vector_results:
             item_map[item.func_id] = item
 
-        scores: Dict[str, float] = {}
+        scores: dict[str, float] = {}
         for rank, item in enumerate(fts_results):
             scores[item.func_id] = scores.get(item.func_id, 0.0) + 1.0 / (k + rank + 1)
         for rank, item in enumerate(vector_results):
@@ -168,7 +168,7 @@ class DualIndexSearch:
 
         sorted_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for page_id, rrf_score in sorted_ids:
             existing = item_map.get(page_id)
             if existing is None:
@@ -190,7 +190,7 @@ class DualIndexSearch:
 
     # ── Private: FTS search ───────────────────────────────────────────
 
-    def _fts_search(self, query: str) -> List[SearchResult]:
+    def _fts_search(self, query: str) -> list[SearchResult]:
         """Keyword search over indexed page content.
 
         Simple TF-based scoring: count of query word occurrences.
@@ -203,7 +203,7 @@ class DualIndexSearch:
             term: re.compile(r"\b" + re.escape(term) + r"\b") for term in query_terms
         }
 
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for page_id, content in self._fts_index.items():
             score = 0.0
             for term in query_terms:
@@ -229,7 +229,7 @@ class DualIndexSearch:
 
     # ── Private: vector search ────────────────────────────────────────
 
-    def _vector_search(self, query: str) -> List[SearchResult]:
+    def _vector_search(self, query: str) -> list[SearchResult]:
         """Semantic search using embedding cosine similarity."""
         if not self._vector_index:
             return []
@@ -240,7 +240,7 @@ class DualIndexSearch:
             logger.warning("Failed to embed query, skipping vector search", exc_info=True)
             return []
 
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for page_id, doc_vector in self._vector_index.items():
             similarity = self._cosine_similarity(query_vector, doc_vector)
             if similarity > self.vector_threshold:  # Minimum relevance threshold
@@ -263,7 +263,7 @@ class DualIndexSearch:
     # ── Utility helpers ───────────────────────────────────────────────
 
     @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""
         dot = sum(x * y for x, y in zip(a, b))
         norm_a = sum(x * x for x in a) ** 0.5

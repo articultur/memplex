@@ -17,10 +17,11 @@ import logging
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -64,7 +65,7 @@ class _ExplainTraceProxy:
     def __init__(
         self,
         service: MemplexService,
-        sink: "Callable[[Dict[str, Any]], None]",
+        sink: Callable[[dict[str, Any]], None],
     ) -> None:
         self._service = service
         self._sink = sink
@@ -120,13 +121,13 @@ class BenchmarkEvaluator:
 
     def run_all(
         self,
-        dataset_paths: Dict[str, str],
+        dataset_paths: dict[str, str],
         retrieval_k: int = 10,
         write_memories: bool = True,
         parallel: bool = False,
         max_workers: int = 4,
         warmup_rounds: int = 1,
-    ) -> Dict[str, List[BenchmarkResult]]:
+    ) -> dict[str, list[BenchmarkResult]]:
         """Run all registered benchmarks.
 
         Parameters
@@ -150,10 +151,10 @@ class BenchmarkEvaluator:
 
         Returns
         -------
-        Dict[str, List[BenchmarkResult]]
+        dict[str, list[BenchmarkResult]]
             Per-dataset list of benchmark results.
         """
-        results: Dict[str, List[BenchmarkResult]] = {}
+        results: dict[str, list[BenchmarkResult]] = {}
 
         if parallel:
             results = self._run_parallel(
@@ -176,7 +177,7 @@ class BenchmarkEvaluator:
         retrieval_k: int = 10,
         write_memories: bool = True,
         warmup_rounds: int = 1,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run a single named benchmark.
 
         Parameters
@@ -194,7 +195,7 @@ class BenchmarkEvaluator:
 
         Returns
         -------
-        List[BenchmarkResult]
+        list[BenchmarkResult]
         """
         return self._run_benchmark(
             dataset_name, dataset_path, retrieval_k, write_memories, warmup_rounds
@@ -202,7 +203,7 @@ class BenchmarkEvaluator:
 
     def report(
         self,
-        results: Dict[str, List[BenchmarkResult]],
+        results: dict[str, list[BenchmarkResult]],
         format: str = "markdown",
     ) -> str:
         """Format benchmark results as a comparison table.
@@ -227,13 +228,13 @@ class BenchmarkEvaluator:
 
     def _run_sequential(
         self,
-        dataset_paths: Dict[str, str],
+        dataset_paths: dict[str, str],
         retrieval_k: int,
         write_memories: bool,
         warmup_rounds: int,
-    ) -> Dict[str, List[BenchmarkResult]]:
+    ) -> dict[str, list[BenchmarkResult]]:
         """Run benchmarks sequentially (one dataset at a time)."""
-        results: Dict[str, List[BenchmarkResult]] = {}
+        results: dict[str, list[BenchmarkResult]] = {}
 
         for dataset_name, dataset_path in dataset_paths.items():
             try:
@@ -246,7 +247,7 @@ class BenchmarkEvaluator:
                     dataset_name,
                     len(dataset_results),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.error("Failed to run %s benchmark: %s", dataset_name, exc)
                 results[dataset_name] = []
 
@@ -254,14 +255,14 @@ class BenchmarkEvaluator:
 
     def _run_parallel(
         self,
-        dataset_paths: Dict[str, str],
+        dataset_paths: dict[str, str],
         retrieval_k: int,
         write_memories: bool,
         max_workers: int,
         warmup_rounds: int,
-    ) -> Dict[str, List[BenchmarkResult]]:
+    ) -> dict[str, list[BenchmarkResult]]:
         """Run benchmarks in parallel across datasets."""
-        results: Dict[str, List[BenchmarkResult]] = {}
+        results: dict[str, list[BenchmarkResult]] = {}
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
@@ -285,7 +286,7 @@ class BenchmarkEvaluator:
                         name,
                         len(results[name]),
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.error("Failed to run %s benchmark: %s", name, exc)
                     results[name] = []
 
@@ -298,7 +299,7 @@ class BenchmarkEvaluator:
         retrieval_k: int,
         write_memories: bool,
         warmup_rounds: int = 1,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Load dataset and run both retrieval and generation benchmarks."""
         # Create dataset and runner (raises KeyError for unknown datasets)
         dataset = BenchmarkRunnerFactory.create_dataset(dataset_name)
@@ -317,7 +318,7 @@ class BenchmarkEvaluator:
             write_memories,
         )
 
-        results: List[BenchmarkResult] = []
+        results: list[BenchmarkResult] = []
 
         # Seed memories if warm mode
         if write_memories:
@@ -358,7 +359,7 @@ class BenchmarkEvaluator:
 
     def _warmup(
         self,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         retrieval_k: int,
         rounds: int,
     ) -> None:
@@ -373,13 +374,13 @@ class BenchmarkEvaluator:
             sample = samples[i % len(samples)]
             try:
                 self.service.query(sample.query, top_k=retrieval_k)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("Warmup query failed for sample %s: %s", sample.id, exc)
 
     def _seed_memories(
         self,
         dataset: EvaluationDataset,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
     ) -> None:
         """Seed memplex with benchmark data.
 
@@ -416,7 +417,7 @@ class BenchmarkEvaluator:
 
                 self.service.write(source_doc)
                 seeded += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.warning("Failed to seed sample %s: %s", sample.id, exc)
                 continue
 
@@ -498,33 +499,31 @@ class BenchmarkEvaluator:
         """Per-query trace JSONL path, next to the results file."""
         return self.output_dir / f"{Path(self.output_file).stem}.traces.jsonl"
 
-    def _append_trace(self, dataset_name: str, explanation: Dict[str, Any]) -> None:
+    def _append_trace(self, dataset_name: str, explanation: dict[str, Any]) -> None:
         """Append one per-query trace line to the traces JSONL file."""
         line = json.dumps(
             {"dataset": dataset_name, "trace": explanation}, default=str
         )
-        with self._trace_lock:
-            with open(self._traces_path(), "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+        with self._trace_lock, open(self._traces_path(), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
     def _write_jsonl(
         self,
-        results: Dict[str, List[BenchmarkResult]],
+        results: dict[str, list[BenchmarkResult]],
     ) -> None:
         """Append all results to a JSONL file, one JSON object per line."""
         output_path = self.output_dir / self.output_file
         mode = "a" if output_path.exists() else "w"
 
         with open(output_path, mode, encoding="utf-8") as fh:
-            for dataset_name, dataset_results in results.items():
-                for result in dataset_results:
-                    fh.write(json.dumps(result.to_dict(), default=str) + "\n")
+            for dataset_results in results.values():
+                fh.writelines(json.dumps(result.to_dict(), default=str) + "\n" for result in dataset_results)
 
         logger.info("Results written to %s", output_path)
 
     def _report_markdown(
         self,
-        results: Dict[str, List[BenchmarkResult]],
+        results: dict[str, list[BenchmarkResult]],
     ) -> str:
         """Format results as a markdown comparison table."""
         if not results:
@@ -536,10 +535,10 @@ class BenchmarkEvaluator:
             for r in dataset_results
         )
         if has_percentiles:
-            lines: List[str] = [
+            lines: list[str] = [
                 "# Memplex Benchmark Results",
                 "",
-                f"_Generated: {datetime.utcnow().isoformat()}Z_",
+                f"_Generated: {datetime.now(UTC).isoformat().replace('+00:00', 'Z')}_",
                 "",
                 "## Summary",
                 "",
@@ -550,7 +549,7 @@ class BenchmarkEvaluator:
             lines = [
                 "# Memplex Benchmark Results",
                 "",
-                f"_Generated: {datetime.utcnow().isoformat()}Z_",
+                f"_Generated: {datetime.now(UTC).isoformat().replace('+00:00', 'Z')}_",
                 "",
                 "## Summary",
                 "",
@@ -584,7 +583,7 @@ class BenchmarkEvaluator:
             lines.append("|--------|-------|")
 
             # Deduplicate by metric (take best value per metric)
-            seen_metrics: Dict[str, float] = {}
+            seen_metrics: dict[str, float] = {}
             for r in dataset_results:
                 key = r.metric
                 if key not in seen_metrics or r.value > seen_metrics[key]:
@@ -599,11 +598,11 @@ class BenchmarkEvaluator:
 
     def _report_json(
         self,
-        results: Dict[str, List[BenchmarkResult]],
+        results: dict[str, list[BenchmarkResult]],
     ) -> str:
         """Format results as JSON."""
-        output: Dict[str, Any] = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+        output: dict[str, Any] = {
+            "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "benchmarks": {},
         }
 
@@ -625,7 +624,7 @@ def run_benchmark_cli(
     warm: bool = True,
     retrieval_k: int = 10,
     parallel: bool = False,
-) -> Dict[str, List[BenchmarkResult]]:
+) -> dict[str, list[BenchmarkResult]]:
     """Convenience function for running a benchmark from the CLI.
 
     Parameters
@@ -645,7 +644,7 @@ def run_benchmark_cli(
 
     Returns
     -------
-    Dict[str, List[BenchmarkResult]]
+    dict[str, list[BenchmarkResult]]
     """
     svc = make_benchmark_service()
     svc.start()

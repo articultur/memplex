@@ -39,10 +39,10 @@ import logging
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from functools import wraps
 from hashlib import sha256
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from memplex.auth import (
     AuthorizationContext,
@@ -267,9 +267,9 @@ def _obs_to_json(obs: Observation) -> dict:
 
 
 def _merge_field_values(
-    existing: List[FieldValue],
-    incoming: List[FieldValue],
-) -> List[FieldValue]:
+    existing: list[FieldValue],
+    incoming: list[FieldValue],
+) -> list[FieldValue]:
     """Merge incoming FieldValues into existing (dedup by desc), mirroring
     the lite backend's merge semantics (including the model-level cap)."""
     seen = {fv.desc for fv in existing}
@@ -303,7 +303,7 @@ class PostgresMemoryStore:
         inbound_executor: InboundSyncExecutor | None = None,
         *,
         require_authorization: bool = False,
-        sync_capture_policy: SyncCapturePolicy = SyncCapturePolicy("off"),
+        sync_capture_policy: SyncCapturePolicy = SyncCapturePolicy("off"),  # noqa: B008 - protocol/FastAPI default idiom
         sync_max_attempts: int = 8,
         sync_snapshot_ttl_seconds: int = 900,
         sync_max_snapshot_items: int = 1000000,
@@ -531,7 +531,7 @@ class PostgresMemoryStore:
         event_id = str(uuid.uuid4())
         version_key = str(
             SyncVersion.create(
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 self._sync_capture_policy.local_node_id,
                 event_id,
             )
@@ -701,16 +701,16 @@ class PostgresMemoryStore:
         except BaseException:
             try:
                 cur.close()
-            except BaseException:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # Application SQL is the primary failure.  The pool manager
                 # records cleanup faults and rejects future leases.
-                pass
+                logger.debug("suppressed BaseException: %s", exc)
             raise
         return cur
 
     # ── Write operations ────────────────────────────────────────────
 
-    def _embed_text(self, func: Function) -> Optional[str]:
+    def _embed_text(self, func: Function) -> str | None:
         """Return a pgvector-literal string for *func* or None when disabled.
 
         pgvector accepts the text form ``[1.0, 2.0, ...]``; we pass it as
@@ -725,7 +725,7 @@ class PostgresMemoryStore:
             vec = self._embedder.embed(text)
             if vec and len(vec) == self._vector_dim:
                 return str(list(vec))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("pgvector embed failed for %s, storing NULL: %s", func.id, exc)
         return None
 
@@ -742,7 +742,7 @@ class PostgresMemoryStore:
         a function row and its audit row are one durable decision.
         """
         if not isinstance(func, Function):
-            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         validate_func_id(func.id)
         validate_domain(func.domain)
         data = _func_to_json(func)
@@ -774,7 +774,7 @@ class PostgresMemoryStore:
                 (
                     func.id,
                     json.dumps(data),
-                    _iso(func.updated_at) or datetime.now(timezone.utc),
+                    _iso(func.updated_at) or datetime.now(UTC),
                     embedding,
                     *identity,
                 ),
@@ -801,7 +801,7 @@ class PostgresMemoryStore:
                 (
                     func.id,
                     json.dumps(data),
-                    _iso(func.updated_at) or datetime.now(timezone.utc),
+                    _iso(func.updated_at) or datetime.now(UTC),
                     *identity,
                 ),
             )
@@ -828,7 +828,7 @@ class PostgresMemoryStore:
         func_id: str,
         event_type: str,
         description: str,
-        source: Optional[SourceDocument],
+        source: SourceDocument | None,
         *,
         node: Any | None = None,
         visibility: str | None = None,
@@ -855,7 +855,7 @@ class PostgresMemoryStore:
             """,
             (
                 func_id,
-                datetime.now(timezone.utc),
+                datetime.now(UTC),
                 event_type,
                 description,
                 src,
@@ -868,7 +868,7 @@ class PostgresMemoryStore:
         """Add a Function, merging FieldValues when a Function with the same
         ``name_normalized`` already exists (base contract; lite semantics)."""
         if not isinstance(func, Function):
-            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))
+            raise ValueError(_ONLY_FUNCTION_NODES.format(backend="PostgreSQL"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         validate_func_id(func.id)
         validate_domain(func.domain)
         context = self._write_identity(func)
@@ -1026,7 +1026,7 @@ class PostgresMemoryStore:
         races converge the same way.
         """
         if not isinstance(incoming, Function):
-            raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))
+            raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         validate_func_id(incoming.id)
         validate_domain(incoming.domain)
         locked = self._locked_function_by_id(cur, incoming.id, context)
@@ -1122,13 +1122,13 @@ class PostgresMemoryStore:
         elif changed:
             existing.version += 1
         if changed:
-            existing.updated_at = datetime.now(timezone.utc).isoformat()
+            existing.updated_at = datetime.now(UTC).isoformat()
         return existing
 
     def add_batch(
         self,
-        funcs: List[Function],
-        sources: List[SourceDocument],
+        funcs: list[Function],
+        sources: list[SourceDocument],
     ) -> BatchResult:
         """Batch add.  Per-item failures are isolated and recorded in
         ``BatchResult.failed_items``; each item goes through :meth:`add`
@@ -1138,7 +1138,7 @@ class PostgresMemoryStore:
             try:
                 self.add(func, src)
                 result.succeeded += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
                 result.failed_items.append(
                     {
                         "func_id": func.id,
@@ -1173,7 +1173,7 @@ class PostgresMemoryStore:
                 (
                     observation.id,
                     json.dumps(payload),
-                    datetime.now(timezone.utc),
+                    datetime.now(UTC),
                     *identity,
                 ),
             )
@@ -1192,7 +1192,7 @@ class PostgresMemoryStore:
     @staticmethod
     def _stamp_node(node: Any) -> None:
         """Fill created_at/updated_at on a Fact/Preference before upsert."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if not node.created_at:
             node.created_at = now
         node.updated_at = now
@@ -1263,7 +1263,7 @@ class PostgresMemoryStore:
                 None, node=preference,
             )
 
-    def get_fact(self, fact_id: str) -> Optional[Fact]:
+    def get_fact(self, fact_id: str) -> Fact | None:
         cur = self._execute(
             "SELECT data FROM memplex_facts "
             f"WHERE {_acl_scope_sql()} AND id = %s",
@@ -1277,7 +1277,7 @@ class PostgresMemoryStore:
         data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         return Fact.from_dict(data)
 
-    def get_preference(self, preference_id: str) -> Optional[Preference]:
+    def get_preference(self, preference_id: str) -> Preference | None:
         cur = self._execute(
             "SELECT data FROM memplex_preferences "
             f"WHERE {_acl_scope_sql()} AND id = %s",
@@ -1292,8 +1292,8 @@ class PostgresMemoryStore:
         return Preference.from_dict(data)
 
     def list_facts(
-        self, offset: int = 0, limit: int = 1000, owner: Optional[str] = None
-    ) -> List[Fact]:
+        self, offset: int = 0, limit: int = 1000, owner: str | None = None
+    ) -> list[Fact]:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_facts "
@@ -1319,8 +1319,8 @@ class PostgresMemoryStore:
         return facts
 
     def list_preferences(
-        self, offset: int = 0, limit: int = 1000, owner: Optional[str] = None
-    ) -> List[Preference]:
+        self, offset: int = 0, limit: int = 1000, owner: str | None = None
+    ) -> list[Preference]:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_preferences "
@@ -1349,9 +1349,9 @@ class PostgresMemoryStore:
         self,
         offset: int = 0,
         limit: int = 1000,
-        category: Optional[str] = None,
-        owner: Optional[str] = None,
-    ) -> List[Observation]:
+        category: str | None = None,
+        owner: str | None = None,
+    ) -> list[Observation]:
         """Paginated Observation listing with optional JSONB filters."""
         clauses = []
         params: list = []
@@ -1378,7 +1378,7 @@ class PostgresMemoryStore:
         cur.close()
         return observations
 
-    def get_observation(self, observation_id: str) -> Optional[Observation]:
+    def get_observation(self, observation_id: str) -> Observation | None:
         cur = self._execute(
             "SELECT data FROM memplex_observations "
             f"WHERE {_acl_scope_sql()} AND id = %s",
@@ -1447,7 +1447,7 @@ class PostgresMemoryStore:
                 return
             node, _identity = locked
             node.access_count = (int(node.access_count or 0) + 1)
-            node.last_accessed_at = datetime.now(timezone.utc).isoformat()
+            node.last_accessed_at = datetime.now(UTC).isoformat()
             payload = _func_to_json(node)
             self._bind_local_sync_context(cur, "function", func_id, payload)
             cur.execute(
@@ -1470,7 +1470,7 @@ class PostgresMemoryStore:
                     continue
                 node, _identity = locked
                 node.access_count = (int(node.access_count or 0) + 1)
-                node.last_accessed_at = datetime.now(timezone.utc).isoformat()
+                node.last_accessed_at = datetime.now(UTC).isoformat()
                 payload = _func_to_json(node)
                 self._bind_local_sync_context(cur, "function", fid, payload)
                 cur.execute(
@@ -1486,7 +1486,7 @@ class PostgresMemoryStore:
 
     # ── Retrieval ───────────────────────────────────────────────────
 
-    def vector_search(self, text: str, top_k: int = 5) -> List[SearchResult]:
+    def vector_search(self, text: str, top_k: int = 5) -> list[SearchResult]:
         """Hybrid search: tsvector full-text + optional pgvector cosine.
 
         When pgvector is enabled and an embedder is configured, runs both a
@@ -1529,14 +1529,14 @@ class PostgresMemoryStore:
                     )
                     vec_rows = cur.fetchall()
                     cur.close()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("pgvector search leg failed, using tsv only: %s", exc)
 
         # --- RRF merge ---
         return self._rrf_merge(tsv_rows, vec_rows, top_k)
 
     @staticmethod
-    def _rrf_merge(tsv_rows: Any, vec_rows: Any, top_k: Any, k: int = 60) -> List[SearchResult]:
+    def _rrf_merge(tsv_rows: Any, vec_rows: Any, top_k: Any, k: int = 60) -> list[SearchResult]:
         """Reciprocal Rank Fusion of the two result legs."""
         scores: dict = {}
         meta: dict = {}
@@ -1565,18 +1565,18 @@ class PostgresMemoryStore:
             )
         return results
 
-    def fts_search(self, text: str, top_k: int = 10) -> List[SearchResult]:
+    def fts_search(self, text: str, top_k: int = 10) -> list[SearchResult]:
         return self.vector_search(text, top_k=top_k)
 
-    def filter(self, filters: SearchFilters) -> List[Function]:
+    def filter(self, filters: SearchFilters) -> list[Function]:
         """Structured filter over stored Functions.
 
         All SearchFilters fields are pushed into SQL as JSONB predicates
         (previously only ``owner`` was honoured, silently ignoring the
         rest). Mirrors the lite backend's ``_matches_filter``.
         """
-        clauses: List[str] = []
-        params: List[Any] = []
+        clauses: list[str] = []
+        params: list[Any] = []
         if filters.domain:
             clauses.append("data->>'domain' = ANY(%s)")
             params.append(list(filters.domain))
@@ -1618,7 +1618,7 @@ class PostgresMemoryStore:
         cur.close()
         return funcs
 
-    def get(self, func_id: str) -> Optional[Function]:
+    def get(self, func_id: str) -> Function | None:
         cur = self._execute(
             f"SELECT data FROM memplex_functions WHERE {_acl_scope_sql()} AND id = %s",
             (func_id,),
@@ -1634,10 +1634,10 @@ class PostgresMemoryStore:
     def get_neighbors(
         self,
         func_id: str,
-        edge_types: Optional[List[str]] = None,
+        edge_types: list[str] | None = None,
         max_hops: int = 1,
-        limit: Optional[int] = None,
-    ) -> List[Function]:
+        limit: int | None = None,
+    ) -> list[Function]:
         """Bidirectional BFS over the edge table, matching lite semantics:
         honours *max_hops* depth, optional *edge_types* restriction, and
         traverses edges in both directions. A per-path cycle guard keeps
@@ -1676,7 +1676,7 @@ class PostgresMemoryStore:
             WHERE {_acl_scope_sql('f')}
             {result_limit}
         """
-        params: List[Any] = [func_id, func_id, func_id]
+        params: list[Any] = [func_id, func_id, func_id]
         if edge_types:
             params.append(list(edge_types))
         params.append(max_hops)
@@ -1696,9 +1696,9 @@ class PostgresMemoryStore:
         self,
         func_id: str,
         *,
-        edge_types: Optional[List[str]],
+        edge_types: list[str] | None,
         limit: int,
-    ) -> List[Function]:
+    ) -> list[Function]:
         """Fetch at most ``limit`` one-hop edge candidates before joining nodes."""
 
         type_clause = "AND edge_type = ANY(%s)" if edge_types else ""
@@ -1724,7 +1724,7 @@ class PostgresMemoryStore:
             JOIN bounded_neighbors ON f.id = bounded_neighbors.neighbor_id
             WHERE {_acl_scope_sql('f')}
         """
-        params: List[Any] = [func_id]
+        params: list[Any] = [func_id]
         if edge_types:
             params.append(list(edge_types))
         params.append(func_id)
@@ -1732,7 +1732,7 @@ class PostgresMemoryStore:
             params.append(list(edge_types))
         params.extend([func_id, limit])
         cur = self._execute(sql, tuple(params), commit=False)
-        funcs: List[Function] = []
+        funcs: list[Function] = []
         seen: set[str] = set()
         for row in cur.fetchall():
             data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
@@ -1743,7 +1743,7 @@ class PostgresMemoryStore:
         cur.close()
         return funcs
 
-    def get_graph(self, func_ids: Optional[List[str]] = None) -> GraphData:
+    def get_graph(self, func_ids: list[str] | None = None) -> GraphData:
         if func_ids is not None:
             cur = self._execute(
                 "SELECT source, target, edge_type, weight, evidence, created_at "
@@ -1764,7 +1764,7 @@ class PostgresMemoryStore:
             if isinstance(evidence, str):
                 try:
                     evidence = json.loads(evidence)
-                except Exception:
+                except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                     evidence = []
             edges.append(
                 GraphEdge(
@@ -1797,7 +1797,7 @@ class PostgresMemoryStore:
         cur.close()
         return GraphData(nodes=nodes, edges=edges)
 
-    def get_timeline(self, func_id: str, limit: int = 20) -> List[ChangelogEvent]:
+    def get_timeline(self, func_id: str, limit: int = 20) -> list[ChangelogEvent]:
         cur = self._execute(
             "SELECT func_id, ts, event_type, description, source, actor "
             f"FROM memplex_changelog WHERE {_acl_scope_sql()} AND func_id = %s "
@@ -1830,8 +1830,8 @@ class PostgresMemoryStore:
         return int(row[0]) if row else 0
 
     def list_functions(
-        self, offset: int = 0, limit: int = 1000, owner: Optional[str] = None
-    ) -> List[Function]:
+        self, offset: int = 0, limit: int = 1000, owner: str | None = None
+    ) -> list[Function]:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_functions "
@@ -1857,8 +1857,8 @@ class PostgresMemoryStore:
         return funcs
 
     def list_changes_since(
-        self, since: Optional[str] = None, limit: int = 100000
-    ) -> List[Function]:
+        self, since: str | None = None, limit: int = 100000
+    ) -> list[Function]:
         """Incremental query: push the updated_at filter into Postgres.
 
         Overrides the base default (which loads all then filters in Python)
@@ -1929,7 +1929,7 @@ class PostgresMemoryStore:
         nodes = list(sub_graph.nodes)
         for node in nodes:
             if not isinstance(node, Function):
-                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))
+                raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="PostgreSQL"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
             validate_func_id(node.id)
             validate_domain(node.domain)
         context = self._authorization_context()
@@ -2031,11 +2031,11 @@ class PostgresMemoryStore:
                     (source, target, edge.edge_type),
                 )
                 is_new_edge = cur.fetchone() is None
-                edge_created_at = edge.created_at or datetime.now(timezone.utc)
+                edge_created_at = edge.created_at or datetime.now(UTC)
                 if edge_created_at.tzinfo is None:
-                    edge_created_at = edge_created_at.replace(tzinfo=timezone.utc)
+                    edge_created_at = edge_created_at.replace(tzinfo=UTC)
                 else:
-                    edge_created_at = edge_created_at.astimezone(timezone.utc)
+                    edge_created_at = edge_created_at.astimezone(UTC)
                 edge_payload = {
                     "weight": float(edge.weight),
                     "evidence": list(edge.evidence or []),

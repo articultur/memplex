@@ -7,7 +7,8 @@ factory.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from memplex.sync_ingress import ValidatedIngressBatch
 
@@ -47,7 +48,7 @@ class InboundSyncExecutor:
             return manager.transaction
         raise TypeError("transaction must be callable or expose a transaction() callable")
 
-    def apply(self, batch: ValidatedIngressBatch) -> "SyncBatchResult":
+    def apply(self, batch: ValidatedIngressBatch) -> SyncBatchResult:
         if type(batch) is not ValidatedIngressBatch:
             raise TypeError("apply accepts only ValidatedIngressBatch")
         if self._authority_check is not None:
@@ -71,7 +72,7 @@ def _extract_single_value(row: Any) -> Any:
     return row[0]
 
 
-def _parse_batch_result(payload: Any, batch: ValidatedIngressBatch) -> "SyncBatchResult":
+def _parse_batch_result(payload: Any, batch: ValidatedIngressBatch) -> SyncBatchResult:
     from memplex.sync_protocol import SyncBatchResult
 
     if type(payload) is not dict:
@@ -112,7 +113,7 @@ def _parse_batch_result(payload: Any, batch: ValidatedIngressBatch) -> "SyncBatc
     )
 
 
-def _parse_receipts(value: Any, event_count: int, batch_event_ids: tuple[str, ...]) -> tuple["SyncReceipt", ...]:
+def _parse_receipts(value: Any, event_count: int, batch_event_ids: tuple[str, ...]) -> tuple[SyncReceipt, ...]:
     from memplex.sync_protocol import SyncReceipt
 
     if type(value) is not list:

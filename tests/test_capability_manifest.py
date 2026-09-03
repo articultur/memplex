@@ -11,7 +11,6 @@ from itertools import combinations
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs/capabilities.json"
 
@@ -200,7 +199,7 @@ def _parse_line_ref(value: Any) -> tuple[str, int, int]:
 
 
 def _assert_valid_line_ref(value: Any) -> None:
-    relative, start, end = _parse_line_ref(value)
+    relative, _, end = _parse_line_ref(value)
     path = _safe_repository_path(relative)
     line_count = len(path.read_text(encoding="utf-8").splitlines())
     assert end <= line_count, f"reference exceeds {relative} line count {line_count}: {value}"

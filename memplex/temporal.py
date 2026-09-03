@@ -19,8 +19,9 @@ Semantics:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, List, Optional
+from collections.abc import Iterable
+from datetime import UTC, datetime, timezone
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from memplex.models import Fact
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
 def now_iso() -> str:
     """UTC now in the canonical ISO form used across memplex timestamps."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _key(fact: Fact) -> tuple[str, str]:
@@ -39,15 +40,15 @@ def _key(fact: Fact) -> tuple[str, str]:
     )
 
 
-def is_valid_at(fact: Fact, as_of: Optional[datetime] = None) -> bool:
+def is_valid_at(fact: Fact, as_of: datetime | None = None) -> bool:
     """Whether *fact*'s business-time interval covers *as_of* (default now).
 
     Invalid dates on the fields are treated as absent rather than raising:
     a malformed stamp must never hide a fact from a security-relevant read.
     """
-    when = as_of or datetime.now(timezone.utc)
+    when = as_of or datetime.now(UTC)
 
-    def parse(value: Optional[str]) -> Optional[datetime]:
+    def parse(value: str | None) -> datetime | None:
         if not value:
             return None
         try:
@@ -55,7 +56,7 @@ def is_valid_at(fact: Fact, as_of: Optional[datetime] = None) -> bool:
         except ValueError:
             return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed
 
     start = parse(getattr(fact, "valid_from", None))
@@ -65,14 +66,12 @@ def is_valid_at(fact: Fact, as_of: Optional[datetime] = None) -> bool:
         return False
     if end is not None and when >= end:
         return False
-    if shelf is not None and when >= shelf:
-        return False
-    return True
+    return not (shelf is not None and when >= shelf)
 
 
 def supersede_contradicted(
-    new_fact: Fact, existing: Iterable[Fact], *, now: Optional[str] = None
-) -> List[Fact]:
+    new_fact: Fact, existing: Iterable[Fact], *, now: str | None = None
+) -> list[Fact]:
     """Return the stored facts *new_fact* supersedes, stamped ``invalid_at``.
 
     Mutation contract: only facts sharing the (subject, predicate) slot that
@@ -83,7 +82,7 @@ def supersede_contradicted(
     stamp = now or now_iso()
     slot = _key(new_fact)
     new_id = getattr(new_fact, "id", None)
-    superseded: List[Fact] = []
+    superseded: list[Fact] = []
     for fact in existing:
         if getattr(fact, "id", None) == new_id:
             continue
@@ -98,6 +97,6 @@ def supersede_contradicted(
     return superseded
 
 
-def facts_valid_at(facts: Iterable[Fact], as_of: Optional[datetime] = None) -> List[Fact]:
+def facts_valid_at(facts: Iterable[Fact], as_of: datetime | None = None) -> list[Fact]:
     """Filter an iterable of facts down to those valid at *as_of*."""
     return [fact for fact in facts if is_valid_at(fact, as_of)]

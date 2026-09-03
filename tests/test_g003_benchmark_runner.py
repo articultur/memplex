@@ -13,7 +13,6 @@ import benchmarks
 from benchmarks.base import BenchmarkResult
 from scripts import run_g003_benchmark as runner
 
-
 CONCRETE_DATASETS = (
     "hotpotqa",
     "locomo",

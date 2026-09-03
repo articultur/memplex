@@ -39,7 +39,8 @@ def test_installer_shell_syntax():
             ["bash", "-n", str(script)],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=10,check=False
+        
         )
         assert result.returncode == 0, result.stderr
 
@@ -67,7 +68,8 @@ def test_hermes_compatibility_wrapper_fails_closed_without_packaged_installer(
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode != 0
     assert "packaged install-agent.sh is missing" in result.stderr
@@ -94,7 +96,8 @@ def test_agent_installer_dry_run_uses_persistent_python(tmp_path):
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "uv venv" not in result.stdout
@@ -120,7 +123,8 @@ def test_hermes_installer_wrapper_delegates_to_agent_installer(tmp_path):
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "-m memplex agent install --agent hermes" in result.stdout
@@ -143,7 +147,8 @@ def test_agent_installer_auto_detects_local_agents(tmp_path):
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "detected agents: codex hermes" in result.stdout
@@ -164,7 +169,8 @@ def test_agent_installer_auto_without_detected_agent_stops_before_install(tmp_pa
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode != 0
     assert "no supported local agents detected" in result.stderr
@@ -186,7 +192,8 @@ def test_agent_installer_all_uses_transactional_cli_path(tmp_path):
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "-m memplex agent install --agent all" in result.stdout
@@ -249,7 +256,8 @@ def test_npm_memplex_setup_runs_packaged_installer_dry_run(tmp_path):
             "PATH": "/usr/bin:/bin",
             "MEMPLEX_INSTALL_SCRIPT_URL": "https://attacker.invalid/installer.sh",
             "MEMPLEX_PACKAGE": "attacker-package",
-        },
+        },check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "memplex==3.3.0" in result.stdout
@@ -273,7 +281,8 @@ def test_npm_memplex_rejects_python_package_override(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         timeout=10,
-        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},check=False
+    
     )
     assert result.returncode != 0
     assert "package override is not allowed" in result.stderr
@@ -299,7 +308,8 @@ def test_npm_memplex_uninstall_aliases_packaged_installer(tmp_path):
             "HOME": str(tmp_path / "home"),
             "PATH": "/usr/bin:/bin",
             "MEMPLEX_INSTALL_SCRIPT_URL": "https://attacker.invalid/installer.sh",
-        },
+        },check=False
+    
     )
     assert result.returncode == 0, result.stderr
     assert "-m memplex agent uninstall --agent codex" in result.stdout
@@ -311,7 +321,8 @@ def test_npm_memplex_pack_contains_only_version_bound_local_installer() -> None:
         cwd=NPM_MEMPLEX_PACKAGE.parent,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=30,check=False
+    
     )
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)

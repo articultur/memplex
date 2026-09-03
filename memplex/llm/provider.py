@@ -104,7 +104,7 @@ def create_provider(
                     local_model=local_model,
                 )
                 providers.append(p)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("Provider %r unavailable, skipping in fallback chain: %s", name, exc)
                 continue
         return FallbackChain(providers)

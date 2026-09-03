@@ -10,15 +10,13 @@ import shutil
 import socket
 import subprocess
 import time
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from collections.abc import Mapping, Sequence
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import urlopen
-
 
 _REDACTED = "<redacted>"
 _SENSITIVE_PARTS = frozenset(

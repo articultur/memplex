@@ -10,11 +10,11 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from types import SimpleNamespace  # noqa: E402
+from types import SimpleNamespace
 
-from memplex.models import SourceDocument, SourceType  # noqa: E402
-from memplex.models.paragraph import ParagraphCollection  # noqa: E402
-from memplex.processing.function_builder import (  # noqa: E402
+from memplex.models import SourceDocument, SourceType
+from memplex.models.paragraph import ParagraphCollection
+from memplex.processing.function_builder import (
     build_functions_from_paragraphs,
     normalize_name,
 )

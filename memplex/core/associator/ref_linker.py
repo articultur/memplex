@@ -1,14 +1,14 @@
 """Cross-document reference extraction and linking."""
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import ClassVar
 
 
 class RefLinker:
     """Extracts and resolves cross-document references."""
 
     # Reference patterns
-    CROSS_DOC_PATTERNS = [
+    CROSS_DOC_PATTERNS: ClassVar[list[str]] = [
         r"详见[《\"]?(.+?)[》文档手册]",
         r"参见[《\"]?(.+?)[》\]]",
         r"[《\"]?(.+?)[》\]]\s*[第见]?\s*([0-9.]+)[章]?",
@@ -28,14 +28,14 @@ class RefLinker:
         r"RFC-?(\d+)",
     ]
 
-    SECTION_PATTERNS = [
+    SECTION_PATTERNS: ClassVar[list[str]] = [
         r"见第?([0-9.]+)节?",
         r"如图?([0-9]+(?:\.[0-9]+)?)",
         r"参考第?([0-9.]+)节",
         r"第([一二三四五六七八九十零]+)章",
     ]
 
-    CN_DIGIT_MAP = {
+    CN_DIGIT_MAP: ClassVar[dict[str, int]] = {
         "一": 1,
         "二": 2,
         "三": 3,
@@ -51,19 +51,19 @@ class RefLinker:
 
     URL_PATTERN = r"https?://[^\s<>\"]+"
 
-    SEQUENTIAL_PATTERNS = [
+    SEQUENTIAL_PATTERNS: ClassVar[list[str]] = [
         r"之后",
         r"随后",
         r"接下来",
     ]
 
-    BACK_REFERENCE_PATTERNS = [
+    BACK_REFERENCE_PATTERNS: ClassVar[list[str]] = [
         "如上所述",
         "如前所述",
         "前述",
     ]
 
-    def extract_references(self, text: str) -> List[Dict]:
+    def extract_references(self, text: str) -> list[dict]:
         """
         Extract all types of references from text.
 
@@ -139,7 +139,7 @@ class RefLinker:
 
         return references
 
-    def resolve_reference(self, ref: Dict, known_entities: Dict[str, List[str]]) -> Optional[str]:
+    def resolve_reference(self, ref: dict, known_entities: dict[str, list[str]]) -> str | None:
         """Resolve reference to entity ID."""
         target = ref["target"]
 
@@ -155,10 +155,10 @@ class RefLinker:
 
     def resolve_implicit_reference(
         self,
-        ref: Dict,
-        known_entities: Dict[str, List[str]],
-        context: Optional[Dict] = None,
-    ) -> Tuple[Optional[str], float]:
+        ref: dict,
+        known_entities: dict[str, list[str]],
+        context: dict | None = None,
+    ) -> tuple[str | None, float]:
         """Resolve implicit reference to entity ID with confidence score."""
         target = ref.get("target", "")
         ref_type = ref.get("type", "")

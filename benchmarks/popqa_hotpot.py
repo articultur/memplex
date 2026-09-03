@@ -18,9 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -61,9 +61,9 @@ def _normalize_text(text: str) -> str:
     return normalize_answer_text(text)
 
 
-def _extract_answer_aliases(answer: Any) -> List[str]:
+def _extract_answer_aliases(answer: Any) -> list[str]:
     """Extract answer string(s) from various answer formats."""
-    aliases: List[str] = []
+    aliases: list[str] = []
 
     if answer is None:
         return aliases
@@ -89,8 +89,8 @@ def _extract_answer_aliases(answer: Any) -> List[str]:
         for item in answer:
             aliases.extend(_extract_answer_aliases(item))
 
-    seen: Set[str] = set()
-    unique: List[str] = []
+    seen: set[str] = set()
+    unique: list[str] = []
     for a in aliases:
         if a and a not in seen:
             seen.add(a)
@@ -117,10 +117,10 @@ class PopQAHotpotDataset(EvaluationDataset):
 
     def __init__(self, dataset_name: str = "popqa_hotpot") -> None:
         self.dataset_name = dataset_name
-        self._samples: List[BenchmarkSample] = []
+        self._samples: list[BenchmarkSample] = []
         self._hf_loaded = False
 
-    def download(self, num_samples: Optional[int] = None) -> str:
+    def download(self, num_samples: int | None = None) -> str:
         """Download dataset from HuggingFace and save locally.
 
         Args:
@@ -162,7 +162,7 @@ class PopQAHotpotDataset(EvaluationDataset):
                 ds = load_dataset(hf_id, config_name, split=split)
             else:
                 ds = load_dataset(hf_id, split=split)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning(
                 "Failed to load %s with config %s: %s. Retrying without config...",
                 hf_id,
@@ -195,7 +195,7 @@ class PopQAHotpotDataset(EvaluationDataset):
 
         records = []
         for s in samples:
-            rec: Dict[str, Any] = {"id": s.id, "question": s.query}
+            rec: dict[str, Any] = {"id": s.id, "question": s.query}
             if self.dataset_name == "hotpotqa":
                 rec["answer"] = s.expected_answer
                 rec["supporting_facts"] = s.metadata.get("supporting_facts", [])
@@ -219,7 +219,7 @@ class PopQAHotpotDataset(EvaluationDataset):
         self._hf_loaded = True
         return str(cache_file)
 
-    def load(self, path: str) -> List[BenchmarkSample]:
+    def load(self, path: str) -> list[BenchmarkSample]:
         """Load benchmark samples from a JSON/JSONL file or HuggingFace.
 
         First tries to load from the given path. If the file does not exist,
@@ -240,7 +240,7 @@ class PopQAHotpotDataset(EvaluationDataset):
                     f"Dataset file not found: {path}, and HuggingFace download failed: {download_exc}"
                 ) from download_exc
 
-        samples: List[BenchmarkSample] = []
+        samples: list[BenchmarkSample] = []
         file_ext = file_path.suffix.lower()
 
         try:
@@ -269,7 +269,7 @@ class PopQAHotpotDataset(EvaluationDataset):
             logger.error("Failed to load dataset from %s: %s", path, exc)
             raise
 
-    def _load_json(self, file_path: Path) -> List[BenchmarkSample]:
+    def _load_json(self, file_path: Path) -> list[BenchmarkSample]:
         """Load samples from a JSON file."""
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -278,7 +278,7 @@ class PopQAHotpotDataset(EvaluationDataset):
             data = data["data"]
 
         if not isinstance(data, list):
-            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")
+            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
 
         samples = []
         for item in data:
@@ -288,7 +288,7 @@ class PopQAHotpotDataset(EvaluationDataset):
 
         return samples
 
-    def _load_jsonl(self, file_path: Path) -> List[BenchmarkSample]:
+    def _load_jsonl(self, file_path: Path) -> list[BenchmarkSample]:
         """Load samples from a JSONL (JSON Lines) file."""
         samples = []
         with open(file_path, "r", encoding="utf-8") as f:
@@ -307,7 +307,7 @@ class PopQAHotpotDataset(EvaluationDataset):
 
         return samples
 
-    def _parse_sample(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_sample(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a single dataset item into a BenchmarkSample."""
         item_keys = set(item.keys())
 
@@ -319,7 +319,7 @@ class PopQAHotpotDataset(EvaluationDataset):
 
         return self._parse_generic(item)
 
-    def _parse_popqa(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_popqa(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a PopQA format item."""
         question = item.get("question", "")
         if not question:
@@ -350,7 +350,7 @@ class PopQAHotpotDataset(EvaluationDataset):
             },
         )
 
-    def _parse_hotpotqa(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_hotpotqa(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a HotpotQA format item."""
         question = item.get("question", "")
         if not question:
@@ -418,7 +418,7 @@ class PopQAHotpotDataset(EvaluationDataset):
             },
         )
 
-    def _parse_generic(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_generic(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a generic item with minimal required fields."""
         question = (
             item.get("query")
@@ -456,8 +456,8 @@ class PopQAHotpotDataset(EvaluationDataset):
             object_=sample.metadata.get("object", sample.expected_answer or ""),
             memory_type="fact",
             source_type=SourceType.WIKI,
-            created_at=datetime.utcnow().isoformat(),
-            updated_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            updated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         )
 
         # Content for the SourceDocument
@@ -488,7 +488,7 @@ class PopQAHotpotDataset(EvaluationDataset):
         return self._samples[index]
 
 
-def _answer_in_text(text: str, answer_aliases: List[str]) -> bool:
+def _answer_in_text(text: str, answer_aliases: list[str]) -> bool:
     """Check if any answer alias appears in the text."""
     if not text or not answer_aliases:
         return False
@@ -500,13 +500,13 @@ def _answer_in_text(text: str, answer_aliases: List[str]) -> bool:
 
 
 def _compute_hop_metrics(
-    retrieved_summaries: List[str],
-    answer_aliases: List[str],
+    retrieved_summaries: list[str],
+    answer_aliases: list[str],
     num_hops: int,
-    k_values: List[int] = [1, 5, 10],
-) -> Dict[str, float]:
+    k_values: list[int] | None = None,
+) -> dict[str, float]:
     """Compute metrics for single-hop retrieval (PopQA-style)."""
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     mrr = 0.0
     for rank, summary in enumerate(retrieved_summaries, 1):
@@ -514,6 +514,10 @@ def _compute_hop_metrics(
             mrr = 1.0 / rank
             break
     metrics["mrr"] = mrr
+
+    if k_values is None:
+
+        k_values = [1, 5, 10]
 
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
@@ -531,14 +535,14 @@ def _compute_hop_metrics(
 
 
 def _compute_multihop_metrics(
-    retrieved_summaries: List[str],
-    supporting_facts: List[Dict],
-    answer_aliases: List[str],
+    retrieved_summaries: list[str],
+    supporting_facts: list[dict],
+    answer_aliases: list[str],
     max_hops: int = 2,
-    k_values: List[int] = [1, 5, 10],
-) -> Dict[str, float]:
+    k_values: list[int] | None = None,
+) -> dict[str, float]:
     """Compute metrics for multi-hop retrieval (HotpotQA-style)."""
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     hop_entities = []
     for fact in supporting_facts:
@@ -550,12 +554,16 @@ def _compute_multihop_metrics(
 
     num_hops = len(hop_entities) if hop_entities else max_hops
 
-    hops_covered: List[bool] = [False] * num_hops
+    hops_covered: list[bool] = [False] * num_hops
     for summary in retrieved_summaries:
         summary_lower = summary.lower()
         for i, entity in enumerate(hop_entities):
             if not hops_covered[i] and entity in summary_lower:
                 hops_covered[i] = True
+
+    if k_values is None:
+
+        k_values = [1, 5, 10]
 
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
@@ -576,6 +584,10 @@ def _compute_multihop_metrics(
     metrics["multihop_accuracy"] = 1.0 if all(hops_covered) else 0.0
     metrics["hop_coverage"] = sum(hops_covered) / num_hops if num_hops > 0 else 0.0
 
+    if k_values is None:
+
+        k_values = [1, 5, 10]
+
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
         relevant_in_top_k = any(_answer_in_text(s, answer_aliases) for s in top_k_summaries)
@@ -592,9 +604,9 @@ def _compute_multihop_metrics(
     return metrics
 
 
-def _compute_qa_metrics(prediction: str, answer_aliases: List[str]) -> Dict[str, float]:
+def _compute_qa_metrics(prediction: str, answer_aliases: list[str]) -> dict[str, float]:
     """Compute QA metrics for a single prediction."""
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     if not answer_aliases:
         return metrics
@@ -624,14 +636,14 @@ class PopQAHotpotRunner(BenchmarkRunner):
     def run_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int = 10,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run retrieval benchmark on the given samples."""
         if not samples:
             return []
 
-        results: List[BenchmarkResult] = []
+        results: list[BenchmarkResult] = []
 
         popqa_samples = [s for s in samples if s.metadata.get("dataset") == "popqa"]
         hotpotqa_samples = [s for s in samples if s.metadata.get("dataset") == "hotpotqa"]
@@ -648,7 +660,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
 
         all_metrics = {**popqa_metrics, **hotpotqa_metrics}
 
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         total_samples = len(samples)
 
         for metric_name, value in all_metrics.items():
@@ -685,16 +697,16 @@ class PopQAHotpotRunner(BenchmarkRunner):
     def _run_popqa_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run retrieval on PopQA samples (single-hop entity QA)."""
         if not samples:
             return {}
 
-        mrr_scores: List[float] = []
-        em_scores: List[float] = []
-        recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
+        mrr_scores: list[float] = []
+        em_scores: list[float] = []
+        recall_scores: dict[str, list[float]] = {f"recall@{k}": [] for k in self._k_values}
         latencies = LatencyStats()
 
         for sample in samples:
@@ -718,7 +730,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
             for k in self._k_values:
                 recall_scores[f"recall@{k}"].append(metrics.get(f"recall@{k}", 0.0))
 
-        avg_metrics: Dict[str, Any] = {}
+        avg_metrics: dict[str, Any] = {}
 
         if mrr_scores:
             avg_metrics["mrr"] = sum(mrr_scores) / len(mrr_scores)
@@ -734,20 +746,20 @@ class PopQAHotpotRunner(BenchmarkRunner):
     def _run_hotpotqa_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run retrieval on HotpotQA samples (multi-hop reasoning)."""
         if not samples:
             return {}
 
-        multihop_acc_scores: List[float] = []
-        hop_coverage_scores: List[float] = []
-        mrr_scores: List[float] = []
-        hop_precision_scores: Dict[str, List[float]] = {
+        multihop_acc_scores: list[float] = []
+        hop_coverage_scores: list[float] = []
+        mrr_scores: list[float] = []
+        hop_precision_scores: dict[str, list[float]] = {
             f"hop_precision@{k}": [] for k in self._k_values
         }
-        hop_recall_scores: Dict[str, List[float]] = {f"hop_recall@{k}": [] for k in self._k_values}
+        hop_recall_scores: dict[str, list[float]] = {f"hop_recall@{k}": [] for k in self._k_values}
         latencies = LatencyStats()
 
         for sample in samples:
@@ -774,8 +786,8 @@ class PopQAHotpotRunner(BenchmarkRunner):
                             if neighbor.id not in all_func_ids:
                                 all_summaries.append(neighbor.name)
                                 all_func_ids.add(neighbor.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 - logged degradation path
+                        logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
             metrics = _compute_multihop_metrics(
                 all_summaries,
@@ -794,7 +806,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
                 )
                 hop_recall_scores[f"hop_recall@{k}"].append(metrics.get(f"hop_recall@{k}", 0.0))
 
-        avg_metrics: Dict[str, Any] = {}
+        avg_metrics: dict[str, Any] = {}
 
         if multihop_acc_scores:
             n = len(multihop_acc_scores)
@@ -813,15 +825,15 @@ class PopQAHotpotRunner(BenchmarkRunner):
     def run_generation(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
-    ) -> List[BenchmarkResult]:
+        samples: list[BenchmarkSample],
+    ) -> list[BenchmarkResult]:
         """Run generation benchmark on the given samples."""
         if not samples:
             return []
 
-        results: List[BenchmarkResult] = []
-        em_scores: List[float] = []
-        f1_scores: List[float] = []
+        results: list[BenchmarkResult] = []
+        em_scores: list[float] = []
+        f1_scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -845,7 +857,7 @@ class PopQAHotpotRunner(BenchmarkRunner):
             f1_scores.append(qa_metrics.get("f1", 0.0))
 
         avg_latency = latencies.mean
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
         avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0

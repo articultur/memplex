@@ -38,9 +38,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -54,9 +54,6 @@ from benchmarks.base import (
 from memplex.models import SourceDocument, SourceType
 from memplex.service import MemplexService
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 #: Token-F1 bar for counting a persona-consistency hit. 0.5 is the usual
@@ -66,7 +63,7 @@ logger = logging.getLogger(__name__)
 PERSONA_F1_HIT_THRESHOLD = 0.5
 
 
-def _parse_turn_timestamp(raw: Any) -> Optional[datetime]:
+def _parse_turn_timestamp(raw: Any) -> datetime | None:
     """Parse a LoCoMo turn timestamp.
 
     Accepts ISO-8601 (repo synthetic format) and the official locomo10
@@ -81,7 +78,7 @@ def _parse_turn_timestamp(raw: Any) -> Optional[datetime]:
         pass
     for fmt in ("%I:%M %p on %d %B, %Y", "%I:%M %p on %d %B %Y"):
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -99,14 +96,14 @@ class LocomoSample:
 
     id: str
     query: str
-    expected_ids: List[str]
-    expected_answer: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    expected_ids: list[str]
+    expected_answer: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # LoCoMo-specific fields
     conversation_id: str = ""
-    turns: List[Dict[str, str]] = field(default_factory=list)
-    ground_truth_memories: List[Dict[str, str]] = field(default_factory=list)
+    turns: list[dict[str, str]] = field(default_factory=list)
+    ground_truth_memories: list[dict[str, str]] = field(default_factory=list)
 
     def to_benchmark_sample(self) -> BenchmarkSample:
         """Convert to the public BenchmarkSample format.
@@ -139,10 +136,10 @@ class LocomoDataset(EvaluationDataset):
         - Multi-modal conversation: multi-speaker dialogue with mixed content types
     """
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path: str | None = None):
         self.path = path
 
-    def load(self, path: str) -> List[BenchmarkSample]:
+    def load(self, path: str) -> list[BenchmarkSample]:
         """Load LoCoMo samples from a JSON file.
 
         Parameters
@@ -172,11 +169,11 @@ class LocomoDataset(EvaluationDataset):
         elif isinstance(raw, list):
             conversations = raw
         else:
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
                 f"Unexpected LoCoMo format in {load_path}: top-level must be dict or list"
             )
 
-        samples: List[BenchmarkSample] = []
+        samples: list[BenchmarkSample] = []
         for conv in conversations:
             if self._is_official_entry(conv):
                 samples.extend(s.to_benchmark_sample() for s in self._parse_official(conv))
@@ -211,7 +208,7 @@ class LocomoDataset(EvaluationDataset):
             and isinstance(conv.get("qa"), list)
         )
 
-    def _parse_official(self, entry: Dict[str, Any]) -> List[LocomoSample]:
+    def _parse_official(self, entry: dict[str, Any]) -> list[LocomoSample]:
         """Parse one official LoCoMo sample into one QA sample per ``qa`` entry.
 
         Sessions are flattened in chronological order (``session_N`` sorted by
@@ -226,7 +223,7 @@ class LocomoDataset(EvaluationDataset):
             (k for k in convo if re.fullmatch(r"session_\d+", k)),
             key=lambda k: int(k.rsplit("_", 1)[1]),
         )
-        turns: List[Dict[str, str]] = []
+        turns: list[dict[str, str]] = []
         for session_key in session_keys:
             session_dt = str(convo.get(f"{session_key}_date_time", ""))
             for turn in convo.get(session_key) or []:
@@ -248,7 +245,7 @@ class LocomoDataset(EvaluationDataset):
             if convo.get(key)
         ]
 
-        samples: List[LocomoSample] = []
+        samples: list[LocomoSample] = []
         for index, qa in enumerate(entry.get("qa") or []):
             if not isinstance(qa, dict):
                 continue
@@ -293,8 +290,8 @@ class LocomoDataset(EvaluationDataset):
     def _make_qa_sample(
         self,
         conv_id: str,
-        turns: List[Dict[str, str]],
-        memories: List[Dict[str, str]],
+        turns: list[dict[str, str]],
+        memories: list[dict[str, str]],
     ) -> LocomoSample:
         """Build a question-answering sample from a LoCoMo conversation.
 
@@ -329,8 +326,8 @@ class LocomoDataset(EvaluationDataset):
     def _make_summarization_sample(
         self,
         conv_id: str,
-        turns: List[Dict[str, str]],
-        memories: List[Dict[str, str]],
+        turns: list[dict[str, str]],
+        memories: list[dict[str, str]],
     ) -> LocomoSample:
         """Build an event summarization sample.
 
@@ -359,8 +356,8 @@ class LocomoDataset(EvaluationDataset):
     def _make_conversation_sample(
         self,
         conv_id: str,
-        turns: List[Dict[str, str]],
-        memories: List[Dict[str, str]],
+        turns: list[dict[str, str]],
+        memories: list[dict[str, str]],
     ) -> LocomoSample:
         """Build a multi-modal conversation sample.
 
@@ -424,7 +421,7 @@ class LocomoDataset(EvaluationDataset):
             # Persist the turn's real timestamp so the recency dimension has
             # a temporal signal to rank by; fall back to now when the source
             # carries none (or an unparseable one).
-            mem_ts = _parse_turn_timestamp(mem.get("timestamp")) or datetime.utcnow()
+            mem_ts = _parse_turn_timestamp(mem.get("timestamp")) or datetime.now(UTC)
             mem_ts_iso = mem_ts.isoformat()
 
             if sample_type == "summarization":
@@ -484,15 +481,15 @@ class LocomoRunner(BenchmarkRunner):
 
     DATASET_NAME = "locomo"
 
-    def __init__(self, dataset: Optional[LocomoDataset] = None):
+    def __init__(self, dataset: LocomoDataset | None = None):
         self.dataset = dataset or LocomoDataset()
 
     def run_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int = 10,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run retrieval benchmarks on LoCoMo samples.
 
         For each sample:
@@ -503,12 +500,12 @@ class LocomoRunner(BenchmarkRunner):
         """
         from benchmarks.metrics import mrr, precision_at_k, recall_at_k
 
-        results: List[BenchmarkResult] = []
-        timestamp = datetime.utcnow().isoformat()
+        results: list[BenchmarkResult] = []
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-        recall_scores: List[float] = []
-        precision_scores: List[float] = []
-        mrr_scores: List[float] = []
+        recall_scores: list[float] = []
+        precision_scores: list[float] = []
+        mrr_scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -532,7 +529,7 @@ class LocomoRunner(BenchmarkRunner):
         if n == 0:
             return []
 
-        def _latency_fields() -> Dict[str, float]:
+        def _latency_fields() -> dict[str, float]:
             return {
                 "latency_ms": latencies.mean,
                 "latency_p50_ms": latencies.p50,
@@ -583,8 +580,8 @@ class LocomoRunner(BenchmarkRunner):
     def run_generation(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
-    ) -> List[BenchmarkResult]:
+        samples: list[BenchmarkSample],
+    ) -> list[BenchmarkResult]:
         """Run generation benchmarks on LoCoMo samples.
 
         For summarization samples, evaluates whether the generated summary
@@ -593,12 +590,12 @@ class LocomoRunner(BenchmarkRunner):
         """
         from benchmarks.metrics import bleu, exact_match, rouge_l
 
-        results: List[BenchmarkResult] = []
-        timestamp = datetime.utcnow().isoformat()
+        results: list[BenchmarkResult] = []
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-        bleu_scores: List[float] = []
-        rouge_scores: List[float] = []
-        em_scores: List[float] = []
+        bleu_scores: list[float] = []
+        rouge_scores: list[float] = []
+        em_scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -666,16 +663,16 @@ class LocomoRunner(BenchmarkRunner):
     def _run_recency_accuracy(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Compute recency accuracy: does memplex retrieve most recent memories first?
 
         Measures how well the recency dimension of the 6-dim reranker orders
         results. Ground truth is temporal ordering from conversation turns.
         """
-        scores: List[float] = []
+        scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -720,10 +717,10 @@ class LocomoRunner(BenchmarkRunner):
     def _run_persona_consistency(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Compute persona consistency via token-overlap F1 against a reference.
 
         Metric definition: for each multi-speaker sample, the reference set is
@@ -743,7 +740,7 @@ class LocomoRunner(BenchmarkRunner):
         anywhere in the retrieved text) scored 1.0 without checking content
         and is not comparable.
         """
-        scores: List[float] = []
+        scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -806,10 +803,10 @@ class LocomoRunner(BenchmarkRunner):
     def _run_event_tracking(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int,
         timestamp: str,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Compute event tracking: how well does memplex track events across turns?
 
         Metric definition: per sample, the fraction of ``metadata['events']``
@@ -821,7 +818,7 @@ class LocomoRunner(BenchmarkRunner):
         paraphrases or semantically equivalent phrasing, so this is a lower
         bound on event-recall ability, not a semantic-coverage measure.
         """
-        scores: List[float] = []
+        scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -857,7 +854,7 @@ class LocomoRunner(BenchmarkRunner):
     # ── Metric helpers ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _score_recency(retrieved: List[str], expected: List[str]) -> float:
+    def _score_recency(retrieved: list[str], expected: list[str]) -> float:
         """Score temporal ordering among the ground-truth memories.
 
         Projects the retrieved list onto the expected ids (distractors are

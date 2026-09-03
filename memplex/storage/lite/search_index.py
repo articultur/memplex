@@ -6,10 +6,10 @@ import math
 import re
 import sqlite3
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
 from memplex.models import Function
 
@@ -22,9 +22,9 @@ _MAX_SQLITE_QUERY_TERMS = 64
 _BM25_TIE_EPSILON = 1e-9
 
 
-def _tokenize_search_text(text: str) -> List[str]:
+def _tokenize_search_text(text: str) -> list[str]:
     """Tokenize text for local BM25 search without external dependencies."""
-    tokens: List[str] = []
+    tokens: list[str] = []
     for match in _TOKEN_RE.finditer(text.lower()):
         part = match.group(0)
         tokens.append(part)
@@ -35,7 +35,7 @@ def _tokenize_search_text(text: str) -> List[str]:
             tokens.extend(chars)
             for size in (2, 3):
                 tokens.extend(
-                    "".join(chars[i : i + size]) for i in range(0, max(len(chars) - size + 1, 0))
+                    "".join(chars[i : i + size]) for i in range(max(len(chars) - size + 1, 0))
                 )
             continue
 
@@ -54,12 +54,12 @@ def _character_ngrams(text: str, size: int = 3) -> set[str]:
     return {normalized[i : i + size] for i in range(len(normalized) - size + 1)}
 
 
-def _encoded_trigram_tokens(text: str) -> List[str]:
+def _encoded_trigram_tokens(text: str) -> list[str]:
     """Encode fuzzy trigrams as FTS-safe ASCII tokens."""
     return ["tri" + gram.encode("utf-8").hex() for gram in sorted(_character_ngrams(text)) if gram]
 
 
-def _sqlite_match_query(tokens: List[str]) -> str:
+def _sqlite_match_query(tokens: list[str]) -> str:
     """Build a safe OR query for SQLite FTS5 MATCH."""
     unique_tokens = list(dict.fromkeys(token for token in tokens if token))
     quoted = [
@@ -87,7 +87,7 @@ class SQLiteFTSIndex:
     def __init__(
         self,
         path: Path,
-        functions: Dict[str, Function],
+        functions: dict[str, Function],
         text_factory: Callable[[Function], str],
     ) -> None:
         self._path = path
@@ -100,7 +100,7 @@ class SQLiteFTSIndex:
         self._indexed_sigs: dict = {}
         self._disabled = False
 
-    def search(self, text: str, top_k: int) -> List[tuple[str, float]]:
+    def search(self, text: str, top_k: int) -> list[tuple[str, float]]:
         """Return ``(func_id, score)`` matches from FTS5 BM25 plus trigrams."""
         query_terms = _tokenize_search_text(text)
         trigram_terms = _encoded_trigram_tokens(text)
@@ -167,7 +167,7 @@ class SQLiteFTSIndex:
         *,
         conn: sqlite3.Connection,
         table: str,
-        tokens: List[str],
+        tokens: list[str],
         weight: float,
         limit: int,
         scores: dict[str, float],
@@ -185,7 +185,7 @@ class SQLiteFTSIndex:
             """,
             (match_query, limit),
         ).fetchall()
-        prev_rank: Optional[float] = None
+        prev_rank: float | None = None
         group_start = 0
         for idx, row in enumerate(rows):
             rank = float(row["rank"])
@@ -199,7 +199,7 @@ class SQLiteFTSIndex:
                 weight / (group_start + 1)
             )
 
-    def _ensure_index(self) -> Optional[sqlite3.Connection]:
+    def _ensure_index(self) -> sqlite3.Connection | None:
         """Open and refresh the SQLite FTS5 sidecar for the current snapshot."""
         signature = self._search_signature()
         if self._disabled and self._signature == signature:
@@ -319,10 +319,10 @@ class SQLiteFTSIndex:
 def local_bm25_search(
     *,
     text: str,
-    functions: Dict[str, Function],
+    functions: dict[str, Function],
     text_factory: Callable[[Function], str],
     top_k: int,
-) -> List[tuple[Function, str, float]]:
+) -> list[tuple[Function, str, float]]:
     """Rank functions with pure-Python BM25 plus phrase and trigram boosts."""
     query_terms = _tokenize_search_text(text)
     query_term_counts = Counter(query_terms)
@@ -330,7 +330,7 @@ def local_bm25_search(
     if not query_terms and not query_ngrams:
         return []
 
-    documents: List[tuple[Function, str, Counter[str], int, set[str]]] = []
+    documents: list[tuple[Function, str, Counter[str], int, set[str]]] = []
     document_frequency: Counter[str] = Counter()
     for func in functions.values():
         func_text = text_factory(func)
@@ -355,7 +355,7 @@ def local_bm25_search(
     doc_count = len(documents)
     avg_doc_len = sum(doc_len for _, _, _, doc_len, _ in documents) / doc_count
     query_lower = text.lower()
-    raw_scores: List[tuple[float, Function, str]] = []
+    raw_scores: list[tuple[float, Function, str]] = []
 
     for func, func_text, term_counts, doc_len, doc_ngrams in documents:
         bm25 = 0.0

@@ -10,7 +10,7 @@ import sys
 import types
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -170,7 +170,7 @@ def _repo(
 
 
 def _version(event_id: str) -> str:
-    return str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), "origin-a", event_id))
+    return str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), "origin-a", event_id))
 
 
 def _event_id(index: int) -> str:
@@ -307,7 +307,7 @@ def _delivery_from_row(stream_seq: int, event_id: str, lease_id: str | None = No
         ),
         attempt=attempt,
         lease_id=lease_id or "550e8400-e29b-41d4-a716-446655440000",
-        lease_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        lease_expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
 
 
@@ -454,7 +454,7 @@ def test_sync_page_persists_confirmed_after_seq_without_advancing() -> None:
 
     insert_sqls = [sql for sql, _ in cursor.executed if sql.startswith("INSERT INTO memplex_sync_cursors")]
     assert insert_sqls
-    assert [params for sql, params in cursor.executed if sql.startswith("INSERT INTO memplex_sync_cursors")][0][3] == 0
+    assert [params for sql, params in cursor.executed if sql.startswith("INSERT INTO memplex_sync_cursors")][0][3] == 0  # noqa: RUF015 - first-match positional access is intentional
 
     cursor.fetchone_queue = [
         (0,),  # retention_floor
@@ -472,8 +472,8 @@ def test_sync_page_persists_confirmed_after_seq_without_advancing() -> None:
         4,
         None,
         None,
-        datetime(2026, 8, 11, tzinfo=timezone.utc),
-        datetime(2026, 8, 11, tzinfo=timezone.utc) + timedelta(minutes=1),
+        datetime(2026, 8, 11, tzinfo=UTC),
+        datetime(2026, 8, 11, tzinfo=UTC) + timedelta(minutes=1),
     )
 
     second = repo.sync_page("remote-a", "consumer-a", claims, 10)
@@ -515,8 +515,8 @@ def test_sync_page_rejects_before_retention_floor() -> None:
         20,
         None,
         None,
-        datetime(2026, 8, 11, tzinfo=timezone.utc),
-        datetime(2026, 8, 11, tzinfo=timezone.utc) + timedelta(minutes=1),
+        datetime(2026, 8, 11, tzinfo=UTC),
+        datetime(2026, 8, 11, tzinfo=UTC) + timedelta(minutes=1),
     )
 
     with pytest.raises(SyncCursorExpired, match="cursor_expired"):
@@ -532,7 +532,7 @@ def test_completed_stream_cursor_opens_new_snapshot_without_replaying_confirmed_
     ]
     cursor.fetchall_queue = [[_outbox_row(stream_seq=3, event_id=_event_id(3))]]
     repo = _repo(cursor)
-    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, tzinfo=UTC)
     completed = SyncCursorClaims(
         1,
         "kid",
@@ -713,7 +713,7 @@ def test_sync_snapshot_page_validates_binding_and_anchor() -> None:
     anchor = _event_anchor("fn")
     cursor = _FakeCursor()
     cursor.fetchone_queue = [
-        (42, "remote-a", "consumer-a", datetime.now(timezone.utc) + timedelta(minutes=5)),
+        (42, "remote-a", "consumer-a", datetime.now(UTC) + timedelta(minutes=5)),
         (1,),
         (1,),
     ]
@@ -731,8 +731,8 @@ def test_sync_snapshot_page_validates_binding_and_anchor() -> None:
         42,
         "snapshot-id",
         anchor,
-        datetime.now(timezone.utc),
-        datetime.now(timezone.utc) + timedelta(minutes=1),
+        datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1),
     )
     page = repo.sync_snapshot_page("remote-a", "consumer-a", claims, 10)
 
@@ -750,13 +750,13 @@ def test_sync_snapshot_page_validates_binding_and_anchor() -> None:
         42,
         "snapshot-id",
         anchor,
-        datetime.now(timezone.utc),
-        datetime.now(timezone.utc) + timedelta(minutes=1),
+        datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1),
     )
     with pytest.raises(ValueError):
         _repo(_FakeCursor()).sync_snapshot_page("remote-a", "consumer-a", bad_claim, 1)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     bad_expired = SyncCursorClaims(
         1,
         "kid",
@@ -778,7 +778,7 @@ def test_sync_snapshot_page_reports_verified_missing_snapshot_as_expired() -> No
     cursor = _FakeCursor()
     cursor.fetchone_queue = [None]
     repo = _repo(cursor)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims = SyncCursorClaims(
         1,
         "kid",
@@ -828,7 +828,7 @@ def test_sync_claim_generates_unique_lease_per_delivery() -> None:
 
     deliveries = repo.sync_claim("target-a", limit=2, lease_seconds=30)
     assert len(deliveries) == 2
-    assert len(set(item.lease_id for item in deliveries)) == 2
+    assert len({item.lease_id for item in deliveries}) == 2
     assert any(
         "FOR UPDATE OF delivery SKIP LOCKED" in sql
         for sql, _ in cursor.executed
@@ -852,7 +852,7 @@ def test_sync_ack_validates_lease_and_prevents_stale_or_mismatch_rows() -> None:
     repo.sync_ack(delivery, SyncReceipt(_event_id(1), "accepted"))
 
     cursor.fetchone_queue = [
-        (1, "leased", delivery.lease_id, datetime.now(timezone.utc) + timedelta(minutes=1)),
+        (1, "leased", delivery.lease_id, datetime.now(UTC) + timedelta(minutes=1)),
     ]
     cursor.rowcount_queue = [1]
     repo = _repo(cursor)
@@ -861,7 +861,7 @@ def test_sync_ack_validates_lease_and_prevents_stale_or_mismatch_rows() -> None:
     assert any(sql.startswith("UPDATE memplex_sync_deliveries") for sql, _ in cursor.executed)
 
     cursor.fetchone_queue = [
-        (1, "delivered", None, datetime.now(timezone.utc) + timedelta(minutes=1)),
+        (1, "delivered", None, datetime.now(UTC) + timedelta(minutes=1)),
     ]
     repo = _repo(cursor)
     repo.sync_ack(delivery, SyncReceipt(_event_id(1), "accepted"))
@@ -871,7 +871,7 @@ def test_sync_ack_validates_lease_and_prevents_stale_or_mismatch_rows() -> None:
             1,
             "leased",
             "f5a4dce1-7e6f-4bf5-b3a7-88f7e9eb9f11",
-            datetime.now(timezone.utc) + timedelta(minutes=1),
+            datetime.now(UTC) + timedelta(minutes=1),
         ),
     ]
     with pytest.raises(SyncDeliveryBusy):
@@ -882,7 +882,7 @@ def test_sync_ack_validates_lease_and_prevents_stale_or_mismatch_rows() -> None:
             1,
             "leased",
             delivery.lease_id,
-            datetime.now(timezone.utc) - timedelta(minutes=1),
+            datetime.now(UTC) - timedelta(minutes=1),
         ),
     ]
     with pytest.raises(SyncDeliveryBusy):
@@ -898,13 +898,13 @@ def test_sync_ack_batch_locks_all_rows_before_updating_any() -> None:
             1,
             "leased",
             first.lease_id,
-            datetime.now(timezone.utc) + timedelta(minutes=1),
+            datetime.now(UTC) + timedelta(minutes=1),
         ),
         (
             2,
             "leased",
             "123e4567-e89b-42d3-a456-426614174999",
-            datetime.now(timezone.utc) + timedelta(minutes=1),
+            datetime.now(UTC) + timedelta(minutes=1),
         ),
     ]
 
@@ -923,12 +923,12 @@ def test_sync_ack_batch_locks_all_rows_before_updating_any() -> None:
     )
 
 def test_sync_fail_uses_current_attempt_for_backoff_and_dead_letter() -> None:
-    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, tzinfo=UTC)
     delivery = _delivery_from_row(5, _event_id(5), attempt=2)
 
     cursor = _FakeCursor()
     cursor.fetchone_queue = [
-        (5, "leased", delivery.lease_id, datetime.now(timezone.utc) + timedelta(minutes=1), 1),
+        (5, "leased", delivery.lease_id, datetime.now(UTC) + timedelta(minutes=1), 1),
     ]
     repo = _repo(cursor, max_attempts=2)
     cursor.rowcount_queue = [1]
@@ -940,7 +940,7 @@ def test_sync_fail_uses_current_attempt_for_backoff_and_dead_letter() -> None:
 
     cursor = _FakeCursor()
     cursor.fetchone_queue = [
-        (5, "leased", delivery.lease_id, datetime.now(timezone.utc) + timedelta(minutes=1), 2),
+        (5, "leased", delivery.lease_id, datetime.now(UTC) + timedelta(minutes=1), 2),
     ]
     cursor.rowcount_queue = [1]
     repo = _repo(cursor, max_attempts=2)
@@ -949,7 +949,7 @@ def test_sync_fail_uses_current_attempt_for_backoff_and_dead_letter() -> None:
 
 
 def test_sync_dead_letter_is_terminal_on_first_attempt() -> None:
-    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, tzinfo=UTC)
     delivery = _delivery_from_row(5, _event_id(5), attempt=1)
     cursor = _FakeCursor()
     cursor.fetchone_queue = [
@@ -957,7 +957,7 @@ def test_sync_dead_letter_is_terminal_on_first_attempt() -> None:
             5,
             "leased",
             delivery.lease_id,
-            datetime.now(timezone.utc) + timedelta(minutes=1),
+            datetime.now(UTC) + timedelta(minutes=1),
         )
     ]
     cursor.rowcount_queue = [1]
@@ -1010,7 +1010,7 @@ def test_sync_list_dead_letters_returns_only_fixed_safe_fields() -> None:
 def test_only_claim_uses_skip_locked_for_delivery_state_transitions() -> None:
     cursor = _FakeCursor()
     delivery = _delivery_from_row(1, _event_id(1), attempt=1)
-    lease_until = datetime.now(timezone.utc) + timedelta(minutes=1)
+    lease_until = datetime.now(UTC) + timedelta(minutes=1)
     cursor.fetchone_queue = [
         (1, "leased", delivery.lease_id, lease_until),
         (1, "leased", delivery.lease_id, lease_until, 1),
@@ -1020,7 +1020,7 @@ def test_only_claim_uses_skip_locked_for_delivery_state_transitions() -> None:
     repo = _repo(cursor)
 
     repo.sync_ack(delivery, SyncReceipt(delivery.event.event_id, "accepted"))
-    repo.sync_fail(delivery, "retry", datetime.now(timezone.utc))
+    repo.sync_fail(delivery, "retry", datetime.now(UTC))
     assert repo.sync_replay_dead_letter("target-a", delivery.event.event_id) is False
 
     locking_sql = [sql for sql, _ in cursor.executed if "FOR UPDATE" in sql]
@@ -1072,7 +1072,7 @@ def test_sync_compact_uses_policy_cutoffs_and_exact_inputs() -> None:
     cursor = _FakeCursor()
     cursor.fetchone_queue = [(3,)]
     repo = _repo(cursor, consumer_ttl_seconds=20, retention_min_seconds=10)
-    now = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 
     assert repo.sync_compact(now, limit=4) == 3
     compact_calls = [
@@ -1152,7 +1152,7 @@ def test_sync_snapshot_methods_do_not_use_read_cursor() -> None:
     cursor = _FakeCursor()
     cursor.fetchone_queue = [
         ("snapshot-id", 1),
-        (1, "remote-a", "consumer-a", datetime.now(timezone.utc) + timedelta(minutes=5)),
+        (1, "remote-a", "consumer-a", datetime.now(UTC) + timedelta(minutes=5)),
         (1,),
     ]
     cursor.fetchall_queue = [[_snapshot_event_dict(event_id=_event_id(2), entity_key="fn")]]
@@ -1173,8 +1173,8 @@ def test_sync_snapshot_methods_do_not_use_read_cursor() -> None:
             1,
             "snapshot-id",
             _event_anchor("fn"),
-            datetime.now(timezone.utc),
-            datetime.now(timezone.utc) + timedelta(minutes=1),
+            datetime.now(UTC),
+            datetime.now(UTC) + timedelta(minutes=1),
         ),
         1,
     )

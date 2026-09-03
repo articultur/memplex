@@ -52,7 +52,7 @@
         "memplex/models/memory.py:42-73",
         "memplex/models/memory.py:154-169",
         "memplex/models/memory.py:255-270",
-        "memplex/models/memory.py:315-362"
+        "memplex/models/memory.py:315-410"
       ],
       "test_refs": [
         "tests/test_models.py:372-407"
@@ -117,7 +117,7 @@
       ],
       "test_refs": [
         "tests/test_temporal_facts.py:42-69",
-        "tests/test_temporal_facts.py:87-137"
+        "tests/test_temporal_facts.py:87-135"
       ]
     },
     {
@@ -153,7 +153,7 @@
       ],
       "test_refs": [
         "tests/test_authorization_context.py:33-100",
-        "tests/test_authorization_gate.py:57-105"
+        "tests/test_authorization_gate.py:57-101"
       ]
     },
     {

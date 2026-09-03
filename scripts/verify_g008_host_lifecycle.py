@@ -17,12 +17,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 try:
-    import memplex as _memplex_package  # noqa: F401
+    import memplex as _memplex_package
 except ModuleNotFoundError:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from memplex.adapters.agent_installer import inspect_agent_installation  # noqa: E402
-from memplex.host_lifecycle import (  # noqa: E402
+from memplex.adapters.agent_installer import inspect_agent_installation
+from memplex.host_lifecycle import (
     HostLifecycleBinding,
     HostLifecycleEvidence,
     HostLifecycleIntegrityError,
@@ -260,9 +260,7 @@ def _required_junit_results(
         outcome = "passed"
         if testcase.find("skipped") is not None:
             outcome = "skipped"
-        elif testcase.find("failure") is not None:
-            outcome = "failed"
-        elif testcase.find("error") is not None:
+        elif testcase.find("failure") is not None or testcase.find("error") is not None:
             outcome = "failed"
         if node_id in cases:
             raise HostLifecycleIntegrityError("host_lifecycle_junit_invalid")

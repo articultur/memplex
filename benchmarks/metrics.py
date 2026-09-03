@@ -8,7 +8,7 @@ metrics for evaluating Memplex behavior.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Optional
 
 from benchmarks.base import BenchmarkSample
 from memplex.service import MemplexService
@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def precision_at_k(
-    retrieved: List[str],
-    expected: List[str],
+    retrieved: list[str],
+    expected: list[str],
     k: int,
 ) -> float:
     """Compute Precision@K.
@@ -45,8 +45,8 @@ def precision_at_k(
 
 
 def recall_at_k(
-    retrieved: List[str],
-    expected: List[str],
+    retrieved: list[str],
+    expected: list[str],
     k: int,
 ) -> float:
     """Compute Recall@K.
@@ -70,7 +70,7 @@ def recall_at_k(
     return relevant / len(expected_set)
 
 
-def mrr(retrieved_ids: List[str], expected_ids: List[str]) -> float:
+def mrr(retrieved_ids: list[str], expected_ids: list[str]) -> float:
     """Compute Mean Reciprocal Rank (MRR).
 
     MRR = 1 / rank_of_first_relevant_item.
@@ -94,10 +94,10 @@ def mrr(retrieved_ids: List[str], expected_ids: List[str]) -> float:
 
 
 def ndcg_at_k(
-    retrieved: List[str],
-    expected: List[str],
+    retrieved: list[str],
+    expected: list[str],
     k: int,
-    relevance_fn: Optional[callable] = None,
+    relevance_fn: callable | None = None,
 ) -> float:
     """Compute Normalized Discounted Cumulative Gain at K.
 
@@ -119,7 +119,7 @@ def ndcg_at_k(
     expected_set = set(expected)
     relevance_fn = relevance_fn or (lambda item_id: 1.0 if item_id in expected_set else 0.0)
 
-    def dcg(items: List[str]) -> float:
+    def dcg(items: list[str]) -> float:
         result = 0.0
         for i, item_id in enumerate(items[:k], start=1):
             rel = relevance_fn(item_id)
@@ -201,7 +201,7 @@ def bleu(prediction: str, reference: str, n: int = 4) -> float:
     return bp * geo_mean
 
 
-def _get_ngrams(tokens: List[str], n: int) -> List[tuple]:
+def _get_ngrams(tokens: list[str], n: int) -> list[tuple]:
     """Extract n-grams from token list."""
     if n <= 0 or n > len(tokens):
         return []
@@ -237,7 +237,7 @@ def rouge_l(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def _lcs_length(a: List[str], b: List[str]) -> int:
+def _lcs_length(a: list[str], b: list[str]) -> int:
     """Compute length of longest common subsequence using dynamic programming."""
     m, n = len(a), len(b)
     # Space-optimized DP
@@ -348,7 +348,7 @@ class MemoryMetrics:
                 mem = service.get(mem_id)
                 if mem:
                     memories.append(mem)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - logged degradation path
                 logger.debug("Could not retrieve memory %s: %s", mem_id, e)
                 continue
 
@@ -414,7 +414,7 @@ class MemoryMetrics:
                 mem = service.get(fact_id)
                 if mem is not None and getattr(mem, "id", None) == fact_id:
                     retained += 1
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - logged degradation path
                 logger.debug("Could not retrieve fact %s: %s", fact_id, e)
                 continue
 
@@ -458,7 +458,7 @@ class MemoryMetrics:
                 neighbor_ids = [getattr(n, "id", None) for n in neighbors]
                 if target_id in neighbor_ids:
                     connected += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.debug("Error checking graph connectivity: %s", e)
             return 0.0
 
@@ -467,7 +467,7 @@ class MemoryMetrics:
     @staticmethod
     def retrieval_latency_p95(
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
     ) -> float:
         """Compute 95th percentile retrieval latency.
 
@@ -487,7 +487,7 @@ class MemoryMetrics:
                 service.query(sample.query, top_k=10)
                 elapsed = (time.perf_counter() - start) * 1000
                 latencies.append(elapsed)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - logged degradation path
                 logger.debug("Query failed for sample %s: %s", sample.id, e)
                 continue
 
@@ -502,7 +502,7 @@ class MemoryMetrics:
 # ── Aggregation Helpers ────────────────────────────────────────────────────────
 
 
-def aggregate_metrics(results: List[float]) -> Dict[str, float]:
+def aggregate_metrics(results: list[float]) -> dict[str, float]:
     """Aggregate a list of per-sample metric values.
 
     Args:

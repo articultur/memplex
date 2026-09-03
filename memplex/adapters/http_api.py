@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -90,7 +90,7 @@ _FORWARDED_CLIENT_HEADERS = frozenset({"forwarded", "x-forwarded-for"})
 
 def _current_operations_readiness_binding(config: object) -> OperationsReadinessBinding:
     """Adapt the shared explicit deployment binding to G006's report schema."""
-    operations = getattr(config, "operations")
+    operations = config.operations
     deployment = load_deployment_evidence_binding_from_environment(
         memplex_version=version("memplex")
     )
@@ -99,11 +99,11 @@ def _current_operations_readiness_binding(config: object) -> OperationsReadiness
         source_sha256=deployment.source_sha256,
         artifact_sha256=deployment.artifact_sha256,
         target_identity_sha256=deployment.target_identity_sha256,
-        expected_key_id=getattr(operations, "report_key_id"),
+        expected_key_id=operations.report_key_id,
     )
 
 
-def _get_service(request) -> "MemplexService":
+def _get_service(request) -> MemplexService:
     """Retrieve the shared MemplexService from app state."""
     return request.app.state.memplex_service
 
@@ -136,7 +136,7 @@ def _authorization(request) -> AuthorizationContext:
 def _typed_changes_since(
     store,
     list_method: str,
-    since: Optional[str],
+    since: str | None,
     *,
     is_visible=None,
 ) -> list:
@@ -153,7 +153,7 @@ def _typed_changes_since(
         return []
     try:
         nodes = list(lister(limit=100000))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.debug("sync changes: %s unavailable: %s", list_method, exc)
         return []
     if since:
@@ -190,8 +190,8 @@ def _merge_typed_push(
     *,
     cls,
     adder_name: str,
-    getter_name: Optional[str] = None,
-    lister_name: Optional[str] = None,
+    getter_name: str | None = None,
+    lister_name: str | None = None,
 ) -> tuple:
     """Merge pushed typed nodes into *store* with LWW by updated_at.
 
@@ -209,19 +209,19 @@ def _merge_typed_push(
     if not callable(adder):
         return accepted, rejected_older
     getter = getattr(store, getter_name, None) if getter_name else None
-    index: Optional[dict] = None
+    index: dict | None = None
     if not callable(getter) and lister_name:
         lister = getattr(store, lister_name, None)
         if callable(lister):
             try:
                 index = {n.id: n for n in lister(limit=100000)}
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("sync_push: %s listing failed: %s", lister_name, exc)
                 index = {}
     for raw in raw_nodes:
         try:
             incoming = cls.from_dict(raw)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sync_push: skip unparseable %s: %s", cls.__name__, exc)
             continue
         existing = None
@@ -230,7 +230,7 @@ def _merge_typed_push(
                 existing = getter(incoming.id)
             elif index is not None:
                 existing = index.get(incoming.id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             existing = None
         # LWW: reject if incoming is older than or equal to the stored copy.
         if existing is not None and (incoming.updated_at or "") <= (
@@ -243,7 +243,7 @@ def _merge_typed_push(
         except NotImplementedError:
             logger.debug("sync_push: backend has no %s storage; skipping rest", cls.__name__)
             break
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sync_push: failed to store %s %s: %s", cls.__name__, incoming.id, exc)
             continue
         accepted += 1
@@ -299,7 +299,7 @@ def _record_tombstone(
         if path.exists():
             tombstones = json.loads(path.read_text(encoding="utf-8"))
         tombstone = {
-            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_at": datetime.now(UTC).isoformat(),
             "deleted_version": deleted_version,
         }
         if tenant_id:
@@ -318,9 +318,9 @@ def _record_tombstone(
 
 def _read_tombstones(
     config,
-    since: Optional[str] = None,
+    since: str | None = None,
     *,
-    tenant_id: Optional[str] = None,
+    tenant_id: str | None = None,
 ) -> list:
     """Return tombstones optionally filtered by *since* (iso8601).
 
@@ -417,13 +417,13 @@ def _get_redis():
         _redis_client.ping()  # verify connectivity
         logger.info("SSE Redis pub/sub connected: %s", redis_url)
         return _redis_client
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.debug("SSE Redis unavailable, using in-process broadcast: %s", exc)
         _redis_client = False
         return None
 
 
-def _auto_probe_redis(host: str = "localhost", port: int = 6379) -> Optional[str]:
+def _auto_probe_redis(host: str = "localhost", port: int = 6379) -> str | None:
     """Probe localhost:6379; return the URL if a Redis is reachable.
 
     This lets a single-machine deployment with a Redis already running
@@ -467,7 +467,7 @@ def _start_redis_subscriber() -> None:
                         _fanout_local(event)
                     except Exception:
                         logger.debug("skipping malformed Redis SSE message", exc_info=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("Redis subscriber thread stopped: %s", exc)
 
     _redis_pubsub_thread = threading.Thread(
@@ -493,7 +493,7 @@ def _fanout_local(event: dict) -> None:
             queue = subscriber
         try:
             queue.put_nowait(event)
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             dead.add(subscriber)
     if dead:
         _SSE_SUBSCRIBERS.difference_update(dead)
@@ -506,7 +506,7 @@ def _broadcast_event(event: dict) -> None:
         try:
             r.publish(_SSE_REDIS_CHANNEL, json.dumps(event))
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("Redis publish failed, falling back to local: %s", exc)
     _fanout_local(event)
 
@@ -545,7 +545,7 @@ def _check_bind_security(app: FastAPI) -> None:
         )
 
 
-def _is_remote_peer(host: Optional[str]) -> bool:
+def _is_remote_peer(host: str | None) -> bool:
     """Return whether a concrete IP peer is outside the loopback range.
 
     This compatibility helper intentionally does not make a trust decision:
@@ -561,7 +561,7 @@ def _is_remote_peer(host: Optional[str]) -> bool:
         return False
 
 
-def _is_loopback_peer(host: Optional[str]) -> bool:
+def _is_loopback_peer(host: str | None) -> bool:
     """Return ``True`` only for a syntactically valid loopback IP address."""
     if not host:
         return False
@@ -607,7 +607,7 @@ def _require_maintenance_access(request: Request) -> AuthorizationContext:
     return context
 
 
-def _safe_extracted_response(service: "MemplexService", extracted: object) -> dict:
+def _safe_extracted_response(service: MemplexService, extracted: object) -> dict:
     """Serialize an extraction without echoing model-unsafe node content."""
     payload = _dataclass_to_dict(extracted)
     unsafe_ids: set[str] = set()
@@ -671,8 +671,8 @@ if _FASTAPI_AVAILABLE:
 
     def _require_auth(
         request: Request,
-        x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-        authorization: Optional[str] = Header(None),
+        x_api_key: str | None = Header(None, alias="X-API-Key"),
+        authorization: str | None = Header(None),
     ) -> AuthorizationContext:
         """Authorize a request against configured credentials.
 
@@ -743,20 +743,18 @@ if _FASTAPI_AVAILABLE:
             raise HTTPException(status_code=403, detail="Authentication required")
 
         # Validate the X-API-Key header against a configured API key.
-        if api_key is not None and x_api_key is not None:
-            if hmac.compare_digest(x_api_key.encode("utf-8"), api_key.encode("utf-8")):
-                context = local_development_context()
-                request.state.authorization = context
-                return context
+        if api_key is not None and x_api_key is not None and hmac.compare_digest(x_api_key.encode("utf-8"), api_key.encode("utf-8")):
+            context = local_development_context()
+            request.state.authorization = context
+            return context
 
         # Validate the Authorization: Bearer header against a configured token.
         if bearer_token is not None and authorization is not None:
             scheme, _, token = authorization.partition(" ")
-            if scheme.lower() == "bearer" and token.strip():
-                if hmac.compare_digest(token.strip().encode("utf-8"), bearer_token.encode("utf-8")):
-                    context = local_development_context()
-                    request.state.authorization = context
-                    return context
+            if scheme.lower() == "bearer" and token.strip() and hmac.compare_digest(token.strip().encode("utf-8"), bearer_token.encode("utf-8")):
+                context = local_development_context()
+                request.state.authorization = context
+                return context
 
         _record_auth_failure(request, "missing_or_mismatched_shared_secret")
         raise HTTPException(
@@ -838,7 +836,7 @@ if _FASTAPI_AVAILABLE:
 
 
 
-def _register_memory_routes(app: "FastAPI", config, profile: str) -> None:
+def _register_memory_routes(app: FastAPI, config, profile: str) -> None:
     """Register the /memories* CRUD, feedback, and review routes."""
     # Concrete paths MUST be registered before the parameterized
     # ``/memories/{memory_id}`` route: FastAPI matches in registration
@@ -855,7 +853,7 @@ def _register_memory_routes(app: "FastAPI", config, profile: str) -> None:
     _register_memory_resolve_route(app)
 
 
-def _register_memory_write_route(app: "FastAPI") -> None:
+def _register_memory_write_route(app: FastAPI) -> None:
     """Register the POST /memories endpoint."""
     @app.post("/memories", summary="Write a new memory")
     async def write_memory(request: Request, body: dict) -> JSONResponse:
@@ -905,14 +903,14 @@ def _register_memory_write_route(app: "FastAPI") -> None:
         return JSONResponse(safe_payload)
 
 
-def _register_memory_query_route(app: "FastAPI") -> None:
+def _register_memory_query_route(app: FastAPI) -> None:
     """Register the GET /memories endpoint."""
     @app.get("/memories", summary="Query memories")
     async def query_memories(
         request: Request,
         q: str = Query(..., description="Query text"),
         top_k: int = Query(10, ge=1, le=100),
-        owner: Optional[str] = Query(None),
+        owner: str | None = Query(None),
         max_tokens: int = Query(4000, ge=0, le=32_000),
     ) -> JSONResponse:
         """Search memories with natural language."""
@@ -939,12 +937,12 @@ def _register_memory_query_route(app: "FastAPI") -> None:
         return JSONResponse(payload)
 
 
-def _register_memory_pending_reviews_route(app: "FastAPI") -> None:
+def _register_memory_pending_reviews_route(app: FastAPI) -> None:
     """Register the GET /memories/pending_reviews endpoint."""
     @app.get("/memories/pending_reviews", summary="List pending reviews")
     async def pending_reviews(
         request: Request,
-        owner: Optional[str] = Query(None),
+        owner: str | None = Query(None),
         limit: int = Query(100, ge=1, le=1000),
     ) -> JSONResponse:
         """Retrieve pending feedback reviews."""
@@ -962,7 +960,7 @@ def _register_memory_pending_reviews_route(app: "FastAPI") -> None:
         )
 
 
-def _register_memory_get_route(app: "FastAPI") -> None:
+def _register_memory_get_route(app: FastAPI) -> None:
     """Register the GET /memories/{memory_id} endpoint."""
     @app.get("/memories/{memory_id}", summary="Get memory detail")
     async def get_memory(request: Request, memory_id: str) -> JSONResponse:
@@ -974,11 +972,11 @@ def _register_memory_get_route(app: "FastAPI") -> None:
         return JSONResponse(_dataclass_to_dict(func))
 
 
-def _register_memory_update_route(app: "FastAPI") -> None:
+def _register_memory_update_route(app: FastAPI) -> None:
     """Register the PATCH /memories/{memory_id} endpoint."""
     @app.patch("/memories/{memory_id}", summary="Update a memory field")
     async def update_memory(
-        request: Request, memory_id: str, body: Any = Body(...)
+        request: Request, memory_id: str, body: Any = Body(...)  # noqa: B008 - protocol/FastAPI default idiom
     ) -> JSONResponse:
         """Update a visible Function field without exposing foreign IDs."""
         svc = _get_service(request)
@@ -1006,7 +1004,7 @@ def _register_memory_update_route(app: "FastAPI") -> None:
         return JSONResponse(payload)
 
 
-def _register_memory_timeline_route(app: "FastAPI") -> None:
+def _register_memory_timeline_route(app: FastAPI) -> None:
     """Register the GET /memories/{memory_id}/timeline endpoint."""
     @app.get("/memories/{memory_id}/timeline", summary="Get memory timeline")
     async def get_timeline(request: Request, memory_id: str) -> JSONResponse:
@@ -1019,7 +1017,7 @@ def _register_memory_timeline_route(app: "FastAPI") -> None:
         return JSONResponse(_dataclass_to_dict(events))
 
 
-def _register_memory_delete_route(app: "FastAPI", config, profile: str) -> None:
+def _register_memory_delete_route(app: FastAPI, config, profile: str) -> None:
     """Register the DELETE /memories/{memory_id} endpoint."""
     @app.delete("/memories/{memory_id}", summary="Delete memory")
     async def delete_memory(request: Request, memory_id: str) -> JSONResponse:
@@ -1055,7 +1053,7 @@ def _register_memory_delete_route(app: "FastAPI", config, profile: str) -> None:
         return JSONResponse({"status": "deleted", "id": memory_id})
 
 
-def _register_memory_feedback_route(app: "FastAPI") -> None:
+def _register_memory_feedback_route(app: FastAPI) -> None:
     """Register the POST /memories/{memory_id}/feedback endpoint."""
     @app.post("/memories/{memory_id}/feedback", summary="Submit feedback")
     async def submit_feedback(request: Request, memory_id: str, body: dict) -> JSONResponse:
@@ -1085,7 +1083,7 @@ def _register_memory_feedback_route(app: "FastAPI") -> None:
         return JSONResponse({"status": "recorded"})
 
 
-def _register_memory_resolve_route(app: "FastAPI") -> None:
+def _register_memory_resolve_route(app: FastAPI) -> None:
     """Register the POST /memories/{memory_id}/resolve endpoint."""
     @app.post("/memories/{memory_id}/resolve", summary="Resolve a review")
     async def resolve_review(request: Request, memory_id: str, body: dict) -> JSONResponse:
@@ -1114,7 +1112,7 @@ def _register_memory_resolve_route(app: "FastAPI") -> None:
 
 
 
-def _register_health_routes(app: "FastAPI") -> None:
+def _register_health_routes(app: FastAPI) -> None:
     """Register health probes, stats, and manual compaction."""
     @app.get("/health", summary="Health check")
     async def health(
@@ -1147,7 +1145,7 @@ def _register_health_routes(app: "FastAPI") -> None:
         return JSONResponse(svc.stats())
 
     @app.post("/compact", summary="Trigger compaction")
-    async def compact(request: Request, body: Optional[dict] = None) -> JSONResponse:
+    async def compact(request: Request, body: dict | None = None) -> JSONResponse:
         """Run the compaction pipeline.
 
         Request body (optional)::
@@ -1198,7 +1196,7 @@ config,
 ) -> str:
     from memplex.sync_protocol import SyncCursorClaims
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims = SyncCursorClaims(
         1,
         config.sync.cursor_signing_key_id,
@@ -1226,7 +1224,7 @@ config,
 ) -> str:
     from memplex.sync_protocol import SyncCursorClaims
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims = SyncCursorClaims(
         1,
         config.sync.cursor_signing_key_id,
@@ -1244,14 +1242,14 @@ config,
 
 
 
-def _register_sync_v1_routes(app: "FastAPI", config) -> None:
+def _register_sync_v1_routes(app: FastAPI, config) -> None:
     """Register the snapshot-stable /sync/v1 endpoints."""
     _register_sync_v1_batches_route(app, config)
     _register_sync_v1_changes_route(app, config)
     _register_sync_v1_snapshot_route(app, config)
 
 
-def _register_sync_v1_batches_route(app: "FastAPI", config) -> None:
+def _register_sync_v1_batches_route(app: FastAPI, config) -> None:
     """Register the POST /sync/v1/batches endpoint."""
     @app.post("/sync/v1/batches", summary="Apply one canonical atomic sync batch")
     async def sync_v1_batches(request: Request) -> JSONResponse:
@@ -1315,7 +1313,7 @@ def _register_sync_v1_batches_route(app: "FastAPI", config) -> None:
             raise HTTPException(status_code=422, detail="invalid_sync_batch") from None
         except RuntimeError:
             raise HTTPException(status_code=503, detail="sync_apply_unavailable") from None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             sqlstate = _exception_sqlstate(exc)
             if sqlstate == "23505":
                 raise HTTPException(status_code=409, detail="batch_conflict") from None
@@ -1327,12 +1325,12 @@ def _register_sync_v1_batches_route(app: "FastAPI", config) -> None:
         return JSONResponse(result.to_dict())
 
 
-def _register_sync_v1_changes_route(app: "FastAPI", config) -> None:
+def _register_sync_v1_changes_route(app: FastAPI, config) -> None:
     """Register the GET /sync/v1/changes endpoint."""
     @app.get("/sync/v1/changes", summary="Read a snapshot-stable sync event page")
     async def sync_v1_changes(
         request: Request,
-        cursor: Optional[str] = Query(None),
+        cursor: str | None = Query(None),
         limit: int = Query(500),
     ) -> JSONResponse:
         from memplex.sync_repository import SyncCursorExpired
@@ -1363,7 +1361,7 @@ def _register_sync_v1_changes_route(app: "FastAPI", config) -> None:
             if str(exc) == "cursor_expired":
                 raise HTTPException(status_code=409, detail="cursor_expired") from None
             raise HTTPException(status_code=400, detail="invalid_cursor") from None
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             raise HTTPException(status_code=503, detail="sync_read_unavailable") from None
         next_cursor = _encode_stream_cursor(
             config,
@@ -1389,13 +1387,13 @@ def _register_sync_v1_changes_route(app: "FastAPI", config) -> None:
         )
 
 
-def _register_sync_v1_snapshot_route(app: "FastAPI", config) -> None:
+def _register_sync_v1_snapshot_route(app: FastAPI, config) -> None:
     """Register the GET /sync/v1/snapshot endpoint."""
     @app.get("/sync/v1/snapshot", summary="Read an immutable sync snapshot")
     async def sync_v1_snapshot(
         request: Request,
-        request_id: Optional[str] = Query(None),
-        cursor: Optional[str] = Query(None),
+        request_id: str | None = Query(None),
+        cursor: str | None = Query(None),
         limit: int = Query(500),
     ) -> JSONResponse:
         from memplex.sync_repository import SyncBackpressureError, SyncCursorExpired
@@ -1440,7 +1438,7 @@ def _register_sync_v1_snapshot_route(app: "FastAPI", config) -> None:
             raise HTTPException(status_code=400, detail="invalid_cursor") from None
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="invalid_snapshot_request") from None
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             raise HTTPException(
                 status_code=503, detail="sync_snapshot_unavailable"
             ) from None
@@ -1532,7 +1530,7 @@ def _legacy_sync_v1_changes(
                 {
                     "func_id": event.entity_key.node_id,
                     "deleted_at": SyncVersion.parse(event.version)
-                    .occurred_at.astimezone(timezone.utc)
+                    .occurred_at.astimezone(UTC)
                     .isoformat(),
                     "deleted_version": "",
                 }
@@ -1540,7 +1538,7 @@ def _legacy_sync_v1_changes(
 
     # Confirm exactly the page just returned. A completed cursor opens a
     # fresh snapshot, but never confirms events committed after this page.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store.sync_page(
         remote_id,
         consumer_id,
@@ -1566,7 +1564,7 @@ def _legacy_sync_v1_changes(
             "preference_changes": changes[SyncNodeType.PREFERENCE],
             "observation_changes": changes[SyncNodeType.OBSERVATION],
             "tombstones": tombstones,
-            "server_time": datetime.now(timezone.utc).isoformat(),
+            "server_time": datetime.now(UTC).isoformat(),
         }
     )
 
@@ -1659,9 +1657,7 @@ def _legacy_sync_v1_push(
                 by_type[key]["rejected_older"] += 1
                 continue
             occurred_at = datetime.fromisoformat(
-                (node.updated_at or datetime.now(timezone.utc).isoformat()).replace(
-                    "Z", "+00:00"
-                )
+                node.updated_at or datetime.now(UTC).isoformat()
             )
             if occurred_at.tzinfo is None:
                 raise ValueError("updated_at must include a timezone")
@@ -1721,7 +1717,7 @@ def _legacy_sync_v1_push(
     )
 
 
-def _register_legacy_sync_changes_route(app: "FastAPI", config, profile: str) -> None:
+def _register_legacy_sync_changes_route(app: FastAPI, config, profile: str) -> None:
     """Register the legacy GET /sync/changes endpoint."""
     @app.get(
         "/sync/changes",
@@ -1730,7 +1726,7 @@ def _register_legacy_sync_changes_route(app: "FastAPI", config, profile: str) ->
     )
     async def sync_changes(
         request: Request,
-        since: Optional[str] = Query(None, description="ISO-8601 cutoff; omit for all"),
+        since: str | None = Query(None, description="ISO-8601 cutoff; omit for all"),
     ) -> JSONResponse:
         """Return nodes with updated_at > since, plus deletion tombstones.
 
@@ -1773,7 +1769,7 @@ def _register_legacy_sync_changes_route(app: "FastAPI", config, profile: str) ->
         )
         # The server's "now" gives clients a high-water mark for the next
         # pull, so they do not re-process the same window.
-        server_now = datetime.now(timezone.utc).isoformat()
+        server_now = datetime.now(UTC).isoformat()
         return JSONResponse(
             {
                 "changes": changed,
@@ -1792,7 +1788,7 @@ def _register_legacy_sync_changes_route(app: "FastAPI", config, profile: str) ->
         )
 
 
-def _register_legacy_sync_push_route(app: "FastAPI", config, profile: str) -> None:
+def _register_legacy_sync_push_route(app: FastAPI, config, profile: str) -> None:
     """Register the legacy POST /sync/push endpoint."""
     @app.post(
         "/sync/push",
@@ -1859,11 +1855,11 @@ def _register_legacy_sync_push_route(app: "FastAPI", config, profile: str) -> No
             for key, cls in node_specs:
                 raw_nodes = body.get(key, [])
                 if not isinstance(raw_nodes, list):
-                    raise ValueError("sync node collection must be a list")
+                    raise ValueError("sync node collection must be a list")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
                 bound_nodes = []
                 for raw in raw_nodes:
                     if not isinstance(raw, dict):
-                        raise ValueError("sync node must be an object")
+                        raise ValueError("sync node must be an object")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
                     node = cls.from_dict(raw)
                     # Validate every supplied claim before any backend write.
                     # bind_node_identity itself performs all conflict checks
@@ -1887,7 +1883,7 @@ def _register_legacy_sync_push_route(app: "FastAPI", config, profile: str) -> No
                 return None
             try:
                 return next((item for item in lister(limit=100000) if item.id == node.id), None)
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort fallback value
                 return None
 
         def is_current_tenant_lww_candidate(node) -> tuple[bool, object | None]:
@@ -1952,14 +1948,14 @@ def _register_legacy_sync_push_route(app: "FastAPI", config, profile: str) -> No
         )
 
 
-def _register_legacy_sync_endpoint_routes(app: "FastAPI", config, profile: str) -> None:
+def _register_legacy_sync_endpoint_routes(app: FastAPI, config, profile: str) -> None:
     """Register the two legacy /sync endpoints (changes + push)."""
     _register_legacy_sync_changes_route(app, config, profile)
     _register_legacy_sync_push_route(app, config, profile)
 
 
 
-def _register_sync_events_route(app: "FastAPI") -> None:
+def _register_sync_events_route(app: FastAPI) -> None:
     """Register the /sync/events SSE stream."""
     @app.get(
         "/sync/events",
@@ -2009,7 +2005,7 @@ def _register_sync_events_route(app: "FastAPI") -> None:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=30.0)
                         yield f"data: {json.dumps(event)}\n\n"
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield ": ping\n\n"  # keepalive
             finally:
                 _SSE_SUBSCRIBERS.discard(subscriber)
@@ -2021,7 +2017,7 @@ def _register_sync_events_route(app: "FastAPI") -> None:
         )
 
 
-def _register_sync_routes(app: "FastAPI", config, profile: str) -> None:
+def _register_sync_routes(app: FastAPI, config, profile: str) -> None:
     """Register sync v1 (snapshot-stable) and legacy sync routes."""
     _register_sync_v1_routes(app, config)
     _register_legacy_sync_endpoint_routes(app, config, profile)
@@ -2029,7 +2025,7 @@ def _register_sync_routes(app: "FastAPI", config, profile: str) -> None:
 
 
 
-def _register_metrics_routes(app: "FastAPI", operations_metrics) -> None:
+def _register_metrics_routes(app: FastAPI, operations_metrics) -> None:
     """Register the Prometheus-format /metrics endpoint."""
     @app.get("/metrics", summary="Prometheus-format metrics")
     async def metrics(request: Request) -> PlainTextResponse:
@@ -2045,7 +2041,7 @@ def _register_metrics_routes(app: "FastAPI", operations_metrics) -> None:
 
 
 
-def create_app(config=None) -> "FastAPI":
+def create_app(config=None) -> FastAPI:
     """Build and return a FastAPI application.
 
     Parameters
@@ -2115,7 +2111,7 @@ def create_app(config=None) -> "FastAPI":
     # ``config`` mirrors the previous on_event behaviour.
 
     @asynccontextmanager
-    async def _lifespan(app: "FastAPI"):
+    async def _lifespan(app: FastAPI):
         install_sensitive_data_filters()
         operations_window_started_at = utc_timestamp_now()
         svc = MemplexService(config=config)
@@ -2179,7 +2175,7 @@ def create_app(config=None) -> "FastAPI":
                             signing_key=load_operations_signing_key(),
                         )
                         write_operations_report_atomic(Path(report_output), report)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - logged degradation path
                         logger.warning("operations_report_write_failed")
             logger.info("Memplex HTTP API stopped")
 
@@ -2246,7 +2242,7 @@ def create_app(config=None) -> "FastAPI":
                 allow_methods=["*"],
                 allow_headers=["*"],
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to configure CORS middleware")
 
     # ══════════════════════════════════════════════════════════════
@@ -2262,7 +2258,7 @@ def create_app(config=None) -> "FastAPI":
     return app
 
 
-def _register_admin_routes(app: "FastAPI") -> None:
+def _register_admin_routes(app: FastAPI) -> None:
     """Human curation console: /admin page + JSON API.
 
     Read-model first: the admin page lists memories and lets the operator
@@ -2285,8 +2281,8 @@ def _register_admin_routes(app: "FastAPI") -> None:
     @app.get("/admin/api/memories", include_in_schema=False)
     async def admin_memories(
         request: Request,
-        q: Optional[str] = None,
-        tier: Optional[str] = None,
+        q: str | None = None,
+        tier: str | None = None,
         limit: int = 200,
     ):
         context = _authorization(request)
@@ -2338,7 +2334,7 @@ def _register_admin_routes(app: "FastAPI") -> None:
         return JSONResponse(result)
 
     @app.get("/admin/api/facts", include_in_schema=False)
-    async def admin_facts(request: Request, as_of: Optional[str] = None, limit: int = 100):
+    async def admin_facts(request: Request, as_of: str | None = None, limit: int = 100):
         context = _authorization(request)
         svc = _get_service(request)
         facts = svc.list_facts(as_of=as_of, limit=min(limit, 500), authorization=context)

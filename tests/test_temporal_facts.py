@@ -8,12 +8,12 @@ Zep/Graphiti-style supersede semantics: contradicted facts are stamped
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.models import Fact, SourceType  # noqa: E402
-from memplex.temporal import (  # noqa: E402
+from memplex.models import Fact, SourceType
+from memplex.temporal import (
     facts_valid_at,
     is_valid_at,
     now_iso,
@@ -22,25 +22,16 @@ from memplex.temporal import (  # noqa: E402
 
 
 def _fact(subject="db", predicate="is", object_="postgres", **kw):
-    base = dict(
-        id=kw.pop("id", f"f-{subject}-{predicate}-{object_}"),
-        tenant_id="t1",
-        owner_subject_id="alice",
-        workspace_id="w1",
-        updated_at=kw.pop("updated_at", now_iso()),
-        subject=subject,
-        predicate=predicate,
-        object_=object_,
-    )
-    base.update(kw)
-    return Fact(**base)
+    defaults = {"id": kw.pop("id", f"f-{subject}-{predicate}-{object_}"), "tenant_id": "t1", "owner_subject_id": "alice", "workspace_id": "w1", "updated_at": kw.pop("updated_at", now_iso()), "subject": subject, "predicate": predicate, "object_": object_}
+    defaults.update(kw)
+    return Fact(**defaults)
 
 
 # ── unit: interval predicate ─────────────────────────────────────────
 
 
 def test_is_valid_at_interval_semantics():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     past = now - timedelta(days=10)
     future = now + timedelta(days=10)
     assert is_valid_at(_fact()) is True  # no bounds = always valid
@@ -86,8 +77,8 @@ def test_supersede_skips_already_invalid_or_expired():
 
 def test_service_write_supersedes_and_as_of_history(tmp_path):
     from memplex.config import MemplexConfig
-    from memplex.service import MemplexService
     from memplex.models import SourceDocument
+    from memplex.service import MemplexService
 
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
@@ -140,5 +131,5 @@ def test_service_write_supersedes_and_as_of_history(tmp_path):
 def test_facts_valid_at_helper():
     a = _fact(id="a", valid_from="2026-01-01T00:00:00+00:00")
     b = _fact(id="b", invalid_at="2026-01-01T00:00:00+00:00")
-    got = [f.id for f in facts_valid_at([a, b], as_of=datetime(2026, 5, 1, tzinfo=timezone.utc))]
+    got = [f.id for f in facts_valid_at([a, b], as_of=datetime(2026, 5, 1, tzinfo=UTC))]
     assert got == ["a"]

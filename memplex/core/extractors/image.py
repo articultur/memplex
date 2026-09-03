@@ -2,7 +2,8 @@
 
 import logging
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,12 @@ class ImageExtractor:
 
     def __init__(self):
         self._ocr_available = None
-        self._external_ocr: Optional[Callable] = None
-        self._external_vision: Optional[Callable] = None
+        self._external_ocr: Callable | None = None
+        self._external_vision: Callable | None = None
         self._vision_timeout = 60  # seconds
         self._vision_max_retries = 2
 
-    def set_ocr_provider(self, fn: Callable[[str], Optional[str]]) -> None:
+    def set_ocr_provider(self, fn: Callable[[str], str | None]) -> None:
         """
         Register an external OCR provider.
 
@@ -35,7 +36,7 @@ class ImageExtractor:
         """
         self._external_ocr = fn
 
-    def set_vision_provider(self, fn: Callable[..., Optional[dict]]) -> None:
+    def set_vision_provider(self, fn: Callable[..., dict | None]) -> None:
         """
         Register an external vision/LLM provider.
 
@@ -66,7 +67,7 @@ class ImageExtractor:
         """Check if vision capability is available (external or internal)."""
         return self._external_vision is not None
 
-    def extract(self, image_path: str) -> Optional[str]:
+    def extract(self, image_path: str) -> str | None:
         """
         Extract text from image using OCR.
 
@@ -87,7 +88,7 @@ class ImageExtractor:
                 result = self._external_ocr(image_path)
                 if result:
                     return result.strip() if isinstance(result, str) else result
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - logged degradation path
                 logger.warning("External OCR failed: %s", e)
 
         # 2. Internal pytesseract
@@ -98,11 +99,11 @@ class ImageExtractor:
             image = Image.open(image_path)
             text = pytesseract.image_to_string(image, lang="eng+chi_sim")
             return text.strip()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("OCR failed for %s: %s", image_path, e)
             return None
 
-    def extract_with_vision(self, image_path: str, prompt: str = None) -> Optional[dict]:
+    def extract_with_vision(self, image_path: str, prompt: str | None = None) -> dict | None:
         """
         Extract visual understanding using vision model.
 
@@ -132,7 +133,7 @@ class ImageExtractor:
                 except TimeoutError:
                     last_error = f"Timeout after {self._vision_timeout}s (attempt {attempt + 1}/{self._vision_max_retries})"
                     logger.warning("External vision timeout: %s", last_error)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - logged degradation path
                     last_error = f"{type(e).__name__}: {e} (attempt {attempt + 1}/{self._vision_max_retries})"
                     logger.warning("External vision failed: %s", last_error)
 
@@ -145,7 +146,7 @@ class ImageExtractor:
 
         return None
 
-    def _call_vision_provider(self, image_path: str, prompt: Optional[str]) -> Optional[dict]:
+    def _call_vision_provider(self, image_path: str, prompt: str | None) -> dict | None:
         """Invoke the registered vision provider, passing ``prompt`` when given.
 
         Providers registered before the ``prompt`` parameter existed accept
@@ -159,7 +160,7 @@ class ImageExtractor:
                 return self._external_vision(image_path)
         return self._external_vision(image_path)
 
-    def extract_full(self, image_path: str, vision_result: dict = None) -> dict:
+    def extract_full(self, image_path: str, vision_result: dict | None = None) -> dict:
         """
         Extract both OCR text and optionally pre-extracted vision understanding.
 

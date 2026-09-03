@@ -8,7 +8,6 @@ implements this interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 
 from memplex.models import (
     BatchResult,
@@ -41,8 +40,8 @@ class MemoryStore(ABC):
     @abstractmethod
     def add_batch(
         self,
-        funcs: List[Function],
-        sources: List[SourceDocument],
+        funcs: list[Function],
+        sources: list[SourceDocument],
     ) -> BatchResult:
         """Batch add.  Calls :meth:`add` per item; single-item failure does
         **not** abort the rest.  Failed items are recorded in
@@ -76,14 +75,14 @@ class MemoryStore(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support Preference storage")
 
-    def get_fact(self, fact_id: str) -> Optional[Fact]:
+    def get_fact(self, fact_id: str) -> Fact | None:
         """OPTIONAL: retrieve a single Fact by ID, or ``None``.
 
         Default returns ``None`` (backend has no Fact storage).
         """
         return None
 
-    def get_preference(self, preference_id: str) -> Optional[Preference]:
+    def get_preference(self, preference_id: str) -> Preference | None:
         """OPTIONAL: retrieve a single Preference by ID, or ``None``.
 
         Default returns ``None`` (backend has no Preference storage).
@@ -94,8 +93,8 @@ class MemoryStore(ABC):
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Fact]:
+        owner: str | None = None,
+    ) -> list[Fact]:
         """OPTIONAL: paginated Fact listing, optionally filtered by *owner*.
 
         Default returns ``[]`` so duck-typed callers (e.g. WikiCompiler)
@@ -107,8 +106,8 @@ class MemoryStore(ABC):
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Preference]:
+        owner: str | None = None,
+    ) -> list[Preference]:
         """OPTIONAL: paginated Preference listing, optionally by *owner*.
 
         Default returns ``[]`` (same reasoning as :meth:`list_facts`).
@@ -119,9 +118,9 @@ class MemoryStore(ABC):
         self,
         offset: int = 0,
         limit: int = 1000,
-        category: Optional[str] = None,
-        owner: Optional[str] = None,
-    ) -> List[Observation]:
+        category: str | None = None,
+        owner: str | None = None,
+    ) -> list[Observation]:
         """OPTIONAL: paginated Observation listing, optionally filtered by
         *category* (see ``OBSERVATION_CATEGORIES``) and/or *owner*.
 
@@ -131,21 +130,21 @@ class MemoryStore(ABC):
         """
         return []
 
-    def get_observation(self, observation_id: str) -> Optional[Observation]:
+    def get_observation(self, observation_id: str) -> Observation | None:
         """OPTIONAL: retrieve one Observation by ID, or ``None``."""
         return None
 
     def delete_fact(self, fact_id: str) -> None:
         """OPTIONAL: delete a Fact by ID.  Default is a no-op."""
-        return None
+        return
 
     def delete_preference(self, preference_id: str) -> None:
         """OPTIONAL: delete a Preference by ID.  Default is a no-op."""
-        return None
+        return
 
     def delete_observation(self, observation_id: str) -> None:
         """OPTIONAL: delete an Observation by ID. Default is a no-op."""
-        return None
+        return
 
     @abstractmethod
     def increment_access(self, func_id: str) -> None:
@@ -154,7 +153,7 @@ class MemoryStore(ABC):
         avoid read-modify-write races.
         """
 
-    def increment_access_batch(self, func_ids: List[str]) -> None:
+    def increment_access_batch(self, func_ids: list[str]) -> None:
         """Increment access_count for many funcs in a single persistence pass.
 
         Default implementation loops the single-func primitive so every
@@ -171,31 +170,31 @@ class MemoryStore(ABC):
     # ── Retrieval ───────────────────────────────────────────────────
 
     @abstractmethod
-    def vector_search(self, text: str, top_k: int = 5) -> List[SearchResult]:
+    def vector_search(self, text: str, top_k: int = 5) -> list[SearchResult]:
         """Semantic / vector similarity search."""
 
     @abstractmethod
-    def fts_search(self, text: str, top_k: int = 10) -> List[SearchResult]:
+    def fts_search(self, text: str, top_k: int = 10) -> list[SearchResult]:
         """Full-text / keyword search."""
 
     @abstractmethod
-    def filter(self, filters: SearchFilters) -> List[Function]:
+    def filter(self, filters: SearchFilters) -> list[Function]:
         """Structured filter over stored Functions."""
 
     # ── Read operations ─────────────────────────────────────────────
 
     @abstractmethod
-    def get(self, func_id: str) -> Optional[Function]:
+    def get(self, func_id: str) -> Function | None:
         """Retrieve a single Function by ID, or ``None``."""
 
     @abstractmethod
     def get_neighbors(
         self,
         func_id: str,
-        edge_types: Optional[List[str]] = None,
+        edge_types: list[str] | None = None,
         max_hops: int = 1,
-        limit: Optional[int] = None,
-    ) -> List[Function]:
+        limit: int | None = None,
+    ) -> list[Function]:
         """Return neighbour Functions reachable within *max_hops* edges,
         optionally restricted to *edge_types* and capped in the storage
         query by *limit*. ``None`` preserves the historical unbounded API.
@@ -204,7 +203,7 @@ class MemoryStore(ABC):
     @abstractmethod
     def get_graph(
         self,
-        func_ids: Optional[List[str]] = None,
+        func_ids: list[str] | None = None,
     ) -> GraphData:
         """Return sub-graph.  If *func_ids* is ``None`` the full graph is
         returned.
@@ -215,7 +214,7 @@ class MemoryStore(ABC):
         self,
         func_id: str,
         limit: int = 20,
-    ) -> List[ChangelogEvent]:
+    ) -> list[ChangelogEvent]:
         """Return recent ChangelogEvents for a Function."""
 
     @abstractmethod
@@ -223,8 +222,8 @@ class MemoryStore(ABC):
         self,
         offset: int = 0,
         limit: int = 1000,
-        owner: Optional[str] = None,
-    ) -> List[Function]:
+        owner: str | None = None,
+    ) -> list[Function]:
         """Paginated listing, optionally filtered by *owner*."""
 
     def count_functions(self) -> int:
@@ -243,8 +242,8 @@ class MemoryStore(ABC):
                 return total
 
     def list_changes_since(
-        self, since: Optional[str] = None, limit: int = 100000
-    ) -> List[Function]:
+        self, since: str | None = None, limit: int = 100000
+    ) -> list[Function]:
         """Return Functions with updated_at > *since* (incremental sync query).
 
         Default implementation falls back to list_functions + Python filter.

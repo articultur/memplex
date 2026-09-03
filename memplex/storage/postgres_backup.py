@@ -9,10 +9,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from memplex.backup import (
@@ -235,7 +236,7 @@ class PostgresClientTools:
             raise BackupConfigurationError("postgres_client_tools_invalid")
 
     @classmethod
-    def discover(cls) -> "PostgresClientTools":
+    def discover(cls) -> PostgresClientTools:
         dump = shutil.which("pg_dump")
         restore = shutil.which("pg_restore")
         if dump is None or restore is None:
@@ -615,7 +616,7 @@ class PostgresBackupExecutor:
                 ingress_acl=self._ingress_acl,
                 deployment_profile=self._deployment_profile,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             raise _fixed_error("postgres_restore_readback_failed", exc)
         if final.state != "ready" or final.current_version != manifest.migration_version:
             raise BackupIntegrityError("postgres_restore_readback_failed")

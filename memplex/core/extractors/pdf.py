@@ -3,7 +3,7 @@
 import logging
 import os
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class PDFExtractor:
                 self._pymupdf_available = False
         return self._pymupdf_available
 
-    def extract(self, pdf_path: str) -> Optional[List[str]]:
+    def extract(self, pdf_path: str) -> list[str] | None:
         """Extract text from PDF file. Returns list of page texts."""
         if not self.is_available():
             return None
@@ -53,11 +53,11 @@ class PDFExtractor:
                     if text:
                         pages.append(text)
             return pages if pages else None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("PDF text extraction failed for %s: %s", pdf_path, e)
             return None
 
-    def _extract_images_pymupdf(self, pdf_path: str) -> List[List[Dict[str, Any]]]:
+    def _extract_images_pymupdf(self, pdf_path: str) -> list[list[dict[str, Any]]]:
         """Extract images from PDF using PyMuPDF. Returns list of images per page."""
         try:
             import fitz
@@ -75,7 +75,7 @@ class PDFExtractor:
                     else:
                         pix = fitz.Pixmap(fitz.csRGB, pix)
                         img_data = pix.tobytes("png")
-                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)  # noqa: SIM115 - delete=False temp file must outlive the block
                     temp_file.write(img_data)
                     temp_file.close()
                     page_images.append(
@@ -90,11 +90,11 @@ class PDFExtractor:
                 images_per_page.append(page_images)
             doc.close()
             return images_per_page
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("PyMuPDF image extraction failed for %s: %s", pdf_path, e)
             return []
 
-    def _extract_images_pdfplumber(self, pdf_path: str) -> List[List[Dict[str, Any]]]:
+    def _extract_images_pdfplumber(self, pdf_path: str) -> list[list[dict[str, Any]]]:
         """Extract image metadata from PDF using pdfplumber (no actual bytes)."""
         try:
             import pdfplumber
@@ -121,11 +121,11 @@ class PDFExtractor:
                         )
                     images_per_page.append(page_images)
             return images_per_page
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("pdfplumber image extraction failed for %s: %s", pdf_path, e)
             return []
 
-    def extract_full(self, pdf_path: str) -> Optional[dict]:
+    def extract_full(self, pdf_path: str) -> dict | None:
         """Extract full content with text, metadata, and images."""
         if not self.is_available():
             return None
@@ -148,6 +148,6 @@ class PDFExtractor:
                 "page_count": len(pages_text),
                 "images": images,
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("PDF full extraction failed for %s: %s", pdf_path, e)
             return None

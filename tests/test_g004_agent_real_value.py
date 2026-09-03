@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from tests.g004_cli_runner import parse_json_stdout, process_diagnostic, run_cli
 
-
 MEMPLEX = ".venv/bin/memplex"
 
 
