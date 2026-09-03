@@ -405,7 +405,10 @@ forbidden_modules = [
 
 [tool.ruff.lint]
 # C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.
-extend-select = ["C901"]
+extend-select = ["C901", "E7"]
+# E7 stays explicit: the release path keeps one deliberate one-line
+# statement (at-most-once atomicity) whose noqa must stay "used" under
+# every ruff default selection so RUF100 cannot strip it.
 ignore = [
     # Re-export pattern: imports used by downstream modules
     "F401",

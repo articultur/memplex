@@ -5,7 +5,7 @@
 1. `uv lock --check` — lockfile must match pyproject.
 2. `.venv/bin/ruff check memplex tests` — lint gate incl. C901 complexity freeze
 2b. `.venv/bin/lint-imports` — hexagonal architecture contract
-2c. `.venv/bin/mypy` — typed-boundary gate (file list pinned in `pyproject.toml [tool.mypy]` — that list is the authoritative count; `tests/test_release_workflows.py` pins it against drift) (ruff is pinned `<0.16`; do not bump without fixing the ~1.8k 0.16-rule violations first).
+2c. `.venv/bin/mypy` — typed-boundary gate (file list pinned in `pyproject.toml [tool.mypy]` — that list is the authoritative count; `tests/test_release_workflows.py` pins it against drift) (ruff was unpinned to `<0.17` in 2026-09 after clearing all 0.16-rule violations; deliberate suppressions carry per-site `# noqa` with reasons — e.g. BLE001 fail-closed degradation, TRY004 exact-type security checks).
 3. Full lite suite: `.venv/bin/python -m pytest tests -q --cov=memplex --cov-fail-under=75`
    (~3,300 tests, ~7 min; suite count grows — always report the real number; CI enforces the same `--cov-fail-under=75`).
 4. Real-PostgreSQL gate for any `storage/`, `sync*`, or migrations change —
@@ -31,7 +31,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **memplex** (11226 symbols, 28920 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **memplex** (11618 symbols, 29769 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
