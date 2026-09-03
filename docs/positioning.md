@@ -96,6 +96,13 @@ official sources and a directly adjacent memory or persistence role. A blank
 capability is not inferred as absent; this table describes documented product
 boundaries.
 
+A broader point-in-time industry survey recorded on 2026-09-04 — including
+Cognee, MemOS, the multi-host memory layer claude-mem/Grok Mem, and host-native
+memory in Codex and Claude — is retained in
+[Memory landscape research](research/memory-landscape-2026-09.md). That survey
+is internal research context and does not modify the boundaries or claims of
+this guide.
+
 | System | Product boundary and primary user | Memory model and lifecycle | Retrieval, scope, and integration | Version context checked |
 | --- | --- | --- | --- | --- |
 | **Memplex** | Host-integrated, multi-agent memory layer for users and teams operating supported local agent hosts. | Typed Function/Fact/Preference/Observation nodes; recall/capture hooks; retained fact supersession and `as_of` reads. | Multi-path retrieval with explicit budgets; tenant/owner/workspace/visibility model; Lite and PostgreSQL backends. | Local checkout declares unreleased `3.3.0`; the [README install section](../README.md#install) identifies public stable `3.2.7`. The retained benchmark artifact is from a dirty worktree and is not release evidence. |
