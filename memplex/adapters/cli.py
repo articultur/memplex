@@ -2290,6 +2290,11 @@ def _add_benchmark_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_bench_run.add_argument("--top-k", type=int, default=10, help="Retrieval top-K (default: 10)")
     p_bench_run.add_argument(
+        "--path",
+        default=None,
+        help="Explicit dataset file path (JSON/JSONL); skips download when provided",
+    )
+    p_bench_run.add_argument(
         "--output",
         dest="benchmark_output",
         default=".memplex/benchmarks/results.jsonl",

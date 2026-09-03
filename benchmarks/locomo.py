@@ -66,6 +66,27 @@ logger = logging.getLogger(__name__)
 PERSONA_F1_HIT_THRESHOLD = 0.5
 
 
+def _parse_turn_timestamp(raw: Any) -> Optional[datetime]:
+    """Parse a LoCoMo turn timestamp.
+
+    Accepts ISO-8601 (repo synthetic format) and the official locomo10
+    style (``"1:56 pm on 8 May, 2023"``). Returns None when unparseable.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    for fmt in ("%I:%M %p on %d %B, %Y", "%I:%M %p on %d %B %Y"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 # ── Internal sample type ───────────────────────────────────────────────────────
 
 
@@ -245,6 +266,7 @@ class LocomoDataset(EvaluationDataset):
                         "memory_id": dia_id,
                         "content": turn.get("text", ""),
                         "session_id": turn.get("session", ""),
+                        "timestamp": turn.get("timestamp", ""),
                     }
                 )
             samples.append(
@@ -399,6 +421,11 @@ class LocomoDataset(EvaluationDataset):
             mem_id = mem.get("memory_id", f"locomo_mem_{len(memory_objects)}")
             mem_content = mem.get("content", "")
             session_id = mem.get("session_id", "")
+            # Persist the turn's real timestamp so the recency dimension has
+            # a temporal signal to rank by; fall back to now when the source
+            # carries none (or an unparseable one).
+            mem_ts = _parse_turn_timestamp(mem.get("timestamp")) or datetime.utcnow()
+            mem_ts_iso = mem_ts.isoformat()
 
             if sample_type == "summarization":
                 # Events -> Observation memories
@@ -410,8 +437,8 @@ class LocomoDataset(EvaluationDataset):
                     actor="conversation",
                     memory_type="observation",
                     source_type=SourceType.MEETING,
-                    created_at=datetime.utcnow().isoformat(),
-                    updated_at=datetime.utcnow().isoformat(),
+                    created_at=mem_ts_iso,
+                    updated_at=mem_ts_iso,
                 )
                 memory_objects.append(obs)
             else:
@@ -424,8 +451,8 @@ class LocomoDataset(EvaluationDataset):
                     object_=mem_content,
                     memory_type="fact",
                     source_type=SourceType.MEETING,
-                    created_at=datetime.utcnow().isoformat(),
-                    updated_at=datetime.utcnow().isoformat(),
+                    created_at=mem_ts_iso,
+                    updated_at=mem_ts_iso,
                 )
                 memory_objects.append(fact)
 
@@ -654,7 +681,17 @@ class LocomoRunner(BenchmarkRunner):
         for sample in samples:
             # Reconstruct ground_truth_memories from metadata
             gt_memories = sample.metadata.get("ground_truth_memories", [])
-            expected_order = [m["memory_id"] for m in gt_memories if "memory_id" in m]
+            gt_pairs = [
+                (m["memory_id"], _parse_turn_timestamp(m.get("timestamp")))
+                for m in gt_memories
+                if "memory_id" in m
+            ]
+            # Expected order is temporal (most recent first), matching the
+            # docstring; fall back to the source list order when timestamps
+            # are missing or unparseable.
+            if gt_pairs and all(ts is not None for _, ts in gt_pairs):
+                gt_pairs.sort(key=lambda item: item[1], reverse=True)
+            expected_order = [mid for mid, _ in gt_pairs]
 
             with latencies.timed():
                 query_result = service.query(sample.query, top_k=top_k)
@@ -821,15 +858,22 @@ class LocomoRunner(BenchmarkRunner):
 
     @staticmethod
     def _score_recency(retrieved: List[str], expected: List[str]) -> float:
-        """Score how well retrieved order matches temporal (recency) order.
+        """Score temporal ordering among the ground-truth memories.
 
-        Returns 1.0 if retrieved order perfectly matches expected (most recent first),
-        decreasing as order diverges.
+        Projects the retrieved list onto the expected ids (distractors are
+        ignored — the metric claims "most recent memories first", not "no
+        other relevant memories may rank above them") and returns the
+        fraction of expected positions matched in the projected order.
+        1.0 = perfect most-recent-first ordering; unretrieved ground truths
+        count as misses.
         """
         if not expected or not retrieved:
             return 0.0
-        pos_map = {rid: i for i, rid in enumerate(retrieved)}
-        correct = sum(1 for i, eid in enumerate(expected) if eid in pos_map and pos_map[eid] == i)
+        expected_set = set(expected)
+        projected = [rid for rid in retrieved if rid in expected_set]
+        correct = sum(
+            1 for i, eid in enumerate(expected) if i < len(projected) and projected[i] == eid
+        )
         return correct / len(expected)
 
 

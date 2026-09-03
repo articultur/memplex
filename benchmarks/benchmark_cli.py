@@ -18,9 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from benchmarks.base import BenchmarkResult
-from benchmarks.evaluator import BenchmarkEvaluator
+from benchmarks.evaluator import BenchmarkEvaluator, make_benchmark_service
 from benchmarks.loader import download_dataset, list_available_datasets
-from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +128,7 @@ def run_benchmark_command(
     Dict[str, List[BenchmarkResult]]
         Per-dataset results.
     """
-    svc = MemplexService()
+    svc = make_benchmark_service()
     svc.start()
 
     try:

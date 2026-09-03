@@ -537,14 +537,14 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
         if not samples:
             return []
 
-        # Sort by age (oldest first)
+        # Sort by age (newest first: sample_age_hours ascends with age)
         sorted_samples = sorted(
             samples,
             key=lambda s: s.metadata.get("sample_age_hours", 0),
         )
 
         # Use the most recent fact's query to test recency ordering
-        recent_sample = sorted_samples[-1]
+        recent_sample = sorted_samples[0]
         if not recent_sample:
             return []
 
@@ -557,8 +557,8 @@ class MemoryBenchmarkRunner(BenchmarkRunner):
 
         retrieved_ids = [r.func_id for r in query_result.results]
 
-        # Most recent first
-        fact_ids_by_age = [s.metadata.get("memory_id", "") for s in reversed(sorted_samples)]
+        # Most recent first (sorted_samples is already newest-first)
+        fact_ids_by_age = [s.metadata.get("memory_id", "") for s in sorted_samples]
         fact_ids_by_age = [fid for fid in fact_ids_by_age if fid]
 
         if not fact_ids_by_age:

@@ -32,6 +32,25 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt
 
 
+def _recency_timestamp(value: "datetime | str | None") -> float:
+    """Coerce an updated_at value into a comparable epoch-second float.
+
+    Returns 0.0 for missing/unparseable values so they sort as oldest in
+    recency tie-breaks.
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return 0.0
+    try:
+        return _ensure_aware(value).timestamp()
+    except (OverflowError, OSError, ValueError):
+        return 0.0
+
+
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from memplex.models import SearchResult, SourceType
@@ -198,7 +217,7 @@ class Reranker:
 
             scored.append((final_score, r))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (x[0], _recency_timestamp(x[1].updated_at)), reverse=True)
         return [r for _, r in scored[:top_k]]
 
     # ── Dimension scorers ───────────────────────────────────────────
@@ -229,7 +248,10 @@ class Reranker:
                 updated_at = datetime.fromisoformat(updated_at)
             except (ValueError, TypeError):
                 return 0.5
-        days_since = max(0, (datetime.now(timezone.utc) - _ensure_aware(updated_at)).days)
+        days_since = max(
+            0.0,
+            (datetime.now(timezone.utc) - _ensure_aware(updated_at)).total_seconds() / 86400.0,
+        )
         return min(1.0, math.exp(-days_since / self.recency_halflife_days))
 
     @staticmethod

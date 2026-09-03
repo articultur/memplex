@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -187,21 +188,48 @@ def _generate_hotpotqa_synthetic(path: Path) -> Path:
 
 
 def _generate_nq_synthetic(path: Path) -> Path:
-    """Generate synthetic Natural Questions-like samples."""
+    """Generate synthetic Natural Questions-like samples.
+
+    Each sample carries a ``context`` sentence that states the answer, so
+    the benchmark measures retrieval over an answer-bearing corpus (the
+    question-only shape tested nothing: the answer could never be retrieved
+    because it was never seeded).
+    """
     samples = [
         {
             "id": f"nq_{i}",
             "question_text": question,
             "question": question,
             "answer": [answer] if isinstance(answer, str) else answer,
+            "context": context,
         }
-        for i, (question, answer) in enumerate(
+        for i, (question, answer, context) in enumerate(
             [
-                ("Who is the president of the United States?", "Barack Obama"),
-                ("What is the capital of France?", "Paris"),
-                ("How many continents are there?", "7"),
-                ("What is the largest ocean?", "Pacific Ocean"),
-                ("Who wrote Hamlet?", "William Shakespeare"),
+                (
+                    "Who is the president of the United States?",
+                    "Barack Obama",
+                    "Barack Obama is the president of the United States.",
+                ),
+                (
+                    "What is the capital of France?",
+                    "Paris",
+                    "Paris is the capital and largest city of France.",
+                ),
+                (
+                    "How many continents are there?",
+                    "7",
+                    "There are 7 continents on Earth.",
+                ),
+                (
+                    "What is the largest ocean?",
+                    "Pacific Ocean",
+                    "The Pacific Ocean is the largest ocean on Earth.",
+                ),
+                (
+                    "Who wrote Hamlet?",
+                    "William Shakespeare",
+                    "William Shakespeare wrote the tragedy Hamlet.",
+                ),
             ],
             start=1,
         )
@@ -213,41 +241,61 @@ def _generate_nq_synthetic(path: Path) -> Path:
 
 
 def _generate_locomo_synthetic(path: Path) -> Path:
-    """Generate synthetic LoCoMo-like conversation samples."""
+    """Generate synthetic LoCoMo-like conversation samples.
+
+    Each conversation states two facts with template-symmetric wording (same
+    length, same query-term overlap, corpus-symmetric term statistics), so
+    lexical relevance ties and the recency dimension measurably decides the
+    order. Dates are relative to generation time so the memories sit within
+    the reranker's recency horizon instead of all decaying to ~0. The query
+    is not contained verbatim in either memory.
+    """
+    now = datetime.now()
+    t_old = (now - timedelta(days=14)).isoformat()
+    t_new = (now - timedelta(days=7)).isoformat()
+    t_query = now.isoformat()
+
+    raw_samples = [
+        (
+            "locomo_conv_1",
+            "My mountain bike is bright red since Saturday.",
+            "My racing helmet is deep blue since Friday.",
+            "What color is my bike and helmet?",
+            "Your mountain bike is red and your racing helmet is blue.",
+        ),
+        (
+            "locomo_conv_2",
+            "My Python course began with basic syntax lessons.",
+            "My Python project ended with working flask code.",
+            "How is my Python course and project?",
+            "Your Python course covered basic syntax and your project produced working Flask code.",
+        ),
+        (
+            "locomo_conv_3",
+            "My tomato plants received plain water last week.",
+            "My tomato plants received rich fertilizer this week.",
+            "How are my tomato plants doing?",
+            "Your tomato plants received water last week and fertilizer this week.",
+        ),
+    ]
     samples = [
         {
-            "conversation_id": f"locomo_conv_{i}",
+            "conversation_id": conv_id,
             "type": "qa",
             "turns": [
-                {"speaker": "user", "text": q, "timestamp": f"2024-01-0{i}T10:00:00"},
-                {
-                    "speaker": "assistant",
-                    "text": a,
-                    "timestamp": f"2024-01-0{i}T10:00:05",
-                },
+                {"speaker": "user", "text": fact_old, "timestamp": t_old},
+                {"speaker": "assistant", "text": "Noted, thanks for sharing.", "timestamp": t_old},
+                {"speaker": "user", "text": fact_new, "timestamp": t_new},
+                {"speaker": "assistant", "text": "Got it, thanks for the update.", "timestamp": t_new},
+                {"speaker": "user", "text": question, "timestamp": t_query},
+                {"speaker": "assistant", "text": answer, "timestamp": t_query},
             ],
             "ground_truth_memories": [
-                {"memory_id": f"mem_{i}_0", "content": q},
-                {"memory_id": f"mem_{i}_1", "content": a},
+                {"memory_id": f"{conv_id}_mem_0", "content": fact_old, "timestamp": t_old},
+                {"memory_id": f"{conv_id}_mem_1", "content": fact_new, "timestamp": t_new},
             ],
         }
-        for i, (q, a) in enumerate(
-            [
-                (
-                    "What is Python used for?",
-                    "Python is a versatile programming language used for web development, data science, AI, and automation.",
-                ),
-                (
-                    "How do I define a function in Python?",
-                    "In Python, you define a function using the 'def' keyword, followed by the function name and parameters.",
-                ),
-                (
-                    "What is a list in Python?",
-                    "A list is an ordered, mutable collection of items in Python, defined with square brackets.",
-                ),
-            ],
-            start=1,
-        )
+        for conv_id, fact_old, fact_new, question, answer in raw_samples
     ]
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(samples, fh, indent=2)
@@ -256,40 +304,51 @@ def _generate_locomo_synthetic(path: Path) -> Path:
 
 
 def _generate_triviaqa_synthetic(path: Path) -> Path:
-    """Generate synthetic TriviaQA-like samples (question + answer aliases)."""
+    """Generate synthetic TriviaQA-like samples (question + answer aliases).
+
+    Each sample carries one web-result snippet whose description states the
+    answer, so the seeded corpus actually contains the answer (previously
+    ``web_results`` was empty and only the question text was seeded, making
+    answer retrieval impossible by construction).
+    """
     samples = [
         {
             "question_id": f"tc_{i}",
             "question": question,
             "answer": {"Value": value, "Aliases": aliases},
-            "search_results": {"web_results": []},
+            "search_results": {"web_results": [{"description": snippet}]},
         }
-        for i, (question, value, aliases) in enumerate(
+        for i, (question, value, aliases, snippet) in enumerate(
             [
                 (
                     "Which planet is known as the Red Planet?",
                     "Mars",
                     ["Mars", "the Red Planet"],
+                    "Mars, the fourth planet from the Sun, is known as the Red Planet.",
                 ),
                 (
                     "Who painted the Mona Lisa?",
                     "Leonardo da Vinci",
                     ["Leonardo da Vinci", "Da Vinci"],
+                    "The Mona Lisa was painted by Leonardo da Vinci.",
                 ),
                 (
                     "What is the chemical symbol for gold?",
                     "Au",
                     ["Au", "AU"],
+                    "The chemical symbol for gold is Au.",
                 ),
                 (
                     "Which ocean is the deepest?",
                     "Pacific Ocean",
                     ["Pacific Ocean", "the Pacific"],
+                    "The Pacific Ocean is the deepest ocean in the world.",
                 ),
                 (
                     "Who wrote the play 'Romeo and Juliet'?",
                     "William Shakespeare",
                     ["William Shakespeare", "Shakespeare"],
+                    "William Shakespeare wrote the play Romeo and Juliet.",
                 ),
             ],
             start=1,

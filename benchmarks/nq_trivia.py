@@ -724,19 +724,21 @@ def _compute_retrieval_metrics(
             break
     metrics["mrr"] = mrr
 
-    total_relevant = len([a for a in answer_aliases if a])
-
+    # Aliases are alternative surface forms of ONE answer, not multiple
+    # relevant items. Recall@k is therefore binary per question (standard QA
+    # convention, same as popqa): 1.0 when any alias appears in the top-k.
+    # The previous formula divided by the alias count (often 10-30), which
+    # structurally capped recall near 0.1 even on perfect retrieval.
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
-        relevant_in_top_k = sum(
-            1 for alias in answer_aliases if alias and alias in " ".join(top_k_summaries).lower()
+        relevant_slots = sum(
+            1 for summary in top_k_summaries if _answer_in_summary(summary, answer_aliases)
         )
 
-        precision = relevant_in_top_k / k if k > 0 else 0.0
+        precision = relevant_slots / k if k > 0 else 0.0
         metrics[f"precision@{k}"] = precision
 
-        recall = min(relevant_in_top_k, 1) / max(total_relevant, 1)
-        metrics[f"recall@{k}"] = min(recall, 1.0)
+        metrics[f"recall@{k}"] = 1.0 if relevant_slots > 0 else 0.0
 
     return metrics
 

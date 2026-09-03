@@ -6,6 +6,7 @@ import math
 import re
 import sqlite3
 from collections import Counter
+from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -16,6 +17,9 @@ _TOKEN_RE = re.compile(r"[a-z0-9_./:-]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 _BM25_K1 = 1.5
 _BM25_B = 0.75
 _MAX_SQLITE_QUERY_TERMS = 64
+# bm25() ranks differing by less than this are treated as tied, so identical
+# documents share one positional weight instead of decaying by row order.
+_BM25_TIE_EPSILON = 1e-9
 
 
 def _tokenize_search_text(text: str) -> List[str]:
@@ -62,6 +66,19 @@ def _sqlite_match_query(tokens: List[str]) -> str:
         '"' + token.replace('"', '""') + '"' for token in unique_tokens[:_MAX_SQLITE_QUERY_TERMS]
     ]
     return " OR ".join(quoted)
+
+
+def _recency_tiebreak(value: object) -> str:
+    """Normalise an ``updated_at`` value for descending tie-break sorting.
+
+    ISO-8601 strings sort chronologically; datetimes are converted to ISO
+    first. Missing values sort as the oldest.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
 
 
 class SQLiteFTSIndex:
@@ -123,7 +140,11 @@ class SQLiteFTSIndex:
                     if query_lower in self._text_factory(func).lower():
                         scores[func_id] += 1.0
 
-            return sorted(scores.items(), key=lambda item: item[1], reverse=True)[:top_k]
+            def _sort_key(item: tuple[str, float]) -> tuple[float, str]:
+                func = self._functions.get(item[0])
+                return (item[1], _recency_tiebreak(getattr(func, "updated_at", None)))
+
+            return sorted(scores.items(), key=_sort_key, reverse=True)[:top_k]
         finally:
             conn.close()
 
@@ -164,9 +185,18 @@ class SQLiteFTSIndex:
             """,
             (match_query, limit),
         ).fetchall()
+        prev_rank: Optional[float] = None
+        group_start = 0
         for idx, row in enumerate(rows):
+            rank = float(row["rank"])
+            # Tied bm25 ranks share the group's positional weight; without
+            # this, identical documents are artificially ordered by rowid
+            # (insertion order), which biases scores toward older entries.
+            if prev_rank is None or abs(rank - prev_rank) > _BM25_TIE_EPSILON:
+                prev_rank = rank
+                group_start = idx
             scores[str(row["func_id"])] = scores.get(str(row["func_id"]), 0.0) + (
-                weight / (idx + 1)
+                weight / (group_start + 1)
             )
 
     def _ensure_index(self) -> Optional[sqlite3.Connection]:
@@ -351,5 +381,5 @@ def local_bm25_search(
         if score > 0:
             raw_scores.append((score, func, func_text))
 
-    raw_scores.sort(key=lambda x: x[0], reverse=True)
+    raw_scores.sort(key=lambda x: (x[0], _recency_tiebreak(getattr(x[1], "updated_at", None))), reverse=True)
     return [(func, func_text, score) for score, func, func_text in raw_scores[:top_k]]
