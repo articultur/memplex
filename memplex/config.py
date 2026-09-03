@@ -316,11 +316,28 @@ class WikiConfig:
 
 @dataclass
 class RetrievalConfig:
-    """Retrieval configuration."""
+    """Retrieval configuration.
+
+    ``retrieval_budget_multiplier`` decouples the candidate budget from the
+    caller-facing ``top_k``: each query fans out with
+    ``max(top_k * multiplier, top_k)`` candidates so merge/rerank see more
+    than the final ``results[:top_k]`` window. ``max_retrieval_budget`` is
+    the server-side cost ceiling the derived budget is clamped to.
+    """
 
     default_max_tokens: int = 4000
     skill_max_tokens: int = 2000
     injection_scan_enabled: bool = True
+    retrieval_budget_multiplier: int = 4
+    max_retrieval_budget: int = 500
+
+    def __post_init__(self) -> None:
+        for name in ("retrieval_budget_multiplier", "max_retrieval_budget"):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise TypeError(f"retrieval.{name} must be an exact int")
+            if value <= 0:
+                raise ValueError(f"retrieval.{name} must be positive")
 
 
 @dataclass
@@ -652,6 +669,8 @@ _ENV_TYPE_COERCIONS: Dict[str, type] = {
     "retrieval.default_max_tokens": int,
     "retrieval.skill_max_tokens": int,
     "retrieval.injection_scan_enabled": bool,
+    "retrieval.retrieval_budget_multiplier": int,
+    "retrieval.max_retrieval_budget": int,
     # LLMConfig
     "llm.query_enhancement": bool,
     "llm.factual_capture": bool,

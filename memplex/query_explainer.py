@@ -73,6 +73,14 @@ def build_query_explanation(
             }
             if stage.get("candidate_budget") is not None:
                 path["candidate_budget"] = stage["candidate_budget"]
+            if stage.get("duration_ms") is not None:
+                path["duration_ms"] = stage["duration_ms"]
+            if stage.get("degraded_reason") is not None:
+                path["degraded_reason"] = stage["degraded_reason"]
+            if stage.get("candidate_refs") is not None:
+                # Copy so later mutation of the output cannot bleed into
+                # the caller's trace; refs hold ids/scores/ranks only.
+                path["candidate_refs"] = [dict(ref) for ref in stage["candidate_refs"]]
             paths.append(path)
         elif name == "merge_deduplicate":
             retrieval["merged_candidates"] = stage.get("candidates", 0)

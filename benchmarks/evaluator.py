@@ -4,6 +4,8 @@ This module provides BenchmarkEvaluator which:
     - Loads and runs benchmarks across all registered datasets
     - Supports warm (seed memories) and cold (no seeding) modes
     - Writes results incrementally to JSONL for resumable runs
+    - Appends per-query retrieval traces (explain=True) to a sibling
+      ``<output stem>.traces.jsonl`` file
     - Generates markdown summary reports
     - Supports parallel execution via ThreadPoolExecutor
 """
@@ -12,11 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -27,6 +31,56 @@ from benchmarks.base import (
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
+
+
+def make_benchmark_service() -> MemplexService:
+    """Create a service with an isolated store for benchmark runs.
+
+    Benchmarks must be reproducible: running against the user's default
+    ``~/.memplex`` store accumulates access counts and stale timestamps
+    across runs, which contaminates recency/frequency-sensitive metrics.
+    Lite runs therefore get a fresh temporary storage path; postgres runs
+    keep their configured DSN (isolating the schema is the operator's
+    responsibility).
+    """
+    from memplex.config import MemplexConfig
+
+    config = MemplexConfig()
+    if config.storage.backend == "lite":
+        config.storage.path = tempfile.mkdtemp(prefix="memplex-bench-")
+    return MemplexService(config=config)
+
+
+class _ExplainTraceProxy:
+    """Service proxy that forces ``explain=True`` and records query traces.
+
+    Benchmark runners call ``service.query(...)`` directly; intercepting at
+    the evaluator boundary keeps every runner unchanged while each traced
+    query appends one controlled-reference record (ids, scores, counts,
+    timings — never memory content) to the evaluator's trace sink. Every
+    attribute other than ``query`` delegates to the wrapped service.
+    """
+
+    def __init__(
+        self,
+        service: MemplexService,
+        sink: "Callable[[Dict[str, Any]], None]",
+    ) -> None:
+        self._service = service
+        self._sink = sink
+
+    def query(self, text: str, *args: Any, **kwargs: Any) -> Any:
+        # A positional ``explain`` would clash with the forced kwarg.
+        if len(args) >= 6:
+            args = args[:5]
+        kwargs["explain"] = True
+        result = self._service.query(text, *args, **kwargs)
+        if result.explanation is not None:
+            self._sink(result.explanation)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service, name)
 
 
 class BenchmarkEvaluator:
@@ -41,6 +95,11 @@ class BenchmarkEvaluator:
     output_file:
         File name (within ``output_dir``) for JSONL results.
         Defaults to ``results.jsonl``.
+    capture_traces:
+        If True (default), run every benchmark query with ``explain=True``
+        and append one JSON object per query to ``<output stem>.traces.jsonl``
+        next to the results file. Traces carry controlled references only
+        (candidate ids, scores, counts, timings) — never memory content.
     """
 
     def __init__(
@@ -48,11 +107,14 @@ class BenchmarkEvaluator:
         service: MemplexService,
         output_dir: str = ".memplex/benchmarks",
         output_file: str = "results.jsonl",
+        capture_traces: bool = True,
     ) -> None:
         self.service = service
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.output_file = output_file
+        self.capture_traces = capture_traces
+        self._trace_lock = threading.Lock()
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -265,13 +327,23 @@ class BenchmarkEvaluator:
         # connection setup) does not pollute the runners' measured latencies.
         self._warmup(samples, retrieval_k, warmup_rounds)
 
+        # Benchmark queries run through the explain proxy so per-query
+        # traces land in <output stem>.traces.jsonl; warmup stays untraced
+        # because it is measurement hygiene, not evaluated workload.
+        query_service: Any = self.service
+        if self.capture_traces:
+            query_service = _ExplainTraceProxy(
+                self.service,
+                lambda explanation: self._append_trace(dataset_name, explanation),
+            )
+
         # Run retrieval benchmark
         start_time = time.perf_counter()
-        retrieval_results = runner.run_retrieval(self.service, samples, top_k=retrieval_k)
+        retrieval_results = runner.run_retrieval(query_service, samples, top_k=retrieval_k)
         results.extend(retrieval_results)
 
         # Run generation benchmark
-        generation_results = runner.run_generation(self.service, samples)
+        generation_results = runner.run_generation(query_service, samples)
         results.extend(generation_results)
 
         elapsed = time.perf_counter() - start_time
@@ -422,6 +494,19 @@ class BenchmarkEvaluator:
             )
             self.service.store.add(func, source)
 
+    def _traces_path(self) -> Path:
+        """Per-query trace JSONL path, next to the results file."""
+        return self.output_dir / f"{Path(self.output_file).stem}.traces.jsonl"
+
+    def _append_trace(self, dataset_name: str, explanation: Dict[str, Any]) -> None:
+        """Append one per-query trace line to the traces JSONL file."""
+        line = json.dumps(
+            {"dataset": dataset_name, "trace": explanation}, default=str
+        )
+        with self._trace_lock:
+            with open(self._traces_path(), "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+
     def _write_jsonl(
         self,
         results: Dict[str, List[BenchmarkResult]],
@@ -562,9 +647,7 @@ def run_benchmark_cli(
     -------
     Dict[str, List[BenchmarkResult]]
     """
-    from memplex.service import MemplexService
-
-    svc = MemplexService()
+    svc = make_benchmark_service()
     svc.start()
 
     try:

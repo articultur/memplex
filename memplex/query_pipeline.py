@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -149,10 +150,20 @@ class QueryPipeline:
         if trace is not None:
             trace["embedding"]["query_vector_available"] = query_vector is not None
 
-        all_results = self._parallel_scope_search(
-            retriever, text, scope, top_k, query_vector, trace
+        # Candidate budget is decoupled from the caller-facing ``top_k``:
+        # ``retrieval.retrieval_budget_multiplier`` widens the merge/rerank
+        # pool so ranking sees more than the final window, and
+        # ``retrieval.max_retrieval_budget`` is the server-side cost ceiling
+        # the derived budget is clamped to. Final results are still
+        # truncated to ``results[:top_k]`` downstream.
+        retrieval_config = self._config.retrieval
+        candidate_budget = min(
+            max(int(top_k) * retrieval_config.retrieval_budget_multiplier, int(top_k), 0),
+            retrieval_config.max_retrieval_budget,
         )
-        candidate_budget = max(0, int(top_k))
+        all_results = self._parallel_scope_search(
+            retriever, text, scope, candidate_budget, query_vector, trace
+        )
         # Merge results
         results = MultiPathRetriever.merge_multi_path(all_results)
         if trace is not None:
@@ -290,6 +301,13 @@ class QueryPipeline:
 
         results, used, truncated = self._apply_token_budget(results, max_tokens, trace)
         if trace is not None:
+            # Mark which per-path candidates survived to the final window.
+            final_ids = {r.func_id for r in results}
+            for stage in trace["stages"]:
+                refs = stage.get("candidate_refs")
+                if refs:
+                    for ref in refs:
+                        ref["in_final"] = ref["id"] in final_ids
             trace["final_results"] = [
                 {
                     "id": r.func_id,
@@ -317,12 +335,12 @@ class QueryPipeline:
         retriever: MultiPathRetriever,
         text: str,
         scope: QueryScope,
-        top_k: int,
+        candidate_budget: int,
         query_vector: Optional[Vector],
         trace: Optional[Dict[str, Any]],
     ) -> List[List[SearchResult]]:
         """Fan out the scoped retrieval paths under one global budget."""
-        # Parallel multi-path retrieval. ``top_k`` is one global candidate
+        # Parallel multi-path retrieval. ``candidate_budget`` is one global
         # budget, not a per-path allowance: otherwise QueryScope.ALL silently
         # triples model-controlled work. Split the budget as evenly as
         # possible; when the budget is smaller than the number of paths, the
@@ -335,7 +353,6 @@ class QueryPipeline:
         if scope in (QueryScope.RELATION, QueryScope.ALL):
             searches.append(("graph", retriever.graph_search, (query_vector,)))
 
-        candidate_budget = max(0, int(top_k))
         per_path, remainder = divmod(candidate_budget, len(searches))
         futures: Dict[concurrent.futures.Future, tuple[str, int]] = {}
         with ThreadPoolExecutor(max_workers=len(searches)) as pool:
@@ -343,7 +360,9 @@ class QueryPipeline:
                 path_budget = per_path + (1 if index < remainder else 0)
                 if path_budget == 0:
                     continue
-                futures[pool.submit(search, text, path_budget, *extra_args)] = (
+                futures[
+                    pool.submit(self._timed_path_search, search, text, path_budget, extra_args)
+                ] = (
                     path,
                     path_budget,
                 )
@@ -352,17 +371,29 @@ class QueryPipeline:
             for future in as_completed(futures):
                 path, path_budget = futures[future]
                 try:
-                    path_results = future.result()
+                    path_results, duration_ms = future.result()
                     all_results.append(path_results)
                     if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "ok",
-                                "candidate_budget": path_budget,
-                                "candidates": len(path_results),
-                            }
-                        )
+                        # Candidate refs carry controlled references only
+                        # (id/score/rank) -- never memory content.
+                        stage: Dict[str, Any] = {
+                            "stage": f"{path}_search",
+                            "status": "ok" if path_results else "empty",
+                            "duration_ms": round(duration_ms, 3),
+                            "candidate_budget": path_budget,
+                            "candidates": len(path_results),
+                            "candidate_refs": [
+                                {
+                                    "id": r.func_id,
+                                    "score": r.relevance_score,
+                                    "rank": rank,
+                                }
+                                for rank, r in enumerate(path_results, start=1)
+                            ],
+                        }
+                        if not path_results:
+                            stage["degraded_reason"] = "path returned no candidates"
+                        trace["stages"].append(stage)
                 except Exception as exc:
                     logger.warning("Search path %s failed: %s", path, exc)
                     if trace is not None:
@@ -371,12 +402,26 @@ class QueryPipeline:
                                 "stage": f"{path}_search",
                                 "status": "failed",
                                 "error": str(exc),
+                                "degraded_reason": str(exc),
                                 "candidate_budget": path_budget,
                                 "candidates": 0,
+                                "candidate_refs": [],
                             }
                         )
 
         return all_results
+
+    @staticmethod
+    def _timed_path_search(
+        search: Callable[..., List[SearchResult]],
+        text: str,
+        path_budget: int,
+        extra_args: tuple[Any, ...],
+    ) -> tuple[List[SearchResult], float]:
+        """Run one path search and report its wall-clock duration in ms."""
+        started = time.perf_counter()
+        results = search(text, path_budget, *extra_args)
+        return results, (time.perf_counter() - started) * 1000.0
 
     @staticmethod
     def _apply_token_budget(

@@ -94,6 +94,16 @@ class TestDefaultConfig:
         assert isinstance(cfg.retrieval, RetrievalConfig)
         assert cfg.retrieval.default_max_tokens == 4000
         assert cfg.retrieval.injection_scan_enabled is True
+        assert cfg.retrieval.retrieval_budget_multiplier == 4
+        assert cfg.retrieval.max_retrieval_budget == 500
+
+    def test_retrieval_budget_fields_are_validated(self):
+        with pytest.raises(ValueError):
+            RetrievalConfig(retrieval_budget_multiplier=0)
+        with pytest.raises(ValueError):
+            RetrievalConfig(max_retrieval_budget=-1)
+        with pytest.raises(TypeError):
+            RetrievalConfig(retrieval_budget_multiplier=1.5)
 
     def test_llm_defaults(self):
         cfg = MemplexConfig()
@@ -309,6 +319,13 @@ class TestEnvOverrides:
         monkeypatch.setenv("MEMPLEX_EMBEDDING_DIMENSION", "768")
         cfg = load_config()
         assert cfg.embedding.dimension == 768
+
+    def test_retrieval_budget_overrides(self, monkeypatch):
+        monkeypatch.setenv("MEMPLEX_RETRIEVAL_RETRIEVAL_BUDGET_MULTIPLIER", "2")
+        monkeypatch.setenv("MEMPLEX_RETRIEVAL_MAX_RETRIEVAL_BUDGET", "64")
+        cfg = load_config()
+        assert cfg.retrieval.retrieval_budget_multiplier == 2
+        assert cfg.retrieval.max_retrieval_budget == 64
 
     def test_embedding_hyde_override(self, monkeypatch):
         monkeypatch.setenv("MEMPLEX_EMBEDDING_HYDE_ENABLED", "false")

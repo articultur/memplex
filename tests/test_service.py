@@ -134,6 +134,8 @@ class TestServiceQuery:
 
         budgets = {}
         monkeypatch.setattr(service, "_detect_scope", lambda _text: QueryScope.ALL)
+        # Pin the amplification to 1 so this test isolates the even split.
+        monkeypatch.setattr(service._config.retrieval, "retrieval_budget_multiplier", 1)
 
         def rag_search(_text, top_k, _query_vector):
             budgets["rag"] = top_k
@@ -165,6 +167,68 @@ class TestServiceQuery:
         service.query("find design", top_k=2)
         assert sum(budgets.values()) == 2
         assert len(budgets) == 2
+
+    def test_candidate_budget_decoupled_from_top_k(self, service, monkeypatch):
+        """The retrieval budget amplifies top_k and clamps to the server cap."""
+
+        budgets = {}
+        monkeypatch.setattr(service, "_detect_scope", lambda _text: QueryScope.ALL)
+
+        def record(path):
+            def search(_text, top_k, *_args):
+                budgets[path] = top_k
+                return []
+
+            return search
+
+        monkeypatch.setattr(service._retriever, "rag_search", record("rag"))
+        monkeypatch.setattr(service._retriever, "wiki_search", record("wiki"))
+        monkeypatch.setattr(service._retriever, "graph_search", record("graph"))
+
+        # Default multiplier widens the candidate pool beyond top_k.
+        service.query("find design", top_k=10, explain=True)
+        assert sum(budgets.values()) == 40
+
+        # The server-side cap still bounds model-controlled work.
+        budgets.clear()
+        monkeypatch.setattr(service._config.retrieval, "max_retrieval_budget", 25)
+        result = service.query("find design", top_k=100, explain=True)
+        assert sum(budgets.values()) == 25
+        assert result.explanation["retrieval"]["candidate_budget"] == 25
+
+    def test_explain_trace_records_per_path_details(self, service, monkeypatch):
+        service.write_text("用户登录系统需要密码认证。")
+        monkeypatch.setattr(service, "_detect_scope", lambda _text: QueryScope.ALL)
+
+        result = service.query("登录", top_k=5, explain=True)
+
+        paths = {p["name"]: p for p in result.explanation["retrieval"]["paths"]}
+        assert set(paths) == {"rag", "wiki", "graph"}
+        for path in paths.values():
+            assert path["status"] in {"ok", "empty"}
+            assert isinstance(path["duration_ms"], float)
+            assert path["duration_ms"] >= 0.0
+            assert path["candidate_budget"] >= 1
+            # Candidate refs are controlled references only: id/score/rank
+            # plus the in_final marker -- never memory content.
+            for ref in path["candidate_refs"]:
+                assert set(ref) <= {"id", "score", "rank", "in_final"}
+        final_ids = {r.func_id for r in result.results}
+        for ref in paths["rag"]["candidate_refs"]:
+            assert ref["in_final"] == (ref["id"] in final_ids)
+
+    def test_failed_path_trace_records_degraded_reason(self, service, monkeypatch):
+        def boom(_text, _budget, _query_vector=None):
+            raise RuntimeError("store down")
+
+        monkeypatch.setattr(service._retriever, "rag_search", boom)
+
+        result = service.query("登录", top_k=5, explain=True)
+
+        paths = {p["name"]: p for p in result.explanation["retrieval"]["paths"]}
+        assert paths["rag"]["status"] == "failed"
+        assert "store down" in paths["rag"]["degraded_reason"]
+        assert paths["rag"]["candidate_refs"] == []
 
 
 # ── Scope detection ─────────────────────────────────────────────────

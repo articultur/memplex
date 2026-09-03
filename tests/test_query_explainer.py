@@ -87,6 +87,58 @@ def test_search_stages_become_named_paths():
     ]
 
 
+def test_search_stage_passes_through_path_observability_fields():
+    """duration/degraded_reason/candidate_refs surface on the path entry."""
+    trace = {
+        "stages": [
+            {
+                "stage": "rag_search",
+                "status": "ok",
+                "duration_ms": 3.25,
+                "candidate_budget": 20,
+                "candidates": 2,
+                "candidate_refs": [
+                    {"id": "f1", "score": 0.9, "rank": 1, "in_final": True},
+                    {"id": "f2", "score": 0.4, "rank": 2, "in_final": False},
+                ],
+            },
+            {
+                "stage": "wiki_search",
+                "status": "empty",
+                "duration_ms": 0.5,
+                "candidate_budget": 20,
+                "candidates": 0,
+                "candidate_refs": [],
+                "degraded_reason": "path returned no candidates",
+            },
+            {
+                "stage": "graph_search",
+                "status": "failed",
+                "candidates": 0,
+                "degraded_reason": "store down",
+            },
+        ],
+    }
+    paths = build_query_explanation(trace)["retrieval"]["paths"]
+    assert paths[0] == {
+        "name": "rag",
+        "status": "ok",
+        "candidates": 2,
+        "candidate_budget": 20,
+        "duration_ms": 3.25,
+        "candidate_refs": [
+            {"id": "f1", "score": 0.9, "rank": 1, "in_final": True},
+            {"id": "f2", "score": 0.4, "rank": 2, "in_final": False},
+        ],
+    }
+    assert paths[1]["status"] == "empty"
+    assert paths[1]["degraded_reason"] == "path returned no candidates"
+    assert paths[2]["degraded_reason"] == "store down"
+    # Output refs are copies: mutating them must not bleed into the trace.
+    paths[0]["candidate_refs"][0]["id"] = "tampered"
+    assert trace["stages"][0]["candidate_refs"][0]["id"] == "f1"
+
+
 def test_merge_deduplicate_stage_sets_merged_candidates():
     trace = {"stages": [{"stage": "merge_deduplicate", "candidates": 7}]}
     out = build_query_explanation(trace)

@@ -393,7 +393,7 @@ class TestOutputFile:
         dataset_file.write_text("[]", encoding="utf-8")
 
         monkeypatch.setattr(cli, "BenchmarkEvaluator", FakeEvaluator)
-        monkeypatch.setattr(cli, "MemplexService", lambda: FakeService())
+        monkeypatch.setattr(cli, "make_benchmark_service", lambda: FakeService())
 
         out = tmp_path / "my_results.jsonl"
         cli.run_benchmark_command(
@@ -403,6 +403,66 @@ class TestOutputFile:
         )
         assert captured["output_file"] == "my_results.jsonl"
         assert captured["output_dir"] == str(tmp_path)
+
+
+# ── Per-query trace export ────────────────────────────────────────────
+
+
+class TestTraceExport:
+    def test_run_single_writes_per_query_traces(self, service, tmp_path):
+        evaluator = BenchmarkEvaluator(service, output_dir=str(tmp_path / "out"))
+        results = evaluator.run_single("memory_benchmark", "ignored", retrieval_k=5)
+        assert results
+
+        traces_file = tmp_path / "out" / "results.traces.jsonl"
+        assert traces_file.exists()
+        lines = traces_file.read_text(encoding="utf-8").splitlines()
+        assert lines
+        record = json.loads(lines[0])
+        assert record["dataset"] == "memory_benchmark"
+        trace = record["trace"]
+        assert trace["schema_version"] == 1
+        assert trace["retrieval"]["paths"]
+        for path in trace["retrieval"]["paths"]:
+            if path["status"] == "failed":
+                continue
+            assert isinstance(path["duration_ms"], float)
+            # Controlled references only: id/score/rank/in_final, no content.
+            for ref in path.get("candidate_refs", []):
+                assert set(ref) <= {"id", "score", "rank", "in_final"}
+
+    def test_traces_file_follows_output_file_stem(self, service, tmp_path):
+        evaluator = BenchmarkEvaluator(
+            service, output_dir=str(tmp_path / "out"), output_file="custom.jsonl"
+        )
+        evaluator.run_single("memory_benchmark", "ignored", retrieval_k=5)
+        assert (tmp_path / "out" / "custom.traces.jsonl").exists()
+
+    def test_capture_traces_disabled_writes_nothing(self, service, tmp_path):
+        evaluator = BenchmarkEvaluator(
+            service, output_dir=str(tmp_path / "out"), capture_traces=False
+        )
+        evaluator.run_single("memory_benchmark", "ignored", retrieval_k=5)
+        assert not (tmp_path / "out" / "results.traces.jsonl").exists()
+
+    def test_explain_proxy_forces_explain_and_delegates(self):
+        from benchmarks.evaluator import _ExplainTraceProxy
+
+        captured = {}
+        result = SimpleNamespace(explanation={"schema_version": 1})
+
+        def fake_query(text, **kwargs):
+            captured.update(kwargs)
+            return result
+
+        fake = SimpleNamespace(query=fake_query, other=42)
+        sink = []
+        proxy = _ExplainTraceProxy(fake, sink.append)
+
+        assert proxy.query("q", explain=False) is result
+        assert captured["explain"] is True
+        assert sink == [{"schema_version": 1}]
+        assert proxy.other == 42
 
 
 class TestForceSynthetic:
@@ -455,7 +515,7 @@ class TestForceSynthetic:
             return dataset_file
 
         monkeypatch.setattr(cli, "BenchmarkEvaluator", FakeEvaluator)
-        monkeypatch.setattr(cli, "MemplexService", lambda: FakeService())
+        monkeypatch.setattr(cli, "make_benchmark_service", lambda: FakeService())
         monkeypatch.setattr(cli, "download_dataset", _fake_download)
 
         cli.run_benchmark_command(
@@ -493,7 +553,7 @@ class TestForceSynthetic:
             return dataset_file
 
         monkeypatch.setattr(cli, "BenchmarkEvaluator", FakeEvaluator)
-        monkeypatch.setattr(cli, "MemplexService", lambda: FakeService())
+        monkeypatch.setattr(cli, "make_benchmark_service", lambda: FakeService())
         monkeypatch.setattr(cli, "download_dataset", _fake_download)
 
         cli.run_benchmark_command(
@@ -573,7 +633,7 @@ def test_cli_all_resolves_self_generated_without_download(tmp_path, monkeypatch)
 
     captured = {}
     monkeypatch.setattr(cli, "BenchmarkEvaluator", FakeEvaluator)
-    monkeypatch.setattr(cli, "MemplexService", lambda: FakeService())
+    monkeypatch.setattr(cli, "make_benchmark_service", lambda: FakeService())
     monkeypatch.setattr(cli, "download_dataset", _fake_download)
 
     cli.run_benchmark_command(
@@ -698,9 +758,15 @@ class TestLocomoOfficialFormat:
         assert turns[0]["timestamp"] == "2024-01-01 09:00"
         assert first.metadata["speakers"] == ["Alice", "Bob"]
         # Evidence turns become ground-truth memories; unknown dia_ids get
-        # empty content but keep their id for expected_ids alignment.
+        # empty content but keep their id for expected_ids alignment. Each
+        # memory also carries its turn timestamp for temporal seeding.
         assert first.metadata["ground_truth_memories"] == [
-            {"memory_id": "D1:2", "content": "I work at Acme.", "session_id": "session_1"}
+            {
+                "memory_id": "D1:2",
+                "content": "I work at Acme.",
+                "session_id": "session_1",
+                "timestamp": "2024-01-01 09:00",
+            }
         ]
         assert second.metadata["ground_truth_memories"][1]["content"] == ""
 
@@ -827,3 +893,67 @@ class TestEvaluatorWarmup:
         evaluator = BenchmarkEvaluator(service, output_dir=str(tmp_path / "out"))
         results = evaluator.run_single("locomo", str(path), retrieval_k=5, warmup_rounds=0)
         assert results
+
+
+# ── Recency / recall scoring contracts (2026-08 benchmark fixes) ──────────────
+
+
+class TestRecencyScoringContracts:
+    """Pin the corrected scoring semantics behind the recency/recall fixes."""
+
+    def test_score_recency_ignores_distractor_positions(self):
+        # Distractors interleaved in the retrieved list must not shift the
+        # relative ground-truth order comparison.
+        retrieved = ["noise_1", "mem_new", "noise_2", "mem_old"]
+        assert LocomoRunner._score_recency(retrieved, ["mem_new", "mem_old"]) == 1.0
+
+    def test_score_recency_detects_inversion(self):
+        retrieved = ["mem_old", "mem_new"]
+        assert LocomoRunner._score_recency(retrieved, ["mem_new", "mem_old"]) == 0.0
+
+    def test_score_recency_counts_unretrieved_as_miss(self):
+        retrieved = ["mem_new"]
+        assert LocomoRunner._score_recency(retrieved, ["mem_new", "mem_old"]) == 0.5
+
+    def test_recency_ndcg_rewards_newest_first(self):
+        from benchmarks.memory_eval import _recency_ndcg
+
+        # NDCG here is graded by age rank: retrieving the newest items
+        # (regardless of their mutual order) scores high; retrieving older
+        # ones scores low.
+        by_age = [f"age_{i}" for i in range(10)]  # newest first
+        perfect = _recency_ndcg(["age_0", "age_1", "age_2", "age_3"], by_age, top_k=4)
+        oldest = _recency_ndcg(["age_9", "age_8", "age_7", "age_6"], by_age, top_k=4)
+        assert perfect == pytest.approx(1.0)
+        assert oldest < 0.6
+
+    def test_nq_trivia_recall_is_binary_per_question(self):
+        from benchmarks.nq_trivia import _compute_retrieval_metrics
+
+        # 30 aliases, only one present in the retrieved summaries: recall
+        # must be 1.0 (aliases are surface forms of one answer), not 1/30.
+        aliases = [f"alias_{i}" for i in range(30)]
+        metrics = _compute_retrieval_metrics(["the answer is alias_3 here"], aliases)
+        assert metrics["recall@10"] == 1.0
+        assert metrics["recall@1"] == 1.0
+        assert metrics["mrr"] == 1.0
+
+    def test_nq_trivia_recall_zero_when_answer_absent(self):
+        from benchmarks.nq_trivia import _compute_retrieval_metrics
+
+        metrics = _compute_retrieval_metrics(["no answer here"], ["paris"])
+        assert metrics["recall@10"] == 0.0
+        assert metrics["mrr"] == 0.0
+
+
+class TestBenchmarkServiceIsolation:
+    def test_make_benchmark_service_uses_isolated_lite_store(self):
+        from benchmarks.evaluator import make_benchmark_service
+
+        svc = make_benchmark_service()
+        try:
+            path = svc._config.storage.path
+            assert path != os.path.expanduser("~/.memplex")
+            assert "memplex-bench-" in path
+        finally:
+            svc.stop() if hasattr(svc, "stop") else None

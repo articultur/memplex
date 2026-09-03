@@ -814,6 +814,7 @@ class AgentMemoryRuntime:
         explanation = result.explanation
         if not isinstance(explanation, dict):
             return
+        visible_ids = {item.func_id for item in result.results}
         explanation["results"] = [
             {
                 "id": item.func_id,
@@ -825,6 +826,20 @@ class AgentMemoryRuntime:
             }
             for item in result.results
         ]
+        # Per-path candidate refs carry record ids and must be scrubbed to
+        # the same authorized set -- a denied record cannot survive there.
+        retrieval = explanation.get("retrieval")
+        if isinstance(retrieval, dict):
+            for path in retrieval.get("paths") or []:
+                if not isinstance(path, dict):
+                    continue
+                refs = path.get("candidate_refs")
+                if isinstance(refs, list):
+                    path["candidate_refs"] = [
+                        ref
+                        for ref in refs
+                        if isinstance(ref, dict) and ref.get("id") in visible_ids
+                    ]
         budget = explanation.get("budget")
         if isinstance(budget, dict):
             budget["tokens_used"] = result.tokens_used
