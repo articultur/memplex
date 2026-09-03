@@ -466,3 +466,134 @@ def test_manifest_warm_settings_match_actual_dataset_invocations(
         expected = {selection: expected[selection]}
     assert warm_by_dataset == expected
     assert {call["dataset"]: call["warm"] for call in captured["benchmark_calls"]} == warm_by_dataset
+
+
+# ── public data-dir mode ─────────────────────────────────────────────
+
+
+def test_public_mode_refuses_datasets_without_local_file_or_hf_mapping(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed: a dataset resolvable only via the synthetic generator
+    must raise in public mode instead of silently substituting data."""
+    with pytest.raises(ValueError, match="refusing to silently substitute"):
+        runner.main(
+            [
+                "run",
+                "--data-dir",
+                str(tmp_path),
+                "--dataset",
+                "longmemeval",
+                "--run-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+
+
+def test_public_mode_rejects_synthetic_flag_combination(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        runner.main(
+            [
+                "run",
+                "--synthetic",
+                "--data-dir",
+                str(tmp_path),
+                "--dataset",
+                "popqa",
+                "--run-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+
+
+def test_public_mode_requires_a_mode_flag(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        runner.main(
+            [
+                "run",
+                "--dataset",
+                "popqa",
+                "--run-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+
+
+def test_public_mode_manifest_marks_real_data_not_synthetic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-placed local file runs through the real benchmark path and the
+    manifest records source_kind=public_local_file, synthetic=false."""
+    import tempfile
+
+    data_dir = tmp_path / "public"
+    data_dir.mkdir()
+    # PopQA official-format file: the loader parses {question, subject,
+    # relation, object} rows directly.
+    data_dir.joinpath("popqa.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "pub-1",
+                    "question": "What editor does the user prefer?",
+                    "subject": "editor preference",
+                    "relation": "prefers",
+                    "object": "Neovim",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+
+    rc = runner.main(
+        [
+            "run",
+            "--data-dir",
+            str(data_dir),
+            "--dataset",
+            "popqa",
+            "--run-dir",
+            str(run_dir),
+        ]
+    )
+    assert rc == 0
+
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["config"]["public"] is True
+    assert manifest["config"]["synthetic"] is False
+    datasets = {
+        entry["name"]: entry for entry in manifest["datasets"]
+    }
+    assert datasets["popqa.json"]["source_kind"] == "public_local_file"
+    assert datasets["popqa.json"]["synthetic"] is False
+    recorded = manifest["command"]
+    assert "--data-dir" in recorded
+    assert "--synthetic" not in recorded
+    # And the bundle verifies under the strict schema.
+    verified = runner.verify_bundle(run_dir)
+    assert verified["evidence_level"]
+
+
+def test_public_mode_local_file_beats_hf_and_hf_beats_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolution order in public mode: local file first (no network)."""
+    data_dir = tmp_path / "public"
+    data_dir.mkdir()
+    data_dir.joinpath("popqa.json").write_text(
+        json.dumps([{"id": "p1", "question": "q?", "subject": "s", "object": "o"}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runner,
+        "download_dataset",
+        lambda *_, **__: pytest.fail("local file must win without a download"),
+    )
+
+    class _Args:
+        pass
+
+    resolved, kind = runner._resolve_public_dataset("popqa", data_dir, None)
+    assert resolved == data_dir / "popqa.json"
+    assert kind == "public_local_file"
