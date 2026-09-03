@@ -82,7 +82,7 @@ dev = [
     "pytest-timeout>=2.3,<3",  # per-test hard stop; CI passes --timeout=120
     # ruff 0.16 broadened default rule selection; the codebase is lint-clean on
     # the 0.15 line. Cap until the codebase is migrated to the newer defaults.
-    "ruff>=0.1.0,<0.16",
+    "ruff>=0.1.0,<0.17",
     # HTTP adapter deps so test_sync / test_http_api run under a plain dev install
     "fastapi>=0.100.0,<1",
     "uvicorn>=0.23.0,<1",
