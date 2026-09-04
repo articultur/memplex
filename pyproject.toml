@@ -43,7 +43,7 @@ http = [
 ]
 llm = [
     "anthropic>=0.30.0,<1",
-    "openai>=1.0.0,<3",
+    "openai>=1.0.0,<4",
 ]
 postgres = [
     "psycopg2-binary>=2.9,<3",
