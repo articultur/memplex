@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
+from typing import ClassVar
 
 import pytest
 
@@ -38,7 +39,7 @@ def _batch() -> SyncBatch:
         SyncNodeType.FUNCTION,
         SyncEntityKey.node("fn-inbound"),
         SyncOperation.UPSERT,
-        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=timezone.utc), origin, event_id)),
+        str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC), origin, event_id)),
         SyncScope("tenant", "owner", "workspace", "user", None, None),
         {"id": "fn-inbound"},
     )
@@ -66,7 +67,7 @@ def _two_event_batch() -> tuple[bytes, str]:
         SyncOperation.UPSERT,
         str(
             SyncVersion.create(
-                datetime(2026, 8, 12, tzinfo=timezone.utc),
+                datetime(2026, 8, 12, tzinfo=UTC),
                 "remote-inbound",
                 "123e4567-e89b-42d3-a456-426614174403",
             )
@@ -356,9 +357,9 @@ class _SyncTestRunner:
 
 
 class _SyncTestPoolManager:
-    init_calls: list[object] = []
-    close_calls: list[str] = []
-    actual_role_by_dsn: dict[str, PostgresApplicationPrincipal] = {}
+    init_calls: ClassVar[list[object]] = []
+    close_calls: ClassVar[list[str]] = []
+    actual_role_by_dsn: ClassVar[dict[str, PostgresApplicationPrincipal]] = {}
     init_blocker: threading.Event | None = None
     init_started: threading.Event | None = None
 
@@ -573,9 +574,9 @@ def test_sync_resources_no_partial_publish_when_targets_mismatch(monkeypatch) ->
 
     assert resources.state == "FAULTED"
     with pytest.raises(RuntimeError, match="not ready"):
-        resources.ready_pool
+        _ = resources.ready_pool
     with pytest.raises(RuntimeError, match="not ready"):
-        resources.executor
+        _ = resources.executor
     assert _SyncTestPoolManager.close_calls == [
         "close:postgresql://app",
     ]
@@ -1055,7 +1056,7 @@ def test_sync_resources_init_race_with_close_converges_to_closed(monkeypatch) ->
     def ensure() -> None:
         try:
             resources.ensure_ready(VectorCapabilityRequest(dim=0, policy="disabled"), "development")
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             errors.append(exc)
 
     worker = threading.Thread(target=ensure)

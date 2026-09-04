@@ -39,7 +39,7 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.classify_intent(query, context)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 errors.append(f"{p.__class__.__name__}: {exc}")
                 logger.debug("classify_intent fallback: %s", errors[-1])
         return await self._fallback().classify_intent(query, context)
@@ -48,7 +48,7 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.summarize(content, max_tokens)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("summarize fallback: %s: %s", p.__class__.__name__, exc)
         return content[:max_tokens]
 
@@ -56,7 +56,7 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.extract_structured(prompt, schema)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("extract_structured fallback: %s: %s", p.__class__.__name__, exc)
         return {}
 
@@ -64,7 +64,7 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.generate_hypothetical(query)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("generate_hypothetical fallback: %s: %s", p.__class__.__name__, exc)
         return query
 
@@ -72,7 +72,7 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.complete(prompt)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("complete fallback: %s: %s", p.__class__.__name__, exc)
         return ""
 
@@ -80,6 +80,6 @@ class FallbackChain:
         for p in self._providers:
             try:
                 return await p.complete_json(prompt)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("complete_json fallback: %s: %s", p.__class__.__name__, exc)
         return {}

@@ -16,10 +16,10 @@ from memplex.llm.provider import LLMProvider, create_provider
 from memplex.llm.sanitizer import LLMPromptSanitizer
 
 __all__ = [
-    "LLMProvider",
     "FallbackChain",
+    "IndirectInjectionGuard",
     "LLMEnhancer",
     "LLMPromptSanitizer",
-    "IndirectInjectionGuard",
+    "LLMProvider",
     "create_provider",
 ]

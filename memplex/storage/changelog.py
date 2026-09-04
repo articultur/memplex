@@ -11,7 +11,6 @@ import logging
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 from memplex.models import ChangelogEvent
 
@@ -26,10 +25,10 @@ class ChangelogStore:
     Data path: ``~/.memplex/changelog.json``
     """
 
-    def __init__(self, path: Optional[Path] = None, *, managed: bool = False) -> None:
+    def __init__(self, path: Path | None = None, *, managed: bool = False) -> None:
         self._path = path or Path("~/.memplex/changelog.json").expanduser()
         self._managed = managed
-        self._events: List[ChangelogEvent] = []
+        self._events: list[ChangelogEvent] = []
         if not managed:
             self._load()
 
@@ -41,11 +40,11 @@ class ChangelogStore:
         if not self._managed:
             self._save()
 
-    def snapshot(self) -> List[ChangelogEvent]:
+    def snapshot(self) -> list[ChangelogEvent]:
         """Return a detached snapshot; managed Lite owns disk publication."""
         return copy.deepcopy(self._events)
 
-    def replace(self, events: List[ChangelogEvent]) -> None:
+    def replace(self, events: list[ChangelogEvent]) -> None:
         """Replace in-memory events.  Managed stores never write independently."""
         self._events = copy.deepcopy(events)
         if not self._managed:
@@ -55,7 +54,7 @@ class ChangelogStore:
         self,
         func_id: str,
         limit: int = 20,
-    ) -> List[ChangelogEvent]:
+    ) -> list[ChangelogEvent]:
         """Return the most recent events for *func_id*, newest first."""
         matching = [e for e in self._events if e.func_id == func_id]
         matching.sort(key=lambda e: e.timestamp, reverse=True)
@@ -118,7 +117,7 @@ class ChangelogStore:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             self._events = [self._deserialize_event(d) for d in raw]
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to load changelog from %s", self._path)
 
     def _save(self) -> None:

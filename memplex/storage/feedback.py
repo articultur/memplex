@@ -18,11 +18,11 @@ import logging
 import tempfile
 from collections.abc import Mapping
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from memplex.auth import (
     AuthorizationContext,
@@ -151,13 +151,13 @@ def _feedback_is_visible(
 def _sqlite_scope(context: AuthorizationContext) -> tuple[str, tuple[str, ...]]:
     """Return the parameterized SQLite equivalent of the memory ACL."""
     return (
-        "tenant_id=? AND ("
-        "(visibility='user' AND owner_subject_id=?) "
-        "OR (visibility='workspace' AND workspace_id=?) "
-        "OR (visibility='session' AND workspace_id=? AND owner_subject_id=? "
-        "AND ?<>'' AND ?<>'' "
-        "AND COALESCE(json_extract(provenance, '$.agent_id'), '')<>'' "
-        "AND COALESCE(json_extract(provenance, '$.session_id'), '')<>'' "
+        "tenant_id=? AND (" +
+        "(visibility='user' AND owner_subject_id=?) " +
+        "OR (visibility='workspace' AND workspace_id=?) " +
+        "OR (visibility='session' AND workspace_id=? AND owner_subject_id=? " +
+        "AND ?<>'' AND ?<>'' " +
+        "AND COALESCE(json_extract(provenance, '$.agent_id'), '')<>'' " +
+        "AND COALESCE(json_extract(provenance, '$.session_id'), '')<>'' " +
         "AND json_extract(provenance, '$.agent_id')=? "
         "AND json_extract(provenance, '$.session_id')=?))",
         (
@@ -267,15 +267,15 @@ def _prepare_postgres_feedback(
 class FeedbackStore(Protocol):
     """Feedback persistence interface."""
 
-    def authorized(self, context: AuthorizationContext) -> "FeedbackStore": ...
+    def authorized(self, context: AuthorizationContext) -> FeedbackStore: ...
 
     def record(self, feedback: MemoryFeedback) -> None: ...
 
-    def get_pending(self) -> List[PendingReview]: ...
+    def get_pending(self) -> list[PendingReview]: ...
 
     def resolve(self, memory_id: str, field_role: str, resolution: str) -> None: ...
 
-    def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]: ...
+    def get_history(self, memory_id: str, limit: int = 50) -> list[MemoryFeedback]: ...
 
     def clear(self) -> None: ...
 
@@ -329,7 +329,7 @@ def _deserialize_feedback(d: dict) -> MemoryFeedback:
     if isinstance(ts, str):
         ts = datetime.fromisoformat(ts)
     elif ts is None:
-        ts = datetime.now()
+        ts = datetime.now(UTC)
 
     reviewed = d.get("needs_review_until")
     if isinstance(reviewed, str):
@@ -371,13 +371,13 @@ class LiteFeedbackStore:
 
     def __init__(
         self,
-        path: Optional[Path] = None,
+        path: Path | None = None,
         *,
         require_authorization: bool = False,
     ) -> None:
         self._path = path or Path("~/.memplex/feedback.json").expanduser()
         self._require_authorization = require_authorization
-        self._records: List[MemoryFeedback] = []
+        self._records: list[MemoryFeedback] = []
         self._load()
 
     def authorized(self, context: AuthorizationContext) -> _AuthorizedFeedbackStore:
@@ -405,9 +405,9 @@ class LiteFeedbackStore:
         self._records.append(feedback)
         self._save()
 
-    def get_pending(self) -> List[PendingReview]:
+    def get_pending(self) -> list[PendingReview]:
         context = self._context()
-        groups: Dict[str, List[MemoryFeedback]] = {}
+        groups: dict[str, list[MemoryFeedback]] = {}
         for fb in self._records:
             if (
                 not self._visible(fb, context)
@@ -418,7 +418,7 @@ class LiteFeedbackStore:
             key = f"{fb.memory_id}:{fb.field_role}"
             groups.setdefault(key, []).append(fb)
 
-        pending: List[PendingReview] = []
+        pending: list[PendingReview] = []
         for key, fbs in groups.items():
             mem_id, role = key.split(":", 1)
             pending.append(
@@ -443,11 +443,11 @@ class LiteFeedbackStore:
                 and fb.resolved_at is None
             ):
                 fb.needs_review = False
-                fb.resolved_at = datetime.now()
+                fb.resolved_at = datetime.now(UTC)
                 fb.resolution = resolution
         self._save()
 
-    def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]:
+    def get_history(self, memory_id: str, limit: int = 50) -> list[MemoryFeedback]:
         context = self._context()
         matching = [
             fb
@@ -455,7 +455,7 @@ class LiteFeedbackStore:
             if fb.memory_id == memory_id and self._visible(fb, context)
         ]
         matching.sort(
-            key=lambda fb: fb.timestamp if isinstance(fb.timestamp, datetime) else datetime.min,
+            key=lambda fb: fb.timestamp if isinstance(fb.timestamp, datetime) else datetime.min,  # noqa: DTZ901 - naive sentinel only orders non-datetime fallbacks
             reverse=True,
         )
         return matching[:limit]
@@ -478,7 +478,7 @@ class LiteFeedbackStore:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             self._records = [_deserialize_feedback(d) for d in raw]
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to load feedback from %s", self._path)
 
     def _save(self) -> None:
@@ -509,7 +509,7 @@ class SQLiteFeedbackStore:
 
     def __init__(
         self,
-        db_path: Optional[str] = None,
+        db_path: str | None = None,
         *,
         require_authorization: bool = False,
     ) -> None:
@@ -620,7 +620,7 @@ class SQLiteFeedbackStore:
         self._conn.commit()
 
     @_connection_locked
-    def get_pending(self) -> List[PendingReview]:
+    def get_pending(self) -> list[PendingReview]:
         self._ensure_conn()
         context = self._context()
         clauses = ["needs_review=1", "resolved_at IS NULL"]
@@ -649,7 +649,7 @@ class SQLiteFeedbackStore:
     def resolve(self, memory_id: str, field_role: str, resolution: str) -> None:
         self._ensure_conn()
         context = self._context()
-        now = datetime.now().isoformat()
+        now = datetime.now(UTC).isoformat()
         clauses = [
             "memory_id=?",
             "field_role=?",
@@ -669,7 +669,7 @@ class SQLiteFeedbackStore:
         self._conn.commit()
 
     @_connection_locked
-    def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]:
+    def get_history(self, memory_id: str, limit: int = 50) -> list[MemoryFeedback]:
         self._ensure_conn()
         context = self._context()
         clauses = ["memory_id=?"]
@@ -709,7 +709,7 @@ class SQLiteFeedbackStore:
             verdict=FeedbackVerdict(r[3]),
             reason=r[4],
             source=r[5] or "user",
-            timestamp=datetime.fromisoformat(r[6]) if r[6] else datetime.now(),
+            timestamp=datetime.fromisoformat(r[6]) if r[6] else datetime.now(UTC),
             owner=r[7],
             feedback_type=r[8] or "field_value",
             old_value=r[9],
@@ -807,24 +807,24 @@ class PostgresFeedbackStore:
         """
         if _FEEDBACK_SCOPE.get() is None:
             return (
-                "tenant_id='local' AND ("
-                "(visibility='user' AND owner_subject_id='local-development') "
-                "OR (visibility='workspace' AND workspace_id='local-development') "
-                "OR (visibility='session' "
-                "AND workspace_id='local-development' "
-                "AND owner_subject_id='local-development' "
+                "tenant_id='local' AND (" +
+                "(visibility='user' AND owner_subject_id='local-development') " +
+                "OR (visibility='workspace' AND workspace_id='local-development') " +
+                "OR (visibility='session' " +
+                "AND workspace_id='local-development' " +
+                "AND owner_subject_id='local-development' " +
                 "AND provenance->>'agent_id'='memplex' "
                 "AND provenance->>'session_id'='local-development'))",
                 (),
             )
         return (
-            "tenant_id=%s AND ("
-            "(visibility='user' AND owner_subject_id=%s) "
-            "OR (visibility='workspace' AND workspace_id=%s) "
-            "OR (visibility='session' AND workspace_id=%s AND owner_subject_id=%s "
-            "AND %s<>'' AND %s<>'' "
-            "AND COALESCE(provenance->>'agent_id', '')<>'' "
-            "AND COALESCE(provenance->>'session_id', '')<>'' "
+            "tenant_id=%s AND (" +
+            "(visibility='user' AND owner_subject_id=%s) " +
+            "OR (visibility='workspace' AND workspace_id=%s) " +
+            "OR (visibility='session' AND workspace_id=%s AND owner_subject_id=%s " +
+            "AND %s<>'' AND %s<>'' " +
+            "AND COALESCE(provenance->>'agent_id', '')<>'' " +
+            "AND COALESCE(provenance->>'session_id', '')<>'' " +
             "AND provenance->>'agent_id'=%s "
             "AND provenance->>'session_id'=%s))",
             (
@@ -886,7 +886,7 @@ class PostgresFeedbackStore:
                 ),
             )
 
-    def get_pending(self) -> List[PendingReview]:
+    def get_pending(self) -> list[PendingReview]:
         context = self._context()
         scope_predicate, scope_params = self._scope_predicate(context)
         cur = self._pool_manager.read_cursor(self._bind_transaction_scope, context)
@@ -902,8 +902,8 @@ class PostgresFeedbackStore:
         except BaseException:
             try:
                 cur.close()
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise
         else:
             cur.close()
@@ -934,7 +934,7 @@ class PostgresFeedbackStore:
                 ),
             )
 
-    def get_history(self, memory_id: str, limit: int = 50) -> List[MemoryFeedback]:
+    def get_history(self, memory_id: str, limit: int = 50) -> list[MemoryFeedback]:
         context = self._context()
         scope_predicate, scope_params = self._scope_predicate(context)
         cur = self._pool_manager.read_cursor(self._bind_transaction_scope, context)
@@ -952,8 +952,8 @@ class PostgresFeedbackStore:
         except BaseException:
             try:
                 cur.close()
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise
         else:
             cur.close()
@@ -978,7 +978,7 @@ class PostgresFeedbackStore:
             verdict=FeedbackVerdict(r[3]),
             reason=r[4],
             source=r[5] or "user",
-            timestamp=r[6] or datetime.now(),
+            timestamp=r[6] or datetime.now(UTC),
             owner=r[7],
             feedback_type=r[8] or "field_value",
             old_value=r[9],

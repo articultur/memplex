@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -163,7 +163,7 @@ def test_dispatch_status_and_terminal_rejection_only_cover_local_origin(
     store.sync_register_target("remote-b")
     store.add(_function("local-delivery"), _source())
     remote = _remote_event(
-        "remote-delivery", occurred_at=datetime(2026, 8, 11, tzinfo=timezone.utc)
+        "remote-delivery", occurred_at=datetime(2026, 8, 11, tzinfo=UTC)
     )
     store.sync_apply_batch(
         SyncBatch(1, str(uuid.uuid4()), "remote-a", (remote,))
@@ -173,7 +173,7 @@ def test_dispatch_status_and_terminal_rejection_only_cover_local_origin(
     assert store.sync_dispatch_status().pending == 1
     delivery = store.sync_claim("remote-b", limit=10, lease_seconds=30)[0]
     store.sync_dead_letter(
-        delivery, "remote_batch_rejected", datetime.now(timezone.utc)
+        delivery, "remote_batch_rejected", datetime.now(UTC)
     )
 
     assert store.sync_dispatch_status().dead_letters == 1
@@ -277,7 +277,7 @@ def test_stream_and_snapshot_cursors_must_match_lite_tenant_binding(
     store = _store(tmp_path)
     store.add(_function("bound-function"), _source())
     page = store.sync_page("remote-b", "consumer-b", None, 10)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     wrong_stream_cursor = SyncCursorClaims(
         1,
         "key-1",
@@ -325,7 +325,7 @@ def test_snapshot_pages_are_stable_and_survive_reopen(tmp_path: Path) -> None:
     assert first.has_more is True
     assert first.next_anchor is not None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cursor = SyncCursorClaims(
         1,
         "key-1",
@@ -351,7 +351,7 @@ def test_missing_verified_snapshot_is_reported_as_expired(tmp_path: Path) -> Non
     store = _store(tmp_path)
     store.add(_function("expired"), _source())
     snapshot = store.sync_create_snapshot("remote-b", "consumer-b", "request-1", 1)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     claims = SyncCursorClaims(
         1,
         "key-1",
@@ -375,10 +375,10 @@ def test_stream_cursor_pins_retention_until_confirmed_progress(tmp_path: Path) -
     store.add(_function("cursor-item"), _source())
     page = store.sync_page("remote-b", "consumer-b", None, 10)
     assert len(page.items) == 1
-    compact_at = datetime.now(timezone.utc) + timedelta(seconds=2)
+    compact_at = datetime.now(UTC) + timedelta(seconds=2)
     assert store.sync_compact(compact_at, limit=10) == 0
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cursor = SyncCursorClaims(
         1,
         "key-1",
@@ -401,7 +401,7 @@ def test_apply_batch_is_atomic_idempotent_lww_and_no_echo(tmp_path: Path) -> Non
     store = _store(tmp_path)
     store.sync_register_target("remote-a")
     store.sync_register_target("remote-b")
-    occurred_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    occurred_at = datetime(2026, 1, 1, tzinfo=UTC)
     event = _remote_event("remote-function", occurred_at=occurred_at)
     batch = SyncBatch(1, str(uuid.uuid4()), "remote-a", (event,))
 
@@ -433,7 +433,7 @@ def test_mixed_origin_delivery_is_pull_only_and_cursor_confirmation_acks_target(
     store.sync_register_target("remote-b")
     event = _remote_event(
         "remote-function",
-        occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     store.sync_apply_batch(
         SyncBatch(1, str(uuid.uuid4()), "remote-a", (event,))
@@ -447,7 +447,7 @@ def test_mixed_origin_delivery_is_pull_only_and_cursor_confirmation_acks_target(
 
     page = store.sync_page("remote-b", "consumer-b", None, 10)
     assert [item.event.event_id for item in page.items] == [event.event_id]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cursor = SyncCursorClaims(
         1,
         "key-1",
@@ -472,7 +472,7 @@ def test_apply_page_advances_cursor_atomically_and_compaction_honours_delivery(
 ) -> None:
     store = _store(tmp_path)
     store.sync_register_target("remote-b")
-    event = _remote_event("from-page", occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    event = _remote_event("from-page", occurred_at=datetime(2025, 1, 1, tzinfo=UTC))
     page = SyncPage((SyncStreamItem(1, event),), 1, 1, False)
 
     applied = store.sync_apply_page("remote-a", page)
@@ -481,9 +481,9 @@ def test_apply_page_advances_cursor_atomically_and_compaction_honours_delivery(
     assert _store(tmp_path).get("from-page") is not None
     assert store.sync_apply_page("remote-a", page).applied == 0
 
-    assert store.sync_compact(datetime(2030, 1, 1, tzinfo=timezone.utc), limit=10) == 0
+    assert store.sync_compact(datetime(2030, 1, 1, tzinfo=UTC), limit=10) == 0
     pulled = store.sync_page("remote-b", "consumer-b", None, 10)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store.sync_page(
         "remote-b",
         "consumer-b",
@@ -502,7 +502,7 @@ def test_apply_page_advances_cursor_atomically_and_compaction_honours_delivery(
         ),
         10,
     )
-    assert store.sync_compact(datetime(2030, 1, 1, tzinfo=timezone.utc), limit=10) == 1
+    assert store.sync_compact(datetime(2030, 1, 1, tzinfo=UTC), limit=10) == 1
 
 
 def test_sparse_remote_page_applies_atomically_replays_after_reopen_and_does_not_pin_compaction(
@@ -510,10 +510,10 @@ def test_sparse_remote_page_applies_atomically_replays_after_reopen_and_does_not
 ) -> None:
     store = _store(tmp_path, retention_min_seconds=1)
     first = _remote_event(
-        "sparse-first", occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
+        "sparse-first", occurred_at=datetime(2025, 1, 1, tzinfo=UTC)
     )
     second = _remote_event(
-        "sparse-second", occurred_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+        "sparse-second", occurred_at=datetime(2025, 1, 2, tzinfo=UTC)
     )
     page = SyncPage(
         (SyncStreamItem(3, first), SyncStreamItem(8, second)), 8, 8, False
@@ -536,7 +536,7 @@ def test_sparse_remote_page_applies_atomically_replays_after_reopen_and_does_not
         "conflict": 0,
         "cursor_advanced": 8,
     }
-    assert reopened.sync_compact(datetime(2030, 1, 1, tzinfo=timezone.utc), limit=10) == 2
+    assert reopened.sync_compact(datetime(2030, 1, 1, tzinfo=UTC), limit=10) == 2
 
 
 def test_outbound_cursor_remote_id_cannot_impersonate_inbound_namespace(
@@ -550,7 +550,7 @@ def test_outbound_cursor_remote_id_cannot_impersonate_inbound_namespace(
     # The outbound consumer is still at sequence zero, so the local outbox
     # event must remain pinned regardless of the remote identifier text.
     assert store.sync_compact(
-        datetime.now(timezone.utc) + timedelta(seconds=2), limit=10
+        datetime.now(UTC) + timedelta(seconds=2), limit=10
     ) == 0
     state = store._durability.load_authoritative().memory["sync"]
     assert state["cursors"][0]["remote_id"] == reserved_looking_remote
@@ -566,11 +566,11 @@ def test_invalid_inbound_page_is_rejected_before_any_lite_pair_write(
     before_memory = (tmp_path / "memory.json").read_bytes()
     before_changelog = (tmp_path / "changelog.json").read_bytes()
     first = _remote_event(
-        "incoming-first", occurred_at=datetime(2025, 1, 1, tzinfo=timezone.utc)
+        "incoming-first", occurred_at=datetime(2025, 1, 1, tzinfo=UTC)
     )
     if invalid == "cross_tenant":
         second = _remote_event(
-            "incoming-second", occurred_at=datetime(2025, 1, 2, tzinfo=timezone.utc)
+            "incoming-second", occurred_at=datetime(2025, 1, 2, tzinfo=UTC)
         )
         second = SyncEvent(
             1,
@@ -620,7 +620,7 @@ def test_all_local_node_types_edges_and_tombstones_share_capture_commit(
         "REFERENCES",
         weight=0.5,
         evidence=["unit"],
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     store.merge(GraphData(nodes=[left, right], edges=[edge]))
     store.add_fact(_identity(Fact(id="fact-a", subject="s", predicate="p", object_="o")))
@@ -705,7 +705,7 @@ def test_clear_sync_page_orders_edge_tombstone_before_function_tombstones(
         "destination", "destination-consumer", None, 10
     )
     destination.sync_apply_page("source", initial_page)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cursor = SyncCursorClaims(
         1,
         "key-1",
@@ -805,8 +805,8 @@ def test_apply_batch_mid_event_fault_rolls_back_business_sync_and_pair_bytes(
 ) -> None:
     store = _store(tmp_path)
     store.sync_register_target("remote-b")
-    first = _remote_event("first-remote", occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
-    second = _remote_event("second-remote", occurred_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    first = _remote_event("first-remote", occurred_at=datetime(2026, 1, 1, tzinfo=UTC))
+    second = _remote_event("second-remote", occurred_at=datetime(2026, 1, 2, tzinfo=UTC))
     batch = SyncBatch(1, str(uuid.uuid4()), "remote-a", (first, second))
     memory_before = (tmp_path / "memory.json").read_bytes()
     changelog_before = (tmp_path / "changelog.json").read_bytes()

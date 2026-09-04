@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import tempfile
-from typing import Any, Optional, Tuple
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class URLHandler:
     """Handles remote URL input and type resolution."""
 
-    URL_TYPE_PATTERNS = {
+    URL_TYPE_PATTERNS: ClassVar[dict[str, list[str]]] = {
         "pdf": [r"\.pdf$", r"/[^/]+\.pdf", r"\?.*\.pdf"],
         "markdown": [r"\.md$", r"\.markdown$", r"\.mdown$"],
         "html": [r"\.html?$", r"\.htm$"],
@@ -21,7 +21,7 @@ class URLHandler:
         "docx": [r"\.docx$"],
     }
 
-    DOMAIN_PARSERS = {
+    DOMAIN_PARSERS: ClassVar[dict[str, str]] = {
         "github.com": "github",
         "gist.github.com": "gist",
         "confluence": "confluence",
@@ -72,7 +72,7 @@ class URLHandler:
 
         return "generic"
 
-    def extract_filename(self, url: str) -> Optional[str]:
+    def extract_filename(self, url: str) -> str | None:
         """Extract filename from URL path."""
         parsed = urlparse(url)
         path = parsed.path
@@ -84,7 +84,7 @@ class URLHandler:
 
         return None
 
-    def _resolve_safe_ip(self, hostname: str) -> Optional[str]:
+    def _resolve_safe_ip(self, hostname: str) -> str | None:
         """Resolve a hostname and return the first safe IP, or ``None``.
 
         This is the single-resolution point for the SSRF guard: the
@@ -147,7 +147,7 @@ class URLHandler:
         return True
 
     @staticmethod
-    def _read_limited(response: Any, limit: int) -> Optional[bytes]:
+    def _read_limited(response: Any, limit: int) -> bytes | None:
         """Read at most ``limit`` bytes; return None if the body exceeds it."""
         total = 0
         chunks = []
@@ -178,7 +178,7 @@ class URLHandler:
             opener.add_handler(handler)
         return opener
 
-    def fetch(self, url: str) -> Optional[Tuple[str, str]]:
+    def fetch(self, url: str) -> tuple[str, str] | None:
         """
         Fetch content from URL with SSRF protection.
 
@@ -271,13 +271,13 @@ class URLHandler:
                         os.path.splitext(self.extract_filename(current_url) or "image.png")[1]
                         or ".png"
                     )
-                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                    temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)  # noqa: SIM115 - delete=False temp file must outlive the block
                     temp_file.write(data)
                     temp_file.close()
                     return ("image", temp_file.name)
 
                 if "pdf" in content_type or self.resolve_type(current_url) == "pdf":
-                    temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)  # noqa: SIM115 - delete=False temp file must outlive the block
                     temp_file.write(data)
                     temp_file.close()
                     return ("pdf", temp_file.name)
@@ -288,7 +288,7 @@ class URLHandler:
             logger.warning("Too many redirects for URL %s", url)
             return None
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to fetch URL %s: %s", url, e)
             return None
 

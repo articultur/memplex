@@ -45,18 +45,19 @@ configured warn threshold. Manual compaction remains available from the CLI.
 
 ## Install
 
-No source checkout is required.
+No source checkout is required. The public registry's latest stable
+release is **3.2.7** (this checkout tracks unreleased 3.3.0 development):
 
 ```bash
-npx memplex@3.3.0 setup
+npx memplex@3.2.7 setup
 ```
 
 Install into a specific agent:
 
 ```bash
-npx memplex@3.3.0 setup --agent codex --project-path "$PWD"
-npx memplex@3.3.0 setup --agent claude-code --project-path "$PWD"
-npx memplex@3.3.0 setup --agent openclaw --project-path "$PWD"
+npx memplex@3.2.7 setup --agent codex --project-path "$PWD"
+npx memplex@3.2.7 setup --agent claude-code --project-path "$PWD"
+npx memplex@3.2.7 setup --agent openclaw --project-path "$PWD"
 npx memplex@3.3.0 setup --agent hermes --project-path "$PWD"
 ```
 

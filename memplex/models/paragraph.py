@@ -1,7 +1,6 @@
 """L1: Paragraph and Sentence models."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
@@ -25,20 +24,20 @@ class Paragraph:
     section: str
     raw_text: str
     semantic_unit: bool = True
-    sentences: List[Sentence] = field(default_factory=list)
-    sentence_relations: List[SentenceRelation] = field(default_factory=list)
+    sentences: list[Sentence] = field(default_factory=list)
+    sentence_relations: list[SentenceRelation] = field(default_factory=list)
     confidence: float = 1.0
     needs_review: bool = False
 
 
 @dataclass
 class ParagraphCollection:
-    paragraphs: List[Paragraph] = field(default_factory=list)
+    paragraphs: list[Paragraph] = field(default_factory=list)
 
     def add(self, paragraph: Paragraph) -> None:
         self.paragraphs.append(paragraph)
 
-    def get_by_id(self, para_id: str) -> Optional[Paragraph]:
+    def get_by_id(self, para_id: str) -> Paragraph | None:
         for p in self.paragraphs:
             if p.id in (f"para_{para_id}", para_id):
                 return p

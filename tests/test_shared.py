@@ -12,7 +12,7 @@ from pathlib import Path
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 
-from memplex.adapters._shared import (  # noqa: E402
+from memplex.adapters._shared import (
     dataclass_to_dict,
     get_plugin_source_dir,
     marketplace_json,

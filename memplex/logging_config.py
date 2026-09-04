@@ -33,7 +33,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any, Optional
 
 # Reserved attributes that should not leak into the JSON "extra" payload.
@@ -144,7 +144,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         # ISO-8601, timezone-aware timestamp.
-        timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        timestamp = datetime.fromtimestamp(record.created, tz=UTC).isoformat()
         payload = {
             "timestamp": timestamp,
             "level": record.levelname,
@@ -170,11 +170,11 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def _truthy(value: Optional[str]) -> bool:
+def _truthy(value: str | None) -> bool:
     return value is not None and value.lower() in ("1", "true", "yes", "on")
 
 
-def configure_logging(json_mode: Optional[bool] = None, level: Optional[str] = None) -> None:
+def configure_logging(json_mode: bool | None = None, level: str | None = None) -> None:
     """Configure the root logger.
 
     Parameters

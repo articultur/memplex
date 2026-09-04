@@ -1,7 +1,6 @@
 """Term-based association using dictionary lookup."""
 
 import logging
-from typing import List, Optional, Set, Tuple
 
 from memplex.core.dictionaries import TermDictionary
 from memplex.models.memory import Function
@@ -15,7 +14,7 @@ class TermMapper:
     def __init__(self, dictionary: TermDictionary = None):
         self.dictionary = dictionary or TermDictionary()
 
-    def embed_text(self, text: str) -> Optional[List[float]]:
+    def embed_text(self, text: str) -> list[float] | None:
         """Generate embedding vector using sentence-transformers when available."""
         try:
             from sentence_transformers import SentenceTransformer
@@ -27,17 +26,17 @@ class TermMapper:
         except ImportError:
             logger.debug("sentence-transformers not installed; skipping term embedding")
             return None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("Term embedding unavailable: %s", exc)
             return None
 
-    def extract_terms(self, text: str) -> Set[str]:
+    def extract_terms(self, text: str) -> set[str]:
         """Extract all matching terms from text."""
         return self.dictionary.find_matching_terms(text)
 
     def find_associations(
-        self, source_terms: Set[str], target_candidates: List[Function]
-    ) -> List[Tuple[Function, float]]:
+        self, source_terms: set[str], target_candidates: list[Function]
+    ) -> list[tuple[Function, float]]:
         """
         Find associations based on term overlap.
 
@@ -54,7 +53,7 @@ class TermMapper:
         associations.sort(key=lambda x: x[1], reverse=True)
         return associations
 
-    def _calculate_term_overlap(self, source_terms: Set[str], func: Function) -> float:
+    def _calculate_term_overlap(self, source_terms: set[str], func: Function) -> float:
         """Calculate term overlap score between source and function."""
         if not source_terms:
             return 0.0

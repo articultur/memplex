@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,11 +22,11 @@ from memplex.capacity_chaos import (
 
 
 def _timestamp(offset: timedelta = timedelta()) -> str:
-    return (datetime.now(timezone.utc) + offset).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return (datetime.now(UTC) + offset).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _report(**overrides: object) -> CapacityChaosEvidence:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     values: dict[str, object] = {
         "report_id": "018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -164,7 +164,7 @@ def test_capacity_chaos_tamper_and_freshness_fail_closed(tmp_path: Path) -> None
     with pytest.raises(CapacityChaosEvidenceError, match="capacity_chaos_evidence_invalid"):
         tampered.verify(b"c" * 32, expected_version="3.3.0")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stale_end = now - timedelta(hours=25, seconds=1)
     cases = (
         {

@@ -81,9 +81,9 @@ class TestHookRunner:
     def _run_hook(
         self,
         command: str,
-        extra_args: list = None,
-        stdin_data: str = None,
-        env: dict = None,
+        extra_args: list | None = None,
+        stdin_data: str | None = None,
+        env: dict | None = None,
     ):
         args = [sys.executable, HOOK_RUNNER, command, *(extra_args or [])]
         isolated_root = Path(tempfile.mkdtemp(prefix="memplex-hook-"))
@@ -103,7 +103,8 @@ class TestHookRunner:
             capture_output=True,
             text=True,
             timeout=30,
-            env=test_env,
+            env=test_env,check=False
+        
         )
         return result
 
@@ -189,7 +190,8 @@ class TestHookRunner:
                 **os.environ,
                 "MEMPLEX_STORAGE_BACKEND": "lite",
                 "MEMPLEX_STORAGE_PATH": str(storage_path),
-            },
+            },check=False
+        
         )
         assert recall.returncode == 0, recall.stderr
         assert "nested-hook-token" in json.loads(recall.stdout)["context"]
@@ -226,7 +228,8 @@ class TestHookRunner:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert capture.returncode == 0, capture.stderr
 
@@ -264,7 +267,8 @@ class TestHookRunner:
             capture_output=True,
             text=True,
             timeout=10,
-            env={**os.environ, "MEMPLEX_PROJECT_ROOT": str(PROJECT_ROOT)},
+            env={**os.environ, "MEMPLEX_PROJECT_ROOT": str(PROJECT_ROOT)},check=False
+        
         )
         assert r.returncode != 0
         assert "Usage" in r.stderr
@@ -968,7 +972,7 @@ class TestMCPServerTools:
     def test_json_rpc_roundtrip_via_subprocess(self, tmp_path):
         """Full JSON-RPC roundtrip through stdin/stdout."""
         cfg_path = tmp_path / "memplex.yaml"
-        cfg_path.write_text("storage:\n  backend: lite\n  path: '%s'" % str(tmp_path))
+        cfg_path.write_text(f"storage:\n  backend: lite\n  path: '{tmp_path}'")
 
         init_msg = json.dumps({"jsonrpc": "2.0", "method": "initialize", "params": {}, "id": 1})
         search_msg = json.dumps(
@@ -996,7 +1000,8 @@ class TestMCPServerTools:
                 "MEMPLEX_STORAGE_BACKEND": "lite",
                 "MEMPLEX_STORAGE_PATH": str(tmp_path / "memory"),
                 "MEMPLEX_CONFIG": str(cfg_path),
-            },
+            },check=False
+        
         )
         assert result.returncode == 0
 
@@ -1021,7 +1026,7 @@ class TestMCPServerTools:
 class TestCLI:
     """Test CLI commands via subprocess."""
 
-    def _run_cli(self, args: list, stdin_data: str = None):
+    def _run_cli(self, args: list, stdin_data: str | None = None):
         return subprocess.run(
             [sys.executable, "-m", "memplex", *args],
             input=stdin_data,
@@ -1032,7 +1037,8 @@ class TestCLI:
                 **os.environ,
                 "MEMPLEX_STORAGE_BACKEND": "lite",
                 "MEMPLEX_STORAGE_PATH": tempfile.mkdtemp(prefix="memplex-cli-"),
-            },
+            },check=False
+        
         )
 
     def test_health_command(self):
@@ -1101,7 +1107,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert capture.returncode == 0, capture.stderr
 
@@ -1127,7 +1134,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert recall.returncode == 0, recall.stderr
         data = json.loads(recall.stdout)
@@ -1165,7 +1173,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert capture.returncode == 0, capture.stderr
 
@@ -1191,7 +1200,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert recall.returncode == 0, recall.stderr
         data = json.loads(recall.stdout)
@@ -1647,7 +1657,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         assert r.returncode == 0
         data = json.loads(r.stdout)
@@ -1669,7 +1680,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         # Then unsetup
         r = subprocess.run(
@@ -1677,7 +1689,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         assert r.returncode == 0
         assert "Memplex plugin uninstalled" in r.stdout
@@ -1694,7 +1707,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         r = subprocess.run(
             [
@@ -1711,7 +1725,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         assert r.returncode == 0
         data = json.loads(r.stdout)
@@ -1724,7 +1739,8 @@ class TestCLI:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},
+            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)},check=False
+        
         )
         assert r.returncode == 0
 
@@ -1817,14 +1833,16 @@ class TestSkillGeneration:
             }
         )
         first = subprocess.run(
-            ["bash", str(hook)], input=payload, capture_output=True, text=True, timeout=30, env=env
+            ["bash", str(hook)], input=payload, capture_output=True, text=True, timeout=30, env=env, check=False
+        
         )
         assert first.returncode == 0, first.stderr
         assert rate.exists(), "rate-limit timestamp was not written"
 
         # Second call within the cooldown is skipped but still exits 0
         second = subprocess.run(
-            ["bash", str(hook)], input=payload, capture_output=True, text=True, timeout=30, env=env
+            ["bash", str(hook)], input=payload, capture_output=True, text=True, timeout=30, env=env, check=False
+        
         )
         assert second.returncode == 0, second.stderr
 
@@ -1835,7 +1853,8 @@ class TestSkillGeneration:
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
+            env=env,check=False
+        
         )
         assert third.returncode == 0, third.stderr
 
@@ -1941,7 +1960,8 @@ class TestPluginConfig:
                 "MEMPLEX_PLUGIN_ROOT": str(plugin_root),
                 "MEMPLEX_STORAGE_BACKEND": "lite",
                 "MEMPLEX_STORAGE_PATH": str(tmp_path / "wrapper-memory"),
-            },
+            },check=False
+        
         )
         assert result.returncode == 0, result.stderr
         response = json.loads(result.stdout.strip().splitlines()[0])

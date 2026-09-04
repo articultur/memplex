@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from memplex.config import MemplexConfig
@@ -25,7 +25,7 @@ def _write_report(tmp_path: Path) -> tuple[Path, str]:
     key = b"o" * 32
     config = MemplexConfig()
     config.operations.report_key_id = "ops-key"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     report = create_operations_evidence(
         metrics_snapshot={
             "request_count": 1000,

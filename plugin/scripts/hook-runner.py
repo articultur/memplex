@@ -82,7 +82,7 @@ def _version_sort_key(path: Path) -> tuple[int, ...]:
         return (0,)
 
 
-def _find_plugin_root() -> Optional[Path]:
+def _find_plugin_root() -> Path | None:
     """Find the plugin root using Claude Code's convention.
 
     Searches in order:
@@ -133,7 +133,7 @@ def _ensure_memplex_importable() -> None:
 
     # Prefer an already-installed memplex; only inject paths as a fallback.
     try:
-        import memplex  # noqa: F401
+        import memplex
 
         return
     except ImportError:
@@ -199,14 +199,11 @@ def _managed_identity() -> dict[str, Any]:
     for identity_path, expected_host_root in dict.fromkeys(candidates):
         if not identity_path.is_file():
             continue
-        try:
-            identity = load_managed_identity(
-                identity_path,
-                expected_agent="claude-code",
-                expected_host_root=expected_host_root,
-            )
-        except ManagedIdentityError:
-            raise
+        identity = load_managed_identity(
+            identity_path,
+            expected_agent="claude-code",
+            expected_host_root=expected_host_root,
+        )
         if plugin_data_identity is not None and identity_path != plugin_data_identity:
             _persist_plugin_data_identity(plugin_data_identity, identity)
         return identity
@@ -215,7 +212,7 @@ def _managed_identity() -> dict[str, Any]:
 
 def _persist_plugin_data_identity(path: Path, identity: dict[str, Any]) -> None:
     """Mirror managed identity into Claude's update-stable plugin data directory."""
-    temporary_path: Optional[Path] = None
+    temporary_path: Path | None = None
     try:
         try:
             current = json.loads(path.read_text(encoding="utf-8"))
@@ -251,7 +248,7 @@ def _persist_plugin_data_identity(path: Path, identity: dict[str, Any]) -> None:
                 pass
 
 
-def _project_path(data: Optional[dict[str, Any]] = None) -> str:
+def _project_path(data: dict[str, Any] | None = None) -> str:
     identity = _managed_identity()
     return (
         str(identity.get("project_path") or "")
@@ -264,7 +261,7 @@ def _project_path(data: Optional[dict[str, Any]] = None) -> str:
 
 def _session_id(
     default: str = "claude-code",
-    data: Optional[dict[str, Any]] = None,
+    data: dict[str, Any] | None = None,
 ) -> str:
     return (
         os.environ.get("MEMPLEX_SESSION_ID")
@@ -273,7 +270,7 @@ def _session_id(
     )
 
 
-def _user_id(data: Optional[dict[str, Any]] = None) -> str:
+def _user_id(data: dict[str, Any] | None = None) -> str:
     identity = _managed_identity()
     return (
         str(identity.get("user_id") or "")
@@ -284,7 +281,7 @@ def _user_id(data: Optional[dict[str, Any]] = None) -> str:
     )
 
 
-def _init_runtime(session_id: str = "", data: Optional[dict[str, Any]] = None):
+def _init_runtime(session_id: str = "", data: dict[str, Any] | None = None):
     """Initialize the shared agent runtime for Claude Code hooks."""
     _ensure_memplex_importable()
     from memplex.adapters.agent_runtime import AgentMemoryRuntime
@@ -312,7 +309,7 @@ def _record_runtime_failure(operation: str, error: BaseException) -> None:
         record_runtime_failure(
             _runtime_status_path(), agent="claude-code", operation=operation, error=error
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - deliberate best-effort suppression
         pass
 
 
@@ -323,17 +320,17 @@ def _clear_runtime_status(operation: str) -> None:
         clear_runtime_status_on_success(
             _runtime_status_path(), agent="claude-code", operation=operation, completed=True
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - deliberate best-effort suppression
         pass
 
 
-def _default_rate_file(data: Optional[dict[str, Any]] = None) -> Path:
+def _default_rate_file(data: dict[str, Any] | None = None) -> Path:
     """Project-scoped rate-limit marker so concurrent projects don't throttle each other."""
     digest = hashlib.sha1(_project_path(data).encode("utf-8")).hexdigest()[:12]
     return Path(tempfile.gettempdir()) / f".memplex_last_obs_{digest}"
 
 
-def _rate_file(data: Optional[dict[str, Any]] = None) -> Path:
+def _rate_file(data: dict[str, Any] | None = None) -> Path:
     override = os.environ.get("MEMPLEX_OBS_RATE_FILE")
     return Path(override) if override else _default_rate_file(data)
 
@@ -399,7 +396,7 @@ def _package_version(memplex_module: Any) -> str:
         from importlib.metadata import version as pkg_version
 
         return pkg_version("memplex")
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return getattr(memplex_module, "__version__", "unknown")
 
 
@@ -416,7 +413,7 @@ def cmd_setup() -> None:
         # Check config
         try:
             cfg = load_config()
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             # Config doesn't exist yet, that's okay for setup
             cfg = None
 
@@ -434,7 +431,7 @@ def cmd_setup() -> None:
         print(f"[Memplex] Setup failed: {e}", file=sys.stderr)
         print("[Memplex] Install memplex: pip install memplex", file=sys.stderr)
         sys.exit(1)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         print(f"[Memplex] Setup warning: {e}", file=sys.stderr)
         # Non-fatal, exit 0
 
@@ -442,7 +439,7 @@ def cmd_setup() -> None:
     sys.exit(0)
 
 
-def _session_start_query(data: Optional[dict[str, Any]] = None) -> str:
+def _session_start_query(data: dict[str, Any] | None = None) -> str:
     """Build a meaningful recall query for session start.
 
     Defaults to project-name keywords (recall is already scoped to the
@@ -467,7 +464,7 @@ def cmd_session_start() -> None:
             _print_contract("[Memplex Context]\n" + recalled.context)
         else:
             _print_contract("[Memplex] No memories yet for this project.")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         _record_runtime_failure("recall", e)
         print(f"[Memplex] session-start: {e}", file=sys.stderr)
         _print_contract()
@@ -495,7 +492,7 @@ def cmd_prompt_submit() -> None:
         else:
             _print_contract()
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         _record_runtime_failure("recall", e)
         print(f"[Memplex] prompt-submit: {e}", file=sys.stderr)
         _print_contract()
@@ -528,14 +525,14 @@ def cmd_file_context() -> None:
         else:
             _print_contract()
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         _record_runtime_failure("recall", e)
         print(f"[Memplex] file-context: {e}", file=sys.stderr)
         _print_contract()
     sys.exit(0)
 
 
-def _read_obs_rate_state(data: Optional[dict[str, Any]] = None) -> "tuple[float, str]":
+def _read_obs_rate_state(data: dict[str, Any] | None = None) -> tuple[float, str]:
     """Read (last_write_ts, last_event_key) from the observation rate file.
 
     The file holds JSON ``{"ts": ..., "key": ...}``; the legacy plain-float
@@ -562,7 +559,7 @@ def _read_obs_rate_state(data: Optional[dict[str, Any]] = None) -> "tuple[float,
 
 def _write_obs_rate_state(
     event_key: str,
-    data: Optional[dict[str, Any]] = None,
+    data: dict[str, Any] | None = None,
 ) -> None:
     """Persist the rate-limit timestamp and dedup key for the next process."""
     try:
@@ -606,7 +603,7 @@ def cmd_observation(tool_name: str = "", session_id: str = "") -> None:
             metadata={"tool_name": tool_name, "tool_input": _sanitize_payload(payload)},
         )
         _clear_runtime_status("capture")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         _record_runtime_failure("capture", e)
         print(f"[Memplex] observation write skipped: {e}", file=sys.stderr)
 
@@ -660,7 +657,7 @@ def cmd_summarize() -> None:
         )
         print(summary)
         print(OUTPUT_CONTRACT)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch with explicit fallback handling
         _record_runtime_failure("summarize", e)
         print(f"[Memplex] summarize: {e}", file=sys.stderr)
         _print_contract()

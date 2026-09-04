@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import yaml
 
@@ -74,8 +74,8 @@ class WikiCompiler:
         self,
         store: MemoryStore,
         wiki_dir: Path = DEFAULT_WIKI_DIR,
-        dual_index: Optional["DualIndexSearch"] = None,
-        graph_config: Optional["GraphConfig"] = None,
+        dual_index: DualIndexSearch | None = None,
+        graph_config: GraphConfig | None = None,
     ) -> None:
         self._store = store
         self.wiki_dir = wiki_dir
@@ -92,7 +92,7 @@ class WikiCompiler:
         trigger / condition / action / benefit sections plus cross-references
         as ``[[target_name]]`` wikilinks.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=func.id,
             name=func.name,
@@ -141,7 +141,7 @@ class WikiCompiler:
 
     def compile_fact(self, fact: Fact) -> WikiPage:
         """Generate a Wiki page for a Fact node."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=fact.id,
             name=fact.name or f"{fact.subject} {fact.predicate} {fact.object_}",
@@ -175,7 +175,7 @@ class WikiCompiler:
 
     def compile_preference(self, pref: Preference) -> WikiPage:
         """Generate a Wiki page for a Preference node."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=pref.id,
             name=pref.name or f"pref_{pref.aspect}",
@@ -210,7 +210,7 @@ class WikiCompiler:
 
     def compile_observation(self, obs: Observation) -> WikiPage:
         """Generate a Wiki page for an Observation node."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         frontmatter = self._build_frontmatter(
             page_id=obs.id,
             name=obs.name or f"obs_{obs.event[:30]}",
@@ -290,7 +290,7 @@ class WikiCompiler:
             lines.append(f"- {func.updated_at or '-'}: Updated `{func.name}` ({func.memory_type})")
         lines.append("")
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         frontmatter = self._build_frontmatter(
             page_id="index",
             name="Memplex Knowledge Base",
@@ -307,14 +307,14 @@ class WikiCompiler:
             metadata={"type": "index", "total_entities": len(all_funcs)},
         )
 
-    def compile_domain_page(self, domain: str, nodes: List[MemoryNode]) -> WikiPage:
+    def compile_domain_page(self, domain: str, nodes: list[MemoryNode]) -> WikiPage:
         """Generate a domain aggregate page.
 
         Produces the ``domain_<domain>`` page targeted by the
         ``[[domain_<domain>]]`` links in ``index.md``, listing every
         memory node that belongs to *domain*.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         page_id = f"domain_{domain}"
 
         lines: list[str] = [f"# Domain: {domain}", ""]
@@ -344,7 +344,7 @@ class WikiCompiler:
             metadata={"type": "domain", "domain": domain, "entity_count": len(nodes)},
         )
 
-    def compile_all(self) -> List[WikiPage]:
+    def compile_all(self) -> list[WikiPage]:
         """Compile all memory nodes from the store into Wiki pages.
 
         Covers all four memory types (Function / Fact / Preference /
@@ -356,9 +356,9 @@ class WikiCompiler:
         ``graph_config`` with ``community_detection_enabled`` was injected,
         community concept pages are appended as well.
         """
-        pages: List[WikiPage] = []
+        pages: list[WikiPage] = []
 
-        nodes: List[MemoryNode] = list(self._store.list_functions(limit=100000))
+        nodes: list[MemoryNode] = list(self._store.list_functions(limit=100000))
         nodes.extend(self._list_optional("list_facts"))
         nodes.extend(self._list_optional("list_preferences"))
         nodes.extend(self._list_optional("list_observations"))
@@ -367,7 +367,7 @@ class WikiCompiler:
             pages.append(self._compile_node(node))
 
         # Domain aggregate pages
-        domain_groups: Dict[str, List[MemoryNode]] = {}
+        domain_groups: dict[str, list[MemoryNode]] = {}
         for node in nodes:
             domain_groups.setdefault(node.domain or "uncategorized", []).append(node)
         for domain, members in sorted(domain_groups.items()):
@@ -380,7 +380,7 @@ class WikiCompiler:
         pages.append(self.compile_index())
         return pages
 
-    def compile_communities(self) -> List[WikiPage]:
+    def compile_communities(self) -> list[WikiPage]:
         """Compile community concept pages via GraphCommunityDetector.
 
         Returns an empty list when no ``graph_config`` was injected or
@@ -399,14 +399,14 @@ class WikiCompiler:
 
         try:
             graph = get_graph()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("Community detection skipped: get_graph failed: %s", exc)
             return []
         detector = GraphCommunityDetector(min_community_size=config.community_min_size)
         communities = detector.detect_communities(graph)
         return detector.generate_concept_pages(communities, self._store)
 
-    def _list_optional(self, method_name: str) -> List[MemoryNode]:
+    def _list_optional(self, method_name: str) -> list[MemoryNode]:
         """Call an optional per-type listing method on the store, if present."""
         lister = getattr(self._store, method_name, None)
         if not callable(lister):
@@ -426,7 +426,7 @@ class WikiCompiler:
 
     # ── Search ────────────────────────────────────────────────────────
 
-    def search(self, query: str, top_k: int = 10) -> List[SearchResult]:
+    def search(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """Search wiki pages via DualIndexSearch or fallback to file scan."""
         if self.dual_index is not None:
             return self.dual_index.search(query, top_k)
@@ -442,7 +442,7 @@ class WikiCompiler:
         - Wikilinks point to existing pages or store entries
         - Orphaned pages (no inbound links) produce warnings
         """
-        issues: List[LintIssue] = []
+        issues: list[LintIssue] = []
 
         # Read all wiki pages from disk
         pages = self._read_all_pages()
@@ -494,7 +494,7 @@ class WikiCompiler:
 
         # Orphan detection: count inbound wikilinks across entity pages
         # plus index.md (which links to every entity and domain page).
-        inbound: Dict[str, int] = {}
+        inbound: dict[str, int] = {}
         link_sources = list(pages)
         index_path = self.wiki_dir / "index.md"
         if index_path.exists():
@@ -559,7 +559,7 @@ class WikiCompiler:
                 if line_count >= MAX_LOG_LINES:
                     self._rotate_log(log_path)
 
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"- {timestamp}: {message}\n")
 
@@ -595,7 +595,7 @@ class WikiCompiler:
         return "\n".join(lines)
 
     @staticmethod
-    def _parse_frontmatter(content: str) -> Optional[dict]:
+    def _parse_frontmatter(content: str) -> dict | None:
         """Parse the YAML frontmatter block of a wiki page.
 
         Returns the parsed mapping, or ``None`` when the block is
@@ -613,7 +613,7 @@ class WikiCompiler:
         return data if isinstance(data, dict) else None
 
     @staticmethod
-    def _field_section(heading: str, values: List[FieldValue]) -> list[str]:
+    def _field_section(heading: str, values: list[FieldValue]) -> list[str]:
         """Build markdown lines for a FieldValue list."""
         if not values:
             return []
@@ -626,12 +626,12 @@ class WikiCompiler:
         lines.append("")
         return lines
 
-    def _fallback_search(self, query: str, top_k: int) -> List[SearchResult]:
+    def _fallback_search(self, query: str, top_k: int) -> list[SearchResult]:
         """Degraded search via filename matching and grep.
 
         Used when DualIndexSearch is not available (e.g. Lite backend).
         """
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         query_lower = query.lower()
 
         # Search in store
@@ -663,9 +663,9 @@ class WikiCompiler:
         results.sort(key=lambda r: r.relevance_score, reverse=True)
         return results[:top_k]
 
-    def _read_all_pages(self) -> List[WikiPage]:
+    def _read_all_pages(self) -> list[WikiPage]:
         """Read all entity pages from ``wiki_dir/entities/``."""
-        pages: List[WikiPage] = []
+        pages: list[WikiPage] = []
         entities_dir = self.wiki_dir / "entities"
         if not entities_dir.exists():
             return pages

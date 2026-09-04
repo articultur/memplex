@@ -27,14 +27,15 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, RLock, Thread
-from typing import Any, Callable, Dict, Iterator, List, Optional, cast
+from typing import Any, Optional, cast
 
 from memplex.compaction import CompactionPipeline, CompactionScope
 from memplex.models import BackgroundTask, CompactionResult, TaskInfo, TaskStatus, WorkerDrainResult
@@ -98,7 +99,7 @@ class TaskStore(TaskRepository):
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock_path = path.with_name(f"{path.name}.lock")
-        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._tasks: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
         self._poisoned = False
         self._load()
@@ -125,7 +126,7 @@ class TaskStore(TaskRepository):
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-    def _read_tasks_file(self) -> Dict[str, Dict[str, Any]]:
+    def _read_tasks_file(self) -> dict[str, dict[str, Any]]:
         if not self._path.exists():
             return {}
         try:
@@ -153,8 +154,8 @@ class TaskStore(TaskRepository):
             self._tasks = self._read_tasks_file()
 
     def _save_candidate(
-        self, candidate: Dict[str, Dict[str, Any]]
-    ) -> Dict[str, Dict[str, Any]]:
+        self, candidate: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
         """Durably replace the complete task state or raise without publication."""
         self._assert_healthy()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,13 +257,13 @@ class TaskStore(TaskRepository):
         *,
         capacity: int,
         now: datetime | None = None,
-    ) -> Optional[TaskInfo]:
+    ) -> TaskInfo | None:
         """Atomically reserve capacity while resetting one durable dead letter."""
         if type(capacity) is not int:
             raise TypeError("capacity must be an exact int")
         if capacity <= 0:
             raise ValueError("capacity must be positive")
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -306,7 +307,7 @@ class TaskStore(TaskRepository):
             self._tasks = self._save_candidate(candidate)
             return True
 
-    def get(self, task_id: str) -> Optional[TaskInfo]:
+    def get(self, task_id: str) -> TaskInfo | None:
         """Retrieve a TaskInfo by ID, or ``None``."""
         with self._lock, self._disk_lock():
             self._assert_healthy()
@@ -316,13 +317,13 @@ class TaskStore(TaskRepository):
                 return None
             return self._dict_to_info(copy.deepcopy(data))
 
-    def list_by_status(self, *statuses: TaskStatus) -> List[TaskInfo]:
+    def list_by_status(self, *statuses: TaskStatus) -> list[TaskInfo]:
         """Return all tasks matching any of the given statuses."""
         status_values = {s.value for s in statuses}
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
-            result: List[TaskInfo] = []
+            result: list[TaskInfo] = []
             for data in self._tasks.values():
                 if data.get("status") in status_values:
                     result.append(self._dict_to_info(copy.deepcopy(data)))
@@ -332,7 +333,7 @@ class TaskStore(TaskRepository):
         return len(self.list_by_status(*statuses))
 
     @staticmethod
-    def _parse_ts(raw: object, *, field: str) -> Optional[datetime]:
+    def _parse_ts(raw: object, *, field: str) -> datetime | None:
         """Parse an ISO timestamp, wrapping corruption as a store integrity error."""
         if raw is None:
             return None
@@ -346,7 +347,7 @@ class TaskStore(TaskRepository):
     def due_task_ids(
         self, now: datetime | None = None, *, limit: int
     ) -> list[str]:
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -375,10 +376,10 @@ class TaskStore(TaskRepository):
         now: datetime | None = None,
         *,
         lease_seconds: int,
-    ) -> Optional[TaskInfo]:
+    ) -> TaskInfo | None:
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive exact int")
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -414,7 +415,7 @@ class TaskStore(TaskRepository):
     ) -> list[TaskInfo]:
         if type(limit) is not int or limit <= 0:
             raise ValueError("limit must be a positive exact int")
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         claimed: list[TaskInfo] = []
         for task_id in self.due_task_ids(effective_now, limit=limit):
             info = self.claim(
@@ -427,7 +428,7 @@ class TaskStore(TaskRepository):
         return claimed
 
     @staticmethod
-    def _lease_matches(data: Dict[str, Any], lease_id: str, now: datetime) -> bool:
+    def _lease_matches(data: dict[str, Any], lease_id: str, now: datetime) -> bool:
         if (
             data.get("status") != TaskStatus.RUNNING.value
             or data.get("lease_id") != lease_id
@@ -452,7 +453,7 @@ class TaskStore(TaskRepository):
     ) -> TaskInfo | None:
         if type(lease_id) is not str or not lease_id:
             raise ValueError("lease_id must be a non-empty exact str")
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -488,7 +489,7 @@ class TaskStore(TaskRepository):
             raise ValueError("error_code must be a non-empty exact str")
         if type(retry_delay_seconds) is not int or retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds must be a non-negative exact int")
-        effective_now = now or datetime.now(timezone.utc)
+        effective_now = now or datetime.now(UTC)
         with self._lock, self._disk_lock():
             self._assert_healthy()
             self._tasks = self._read_tasks_file()
@@ -527,7 +528,7 @@ class TaskStore(TaskRepository):
     # ── Serialisation helpers ───────────────────────────────────────
 
     @staticmethod
-    def _info_to_dict(info: TaskInfo) -> Dict[str, Any]:
+    def _info_to_dict(info: TaskInfo) -> dict[str, Any]:
         return {
             "task_id": info.task_id,
             "task_type": info.task_type.value,
@@ -548,7 +549,7 @@ class TaskStore(TaskRepository):
         }
 
     @staticmethod
-    def _dict_to_info(data: Dict[str, Any]) -> TaskInfo:
+    def _dict_to_info(data: dict[str, Any]) -> TaskInfo:
         required = {
             "task_id",
             "task_type",
@@ -580,7 +581,7 @@ class TaskStore(TaskRepository):
             status=TaskStatus(data["status"]),
             created_at=datetime.fromisoformat(data["created_at"])
             if data.get("created_at")
-            else datetime.now(),
+            else datetime.now(UTC),
             completed_at=datetime.fromisoformat(data["completed_at"])
             if data.get("completed_at")
             else None,
@@ -620,11 +621,11 @@ class BackgroundWorker:
     def __init__(
         self,
         storage_path: Path | None = None,
-        compaction_pipeline: Optional["CompactionPipeline"] = None,
-        store: Optional[Any] = None,
-        engine: Optional[Any] = None,
-        embedding_service: Optional[Any] = None,
-        config: Optional[Any] = None,
+        compaction_pipeline: CompactionPipeline | None = None,
+        store: Any | None = None,
+        engine: Any | None = None,
+        embedding_service: Any | None = None,
+        config: Any | None = None,
         *,
         queue_capacity: int | None = None,
         claim_size: int | None = None,
@@ -679,14 +680,14 @@ class BackgroundWorker:
         self._claim_size = min(claim_size, queue_capacity)
         self._max_attempts = max_attempts
         self._lease_seconds = lease_seconds
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._queue: Queue[str] = Queue(maxsize=queue_capacity)
         self._queued_ids: set[str] = set()
         self._state_lock = RLock()
         self._wake = Event()
         self._accepting = True
         self._running: bool = False
-        self._worker_thread: Optional[Thread] = None
+        self._worker_thread: Thread | None = None
         self._active_task_id: str | None = None
         self._completed_since_start = 0
         self._callbacks: dict[str, Callable] = {}
@@ -695,7 +696,7 @@ class BackgroundWorker:
         self._engine = engine
         self._embedding_service = embedding_service
         self._config = config
-        self._last_compaction: Optional[datetime] = None
+        self._last_compaction: datetime | None = None
         self._recover_pending_tasks()
 
     @property
@@ -709,7 +710,7 @@ class BackgroundWorker:
         return self._task_store
 
     @property
-    def last_compaction(self) -> Optional[datetime]:
+    def last_compaction(self) -> datetime | None:
         """Return the timestamp of the last compaction run, or None."""
         return self._last_compaction
 
@@ -780,7 +781,7 @@ class BackgroundWorker:
         self,
         task: BackgroundTask,
         payload: dict,
-        callback: Optional[Callable] = None,
+        callback: Callable | None = None,
     ) -> str:
         """Submit a background task, returning the ``task_id``.
 
@@ -882,7 +883,7 @@ class BackgroundWorker:
                 if not self._run_once(require_running=True):
                     self._wake.wait(timeout=0.1)
                     self._wake.clear()
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 logger.error("worker_loop_failed")
 
     def _fill_due_queue(self) -> None:
@@ -975,7 +976,7 @@ class BackgroundWorker:
         try:
             completed_result = self._dispatch(task_type, payload)
 
-        except BaseException:
+        except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             delay = min(2 ** (info.retry_count + 1), 30)
             failed = self._task_store.fail(
                 task_id,
@@ -1009,7 +1010,7 @@ class BackgroundWorker:
         if callback is not None:
             try:
                 callback(completed_result)
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.warning("worker_callback_failed")
 
     # ── Dispatch & task handlers ────────────────────────────────────
@@ -1066,7 +1067,7 @@ class BackgroundWorker:
         if engine is None:
             try:
                 engine = CoreEngine(store=self._resolve_store())
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 engine = CoreEngine(store=None)
             self._engine = engine
         extracted = engine.extract(source)

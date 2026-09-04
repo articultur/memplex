@@ -38,16 +38,15 @@ def probe_database(pg_server_dsn: str) -> Iterator[str]:
 def _catalogue(dsn: str) -> dict[str, list[tuple]]:
     import psycopg2
 
-    with closing(psycopg2.connect(dsn)) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM pg_extension ORDER BY extname")
-            extensions = cursor.fetchall()
-            cursor.execute(
-                "SELECT oid, nspname, nspowner, nspacl FROM pg_namespace ORDER BY nspname"
-            )
-            schemas = cursor.fetchall()
-            cursor.execute("SELECT oid, rolname FROM pg_roles ORDER BY rolname")
-            roles = cursor.fetchall()
+    with closing(psycopg2.connect(dsn)) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM pg_extension ORDER BY extname")
+        extensions = cursor.fetchall()
+        cursor.execute(
+            "SELECT oid, nspname, nspowner, nspacl FROM pg_namespace ORDER BY nspname"
+        )
+        schemas = cursor.fetchall()
+        cursor.execute("SELECT oid, rolname FROM pg_roles ORDER BY rolname")
+        roles = cursor.fetchall()
     return {"extensions": extensions, "schemas": schemas, "roles": roles}
 
 

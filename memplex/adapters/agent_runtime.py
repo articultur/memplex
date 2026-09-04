@@ -17,9 +17,9 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from memplex.adapters._shared import (
     MAX_MODEL_SEARCH_CANDIDATES,
@@ -52,8 +52,8 @@ class AgentProfile:
     integration_modes: list[str]
     hook_events: list[str]
     tools: list[str]
-    capabilities: Dict[str, bool]
-    config: Dict[str, Any] = field(default_factory=dict)
+    capabilities: dict[str, bool]
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,7 +69,7 @@ class RecalledContext:
     est_tokens: int = 0
 
 
-AGENT_PROFILES: Dict[str, AgentProfile] = {
+AGENT_PROFILES: dict[str, AgentProfile] = {
     "codex": AgentProfile(
         name="codex",
         display_name="Codex",
@@ -207,7 +207,7 @@ AGENT_PROFILES: Dict[str, AgentProfile] = {
     ),
 }
 
-_PREFETCH_CACHE: Dict[str, RecalledContext] = {}
+_PREFETCH_CACHE: dict[str, RecalledContext] = {}
 
 
 def _normalise_agent(agent: str) -> str:
@@ -221,13 +221,13 @@ def _normalise_agent(agent: str) -> str:
     return aliases.get(key, key)
 
 
-def list_agent_profiles() -> Dict[str, Dict[str, Any]]:
+def list_agent_profiles() -> dict[str, dict[str, Any]]:
     """Return all supported agent profiles as JSON-serialisable dicts."""
 
     return {name: _manifest_from_profile(profile) for name, profile in AGENT_PROFILES.items()}
 
 
-def _manifest_from_profile(profile: AgentProfile) -> Dict[str, Any]:
+def _manifest_from_profile(profile: AgentProfile) -> dict[str, Any]:
     manifest = asdict(profile)
     manifest.update(
         {
@@ -248,7 +248,7 @@ def _manifest_from_profile(profile: AgentProfile) -> Dict[str, Any]:
     return manifest
 
 
-def get_agent_manifest(agent: str) -> Dict[str, Any]:
+def get_agent_manifest(agent: str) -> dict[str, Any]:
     """Return install/runtime hints for an agent family."""
 
     key = _normalise_agent(agent)
@@ -263,13 +263,13 @@ def get_agent_manifest(agent: str) -> Dict[str, Any]:
 def describe_memory_scope(
     *,
     agent: str,
-    user_id: Optional[str],
+    user_id: str | None,
     session_id: str,
-    project_path: Optional[str | Path],
+    project_path: str | Path | None,
     storage_namespace: str,
     visibility: str = DEFAULT_MEMORY_VISIBILITY,
-    workspace_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     """Describe the exact namespace contract used by agent runtimes.
 
     The returned read filters are OR branches.  The final two branches are
@@ -301,7 +301,7 @@ def describe_memory_scope(
     # namespace only on the legacy branch, whose older records have no
     # principal-scoped visibility metadata to authorize against.
     common = {"memplex_user_id": user}
-    read_filters: list[Dict[str, Optional[str]]] = [
+    read_filters: list[dict[str, str | None]] = [
         # Team-tier knowledge: promoted via service.promote(id, "team"),
         # workspace-shared by definition — any member agent reads it
         # regardless of which user captured it (S4 fix: previously every
@@ -396,17 +396,17 @@ class AgentMemoryRuntime:
 
     def __init__(
         self,
-        service: Optional[MemplexService] = None,
+        service: MemplexService | None = None,
         agent: str = "codex",
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         session_id: str = "default",
-        project_path: Optional[str | Path] = None,
+        project_path: str | Path | None = None,
         top_k: int = 5,
         token_budget: int = 1500,
         auto_capture: bool = True,
         auto_recall: bool = True,
-        prefetch: Optional[bool] = None,
-        authorization: Optional[AuthorizationContext] = None,
+        prefetch: bool | None = None,
+        authorization: AuthorizationContext | None = None,
     ) -> None:
         if service is None:
             # Self-created services must be started so the background
@@ -508,7 +508,7 @@ class AgentMemoryRuntime:
         # Deduplication key of the most recent captured turn; consecutive
         # identical captures (e.g. PostToolUse + Stop hooks both firing for
         # the same turn) are dropped. Shared policy: core.hooks.policy.
-        self._last_capture_key: Optional[str] = None
+        self._last_capture_key: str | None = None
 
     def _local_process_authorization(self) -> AuthorizationContext:
         """Project local adapter parameters into an explicit trust boundary.
@@ -557,8 +557,8 @@ class AgentMemoryRuntime:
         self,
         user_message: str,
         assistant_message: str,
-        next_prompt_hint: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        next_prompt_hint: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Capture a completed turn and prefetch next-turn context."""
 
@@ -572,16 +572,16 @@ class AgentMemoryRuntime:
         self,
         user_message: str,
         assistant_message: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Persist a turn as observation input without requiring manual writes."""
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "agent": self.agent,
             "user_id": self.user_id,
             "session_id": self.session_id,
             "project_path": self.project_path,
-            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "observed_at": datetime.now(UTC).isoformat(),
             "user": user_message.strip(),
             "assistant": assistant_message.strip(),
             "metadata": metadata or {},
@@ -636,7 +636,7 @@ class AgentMemoryRuntime:
         )
         return result
 
-    def _capture_observation(self, payload: Dict[str, Any]) -> None:
+    def _capture_observation(self, payload: dict[str, Any]) -> None:
         """Persist one structured Observation node for the captured turn.
 
         Complements the extraction pipeline (which never emits Observation
@@ -674,7 +674,7 @@ class AgentMemoryRuntime:
                 visibility=visibility,
                 authorization=self.authorization_context,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("observation capture skipped: %s", exc)
 
     def _compress_observation_context(self, content: str, max_length: int = 500) -> str:
@@ -705,7 +705,7 @@ class AgentMemoryRuntime:
             except RuntimeError:
                 # No running loop (CLI / sync hook path)
                 return asyncio.run(coro)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("observation compression failed, using rule truncation: %s", exc)
             return LLMEnhancer._rule_truncate(content, max_length)
 
@@ -760,8 +760,8 @@ class AgentMemoryRuntime:
         self,
         query: str,
         *,
-        top_k: Optional[int] = None,
-        max_tokens: Optional[int] = None,
+        top_k: int | None = None,
+        max_tokens: int | None = None,
         explain: bool = False,
     ) -> QueryResult:
         """Search only memories visible to this runtime identity."""
@@ -880,7 +880,7 @@ class AgentMemoryRuntime:
     def _storage_namespace(self) -> str:
         return self.service.storage_namespace()
 
-    def _namespace_metadata(self, *, visibility: str = "workspace") -> Dict[str, str]:
+    def _namespace_metadata(self, *, visibility: str = "workspace") -> dict[str, str]:
         return describe_memory_scope(
             agent=self.agent,
             user_id=self.user_id,
@@ -899,7 +899,7 @@ class AgentMemoryRuntime:
                 f"Unsupported memory visibility {visibility!r}. Supported: {supported}"
             )
 
-    def _domain_scoped_filters(self) -> list[Dict[str, Optional[str]]]:
+    def _domain_scoped_filters(self) -> list[dict[str, str | None]]:
         """Read filters ANDed with the agent's bound knowledge domains.
 
         Agent→domain binding (``agent_domains.agent_domains`` config): when
@@ -913,12 +913,12 @@ class AgentMemoryRuntime:
             bound = list(
                 self.service._config.agent_domains.agent_domains.get(self.agent, [])
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             bound = []
         bound = [domain for domain in bound if domain]
         if not bound:
             return branches
-        scoped: list[Dict[str, Optional[str]]] = []
+        scoped: list[dict[str, str | None]] = []
         for branch in branches:
             for domain in bound:
                 expanded = dict(branch)
@@ -926,7 +926,7 @@ class AgentMemoryRuntime:
                 scoped.append(expanded)
         return scoped
 
-    def _read_namespace_filters(self) -> list[Dict[str, Optional[str]]]:
+    def _read_namespace_filters(self) -> list[dict[str, str | None]]:
         """Return OR-ed visibility boundaries for the current runtime."""
 
         return describe_memory_scope(
@@ -938,7 +938,7 @@ class AgentMemoryRuntime:
             workspace_id=self.workspace_id,
         )["read_namespace_filters"]
 
-    def read_namespace_filters(self) -> list[Dict[str, Optional[str]]]:
+    def read_namespace_filters(self) -> list[dict[str, str | None]]:
         """Expose a copy of the runtime's effective read boundaries."""
 
         return [dict(branch) for branch in self._read_namespace_filters()]
@@ -971,7 +971,7 @@ class AgentMemoryRuntime:
             return False
         return self._node_in_namespace(node)
 
-    def get_accessible_memory(self, memory_id: str) -> Optional[Function]:
+    def get_accessible_memory(self, memory_id: str) -> Function | None:
         """Return a memory only when it is visible to this runtime."""
 
         node = self.service.get(memory_id, authorization=self.authorization_context)

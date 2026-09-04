@@ -6,6 +6,9 @@ Hook payload 中的 ``cwd``/``session_id`` 作为动态工作区和会话来源�
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
 import getpass
 import hashlib
 import json
@@ -130,10 +133,10 @@ def _record_runtime_failure(operation: str, error: BaseException) -> None:
         record_runtime_failure(
             _runtime_status_path(), agent="codex", operation=operation, error=error
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         # The original hook error remains authoritative and the hook must stay
         # non-blocking even when the local status volume is unavailable.
-        pass
+        logger.debug("suppressed Exception: %s", exc)
 
 
 def _clear_runtime_status(operation: str) -> None:
@@ -141,8 +144,8 @@ def _clear_runtime_status(operation: str) -> None:
         clear_runtime_status_on_success(
             _runtime_status_path(), agent="codex", operation=operation, completed=True
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
+        logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
 
 def _write_turn_state(identity: dict[str, str], prompt: str) -> None:
@@ -313,8 +316,8 @@ def _handle_stop(payload: dict[str, Any]) -> dict[str, Any]:
     _clear_runtime_status("capture")
     try:
         path.unlink()
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("suppressed OSError in cleanup/degradation path: %s", exc)
     return {}
 
 
@@ -340,7 +343,7 @@ def _read_stdin_payload() -> dict[str, Any]:
 def _run_hook() -> int:
     try:
         output = dispatch_hook(_read_stdin_payload())
-    except Exception as exc:  # Hook failures must not block Codex.
+    except Exception as exc:  # Hook failures must not block Codex.  # noqa: BLE001 - broad catch with explicit fallback handling
         print(f"memplex codex hook skipped: {exc}", file=sys.stderr)
         output = {}
     sys.stdout.write(json.dumps(output, ensure_ascii=False) + "\n")

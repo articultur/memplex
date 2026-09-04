@@ -24,7 +24,6 @@ from memplex.storage.vector import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from memplex.storage.feedback import PostgresFeedbackStore
     from memplex.storage.postgres import PostgresMemoryStore
 
 
@@ -177,23 +176,23 @@ def create_store(
 
 
 __all__ = [
-    "MemoryStore",
+    "ChangelogStore",
+    "ChromaVectorStore",
+    "FeedbackStore",
+    "InMemoryVectorStore",
+    "LiteFeedbackStore",
     "LiteMemoryStore",
     "LiteStorageIntegrityError",
-    "ChangelogStore",
-    "VectorStore",
-    "InMemoryVectorStore",
-    "ChromaVectorStore",
-    "create_vector_store",
-    "FeedbackStore",
-    "LiteFeedbackStore",
-    "SQLiteFeedbackStore",
+    "MemoryStore",
     "PostgresFeedbackStore",
     "PostgresPoolManager",
     "PostgresStorageResources",
     "ReadyPostgresPool",
+    "SQLiteFeedbackStore",
+    "VectorStore",
     "create_feedback_store",
     "create_store",
+    "create_vector_store",
 ]
 
 from memplex.storage.pool import (

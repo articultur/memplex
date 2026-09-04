@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -272,7 +272,7 @@ def test_g003_g004_require_current_signed_deployment_evidence(
         base64.b64encode(key).decode("ascii"),
     )
     monkeypatch.setenv("MEMPLEX_INDUSTRIAL_EVIDENCE_KEY_ID", key_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for gate_id, env_name in (
         ("schema_migrations_atomicity", "MEMPLEX_G003_STORAGE_REPORT"),
         ("durable_sync_backpressure", "MEMPLEX_G004_SYNC_REPORT"),
@@ -305,7 +305,7 @@ def test_capacity_chaos_gate_accepts_only_current_signed_passing_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = b"c" * 32
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     report = CapacityChaosEvidence.create(
         report_id="018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
         generated_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
@@ -459,7 +459,7 @@ def test_operations_slo_gate_accepts_only_signed_passing_measured_evidence(
     config = MemplexConfig()
     config.operations.report_key_id = "ops-key"
     binding = _set_deployment_binding(monkeypatch)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     report = create_operations_evidence(
         metrics_snapshot={
             "request_count": 1000,
@@ -875,9 +875,10 @@ def test_readiness_cli_is_machine_readable_and_strict_is_fail_closed(tmp_path: P
     }
     base = [sys.executable, "-m", "memplex", "--output", "json", "readiness"]
 
-    inspect = subprocess.run(base, capture_output=True, text=True, env=env, timeout=30)
+    inspect = subprocess.run(base, capture_output=True, text=True, env=env, timeout=30, check=False)
     strict = subprocess.run(
-        [*base, "--strict"], capture_output=True, text=True, env=env, timeout=30
+        [*base, "--strict"], capture_output=True, text=True, env=env, timeout=30, check=False
+    
     )
 
     assert inspect.returncode == 0, inspect.stderr
@@ -912,7 +913,7 @@ def test_readiness_cli_reports_g002_gate_but_strict_stays_closed(
     }
     command = [sys.executable, "-m", "memplex", "--output", "json", "readiness", "--strict"]
 
-    completed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=30)
+    completed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=30, check=False)
     report = json.loads(completed.stdout)
     gate = next(item for item in report["gates"] if item["id"] == "principal_tenant_acl")
 

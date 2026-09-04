@@ -61,7 +61,7 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -113,14 +113,14 @@ class _KeyRing:
     previous key (rotation), selected by the envelope ``kid``.
     """
 
-    __slots__ = ("current_aead", "current_kid", "by_kid")
+    __slots__ = ("by_kid", "current_aead", "current_kid")
 
-    def __init__(self, current: bytes, previous: Optional[bytes]) -> None:
+    def __init__(self, current: bytes, previous: bytes | None) -> None:
         self.current_aead = _aesgcm(current)
         self.current_kid = _derive_kid(current)
         # Insertion order matters: legacy (kid-less) envelopes try the
         # current key first, then the previous one.
-        by_kid: Dict[str, Any] = {self.current_kid: self.current_aead}
+        by_kid: dict[str, Any] = {self.current_kid: self.current_aead}
         if previous is not None:
             by_kid.setdefault(_derive_kid(previous), _aesgcm(previous))
         self.by_kid = by_kid
@@ -128,10 +128,10 @@ class _KeyRing:
 
 # Process-local cache keyed by the raw env values, so changing either
 # variable (e.g. rotation) automatically misses the cache and rebuilds.
-_ring_cache: Dict[Tuple[Optional[str], Optional[str]], _KeyRing] = {}
+_ring_cache: dict[tuple[str | None, str | None], _KeyRing] = {}
 
 
-def _get_ring() -> Optional[_KeyRing]:
+def _get_ring() -> _KeyRing | None:
     """Return the key ring for the current env, or None when encryption is off.
 
     Fail-closed on malformed key material (current or previous). Results are
@@ -171,7 +171,7 @@ def is_configured() -> bool:
     return is_enabled()
 
 
-def encrypt_json_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def encrypt_json_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Encrypt one JSON-serialisable sync payload into an opaque envelope.
 
     Returns ``{"memplex_encrypted": 1, "v": 1, "kid": <key id>,
@@ -203,7 +203,7 @@ def is_encrypted_envelope(body: Any) -> bool:
     )
 
 
-def _decode_envelope_fields(envelope: Dict[str, Any], what: str) -> Tuple[bytes, bytes]:
+def _decode_envelope_fields(envelope: dict[str, Any], what: str) -> tuple[bytes, bytes]:
     """Extract and base64-decode nonce + ciphertext, fail-closed."""
     try:
         nonce = base64.urlsafe_b64decode(envelope["n"].encode("ascii"))
@@ -215,7 +215,7 @@ def _decode_envelope_fields(envelope: Dict[str, Any], what: str) -> Tuple[bytes,
     return nonce, ciphertext
 
 
-def _open_envelope(ring: _KeyRing, envelope: Dict[str, Any], nonce: bytes, ciphertext: bytes) -> bytes:
+def _open_envelope(ring: _KeyRing, envelope: dict[str, Any], nonce: bytes, ciphertext: bytes) -> bytes:
     """AEAD-open with kid-based key selection, fail-closed.
 
     Every failure — unknown kid, wrong key, tamper — collapses to one
@@ -232,12 +232,12 @@ def _open_envelope(ring: _KeyRing, envelope: Dict[str, Any], nonce: bytes, ciphe
     for aead in candidates:
         try:
             return aead.decrypt(nonce, ciphertext, associated_data=None)
-        except Exception:  # InvalidTag covers tamper + wrong key
+        except Exception:  # InvalidTag covers tamper + wrong key  # noqa: BLE001, S112 - deliberate best-effort suppression
             continue
     raise SyncCryptoError("encrypted sync envelope failed authentication")
 
 
-def decrypt_json_payload(envelope: Dict[str, Any]) -> Dict[str, Any]:
+def decrypt_json_payload(envelope: dict[str, Any]) -> dict[str, Any]:
     """Decrypt an envelope back into the original JSON payload.
 
     Fail-closed: any tamper, wrong key, or malformed field raises

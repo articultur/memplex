@@ -35,7 +35,8 @@ def _run_memplex(args: list[str], *, env: dict[str, str]) -> subprocess.Complete
         capture_output=True,
         text=True,
         timeout=30,
-        env=env,
+        env=env,check=False
+    
     )
 
 
@@ -168,14 +169,7 @@ def test_corpus_manifest_preview_index_and_recall_are_bounded(tmp_path):
     (root / "nested" / ".claude" / "private.md").write_text("nested claude\n", encoding="utf-8")
     manifest = root / "memplex-corpus.toml"
     manifest.write_text(
-        "\n".join(
-            [
-                "[corpus]",
-                'name = "docs"',
-                'scope = "project"',
-                'include = ["*", "**/*"]',
-            ]
-        ),
+        '[corpus]\nname = "docs"\nscope = "project"\ninclude = [\"*\", \"**/*\"]',
         encoding="utf-8",
     )
 
@@ -234,14 +228,7 @@ def test_corpus_recall_explanation_does_not_leak_non_corpus_results(tmp_path):
     )
     manifest = root / "memplex-corpus.toml"
     manifest.write_text(
-        "\n".join(
-            [
-                "[corpus]",
-                'name = "docs"',
-                'scope = "project"',
-                'include = ["docs/*.md"]',
-            ]
-        ),
+        '[corpus]\nname = "docs"\nscope = "project"\ninclude = [\"docs/*.md\"]',
         encoding="utf-8",
     )
 
@@ -494,14 +481,7 @@ def test_corpus_index_skips_unreadable_files(tmp_path):
     (root / "docs" / "blob.bin").write_bytes(b"\xff\xfe\x00\x01not-utf-8\x80\x81")
     manifest = root / "memplex-corpus.toml"
     manifest.write_text(
-        "\n".join(
-            [
-                "[corpus]",
-                'name = "docs"',
-                'scope = "project"',
-                'include = ["docs/*"]',
-            ]
-        ),
+        '[corpus]\nname = "docs"\nscope = "project"\ninclude = [\"docs/*\"]',
         encoding="utf-8",
     )
 

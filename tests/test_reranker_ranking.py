@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.retrieval.reranker import Reranker  # noqa: E402
+from memplex.retrieval.reranker import Reranker
 
 
 class _FixedEmbedder:
@@ -66,7 +66,7 @@ def test_default_weights_sum_to_one():
 
 
 def test_recency_halflife_is_configurable():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ranker = Reranker(_FixedEmbedder(), recency_halflife_days=10.0)
     # 10 days at halflife 10 → exp(-1) ≈ 0.368; with 60 → exp(-1/6) ≈ 0.846
     assert abs(ranker._recency_decay(now - timedelta(days=10)) - math.exp(-1)) < 1e-6
@@ -75,7 +75,7 @@ def test_recency_halflife_is_configurable():
 
 
 def test_higher_confidence_ranks_above_lower():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = _Store({"high": _Node(confidence=0.95), "low": _Node(confidence=0.10)})
     ranker = Reranker(_FixedEmbedder(), storage=store)
     ranked = ranker.rerank("q", [_result("low", now), _result("high", now)], top_k=2)
@@ -83,7 +83,7 @@ def test_higher_confidence_ranks_above_lower():
 
 
 def test_missing_confidence_is_neutral_not_punitive():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = _Store({"absent": _Node(access_count=0), "explicit": _Node(confidence=1.0)})
     assert Reranker._confidence_score(None) == 0.5
     assert Reranker._confidence_score(_Node(confidence=7.0)) == 1.0  # clamped
@@ -93,7 +93,7 @@ def test_missing_confidence_is_neutral_not_punitive():
 
 
 def test_zero_confidence_weight_disables_dimension():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = _Store({"a": _Node(confidence=0.0), "b": _Node(confidence=1.0)})
     ranker = Reranker(
         _FixedEmbedder(),

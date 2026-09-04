@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.auth import AuthorizationContext, Principal  # noqa: E402
-from memplex.authorization import AuthorizationGate  # noqa: E402
+from memplex.auth import AuthorizationContext, Principal
+from memplex.authorization import AuthorizationGate
 
 
 def _gate(profile: str = "development") -> AuthorizationGate:
@@ -31,11 +31,7 @@ def _context(tenant="tenant-a", subject="alice", workspace="ws-a", session="s1",
 
 
 def _node(**kw):
-    base = dict(
-        tenant_id="tenant-a", owner_subject_id="alice", owner="alice",
-        workspace_id="ws-a", visibility="workspace", namespace={},
-        provenance={"agent_id": "ag"}, origin_session="s1",
-    )
+    base = {"tenant_id": "tenant-a", "owner_subject_id": "alice", "owner": "alice", "workspace_id": "ws-a", "visibility": "workspace", "namespace": {}, "provenance": {"agent_id": "ag"}, "origin_session": "s1"}
     base.update(kw)
     return SimpleNamespace(**base)
 

@@ -7,11 +7,15 @@ section owns the business state, changelog, and sync state as one pair.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
 import copy
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Iterator, cast
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, cast
 
 from memplex.sync_protocol import (
     SyncApplyResult,
@@ -114,15 +118,15 @@ class LiteSyncRepository(AbstractSyncRepository):
     def _require_datetime(value: object, name: str) -> datetime:
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise TypeError(f"{name} must be an aware datetime")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @staticmethod
     def _time(value: datetime) -> str:
-        return value.astimezone(timezone.utc).isoformat()
+        return value.astimezone(UTC).isoformat()
 
     @staticmethod
     def _parse_time(value: str) -> datetime:
-        return datetime.fromisoformat(value).astimezone(timezone.utc)
+        return datetime.fromisoformat(value).astimezone(UTC)
 
     @property
     def _state(self) -> dict[str, Any]:
@@ -168,8 +172,8 @@ class LiteSyncRepository(AbstractSyncRepository):
             except BaseException:
                 try:
                     self._store._reload_for_mutation(force=True)
-                except BaseException:
-                    pass
+                except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                    logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
                 raise
 
     @contextmanager
@@ -328,7 +332,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         if self._capture_policy.mode == "off":
             return None
         event_id = str(uuid.uuid4())
-        occurred_at = datetime.now(timezone.utc)
+        occurred_at = datetime.now(UTC)
         event = SyncEvent(
             1,
             event_id,
@@ -352,11 +356,11 @@ class LiteSyncRepository(AbstractSyncRepository):
         if self._capture_policy.mode == "off":
             return None
         event_id = str(uuid.uuid4())
-        occurred_at = datetime.now(timezone.utc)
+        occurred_at = datetime.now(UTC)
         created_at = edge.created_at
         if not isinstance(created_at, datetime):
             created_at = occurred_at
-        created_at = created_at.astimezone(timezone.utc)
+        created_at = created_at.astimezone(UTC)
         payload = None
         if operation is SyncOperation.UPSERT:
             payload = {
@@ -417,7 +421,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                 or cursor.remote_binding != remote_id
                 or cursor.consumer_binding != consumer_id
                 or cursor.snapshot_id is not None
-                or datetime.now(timezone.utc) >= cursor.expires_at
+                or datetime.now(UTC) >= cursor.expires_at
             ):
                 raise SyncCursorExpired("invalid_cursor")
             if cursor is not None:
@@ -446,12 +450,12 @@ class LiteSyncRepository(AbstractSyncRepository):
                         "remote_id": remote_id,
                         "consumer_id": consumer_id,
                         "after_seq": confirmed,
-                        "updated_at": self._time(datetime.now(timezone.utc)),
+                        "updated_at": self._time(datetime.now(UTC)),
                     }
                 )
             else:
                 cursor_row["after_seq"] = max(cursor_row["after_seq"], confirmed)
-                cursor_row["updated_at"] = self._time(datetime.now(timezone.utc))
+                cursor_row["updated_at"] = self._time(datetime.now(UTC))
             rows = [
                 item
                 for item in self._state["outbox"]
@@ -501,7 +505,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                     "enabled": True,
                 }
             )
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             for item in retained:
                 self._state["deliveries"].append(
                     {
@@ -526,7 +530,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         target_id = self._require_str(target_id, "target_id")
         limit = self._require_int(limit, "limit", minimum=1)
         lease_seconds = self._require_int(lease_seconds, "lease_seconds", minimum=1)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._mutation():
             target = next(
                 (item for item in self._state["targets"] if item["target_id"] == target_id),
@@ -642,7 +646,7 @@ class LiteSyncRepository(AbstractSyncRepository):
     def _require_active_lease(self, row: dict[str, Any], delivery: SyncDelivery) -> None:
         if row["state"] != "leased" or row["lease_owner"] != delivery.lease_id:
             raise SyncDeliveryBusy("delivery lease is no longer active")
-        if self._parse_time(row["lease_until"]) <= datetime.now(timezone.utc):
+        if self._parse_time(row["lease_until"]) <= datetime.now(UTC):
             raise SyncDeliveryBusy("delivery lease is no longer active")
 
     def sync_fail(self, delivery: SyncDelivery, error_code: str, now: datetime) -> None:
@@ -711,7 +715,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                         attempt_count=0,
                         lease_owner=None,
                         lease_until=None,
-                        next_attempt_at=self._time(datetime.now(timezone.utc)),
+                        next_attempt_at=self._time(datetime.now(UTC)),
                         last_error_code=None,
                     )
                     return True
@@ -821,7 +825,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         )
         if version_row is None:
             event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"memplex:{node_type.value}:{node.id}"))
-            occurred_at = datetime.fromisoformat(cast(str, node.updated_at)).astimezone(timezone.utc)
+            occurred_at = datetime.fromisoformat(cast(str, node.updated_at)).astimezone(UTC)
             version = str(SyncVersion.create(occurred_at, self._local_node_id, event_id))
         else:
             event_id = version_row["event_id"]
@@ -867,10 +871,10 @@ class LiteSyncRepository(AbstractSyncRepository):
             )
             if version_row is None:
                 event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"memplex:edge:{entity_key}"))
-                occurred_at = edge.created_at or datetime.now(timezone.utc)
+                occurred_at = edge.created_at or datetime.now(UTC)
                 version = str(
                     SyncVersion.create(
-                        occurred_at.astimezone(timezone.utc), self._local_node_id, event_id
+                        occurred_at.astimezone(UTC), self._local_node_id, event_id
                     )
                 )
             else:
@@ -891,7 +895,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                     {
                         "weight": float(edge.weight),
                         "evidence": list(edge.evidence),
-                        "created_at": created_at.astimezone(timezone.utc).strftime(
+                        "created_at": created_at.astimezone(UTC).strftime(
                             "%Y-%m-%dT%H:%M:%S.%fZ"
                         ),
                     },
@@ -927,7 +931,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         consumer_id = self._require_str(consumer_id, "consumer_id")
         request_id = self._require_str(request_id, "request_id")
         limit = self._require_int(limit, "limit", minimum=1)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._mutation():
             self._cleanup_expired_snapshots(now)
             snapshot = next(
@@ -998,7 +1002,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         if type(cursor) is not SyncCursorClaims or cursor.snapshot_id is None:
             raise TypeError("cursor must be a snapshot SyncCursorClaims")
         limit = self._require_int(limit, "limit", minimum=1)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expired_snapshot = False
         page: SyncSnapshotPage | None = None
         with self._mutation():
@@ -1090,7 +1094,7 @@ class LiteSyncRepository(AbstractSyncRepository):
         if type(created_at) is not str:
             raise TypeError("edge created_at must be a string")
         parsed = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
         if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != created_at:
             raise ValueError("edge created_at is not canonical")
@@ -1302,7 +1306,7 @@ class LiteSyncRepository(AbstractSyncRepository):
                     "batch_id": batch.batch_id,
                     "request_sha256": batch.request_digest,
                     "response": result.to_dict(),
-                    "created_at": self._time(datetime.now(timezone.utc)),
+                    "created_at": self._time(datetime.now(UTC)),
                 }
             )
             return result
@@ -1354,12 +1358,12 @@ class LiteSyncRepository(AbstractSyncRepository):
                         "remote_id": remote_id,
                         "consumer_id": self._local_node_id,
                         "after_seq": page.next_after_seq,
-                        "updated_at": self._time(datetime.now(timezone.utc)),
+                        "updated_at": self._time(datetime.now(UTC)),
                     }
                 )
             else:
                 cursor["after_seq"] = page.next_after_seq
-                cursor["updated_at"] = self._time(datetime.now(timezone.utc))
+                cursor["updated_at"] = self._time(datetime.now(UTC))
             return SyncApplyResult(
                 applied, duplicate, conflict, page.next_after_seq
             )

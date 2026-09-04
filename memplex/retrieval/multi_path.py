@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from itertools import islice
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 from memplex.models import SearchResult
 
@@ -66,9 +66,9 @@ class MultiPathRetriever:
 
     def __init__(
         self,
-        store: "MemoryStore",
-        embedding_service: Optional["EmbeddingService"] = None,
-        wiki_searcher: Optional[object] = None,
+        store: MemoryStore,
+        embedding_service: EmbeddingService | None = None,
+        wiki_searcher: object | None = None,
     ) -> None:
         self._store = store
         self._embedding_service = embedding_service
@@ -80,8 +80,8 @@ class MultiPathRetriever:
         self,
         text: str,
         top_k: int,
-        query_vector: Optional["Vector"] = None,
-    ) -> List[SearchResult]:
+        query_vector: Vector | None = None,
+    ) -> list[SearchResult]:
         """RAG vector + FTS hybrid search with FTS fallback.
 
         Pre-fills ``vector_cache`` on each hit with the hit's OWN embedding
@@ -99,7 +99,7 @@ class MultiPathRetriever:
         self._prefill_result_vectors(results)
         return results
 
-    def wiki_search(self, text: str, top_k: int) -> List[SearchResult]:
+    def wiki_search(self, text: str, top_k: int) -> list[SearchResult]:
         """Wiki layer: search over compiled wiki pages.
 
         When a ``wiki_searcher`` was injected (e.g.
@@ -113,7 +113,7 @@ class MultiPathRetriever:
                 search = getattr(self._wiki_searcher, "search", None)
                 if callable(search):
                     return list(search(text, top_k))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("wiki_search: searcher failed, falling back to FTS: %s", exc)
         return self._store.fts_search(text, top_k)
 
@@ -121,12 +121,16 @@ class MultiPathRetriever:
         self,
         text: str,
         top_k: int,
-        query_vector: Optional["Vector"] = None,
-    ) -> List[SearchResult]:
+        query_vector: Vector | None = None,
+        max_hops: int = 1,
+    ) -> list[SearchResult]:
         """Incremental graph traversal search.
 
         1. Spend part of ``top_k`` on at most three seed Functions.
-        2. Divide the remaining budget across bounded 1-hop reads.
+        2. Divide the remaining budget across bounded neighbour reads of
+           at most *max_hops* hops (1 = the historical seed + one-hop
+           behaviour; 2 = bounded two-hop expansion under the same
+           budget). Bounded expansion, not generic multi-hop reasoning.
         3. Filter to relation-type edges.
 
         The *query_vector* parameter is retained for call-site
@@ -147,9 +151,9 @@ class MultiPathRetriever:
         if not seed_results:
             return []
 
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         seen: set = set()
-        unique_seeds: List[SearchResult] = []
+        unique_seeds: list[SearchResult] = []
         for seed in seed_results:
             if seed.func_id in seen:
                 continue
@@ -174,7 +178,7 @@ class MultiPathRetriever:
                     neighbors = self._store.get_neighbors(
                         seed.func_id,
                         edge_types=_RELATION_EDGE_TYPES,
-                        max_hops=1,
+                        max_hops=max_hops,
                         limit=quota,
                     )
                 except TypeError:
@@ -183,10 +187,10 @@ class MultiPathRetriever:
                     # unbounded neighbour read.
                     neighbors = self._store.get_neighbors(
                         seed.func_id,
-                        max_hops=1,
+                        max_hops=max_hops,
                         limit=quota,
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("graph_search: get_neighbors failed for %s: %s", seed.func_id, exc)
                 continue
             for neighbor in islice(neighbors, quota):
@@ -217,7 +221,7 @@ class MultiPathRetriever:
 
     # ── Post-retrieval helpers ───────────────────────────────────────
 
-    def _prefill_result_vectors(self, results: List[SearchResult]) -> None:
+    def _prefill_result_vectors(self, results: list[SearchResult]) -> None:
         """Fill ``vector_cache`` with each result's OWN embedding.
 
         Skipped when no embedding service is configured; the Reranker then
@@ -229,7 +233,7 @@ class MultiPathRetriever:
             if r.vector_cache is None:
                 r.vector_cache = self._embed_query_text(r.summary)
 
-    def _embed_query_text(self, text: str) -> "Vector":
+    def _embed_query_text(self, text: str) -> Vector:
         """Embed query-time text without polluting TF-IDF corpus statistics."""
         embed_query = getattr(self._embedding_service, "embed_query", None)
         if callable(embed_query):
@@ -238,7 +242,7 @@ class MultiPathRetriever:
             return []
         return self._embedding_service.embed(text)
 
-    def _load_functions(self, func_ids: List[str]) -> Dict[str, object]:
+    def _load_functions(self, func_ids: list[str]) -> dict[str, object]:
         """Load Functions by id, preferring a single bulk call.
 
         Uses the store's ``get_many`` when available (avoids the N+1
@@ -250,7 +254,7 @@ class MultiPathRetriever:
         if callable(get_many):
             try:
                 loaded = get_many(unique_ids)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug(
                     "filter_by_namespace: bulk get_many failed (%s); "
                     "falling back to per-id get",
@@ -262,7 +266,7 @@ class MultiPathRetriever:
                 return {f.id: f for f in loaded if f is not None}
         return {fid: self._store.get(fid) for fid in unique_ids}
 
-    def _get_typed_node(self, node_id: str) -> Optional[object]:
+    def _get_typed_node(self, node_id: str) -> object | None:
         """Resolve a Fact/Preference node via the store's optional typed
         APIs (duck-typed ``get_fact`` / ``get_preference``)."""
         for getter_name in ("get_fact", "get_preference"):
@@ -271,7 +275,7 @@ class MultiPathRetriever:
                 continue
             try:
                 node = getter(node_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug(
                     "filter_by_namespace: typed lookup via %s failed for %s: %s",
                     getter_name,
@@ -285,9 +289,9 @@ class MultiPathRetriever:
 
     def filter_by_namespace(
         self,
-        results: List[SearchResult],
-        namespace_filter: Dict[str, Optional[str]] | List[Dict[str, Optional[str]]],
-    ) -> List[SearchResult]:
+        results: list[SearchResult],
+        namespace_filter: dict[str, str | None] | list[dict[str, str | None]],
+    ) -> list[SearchResult]:
         """Keep only results whose stored metadata matches a namespace.
 
         A list of filters is an OR expression; keys inside each filter are
@@ -306,14 +310,14 @@ class MultiPathRetriever:
             return []
         filters = [namespace_filter] if isinstance(namespace_filter, dict) else namespace_filter
 
-        def matches(metadata: Dict[str, object]) -> bool:
+        def matches(metadata: dict[str, object]) -> bool:
             return any(
                 all(metadata.get(key) == value for key, value in candidate.items())
                 for candidate in filters
             )
 
         funcs_by_id = self._load_functions([r.func_id for r in results])
-        filtered: List[SearchResult] = []
+        filtered: list[SearchResult] = []
         for result in results:
             func = funcs_by_id.get(result.func_id)
             if func is None:
@@ -354,13 +358,46 @@ class MultiPathRetriever:
 
     @staticmethod
     def merge_multi_path(
-        result_lists: List[List[SearchResult]],
-    ) -> List[SearchResult]:
-        """Merge multi-path results; deduplicate by ``func_id``, keeping
-        the highest ``relevance_score``."""
-        seen: Dict[str, SearchResult] = {}
+        result_lists: list[list[SearchResult]],
+    ) -> list[SearchResult]:
+        """Merge multi-path results on a comparable per-path score scale.
+
+        The path scores carry incomparable scales -- BM25 magnitudes, wiki
+        RRF scores, and the graph path's constant neighbor score -- so
+        merging by the maximum raw score lets whichever path reports the
+        largest numbers dominate. Each list is therefore normalized by its
+        own maximum (its rank-1 hit scores 1.0, weaker hits keep their
+        relative magnitude), and a hit found by several paths takes its
+        best normalized contribution.
+
+        Within-path magnitude is preserved on purpose: it is the lexical
+        match-quality gradient the downstream Reranker's ``raw_relevance``
+        dimension consumes. Rank-only fusion (RRF) was measured flattening
+        it on the single-path paraphrase workload (high-overlap recall@1
+        0.88 -> 0.40) because k-damped ranks barely differ within one
+        list.
+
+        Deduplicates by ``func_id``, keeping the highest raw-scored object
+        for metadata, then overwrites ``relevance_score`` with the fused
+        normalized score. Equal scores tie-break by ``func_id``, so output
+        order never depends on which parallel path finished first.
+        """
+        best: dict[str, SearchResult] = {}
+        fused: dict[str, float] = {}
         for results in result_lists:
-            for r in results:
-                if r.func_id not in seen or r.relevance_score > seen[r.func_id].relevance_score:
-                    seen[r.func_id] = r
-        return sorted(seen.values(), key=lambda x: x.relevance_score, reverse=True)
+            path_max = max((r.relevance_score for r in results), default=0.0)
+            scale = path_max if path_max > 0.0 else 1.0
+            for result in results:
+                contribution = result.relevance_score / scale
+                if contribution > fused.get(result.func_id, 0.0):
+                    fused[result.func_id] = contribution
+                current = best.get(result.func_id)
+                if current is None or result.relevance_score > current.relevance_score:
+                    best[result.func_id] = result
+        merged = [
+            best[func_id]
+            for func_id in sorted(fused, key=lambda fid: (-fused[fid], fid))
+        ]
+        for result in merged:
+            result.relevance_score = fused[result.func_id]
+        return merged

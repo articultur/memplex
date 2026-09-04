@@ -18,8 +18,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, List, Optional
+from datetime import UTC, datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.core.associator.domain_classifier import DomainClassifier
 from memplex.core.associator.entity_aligner import EntityAligner
@@ -99,7 +99,7 @@ class CoreEngine:
         (graph edges will be built from the batch only).
     """
 
-    def __init__(self, store: Optional[MemoryStore] = None) -> None:
+    def __init__(self, store: MemoryStore | None = None) -> None:
         # ── Extractors ──────────────────────────────────────────────
         self.markdown_extractor = MarkdownExtractor()
         self.image_extractor = ImageExtractor()
@@ -182,8 +182,8 @@ class CoreEngine:
         # classifies as fact / preference (memplex.intent.detect) produce
         # Fact / Preference nodes; everything else produces Functions
         # (previous behaviour, including observation-intent text).
-        facts: List[Fact] = []
-        preferences: List[Preference] = []
+        facts: list[Fact] = []
+        preferences: list[Preference] = []
         func_paragraphs = ParagraphCollection()
         for para in paragraphs.paragraphs:
             intent = detect_memory_type(para.raw_text or "")
@@ -245,7 +245,7 @@ class CoreEngine:
             preferences=preferences,
         )
 
-    def extract_batch(self, sources: List[SourceDocument]) -> ExtractedData:
+    def extract_batch(self, sources: list[SourceDocument]) -> ExtractedData:
         """Batch extraction: process multiple sources and merge results.
 
         Parameters
@@ -258,9 +258,9 @@ class CoreEngine:
         ExtractedData
             Merged extraction results from all sources.
         """
-        all_functions: List[Function] = []
-        all_facts: List[Fact] = []
-        all_preferences: List[Preference] = []
+        all_functions: list[Function] = []
+        all_facts: list[Fact] = []
+        all_preferences: list[Preference] = []
 
         for source in sources:
             extracted = self.extract(source)
@@ -419,7 +419,7 @@ class CoreEngine:
                 break
         content_hash = hashlib.sha256(raw.encode()).hexdigest()
         name = para.section if para.section else raw[:50]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         return Fact(
             id=f"fact_{content_hash[:16]}",
             name=name,
@@ -439,7 +439,7 @@ class CoreEngine:
         raw = (para.raw_text or "").strip()
         content_hash = hashlib.sha256(raw.encode()).hexdigest()
         name = para.section if para.section else raw[:50]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         return Preference(
             id=f"pref_{content_hash[:16]}",
             name=name,
@@ -452,7 +452,7 @@ class CoreEngine:
             updated_at=now,
         )
 
-    def _flag_conflicts(self, functions: List[Function]) -> set:
+    def _flag_conflicts(self, functions: list[Function]) -> set:
         """Detect conflicts and mark involved Functions ``needs_review``.
 
         Returns the set of Function ids involved in a human-reviewable
@@ -475,8 +475,8 @@ class CoreEngine:
         return conflicted_ids
 
     def _deduplicate_functions(
-        self, functions: List[Function], skip_ids: set | None = None
-    ) -> List[Function]:
+        self, functions: list[Function], skip_ids: set | None = None
+    ) -> list[Function]:
         """Use EntityAligner to merge duplicate Functions.
 
         Functions whose id is in ``skip_ids`` (e.g. involved in a detected
@@ -513,7 +513,7 @@ class CoreEngine:
                     merged_ids.add(member_id)
 
         # Merge fields for grouped functions
-        result: List[Function] = []
+        result: list[Function] = []
         for func in functions:
             if func.id in merged_ids:
                 continue
@@ -525,7 +525,7 @@ class CoreEngine:
 
         return result
 
-    def _merge_function_fields(self, functions: List[Function]) -> Function:
+    def _merge_function_fields(self, functions: list[Function]) -> Function:
         """Merge FieldValues from multiple Functions into one."""
         if not functions:
             raise ValueError("Cannot merge empty function list")
@@ -572,7 +572,7 @@ class CoreEngine:
         # Fallback: use source-based base confidence
         return self.confidence_calculator._get_base_confidence(source_hint)
 
-    def _build_graph(self, functions: List[Function]) -> GraphData:
+    def _build_graph(self, functions: list[Function]) -> GraphData:
         """Build relationship edges between Functions using GraphBuilder."""
         edges = []
 
@@ -581,7 +581,7 @@ class CoreEngine:
             try:
                 builder = GraphBuilder(store=self._store)
                 edges = builder.build_from_batch(functions)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.warning("GraphBuilder failed: %s", exc)
                 edges = build_edges_rule_based(functions)
         else:

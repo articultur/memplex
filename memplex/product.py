@@ -11,10 +11,11 @@ import fnmatch
 import logging
 import os
 import tomllib
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from memplex.auth import PrincipalRegistry, PrincipalRegistryError
 from memplex.config import MemplexConfig, normalize_deployment_contract
@@ -148,7 +149,7 @@ def _backup_restore_dr_gate() -> dict[str, Any]:
             or not report.industrial_gate_closing
         ):
             return invalid
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         "backup_restore_dr",
@@ -258,10 +259,10 @@ def _signed_deployment_gate(
             signing_key=load_signing_key_from_environment(
                 "MEMPLEX_INDUSTRIAL_EVIDENCE_HMAC_KEY"
             ),
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
             max_age=timedelta(minutes=15),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         gate_id,
@@ -322,7 +323,7 @@ def _operations_slo_gate(config: MemplexConfig) -> dict[str, Any]:
                 expected_key_id=config.operations.report_key_id,
             ),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         "operations_slo",
@@ -369,7 +370,7 @@ def _release_supply_chain_gate() -> dict[str, Any]:
             signing_key=signing_key,
             expected_version=version("memplex"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         "release_supply_chain",
@@ -429,7 +430,7 @@ def _four_host_e2e_gate() -> dict[str, Any]:
                 ),
             ),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         "four_host_e2e",
@@ -472,7 +473,7 @@ def _capacity_chaos_gate() -> dict[str, Any]:
             load_capacity_chaos_signing_key(),
             expected_version=version("memplex"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return invalid
     return _completed_industrial_gate(
         "capacity_chaos",
@@ -498,8 +499,7 @@ def industrial_readiness_report(config: MemplexConfig) -> dict[str, Any]:
     storage_evidence = (
         "storage.backend=postgres; application and migration DSNs configured"
         if split_postgres_dsn_configured
-        else "storage.backend=%s; production requires postgres plus application and migration DSNs"
-        % backend
+        else f"storage.backend={backend}; production requires postgres plus application and migration DSNs"
     )
     gates: list[dict[str, Any]] = [
         {
@@ -574,7 +574,7 @@ def migration_verification_report(store: Any) -> dict[str, Any]:
     local = _unwrap_postgres_for_migration(store)
     try:
         ready_pool = validate_ready_postgres_pool(getattr(local, "_ready_pool", None))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch, re-raised/wrapped below
         _ = exc
         raise ValueError("PostgreSQL store has no verified storage readiness seal") from None
     target = getattr(ready_pool, "target", None)
@@ -657,7 +657,7 @@ PRIVATE_CORPUS_PATTERNS = (
 )
 
 
-def setup_profile(name: Optional[str]) -> Optional[dict[str, Any]]:
+def setup_profile(name: str | None) -> dict[str, Any] | None:
     """Return a named setup profile, or ``None`` when no profile was requested."""
 
     if name is None:
@@ -736,9 +736,9 @@ def scope_catalog() -> dict[str, Any]:
 def scope_explain(
     *,
     agent: str,
-    user_id: Optional[str],
+    user_id: str | None,
     session_id: str,
-    project_path: Optional[str],
+    project_path: str | None,
     storage_namespace: str,
 ) -> dict[str, Any]:
     """Explain the namespace metadata a runtime will use."""
@@ -768,10 +768,10 @@ def run_agent_diagnostics(
     service: Any,
     *,
     agent: str = "codex",
-    target_dir: Optional[str | Path] = None,
-    user_id: Optional[str] = None,
+    target_dir: str | Path | None = None,
+    user_id: str | None = None,
     session_id: str = "default",
-    project_path: Optional[str | Path] = None,
+    project_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return one read-only integration snapshot for an agent host."""
 
@@ -847,7 +847,7 @@ def scope_preview(
 
     try:
         funcs = service.store.list_functions(limit=selected_scan_limit)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - best-effort fallback value
         return {
             "status": "error",
             "error": str(exc),
@@ -1120,12 +1120,12 @@ def run_doctor(
     service: Any,
     *,
     agent: str = "codex",
-    profile: Optional[str] = None,
+    profile: str | None = None,
     smoke: bool = False,
-    target_dir: Optional[str | Path] = None,
-    user_id: Optional[str] = None,
+    target_dir: str | Path | None = None,
+    user_id: str | None = None,
     session_id: str = "default",
-    project_path: Optional[str | Path] = None,
+    project_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run productized readiness checks."""
 
@@ -1141,7 +1141,7 @@ def run_doctor(
         }
     )
 
-    diagnostics: Optional[dict[str, Any]] = None
+    diagnostics: dict[str, Any] | None = None
     try:
         manifest = get_agent_manifest(agent)
         checks.append(
@@ -1158,7 +1158,7 @@ def run_doctor(
                 },
             }
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         checks.append({"name": "agent_manifest", "status": "fail", "error": str(exc)})
     else:
         try:
@@ -1170,7 +1170,7 @@ def run_doctor(
                 session_id=session_id,
                 project_path=project_path,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
             checks.append(
                 {
                     "name": "agent_installation",
@@ -1233,14 +1233,14 @@ def run_doctor(
                 "explanation": query.explanation,
             }
             status = "pass" if found else "fail"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
             details = {"error": str(exc), "captured_ids": captured_ids}
             status = "fail"
         finally:
             for memory_id in captured_ids:
                 try:
                     service.delete(memory_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 - logged degradation path
                     logger.debug("Failed to clean doctor smoke memory %s", memory_id)
         checks.append(
             {
@@ -1306,7 +1306,7 @@ def lifecycle_counts(service: Any) -> dict[str, int]:
     counts = {"working": 0, "trusted": 0, "project": 0, "archived": 0, "blocked": 0}
     try:
         funcs = service.store.list_functions(limit=100000)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort fallback value
         return counts
     for func in funcs:
         attrs = getattr(func, "attributes", {}) or {}

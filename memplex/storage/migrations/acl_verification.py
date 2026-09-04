@@ -80,7 +80,7 @@ def _verify_application_acl(
                    )
             FROM reachable JOIN pg_catalog.pg_roles role ON role.oid=reachable.oid
             """,
-            (role_oid, list(_MANAGED_TABLES)),
+            (role_oid, [*_MANAGED_TABLES]),
         )
         for role_name, is_super, bypass_rls, owns_managed in cur.fetchall():
             if (
@@ -130,7 +130,7 @@ def _verify_application_acl(
         WHERE n.nspname=current_schema() AND c.relname = ANY(%s)
           AND (c.relowner=%s OR a.attname IS NOT NULL)
         """,
-        (role_oid, list((*tables, _LEDGER_TABLE, _CAPABILITIES_TABLE)), role_oid),
+        (role_oid, [*tables, _LEDGER_TABLE, _CAPABILITIES_TABLE], role_oid),
     )
     if cur.fetchall():
         raise MigrationIntegrityError("application role has unsafe managed ownership or column ACL")
@@ -144,7 +144,7 @@ def _verify_application_acl(
           AND c.relname = ANY(%s)
         ORDER BY c.relname, a.grantee, a.privilege_type
         """,
-        (list((*tables, _LEDGER_TABLE, _CAPABILITIES_TABLE)),),
+        ([*tables, _LEDGER_TABLE, _CAPABILITIES_TABLE],),
     )
     observed: dict[str, set[str]] = {name: set() for name in tables}
     for table, owner, grantee, privilege, grantable in cur.fetchall():

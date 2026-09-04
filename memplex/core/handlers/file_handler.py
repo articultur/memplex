@@ -2,13 +2,13 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import ClassVar
 
 
 class FileHandler:
     """Handles local file reading."""
 
-    SUPPORTED_EXTENSIONS = {
+    SUPPORTED_EXTENSIONS: ClassVar[set[str]] = {
         ".md",
         ".markdown",
         ".txt",
@@ -26,7 +26,7 @@ class FileHandler:
         ext = Path(path).suffix.lower()
         return ext in self.SUPPORTED_EXTENSIONS
 
-    def read(self, path: str) -> Optional[Tuple[str, str]]:
+    def read(self, path: str) -> tuple[str, str] | None:
         """
         Read file content.
 
@@ -54,7 +54,7 @@ class FileHandler:
 
         return None
 
-    def list_files(self, directory: str, recursive: bool = False) -> List[str]:
+    def list_files(self, directory: str, recursive: bool = False) -> list[str]:
         """List supported files in directory."""
         files = []
         path = Path(directory)

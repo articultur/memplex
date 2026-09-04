@@ -19,9 +19,10 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -313,11 +314,11 @@ def _restore_install_snapshot(
                     _restore_concrete_install_path(path, state)
             else:
                 _remove_install_path(path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
             errors.append(f"{path}: {exc}")
     try:
         shutil.rmtree(snapshot_root)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         errors.append(f"{snapshot_root}: {exc}")
     return errors
 

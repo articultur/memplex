@@ -7,6 +7,9 @@ one JSON payload per lifecycle hook or tool call to this module over stdio.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
 import getpass
 import json
 import os
@@ -175,8 +178,8 @@ def _record_runtime_failure(operation: str, error: BaseException) -> None:
         record_runtime_failure(
             _runtime_status_path(), agent="openclaw", operation=operation, error=error
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
+        logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
 
 def _clear_runtime_status(operation: str) -> None:
@@ -184,8 +187,8 @@ def _clear_runtime_status(operation: str) -> None:
         clear_runtime_status_on_success(
             _runtime_status_path(), agent="openclaw", operation=operation, completed=True
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
+        logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
 
 
 def _last_turn(messages: Any) -> tuple[str, str]:
@@ -318,7 +321,7 @@ def _read_payload() -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ValueError("OpenClaw bridge expects one JSON object on stdin") from exc
     if not isinstance(payload, dict):
-        raise ValueError("OpenClaw bridge payload must be an object")
+        raise ValueError("OpenClaw bridge payload must be an object")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     return payload
 
 
@@ -333,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         result = _ACTIONS[arguments[0]](_read_payload())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
         print(f"memplex openclaw bridge failed: {exc}", file=sys.stderr)
         return 1
     sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")

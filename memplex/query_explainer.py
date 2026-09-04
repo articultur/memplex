@@ -18,7 +18,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def build_query_explanation(
-    trace: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
+    trace: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Convert an internal query trace into a stable product schema.
 
     Parameters
@@ -51,12 +51,12 @@ def build_query_explanation(
     if trace is None:
         return None
 
-    paths: List[Dict[str, Any]] = []
-    filters: List[Dict[str, Any]] = []
-    ranking: Dict[str, Any] = {}
-    retrieval: Dict[str, Any] = {"paths": paths}
-    selection: Dict[str, Any] = {}
-    budget: Dict[str, Any] = {
+    paths: list[dict[str, Any]] = []
+    filters: list[dict[str, Any]] = []
+    ranking: dict[str, Any] = {}
+    retrieval: dict[str, Any] = {"paths": paths}
+    selection: dict[str, Any] = {}
+    budget: dict[str, Any] = {
         "top_k": trace.get("top_k"),
         "max_tokens": trace.get("max_tokens"),
         "tokens_used": 0,

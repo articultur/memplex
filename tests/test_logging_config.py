@@ -12,7 +12,7 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.logging_config import (  # noqa: E402
+from memplex.logging_config import (
     JsonFormatter,
     configure_logging,
     install_sensitive_data_filters,

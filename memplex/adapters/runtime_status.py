@@ -12,9 +12,10 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 RUNTIME_STATUS_FILENAME = ".memplex-runtime-status.json"
 RUNTIME_STATUS_SCHEMA_VERSION = 2

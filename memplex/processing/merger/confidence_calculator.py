@@ -1,6 +1,6 @@
 """Confidence calculation based on extraction quality signals."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from memplex.models.paragraph import Paragraph
@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 class ConfidenceCalculator:
     """Calculates confidence scores based on extraction quality signals."""
 
-    SOURCE_BASE = {
+    SOURCE_BASE: ClassVar[dict[str, float]] = {
         "text": 0.95,
         "markdown": 0.95,
         "pdf": 0.90,
@@ -19,7 +19,7 @@ class ConfidenceCalculator:
         "url": 0.90,
     }
 
-    SOURCE_ALIASES = {
+    SOURCE_ALIASES: ClassVar[dict[str, str]] = {
         "clipboard": "text",
         "file:": "file",
     }

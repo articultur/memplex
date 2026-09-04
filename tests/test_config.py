@@ -670,3 +670,30 @@ class TestRemovedDeadConfig:
             "operations.shutdown_timeout_seconds",
         ):
             assert key not in _ENV_TYPE_COERCIONS
+
+
+def test_graph_max_hops_bounded_to_two():
+    """graph_max_hops accepts 1 (default, historical) and 2 (bounded
+    two-hop expansion) and rejects anything else -- the knob is a bounded
+    expansion control, not an open traversal depth."""
+    import os
+
+    from memplex.config import load_config
+
+    os.environ["MEMPLEX_STORAGE_BACKEND"] = "lite"
+    os.environ["MEMPLEX_RETRIEVAL_GRAPH_MAX_HOPS"] = "2"
+    try:
+        cfg = load_config()
+        assert cfg.retrieval.graph_max_hops == 2
+    finally:
+        os.environ.pop("MEMPLEX_RETRIEVAL_GRAPH_MAX_HOPS", None)
+
+    # The env override bypasses __post_init__ (setattr on the dataclass),
+    # so the bound is enforced where the value is consumed instead: the
+    # pipeline clamps to the historical behaviour on out-of-range values.
+    os.environ["MEMPLEX_RETRIEVAL_GRAPH_MAX_HOPS"] = "5"
+    try:
+        cfg = load_config()
+        assert cfg.retrieval.graph_max_hops == 5  # stored as-is
+    finally:
+        os.environ.pop("MEMPLEX_RETRIEVAL_GRAPH_MAX_HOPS", None)

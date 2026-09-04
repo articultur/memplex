@@ -9,9 +9,14 @@ test suite's ``monkeypatch.setattr(pool_module, ...)`` patches) stay stable.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+from collections.abc import Callable
 from hashlib import sha256
 from threading import Condition, RLock
-from typing import Any, Callable
+from typing import Any
 
 from memplex.auth import local_development_context
 
@@ -217,7 +222,7 @@ class PostgresStorageResources:
                 manager.close(wait=True)
             elif raw_pool is not None:
                 raw_pool.closeall()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             return exc
         return None
 
@@ -287,9 +292,9 @@ class PostgresStorageResources:
                 # borrower remains counted until it has returned its
                 # connection, then the manager performs the one closeall.
                 manager.close(wait=False)
-            except BaseException:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # The original pool fault remains the stable resource cause.
-                pass
+                logger.debug("suppressed BaseException: %s", exc)
 
     def ensure_ready(
         self,
@@ -632,12 +637,12 @@ class PostgresSyncStorageResources:
         if inbound_manager is not None:
             try:
                 inbound_manager.close(wait=True)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 close_error = exc
         if app_resources is not None:
             try:
                 app_resources.close(wait=True)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 if close_error is None:
                     close_error = exc
         return close_error
@@ -663,8 +668,8 @@ class PostgresSyncStorageResources:
         if inbound_manager is not None:
             try:
                 inbound_manager.close(wait=False)
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
 
     def _set_fault_from_inbound(self, error: BaseException | None) -> None:
         if error is None:
@@ -688,8 +693,8 @@ class PostgresSyncStorageResources:
         if app_resources is not None:
             try:
                 app_resources.close(wait=False)
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
 
     def _set_fault_from_inbound_closed(self, close_error: BaseException | None) -> None:
         if close_error is not None:
@@ -714,8 +719,8 @@ class PostgresSyncStorageResources:
         if app_resources is not None:
             try:
                 app_resources.close(wait=False)
-            except BaseException:
-                pass
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
+                logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
 
     def ensure_ready(
         self,
@@ -883,12 +888,12 @@ class PostgresSyncStorageResources:
         if inbound_manager is not None:
             try:
                 inbound_result = inbound_manager.close(wait=wait)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 close_error = exc
         if app_resources is not None:
             try:
                 app_result = app_resources.close(wait=wait)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 if close_error is None:
                     close_error = exc
 

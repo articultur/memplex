@@ -75,7 +75,8 @@ def _install_wheel_in_isolated_venv(wheel: Path, tmp_path: Path) -> Path:
             continue
         probe = subprocess.run(
             [candidate, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
-            capture_output=True,
+            capture_output=True,check=False
+        
         )
         if probe.returncode == 0:
             bootstrap_python = candidate
@@ -1324,9 +1325,8 @@ def test_readonly_connection_preserves_primary_error_when_rollback_fails() -> No
         "postgresql://example.invalid/memplex", connection_factory=lambda: connection
     )
 
-    with pytest.raises(ValueError, match="primary catalogue failure"):
-        with runner._short_connection(readonly=True):
-            raise ValueError("primary catalogue failure")
+    with pytest.raises(ValueError, match="primary catalogue failure"), runner._short_connection(readonly=True):
+        raise ValueError("primary catalogue failure")
 
     assert connection.closed
 
@@ -1353,9 +1353,8 @@ def test_readonly_connection_closes_when_normal_rollback_fails() -> None:
         "postgresql://example.invalid/memplex", connection_factory=lambda: connection
     )
 
-    with pytest.raises(RuntimeError, match="rollback failed"):
-        with runner._short_connection(readonly=True):
-            pass
+    with pytest.raises(RuntimeError, match="rollback failed"), runner._short_connection(readonly=True):
+        pass
 
     assert connection.closed
 

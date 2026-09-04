@@ -28,18 +28,18 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 
 def _ensure_aware(dt: datetime) -> datetime:
     """Normalize a datetime to offset-aware UTC for safe arithmetic."""
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from memplex.config import MemplexConfig
 from memplex.models import (
@@ -54,9 +54,6 @@ from memplex.retrieval.dedup import MemoryDeduplicator
 from memplex.retrieval.embedding import EmbeddingService
 from memplex.storage.base import MemoryStore
 from memplex.storage.lite.durability import _load_fcntl
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +110,7 @@ class FileLock(CompactionLock):
         key_hash = hashlib.sha1(key.encode()).hexdigest()[:16]
         self._lock_path = lock_dir / f"{key_hash}.lock"
         self._lock_dir = lock_dir
-        self._fd: Optional[int] = None
+        self._fd: int | None = None
 
     async def try_acquire(self) -> bool:
         self._lock_dir.mkdir(parents=True, exist_ok=True)
@@ -151,7 +148,7 @@ class CompactionPipeline:
         Full :class:`MemplexConfig` (read compaction sub-config).
     """
 
-    STAGES = ["extract", "dedup", "summarize", "prune", "archive"]
+    STAGES: ClassVar[list[str]] = ["extract", "dedup", "summarize", "prune", "archive"]
 
     def __init__(
         self,
@@ -207,7 +204,7 @@ class CompactionPipeline:
     async def _run_pipeline(self, scope: CompactionScope) -> CompactionResult:
         """Execute each stage sequentially."""
         start_time = time.monotonic()
-        stage_results: List[CompactionStageResult] = []
+        stage_results: list[CompactionStageResult] = []
         total_processed = 0
         total_removed = 0
         total_merged = 0
@@ -282,7 +279,7 @@ class CompactionPipeline:
         """
         t0 = time.monotonic()
         expected_generation, functions = self._function_snapshot()
-        memories: List[Memory] = list(functions)
+        memories: list[Memory] = list(functions)
 
         threshold = self._config.compaction.dedup_threshold
         chunk_threshold = self._config.compaction.chunk_threshold
@@ -336,7 +333,7 @@ class CompactionPipeline:
         if getattr(merged, "updated_at", None):
             target.updated_at = merged.updated_at
 
-    def _replace_functions(self, functions: List[Memory]) -> None:
+    def _replace_functions(self, functions: list[Memory]) -> None:
         """Use an explicit persistence API; never reflect into `_save`."""
         replace = getattr(self._store, "replace_function", None)
         if callable(replace):
@@ -352,7 +349,7 @@ class CompactionPipeline:
                 SourceDocument(type="compaction", source_type=SourceType.WIKI),
             )
 
-    def _function_snapshot(self) -> tuple[Optional[int], List[Memory]]:
+    def _function_snapshot(self) -> tuple[int | None, list[Memory]]:
         """Bind compaction input to one store generation when supported."""
         snapshot = getattr(self._store, "compaction_snapshot", None)
         if callable(snapshot):
@@ -361,7 +358,7 @@ class CompactionPipeline:
         return None, list(self._store.list_functions(limit=100000))
 
     def _apply_compaction(
-        self, replacements: List[Memory], delete_ids: List[str], expected_generation: Optional[int]
+        self, replacements: list[Memory], delete_ids: list[str], expected_generation: int | None
     ) -> bool:
         apply = getattr(self._store, "apply_compaction", None)
         if not callable(apply):
@@ -394,7 +391,7 @@ class CompactionPipeline:
         for func in functions:
             trimmed_this = False
             for role in ("trigger", "condition", "action", "benefit"):
-                values: List[FieldValue] = getattr(func, role, [])
+                values: list[FieldValue] = getattr(func, role, [])
                 if len(values) <= max_values:
                     continue
 
@@ -448,7 +445,7 @@ class CompactionPipeline:
         delete_ids: list[str] = []
         fields_trimmed = 0
         processed = len(functions)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for func in functions:
             should_delete = False
@@ -494,7 +491,7 @@ class CompactionPipeline:
             # Prune deprecated FieldValue entries (not the whole Function)
             if not should_delete:
                 for role in ("trigger", "condition", "action", "benefit"):
-                    values: List[FieldValue] = getattr(func, role, [])
+                    values: list[FieldValue] = getattr(func, role, [])
                     before = len(values)
                     kept = [fv for fv in values if fv.status != "deprecated"]
                     if len(kept) < before:
@@ -544,7 +541,7 @@ class CompactionPipeline:
         archive_dir = Path.home() / ".memplex" / "archive"
         try:
             _ensure_directory_tree_durable(archive_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("Failed to prepare durable archive directory: %s", exc)
             return CompactionStageResult(
                 stage="archive", processed=0, removed=0, merged=0,
@@ -553,7 +550,7 @@ class CompactionPipeline:
 
         expected_generation, functions = self._function_snapshot()
         max_age_days = self._config.compaction.prune_max_age_days
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         archived = 0
         delete_ids: list[str] = []
 
@@ -580,7 +577,7 @@ class CompactionPipeline:
                     payload["archived_at"] = now.isoformat()
                     payload["original_updated_at"] = str(updated)
                     tmp = archive_file.with_name(f".{archive_file.name}.{uuid.uuid4().hex}.tmp")
-                    with open(tmp, "w", encoding="utf-8") as fh:
+                    with open(tmp, "w", encoding="utf-8") as fh:  # noqa: ASYNC230 - runs on the worker thread, not the event loop
                         json.dump(
                             payload,
                             fh,
@@ -594,7 +591,7 @@ class CompactionPipeline:
                     _fsync_directory(archive_dir)
                     delete_ids.append(func.id)
                     archived += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     tmp.unlink(missing_ok=True)
                     logger.warning("Failed to archive %s: %s", func.id, exc)
 

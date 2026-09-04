@@ -5,7 +5,7 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -52,7 +52,7 @@ class TestFieldValue:
         assert fv.status == "active"
 
     def test_create_full(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fv = FieldValue(
             desc="trigger text",
             sources=["text:para_1"],
@@ -472,7 +472,7 @@ class TestGraphTypes:
 
 class TestFieldValueSerialization:
     def test_roundtrip_full(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fv = FieldValue(
             desc="trigger text",
             sources=["text:para_1", "wiki:p2"],
@@ -612,7 +612,7 @@ class TestMemoryFeedbackTimezone:
         """Regression: Postgres TIMESTAMPTZ (asyncpg) yields tz-aware
         datetimes while lite/SQLite produce naive ones; mixing them raised
         TypeError on comparison/sort."""
-        aware = datetime.now(timezone.utc)
+        aware = datetime.now(UTC)
         fb = MemoryFeedback(
             memory_id="m1",
             field_role="trigger",
@@ -624,7 +624,7 @@ class TestMemoryFeedbackTimezone:
         assert fb.timestamp == aware.replace(tzinfo=None)
 
     def test_naive_timestamp_unchanged(self):
-        naive = datetime(2026, 1, 1, 12, 0, 0)
+        naive = datetime(2026, 1, 1, 12, 0, 0)  # noqa: DTZ001 - deliberately naive input
         fb = MemoryFeedback(
             memory_id="m1",
             field_role="trigger",
@@ -640,9 +640,9 @@ class TestMemoryFeedbackTimezone:
             field_role="trigger",
             value_index=0,
             verdict=FeedbackVerdict.CORRECT,
-            timestamp=datetime.now(timezone.utc),
-            needs_review_until=datetime.now(timezone.utc) + timedelta(days=7),
-            resolved_at=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
+            needs_review_until=datetime.now(UTC) + timedelta(days=7),
+            resolved_at=datetime.now(UTC),
         )
         naive_fb = MemoryFeedback(
             memory_id="m2",

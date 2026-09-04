@@ -11,20 +11,20 @@ import copy
 import inspect
 import os
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.auth import AuthorizationContext, Principal  # noqa: E402
-from memplex.storage.lite.store import LiteMemoryStore  # noqa: E402
-from memplex.storage.lite.sync_repository import LiteSyncRepository  # noqa: E402
-from memplex.storage.postgres_sync import PostgresSyncRepository  # noqa: E402
-from memplex.sync_protocol import (  # noqa: E402
+from memplex.auth import AuthorizationContext, Principal
+from memplex.storage.lite.store import LiteMemoryStore
+from memplex.storage.lite.sync_repository import LiteSyncRepository
+from memplex.storage.postgres_sync import PostgresSyncRepository
+from memplex.sync_protocol import (
     SyncEntityKey,
     SyncEvent,
     SyncNodeType,
@@ -34,7 +34,7 @@ from memplex.sync_protocol import (  # noqa: E402
     SyncStreamItem,
     SyncVersion,
 )
-from memplex.sync_repository import (  # noqa: E402
+from memplex.sync_repository import (
     AbstractSyncRepository,
     SyncCapturePolicy,
     SyncRepository,
@@ -74,7 +74,7 @@ def _event(index: int, *, tenant_id: str = "tenant-a") -> SyncEvent:
         SyncOperation.UPSERT,
         str(
             SyncVersion.create(
-                datetime(2026, 8, 12, tzinfo=timezone.utc),
+                datetime(2026, 8, 12, tzinfo=UTC),
                 "remote-a",
                 event_id,
             )

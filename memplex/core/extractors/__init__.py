@@ -7,9 +7,9 @@ from .pdf import PDFExtractor
 from .vision_mapper import VisionMapper
 
 __all__ = [
-    "MarkdownExtractor",
-    "ImageExtractor",
-    "PDFExtractor",
     "DOCXExtractor",
+    "ImageExtractor",
+    "MarkdownExtractor",
+    "PDFExtractor",
     "VisionMapper",
 ]

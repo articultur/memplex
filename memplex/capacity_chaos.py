@@ -9,11 +9,11 @@ import math
 import os
 import stat
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 _SCHEMA_VERSION = 1
 _MAX_EVIDENCE_BYTES = 128 * 1024
@@ -118,7 +118,7 @@ def _timestamp(value: object) -> datetime:
     text = _exact_text(value)
     try:
         parsed = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
     except ValueError as exc:
         raise CapacityChaosEvidenceError() from exc
@@ -483,7 +483,7 @@ class CapacityChaosEvidence:
         ).hexdigest()
         if not hmac.compare_digest(expected, parsed.signature):
             _fail()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         generated = _timestamp(parsed.generated_at)
         if now - generated > _MAX_EVIDENCE_AGE or generated - now > _MAX_FUTURE_SKEW:
             _fail("capacity_chaos_freshness_invalid")

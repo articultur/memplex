@@ -2,9 +2,9 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, overload
+from typing import Any, overload
 
 from memplex.models.misc import FieldValue
 
@@ -19,7 +19,7 @@ class FeedbackVerdict(Enum):
 def _to_naive(dt: datetime) -> datetime: ...
 @overload
 def _to_naive(dt: None) -> None: ...
-def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
+def _to_naive(dt: datetime | None) -> datetime | None:
     """Normalize a datetime to naive UTC.
 
     Lite/SQLite feedback stores produce naive timestamps while the
@@ -28,7 +28,7 @@ def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
     at the model boundary keeps every store backend comparable.
     """
     if isinstance(dt, datetime) and dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.astimezone(UTC).replace(tzinfo=None)
     return dt
 
 
@@ -38,25 +38,25 @@ class MemoryFeedback:
     field_role: str
     value_index: int
     verdict: FeedbackVerdict
-    reason: Optional[str] = None
+    reason: str | None = None
     source: str = "user"
     timestamp: datetime = field(default_factory=datetime.now)
-    owner: Optional[str] = None
+    owner: str | None = None
     feedback_type: str = "field_value"
-    old_value: Optional[str] = None
-    new_value: Optional[str] = None
+    old_value: str | None = None
+    new_value: str | None = None
     needs_review: bool = True
-    needs_review_until: Optional[datetime] = None
-    resolved_at: Optional[datetime] = None
-    resolution: Optional[str] = None
+    needs_review_until: datetime | None = None
+    resolved_at: datetime | None = None
+    resolution: str | None = None
     # Feedback has the same identity boundary as the memory it reviews.  The
     # fields remain optional for backwards-compatible loading of historic JSON
     # and SQLite rows; authenticated stores fill them before persistence.
-    tenant_id: Optional[str] = None
-    owner_subject_id: Optional[str] = None
-    workspace_id: Optional[str] = None
+    tenant_id: str | None = None
+    owner_subject_id: str | None = None
+    workspace_id: str | None = None
     visibility: str = "workspace"
-    provenance: Dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.timestamp = _to_naive(self.timestamp)
@@ -75,6 +75,6 @@ class MemoryFeedback:
 class PendingReview:
     memory_id: str
     field_role: str
-    conflicting_values: List[FieldValue] = field(default_factory=list)
-    detected_at: Optional[datetime] = None
+    conflicting_values: list[FieldValue] = field(default_factory=list)
+    detected_at: datetime | None = None
     source: str = ""

@@ -6,13 +6,14 @@ import types
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
+from typing import ClassVar
+
 from memplex.retrieval import embedding
 from memplex.retrieval.embedding import EmbeddingService
 
 
 class _FakeSentenceTransformerEmbedder:
-    seen_model_names: list[str] = []
-
+    seen_model_names: ClassVar[list[str]] = []
     def __init__(self, model_name: str, dimension: int) -> None:
         self.seen_model_names.append(model_name)
         self.dimension = dimension

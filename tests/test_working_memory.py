@@ -7,7 +7,7 @@ import time
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.working_memory import WorkingMemory  # noqa: E402
+from memplex.working_memory import WorkingMemory
 
 
 def test_add_and_recency_ordered_recall():

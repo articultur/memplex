@@ -20,7 +20,6 @@ from tests.g004_cli_runner import (
     run_cli,
 )
 
-
 # The ordinary Lite suite does not select this externally provisioned tier.
 # An explicit PostgreSQL gate sets this contract before pytest collection.
 __test__ = os.environ.get("MEMPLEX_REQUIRE_PGVECTOR") == "1"
@@ -66,7 +65,7 @@ def test_external_postgres_connection_failure_is_fixed_and_credential_safe() -> 
 def _probe_external_postgres(psycopg2: Any, dsn: str) -> None:
     try:
         connection = psycopg2.connect(dsn)
-    except Exception:
+    except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
         raise AssertionError(
             "PostgreSQL prerequisite unavailable: external DSN connection failed"
         ) from None
@@ -84,7 +83,7 @@ def _probe_external_postgres(psycopg2: Any, dsn: str) -> None:
                 connection.rollback()
             finally:
                 cursor.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch, re-raised/wrapped below
             connection.rollback()
             raise AssertionError(
                 "PostgreSQL prerequisite unavailable: pgvector probe failed"

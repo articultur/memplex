@@ -11,9 +11,10 @@ import hashlib
 import hmac
 import json
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, FrozenSet, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from memplex.models import MemoryNode
@@ -48,7 +49,7 @@ class Principal:
 
     tenant_id: str
     subject_id: str
-    roles: FrozenSet[str] = field(default_factory=frozenset)
+    roles: frozenset[str] = field(default_factory=frozenset)
     authentication_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -131,7 +132,7 @@ class PrincipalCredential:
     subject_id: str
     workspace_id: str
     agent_id: str = ""
-    roles: FrozenSet[str] = field(default_factory=frozenset)
+    roles: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -159,7 +160,7 @@ class PrincipalCredential:
         )
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "PrincipalCredential":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> PrincipalCredential:
         """Validate one opaque server-side principal-registry entry."""
         if not isinstance(raw, Mapping):
             raise PrincipalRegistryError("principal registry entries must be objects")
@@ -199,7 +200,7 @@ class PrincipalRegistry:
             raise PrincipalRegistryError("principal registry token_sha256 values must be unique")
 
     @classmethod
-    def from_environment(cls) -> Optional["PrincipalRegistry"]:
+    def from_environment(cls) -> PrincipalRegistry | None:
         """Load ``MEMPLEX_PRINCIPALS_JSON``, or return ``None`` when absent.
 
         An explicitly configured empty, malformed, or non-list registry is a
@@ -222,8 +223,8 @@ class PrincipalRegistry:
         *,
         request_id: str = "",
         session_id: str = "",
-        provenance: Optional[Mapping[str, str]] = None,
-    ) -> Optional[AuthorizationContext]:
+        provenance: Mapping[str, str] | None = None,
+    ) -> AuthorizationContext | None:
         """Resolve *token* using constant-time SHA-256 digest comparison.
 
         Every registry digest is compared before selecting a match, avoiding
@@ -233,7 +234,7 @@ class PrincipalRegistry:
         if not isinstance(token, str) or not token:
             return None
         presented = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        matched: Optional[PrincipalCredential] = None
+        matched: PrincipalCredential | None = None
         for credential in self.credentials:
             is_match = hmac.compare_digest(presented, credential.token_sha256)
             if is_match:
@@ -257,12 +258,12 @@ class PrincipalRegistry:
 
 def resolve_environment_authorization(
     *,
-    agent_id: Optional[str],
+    agent_id: str | None,
     session_id: str = "",
     request_id: str = "",
-    provenance: Optional[Mapping[str, str]] = None,
+    provenance: Mapping[str, str] | None = None,
     require_registry: bool = False,
-) -> Optional[AuthorizationContext]:
+) -> AuthorizationContext | None:
     """Resolve one host identity from the process principal registry.
 
     ``MEMPLEX_PRINCIPALS_JSON`` is authoritative whenever present. Its
@@ -338,12 +339,12 @@ def _claim_conflicts(value: object, expected: str) -> bool:
 
 
 def bind_node_identity(
-    node: "MemoryNode",
+    node: MemoryNode,
     context: AuthorizationContext,
     *,
     visibility: str = "workspace",
     reject_conflicts: bool = True,
-) -> "MemoryNode":
+) -> MemoryNode:
     """Atomically project *context* onto ``node`` before persistence.
 
     Payload identity fields are only accepted when absent or equal to the

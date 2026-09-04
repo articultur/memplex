@@ -10,14 +10,14 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from memplex.intent import (  # noqa: E402
+from memplex.intent import (
     NEGATION_PREFIXES,
     SCOPE_KEYWORDS,
     classify_observation,
     detect_memory_type,
     detect_scope_by_keywords,
 )
-from memplex.models import QueryScope  # noqa: E402
+from memplex.models import QueryScope
 
 # ── detect_memory_type ────────────────────────────────────────────────
 

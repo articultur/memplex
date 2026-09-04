@@ -53,26 +53,26 @@ from .popqa_hotpot import (
     PopQAHotpotRunner,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022 - grouped by module section, not alphabetical
     # Base
-    "BenchmarkSample",
     "BenchmarkResult",
-    "EvaluationDataset",
     "BenchmarkRunner",
     "BenchmarkRunnerFactory",
+    "BenchmarkSample",
     "BenchmarkSourceDocument",
+    "EvaluationDataset",
     # Metrics
-    "precision_at_k",
-    "recall_at_k",
-    "mrr",
-    "ndcg_at_k",
-    "bleu",
-    "rouge_l",
-    "f1_score",
-    "exact_match",
-    "answer_contains",
     "MemoryMetrics",
     "aggregate_metrics",
+    "answer_contains",
+    "bleu",
+    "exact_match",
+    "f1_score",
+    "mrr",
+    "ndcg_at_k",
+    "precision_at_k",
+    "recall_at_k",
+    "rouge_l",
     # NQ + TriviaQA
     "NQDataset",
     "NQTriviaDataset",

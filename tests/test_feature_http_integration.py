@@ -16,14 +16,14 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from contextlib import contextmanager  # noqa: E402
+from contextlib import contextmanager
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from memplex import sync_crypto  # noqa: E402
-from memplex.adapters.http_api import create_app  # noqa: E402
-from memplex.config import MemplexConfig  # noqa: E402
-from memplex.models import Fact, SourceType  # noqa: E402
+from memplex import sync_crypto
+from memplex.adapters.http_api import create_app
+from memplex.config import MemplexConfig
+from memplex.models import Fact, SourceType
 
 
 @contextmanager

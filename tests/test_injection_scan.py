@@ -241,7 +241,7 @@ def test_drop_injection_suspected_removes_flagged_functions():
 
 def test_drop_injection_suspected_keeps_results_when_store_lookup_fails():
     class _BrokenStore:
-        def get(self, func_id):  # noqa: ANN001
+        def get(self, func_id):
             raise RuntimeError("transient")
 
     kept = drop_injection_suspected([_Result("x")], _BrokenStore())
@@ -250,7 +250,7 @@ def test_drop_injection_suspected_keeps_results_when_store_lookup_fails():
 
 def test_lookup_failure_still_drops_only_suspicious_summary():
     class _BrokenStore:
-        def get(self, func_id):  # noqa: ANN001
+        def get(self, func_id):
             raise RuntimeError("transient")
 
     kept = drop_injection_suspected(

@@ -130,10 +130,10 @@ budget among those seeds, and requests relation-type neighbors with
 `max_hops=1` and an explicit limit. It deduplicates neighbors and never falls
 back to an unbounded read.
 
-- Implementation: [bounded one-hop graph search](../memplex/retrieval/multi_path.py#L120-L215)
+- Implementation: [bounded hop-limited graph search](../memplex/retrieval/multi_path.py#L120-L215)
 - Contract tests: [one-hop behavior](../tests/test_multi_path.py#L178-L205)
   and [edge filters plus hard budgets](../tests/test_multi_path.py#L256-L305)
-- Limit: this is one-hop expansion. It must not be described as unrestricted
+- Limit: this is bounded one- or two-hop expansion (retrieval.graph_max_hops). It must not be described as unrestricted
   traversal or general multi-hop reasoning.
 
 ## Principal tenant authorization

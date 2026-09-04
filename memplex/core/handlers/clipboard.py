@@ -1,12 +1,11 @@
 """Handle text paste input."""
 
-from typing import List, Tuple
 
 
 class ClipboardHandler:
     """Handles pasted text content."""
 
-    def parse(self, content: str) -> List[Tuple[str, str]]:
+    def parse(self, content: str) -> list[tuple[str, str]]:
         """
         Parse pasted content.
 

@@ -24,10 +24,11 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from threading import Condition, RLock
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from memplex.auth import (
     AuthorizationContext,
@@ -50,10 +51,10 @@ from memplex.llm.injection_guard import (
 )
 from memplex.llm.provider import create_provider
 from memplex.models import (
-    Fact,
     CompactionResult,
     CompactionScope,
     ExtractedData,
+    Fact,
     FeedbackVerdict,
     Function,
     MemoryFeedback,
@@ -89,7 +90,7 @@ logger = logging.getLogger(__name__)
 # Optional callback registered by the HTTP adapter at startup so the
 # service health surface can report the SSE subscriber count without a
 # reverse domain→adapter import. Returns int; never raises.
-_sse_subscriber_count_provider: Optional[Callable[[], int]] = None
+_sse_subscriber_count_provider: Callable[[], int] | None = None
 
 
 def register_sse_subscriber_count_provider(provider: Callable[[], int]) -> None:
@@ -118,7 +119,7 @@ def _package_version() -> str:
             project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
             if project.get("name") == "memplex" and project.get("version"):
                 return str(project["version"])
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.debug("pyproject version resolution failed, falling back to importlib: %s", exc)
 
     from importlib.metadata import version as pkg_version
@@ -157,7 +158,7 @@ class MemplexService:
         :func:`load_config`.
     """
 
-    def __init__(self, config: Optional[MemplexConfig] = None) -> None:
+    def __init__(self, config: MemplexConfig | None = None) -> None:
         from memplex.operations import RuntimeLifecycle
 
         self._config = config or load_config()
@@ -166,9 +167,8 @@ class MemplexService:
         # (below) already needs the production-profile check. Stores are
         # resolved lazily via providers so the gate always reads the service's
         # current ``store`` / ``_feedback_store`` (never a stale snapshot).
-        from memplex.working_memory import WorkingMemory
-
         from memplex.sleep_time import SleepTimeAgent
+        from memplex.working_memory import WorkingMemory
 
         self._sleep_time = SleepTimeAgent(
             self,
@@ -302,11 +302,11 @@ class MemplexService:
         except BaseException:
             try:
                 self._close_postgres_resources_once()
-            except BaseException:
+            except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 # Construction failure is the caller-visible cause.  Resource
                 # shutdown is still attempted exactly once and its state is
                 # retained for diagnostic inspection.
-                pass
+                logger.debug("suppressed BaseException: %s", exc)
             raise
 
     def _initialize_runtime(
@@ -365,7 +365,7 @@ class MemplexService:
         )
 
         # ── LLM Enhancer (optional) ─────────────────────────────
-        self._llm: Optional[LLMEnhancer] = None
+        self._llm: LLMEnhancer | None = None
         self._init_llm(cfg)
 
         # ── Feedback store ──────────────────────────────────────
@@ -542,7 +542,7 @@ class MemplexService:
     # from the service itself.
 
     def _require_authorization(
-        self, context: Optional[AuthorizationContext]
+        self, context: AuthorizationContext | None
     ) -> AuthorizationContext:
         """Require adapter-bound identity outside the local development profile."""
         return self._auth.require_authorization(context)
@@ -564,7 +564,7 @@ class MemplexService:
         return self._auth.typed_lookup_for(context)
 
     @staticmethod
-    def _identity_value(node: Any, field_name: str, namespace_key: str) -> Optional[str]:
+    def _identity_value(node: Any, field_name: str, namespace_key: str) -> str | None:
         """Resolve a node identity field, accepting the stable namespace copy."""
         return AuthorizationGate.identity_value(node, field_name, namespace_key)
 
@@ -586,8 +586,8 @@ class MemplexService:
         return self._auth.require_visible_node(memory_id, context)
 
     def _filter_authorized_results(
-        self, results: List[SearchResult], context: AuthorizationContext
-    ) -> List[SearchResult]:
+        self, results: list[SearchResult], context: AuthorizationContext
+    ) -> list[SearchResult]:
         """Drop inaccessible search candidates before any ranking side effect."""
         return self._auth.filter_authorized_results(results, context)
 
@@ -614,13 +614,13 @@ class MemplexService:
                 fallback_chain=cfg.llm.fallback_chain,
             )
             self._llm = LLMEnhancer(llm_provider=provider, config=cfg.llm)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.info("LLM enhancer not available (%s); using rule-based fallback", exc)
             self._llm = None
 
     # ── Wiki searcher initialisation ────────────────────────────────
 
-    def _build_wiki_searcher(self, cfg: MemplexConfig) -> Optional[object]:
+    def _build_wiki_searcher(self, cfg: MemplexConfig) -> object | None:
         """Build a DualIndexSearch over compiled wiki pages when enabled.
 
         Returns ``None`` when wiki is disabled or construction fails; the
@@ -636,7 +636,7 @@ class MemplexService:
                 wiki_dir=Path(wiki_cfg.dir).expanduser(),
                 embedding_service=self._embedding_service,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("wiki searcher init failed; wiki path falls back to FTS: %s", exc)
             return None
 
@@ -655,7 +655,7 @@ class MemplexService:
         their bounded in-process registry entry is backed by mandatory typed
         content scans at every model-facing read.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         self._injection_scans.prune(today)
         seen: set[int] = set()
         for node in nodes:
@@ -720,7 +720,7 @@ class MemplexService:
         """Return whether a loaded typed node may be serialized to a model."""
         try:
             node_id = str(getattr(node, "id", "") or "")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("injection node id inspection failed closed: %s", exc)
             return False
         if self._injection_risks.contains(node_id):
@@ -739,14 +739,12 @@ class MemplexService:
         self,
         text: str,
         top_k: int = 10,
-        owner: Optional[str] = None,
+        owner: str | None = None,
         max_tokens: int = 4000,
-        namespace_filter: Optional[
-            Dict[str, Optional[str]] | List[Dict[str, Optional[str]]]
-        ] = None,
+        namespace_filter: dict[str, str | None] | list[dict[str, str | None]] | None = None,
         explain: bool = False,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> QueryResult:
         """Unified query entry point.
 
@@ -813,14 +811,12 @@ class MemplexService:
         self,
         text: str,
         top_k: int = 10,
-        owner: Optional[str] = None,
+        owner: str | None = None,
         max_tokens: int = 4000,
-        namespace_filter: Optional[
-            Dict[str, Optional[str]] | List[Dict[str, Optional[str]]]
-        ] = None,
+        namespace_filter: dict[str, str | None] | list[dict[str, str | None]] | None = None,
         explain: bool = False,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> QueryResult:
         """Async version of :meth:`query`.
 
@@ -878,7 +874,7 @@ class MemplexService:
                     "relation": QueryScope.RELATION,
                 }
                 return intent_map.get(enhanced.intent, QueryScope.IMMEDIATE)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 # LLM intent detection failed; fall through to keyword
                 # scoring but keep a debug trace for diagnosis.
                 logger.debug("LLM intent detection failed, using keyword fallback: %s", exc)
@@ -891,10 +887,10 @@ class MemplexService:
         self,
         memory_ids: Iterable[str],
         *,
-        attributes: Optional[Dict[str, Any]] = None,
-        needs_review: Optional[bool] = None,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> List[Function]:
+        attributes: dict[str, Any] | None = None,
+        needs_review: bool | None = None,
+        authorization: AuthorizationContext | None = None,
+    ) -> list[Function]:
         """Annotate stored memories through the service boundary.
 
         This keeps product workflows from mutating store internals directly.
@@ -930,7 +926,7 @@ class MemplexService:
                 attributes=attributes,
                 needs_review=needs_review,
             )
-        updated: List[Function] = []
+        updated: list[Function] = []
         typed_updated: list = []
         for node in visible_nodes:
             if isinstance(node, Function):
@@ -997,14 +993,14 @@ class MemplexService:
                 facts = pool.submit(
                     asyncio.run, self._llm.factualize(content)
                 ).result(timeout=10.0)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("factual capture failed, keeping original content: %s", exc)
             return content
         if not facts:
             return content
         return content + "\n\nExtracted facts:\n" + "\n".join(f"- {fact}" for fact in facts)
 
-    def _compute_hyde_vector(self, text: str) -> Optional[Vector]:
+    def _compute_hyde_vector(self, text: str) -> Vector | None:
         """Generate a HyDE (Hypothetical Document Embedding) vector.
 
         Uses ThreadPoolExecutor to isolate ``asyncio.run`` so it works
@@ -1022,7 +1018,7 @@ class MemplexService:
                     self._llm.enhance_query_hyde_text(text),
                 ).result(timeout=5.0)
             return self._embedding_service.embed_query(hyde_text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("HyDE failed, falling back to raw query vector: %s", exc)
             return None
 
@@ -1035,7 +1031,7 @@ class MemplexService:
         source: SourceDocument,
         *,
         visibility: str = "workspace",
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> ExtractedData:
         """Write new content: extract Functions -> build graph edges
         -> ``store.merge()``.
@@ -1136,7 +1132,7 @@ class MemplexService:
                         # byte-for-byte via cast; tracked as a latent bug.
                         {"func_id": func.id, "source_id": cast(Any, source).id if source else None},
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 # Background tasks are best-effort, but a submission failure
                 # should not vanish silently -- debug-log so the dropped index
                 # build is traceable.
@@ -1185,7 +1181,7 @@ class MemplexService:
             for node in nodes:
                 try:
                     add(node)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.debug(
                         "%s persistence failed for %s: %s",
                         kind,
@@ -1212,7 +1208,7 @@ class MemplexService:
             return
         try:
             existing = list_facts()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("fact supersession listing failed: %s", exc)
             return
 
@@ -1223,7 +1219,7 @@ class MemplexService:
             for old_fact in superseded:
                 try:
                     store.add_fact(old_fact)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.debug(
                         "fact supersede persist failed for %s: %s", old_fact.id, exc
                     )
@@ -1253,7 +1249,7 @@ class MemplexService:
                     warn,
                     hard,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("compaction scheduling check failed: %s", exc)
 
     @staticmethod
@@ -1276,7 +1272,7 @@ class MemplexService:
         source_type: str = "text",
         *,
         visibility: str = "workspace",
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> ExtractedData:
         """Convenience: write raw text content.
 
@@ -1308,8 +1304,8 @@ class MemplexService:
         self,
         memory_id: str,
         *,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> Optional[Function]:
+        authorization: AuthorizationContext | None = None,
+    ) -> Function | None:
         """Retrieve a single memory node by ID, or ``None``.
 
         Functions resolve through ``store.get``; Fact/Preference nodes
@@ -1332,7 +1328,7 @@ class MemplexService:
         memory_id: str,
         limit: int = 20,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> list:
         """Return a visible memory's changelog, hiding cross-scope IDs."""
         context = self._require_authorization(authorization)
@@ -1340,18 +1336,18 @@ class MemplexService:
             return []
         try:
             return list(self._store_for(context).get_timeline(memory_id, limit=limit))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("get_timeline failed for %s: %s", memory_id, exc)
             return []
 
     def list_facts(
         self,
-        as_of: Optional[str] = None,
+        as_of: str | None = None,
         limit: int = 1000,
         *,
         include_invalidated: bool = False,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> List[Fact]:
+        authorization: AuthorizationContext | None = None,
+    ) -> list[Fact]:
         """List Fact nodes through the store's optional API, temporally scoped.
 
         Bi-temporal read surface: by default only facts whose
@@ -1392,18 +1388,18 @@ class MemplexService:
                 except ValueError:
                     point = None  # malformed as_of degrades to "now", never 500s
             return temporal.facts_valid_at(safe, as_of=point)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("list_facts failed: %s", exc)
             return []
 
     def list_observations(
         self,
-        category: Optional[str] = None,
-        owner: Optional[str] = None,
+        category: str | None = None,
+        owner: str | None = None,
         limit: int = 1000,
         *,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> List[Observation]:
+        authorization: AuthorizationContext | None = None,
+    ) -> list[Observation]:
         """List captured Observation nodes through the store's optional API.
 
         Thin pass-through to ``store.list_observations`` with *category*
@@ -1430,7 +1426,7 @@ class MemplexService:
                 if self._is_node_visible(observation, context)
             ]
             return [observation for observation in visible if self.is_safe_for_model(observation)]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("list_observations failed: %s", exc)
             return []
 
@@ -1439,7 +1435,7 @@ class MemplexService:
         observation: Observation,
         *,
         visibility: str = "workspace",
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> Observation:
         """Bind and persist an Observation through the authorized store."""
 
@@ -1460,7 +1456,7 @@ class MemplexService:
         role: str,
         new_value: str,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> UpdateResult:
         """Update a Function's field value.
 
@@ -1545,7 +1541,7 @@ class MemplexService:
         self,
         memory_id: str,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> None:
         """Delete a visible memory through its typed store boundary."""
         context = self._require_authorization(authorization)
@@ -1570,9 +1566,9 @@ class MemplexService:
         field_role: str,
         value_index: int,
         verdict: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> None:
         """Submit user feedback on a memory field value.
 
@@ -1619,9 +1615,9 @@ class MemplexService:
         memory_id: str,
         field_role: str,
         action: str,
-        new_value: Optional[str] = None,
+        new_value: str | None = None,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> dict:
         """Apply a resolution to a pending feedback review.
 
@@ -1657,10 +1653,10 @@ class MemplexService:
 
     def get_pending_reviews(
         self,
-        owner: Optional[str] = None,
+        owner: str | None = None,
         limit: int = 100,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> list:
         """Return pending feedback reviews, optionally filtered by owner.
 
@@ -1710,7 +1706,7 @@ class MemplexService:
         try:
             self.store.list_functions(limit=1)
             storage_status = "ok"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broad catch with explicit fallback handling
             storage_status = f"error: {exc}"
 
         worker_running = self._worker._running
@@ -1724,7 +1720,7 @@ class MemplexService:
         # Count functions
         try:
             functions_total = self._count_functions_exact(self.store)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("health: list_functions failed, reporting 0: %s", exc)
             functions_total = 0
 
@@ -1732,7 +1728,7 @@ class MemplexService:
         try:
             graph = self.store.get_graph()
             edges_total = len(graph.edges)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("health: get_graph failed, reporting 0 edges: %s", exc)
             edges_total = 0
 
@@ -1741,13 +1737,13 @@ class MemplexService:
 
         # Last compaction
         last_compaction = self._worker.last_compaction
-        last_compaction_iso: Optional[str] = None
+        last_compaction_iso: str | None = None
         if last_compaction is not None:
             last_compaction_iso = last_compaction.isoformat()
 
         # Injection scans detected in last 24h (prune stale date keys so
         # the map cannot grow one entry per day forever).
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         self._injection_scans.prune(today)
         injection_scans_detected_24h = self._injection_scans.count(today)
 
@@ -1791,7 +1787,7 @@ class MemplexService:
             worker_pending = worker_counts.get(TaskStatus.PENDING, 0)
             worker_leased = worker_counts.get(TaskStatus.RUNNING, 0)
             worker_dead_letters = worker_counts.get(TaskStatus.FAILED, 0)
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             worker_pending = 0
             worker_leased = 0
             worker_dead_letters = 0
@@ -1825,13 +1821,13 @@ class MemplexService:
         elif lifecycle == "ready":
             try:
                 self.store.list_functions(limit=1)
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 storage_ready = False
         if lifecycle == "ready" and not storage_ready:
             try:
                 self._runtime_lifecycle.mark_faulted()
-            except RuntimeError:
-                pass
+            except RuntimeError as exc:
+                logger.debug("suppressed RuntimeError in cleanup/degradation path: %s", exc)
             lifecycle = self._runtime_lifecycle.state
         ready = lifecycle == "ready" and storage_ready
         return {
@@ -1891,7 +1887,7 @@ class MemplexService:
         # (adapters register a provider at startup; no reverse import).
         try:
             info["sse_subscribers"] = _sse_subscriber_count_provider() if _sse_subscriber_count_provider else 0
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             info["sse_subscribers"] = 0
         return info
 
@@ -1899,7 +1895,7 @@ class MemplexService:
         """Return storage and usage statistics."""
         try:
             total = self._count_functions_exact(self.store)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("stats: list_functions failed, reporting 0: %s", exc)
             total = 0
 
@@ -1938,11 +1934,11 @@ class MemplexService:
 
     def filter_and_wrap_for_context(
         self,
-        results: List[SearchResult],
+        results: list[SearchResult],
         *,
-        max_tokens: Optional[int] = None,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        authorization: AuthorizationContext | None = None,
+    ) -> str | None:
         """Filter injection-suspected results and wrap the rest for LLM context.
 
         Wraps :meth:`IndirectInjectionGuard.filter_and_wrap` so adapters
@@ -1970,8 +1966,8 @@ class MemplexService:
         memory_id: str,
         tier: str,
         *,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> Dict[str, object]:
+        authorization: AuthorizationContext | None = None,
+    ) -> dict[str, object]:
         """Promote one memory into a curated knowledge tier.
 
         The memory→knowledge lifecycle: a captured node (tier ``None``)
@@ -2004,7 +2000,7 @@ class MemplexService:
         node.version = getattr(node, "version", 1) + 1
         provenance = dict(getattr(node, "provenance", {}) or {})
         provenance["promoted_by"] = context.principal.subject_id
-        provenance["promoted_at"] = datetime.now(timezone.utc).isoformat()
+        provenance["promoted_at"] = datetime.now(UTC).isoformat()
         provenance["promoted_to_tier"] = tier
         node.provenance = provenance
 
@@ -2032,8 +2028,8 @@ class MemplexService:
         memory_id: str,
         agent_id: str,
         *,
-        authorization: Optional[AuthorizationContext] = None,
-    ) -> Dict[str, object]:
+        authorization: AuthorizationContext | None = None,
+    ) -> dict[str, object]:
         """Grant one named agent read access to a user-private memory.
 
         Cross-agent directed sharing for the multi-agent team model: the
@@ -2078,7 +2074,7 @@ class MemplexService:
     def improve(
         self,
         *,
-        authorization: Optional[AuthorizationContext] = None,
+        authorization: AuthorizationContext | None = None,
     ) -> dict[str, object]:
         """Run the proactive maintenance pass (Cognee ``improve``-style).
 
@@ -2109,7 +2105,7 @@ class MemplexService:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             result = pool.submit(asyncio.run, self._compaction.run(compaction_scope)).result()
         # Record last compaction timestamp
-        self._worker._last_compaction = datetime.now()
+        self._worker._last_compaction = datetime.now(UTC)
         return result
 
     def start(self) -> None:
@@ -2206,7 +2202,7 @@ class MemplexService:
             worker_result = self._worker.stop(
                 timeout=self._config.worker.drain_timeout_seconds
             )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             primary_error = exc
         try:
             self._close_postgres_resources_once()

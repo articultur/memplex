@@ -17,16 +17,15 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 # ── HuggingFace dataset IDs ────────────────────────────────────────────────────
 
-HF_DATASET_IDS: Dict[str, str] = {
+HF_DATASET_IDS: dict[str, str] = {
     "popqa": "mteb/popqa",
     "hotpotqa": "hotpotqa",
     "nq": "natural_questions",
@@ -37,8 +36,8 @@ HF_DATASET_IDS: Dict[str, str] = {
 def _fetch_from_huggingface(
     dataset_name: str,
     split: str = "test",
-    num_samples: Optional[int] = None,
-) -> Optional[Path]:
+    num_samples: int | None = None,
+) -> Path | None:
     """Try to download a dataset from HuggingFace.
 
     Returns the path to the cached JSON file, or ``None`` on failure.
@@ -52,14 +51,22 @@ def _fetch_from_huggingface(
 
         logger.info("Fetching %s from HuggingFace: %s", dataset_name, hf_id)
 
-        if dataset_name == "hotpotqa":
-            ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki", split=split)
-        elif dataset_name == "nq":
-            ds = load_dataset("natural_questions", split=split)
-        elif dataset_name == "triviaqa":
-            ds = load_dataset("triviaqa", "rc", split=split)
+        # Parquet-native canonical releases; the historical script-based
+        # ids (natural_questions, triviaqa) stopped loading with datasets
+        # 5.x, and answers only exist on the validation split.
+        _HF_SPECS = {
+            "hotpotqa": ("hotpotqa/hotpot_qa", "fullwiki", "validation"),
+            "nq": ("google-research-datasets/natural_questions", "dev", "validation"),
+            "triviaqa": ("mandarjoshi/trivia_qa", "rc.nocontext", "validation"),
+        }
+        if dataset_name in _HF_SPECS:
+            repo, config, split_override = _HF_SPECS[dataset_name]
+            ds = load_dataset(repo, config, split=split_override)
         elif dataset_name == "popqa":
-            ds = load_dataset("mteb/popqa", split=split)
+            # mteb/popqa was removed from the Hub; akariasai/PopQA is the
+            # canonical release (subj/prop/obj -> subject/relation/object).
+            ds = load_dataset("akariasai/PopQA", split=split)
+            ds = ds.rename_columns({"subj": "subject", "prop": "relation", "obj": "object"})
         else:
             ds = load_dataset(hf_id, split=split)
 
@@ -67,6 +74,11 @@ def _fetch_from_huggingface(
             ds = ds.select(range(min(num_samples, len(ds))))
 
         records = [dict(row) for row in ds]
+        # Evidence provenance requires string sample identities; integer ids
+        # from upstream releases are normalised here rather than rejected.
+        for record in records:
+            if isinstance(record.get("id"), int):
+                record["id"] = str(record["id"])
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fh:
             json.dump(records, fh, indent=2, default=str)
@@ -80,7 +92,7 @@ def _fetch_from_huggingface(
         )
         return Path(tmp_path)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.warning(
             "HuggingFace fetch failed for %s (%s): %s. Falling back to synthetic data.",
             dataset_name,
@@ -250,7 +262,7 @@ def _generate_locomo_synthetic(path: Path) -> Path:
     the reranker's recency horizon instead of all decaying to ~0. The query
     is not contained verbatim in either memory.
     """
-    now = datetime.now()
+    now = datetime.now(UTC)
     t_old = (now - timedelta(days=14)).isoformat()
     t_new = (now - timedelta(days=7)).isoformat()
     t_query = now.isoformat()
@@ -409,7 +421,7 @@ def _generate_longmemeval_synthetic(path: Path) -> Path:
     logger.info("Generated %d synthetic LongMemEval samples at %s", len(questions), path)
     return path
 
-_SYNTHETIC_GENERATORS: Dict[str, callable] = {
+_SYNTHETIC_GENERATORS: dict[str, callable] = {
     "popqa": _generate_popqa_synthetic,
     "hotpotqa": _generate_hotpotqa_synthetic,
     "nq": _generate_nq_synthetic,
@@ -424,9 +436,9 @@ _SYNTHETIC_GENERATORS: Dict[str, callable] = {
 
 def download_dataset(
     dataset_name: str,
-    output_dir: Optional[str] = None,
+    output_dir: str | None = None,
     split: str = "test",
-    num_samples: Optional[int] = None,
+    num_samples: int | None = None,
     force_synthetic: bool = False,
 ) -> Path:
     """Download or generate a benchmark dataset.
@@ -491,6 +503,6 @@ def download_dataset(
     )
 
 
-def list_available_datasets() -> List[str]:
+def list_available_datasets() -> list[str]:
     """Return list of supported dataset names."""
     return list(_SYNTHETIC_GENERATORS.keys())

@@ -15,7 +15,7 @@ overwrite one another.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from memplex.auth import (
     AuthorizationContext,
@@ -56,7 +56,7 @@ class _TypedNodeLookup:
                 continue
             try:
                 node = getter(node_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("typed-node lookup via %s failed for %s: %s", getter_name, node_id, exc)
                 node = None
             if node is not None:
@@ -95,7 +95,7 @@ class AuthorizationGate:
         )
 
     def require_authorization(
-        self, context: Optional[AuthorizationContext]
+        self, context: AuthorizationContext | None
     ) -> AuthorizationContext:
         """Require adapter-bound identity outside the local development profile."""
         if context is not None:
@@ -121,7 +121,7 @@ class AuthorizationGate:
         authorize = getattr(self._store_provider(), "authorized", None)
         return authorize(context) if callable(authorize) else self._store_provider()
 
-    def feedback_store_for(self, context: AuthorizationContext) -> "FeedbackStore":
+    def feedback_store_for(self, context: AuthorizationContext) -> FeedbackStore:
         """Return the request-scoped feedback facade for production calls.
 
         Historic Lite feedback files may contain records without tenant
@@ -142,7 +142,7 @@ class AuthorizationGate:
     # ── Visibility rules ───────────────────────────────────────────
 
     @staticmethod
-    def identity_value(node: Any, field_name: str, namespace_key: str) -> Optional[str]:
+    def identity_value(node: Any, field_name: str, namespace_key: str) -> str | None:
         """Resolve a node identity field, accepting the stable namespace copy.
 
         Identity is persisted both on ``MemoryNode`` and in its namespace so
@@ -246,7 +246,7 @@ class AuthorizationGate:
         """Load one node and hide inaccessible identifiers from callers."""
         try:
             node = self.typed_lookup_for(context).get(memory_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("authorized node lookup failed for %s: %s", memory_id, exc)
             return None
         if node is None or not self.is_node_visible(node, context):
@@ -261,10 +261,10 @@ class AuthorizationGate:
         return node
 
     def filter_authorized_results(
-        self, results: List["SearchResult"], context: AuthorizationContext
-    ) -> List["SearchResult"]:
+        self, results: list[SearchResult], context: AuthorizationContext
+    ) -> list[SearchResult]:
         """Drop inaccessible search candidates before any ranking side effect."""
-        kept: List["SearchResult"] = []
+        kept: list[SearchResult] = []
         for result in results:
             node = self.visible_node(result.func_id, context)
             if node is not None:
@@ -273,7 +273,7 @@ class AuthorizationGate:
 
     @staticmethod
     def bind_extracted_identity(
-        extracted: "ExtractedData",
+        extracted: ExtractedData,
         context: AuthorizationContext,
         *,
         visibility: str = "workspace",

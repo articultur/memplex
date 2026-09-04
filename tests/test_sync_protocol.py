@@ -7,7 +7,7 @@ import inspect
 import json
 import shutil
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -43,7 +43,7 @@ from memplex.sync_repository import (
 
 EVENT_A = "018f3e7c-9b52-7f1f-a091-6f5ebf54b1d0"
 EVENT_B = "018f3e7c-9b52-7f1f-a091-6f5ebf54b1d1"
-NOW = datetime(2026, 8, 11, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 11, tzinfo=UTC)
 USER_SCOPE = SyncScope("tenant-a", "alice", None, "user", None, None)
 WORKSPACE_SCOPE = SyncScope("tenant-a", "alice", "workspace-a", "workspace", None, None)
 SESSION_SCOPE = SyncScope(
@@ -429,7 +429,7 @@ def test_jcs_subset_golden_vectors_are_cross_runtime_stable() -> None:
     assert _canonical_json_bytes(vector) == (
         '{"nested":{"a":1,"b":2},"z":[0,1,1e-7,0.000001,100000000000000000000,1e+21],'
         '"𐀀":"a","😀":"é","":"b"}'
-    ).encode("utf-8")
+    ).encode()
 
 
 @pytest.mark.parametrize("value", (2**53, -(2**53)))

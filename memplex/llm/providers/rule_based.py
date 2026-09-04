@@ -1,5 +1,7 @@
 """Rule-based LLM provider: zero-dependency fallback implementation."""
 
+from typing import ClassVar
+
 from memplex.models import IntentType
 
 
@@ -11,8 +13,7 @@ class RuleBasedProvider:
     """
 
     # Intent classification keyword mapping
-    _INTENT_KEYWORDS: dict[str, list[str]] = {
-        "understand": [
+    _INTENT_KEYWORDS: ClassVar[dict[str, list[str]]] = {        "understand": [
             "what is",
             "what are",
             "explain",

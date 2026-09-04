@@ -1001,7 +1001,7 @@ def _sync_table_catalogue_matches(name: str, table: dict[str, Any]) -> bool:
         and len(table["policies"]) == 1
         and table["policies"][0][0] == f"{name}_scope"
         and table["policies"][0][1:4] == ("*", True, (0,))
-        and set(index[0] for index in table["indexes"]) == _SYNC_INDEXES[name]
+        and {index[0] for index in table["indexes"]} == _SYNC_INDEXES[name]
         and _SYNC_TABLE_SIGNATURE_DIGESTS[name]
         and _sync_table_signature(table) == _SYNC_TABLE_SIGNATURE_DIGESTS[name]
     )

@@ -38,7 +38,7 @@ def main() -> int:
         "pytest",
         "-q",
         "tests/test_sync_postgres_integration.py::"
-        "test_postgres_pages_100001_mixed_events_with_bounded_monotonic_cursor",
+        + "test_postgres_pages_100001_mixed_events_with_bounded_monotonic_cursor",
     ]
     started = time.monotonic()
     completed = subprocess.run(command, env=environment, check=False)

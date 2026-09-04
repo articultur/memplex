@@ -7,10 +7,10 @@ import sqlite3
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
-import pytest  # noqa: E402
+import pytest
 
 from memplex.models import (
     BatchResult,
@@ -848,7 +848,7 @@ class TestChangelogStore:
         changelog = ChangelogStore(path=tmp_path / "changelog.json")
         event = ChangelogEvent(
             func_id="func_cl",
-            timestamp=datetime.now(),
+            timestamp=datetime.now(UTC),
             event_type="created",
             description="Created function",
             source="test",
@@ -865,7 +865,7 @@ class TestChangelogStore:
         changelog.append(
             ChangelogEvent(
                 func_id="func_a",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="created",
                 description="A",
                 source="",
@@ -875,7 +875,7 @@ class TestChangelogStore:
         changelog.append(
             ChangelogEvent(
                 func_id="func_b",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="created",
                 description="B",
                 source="",
@@ -891,7 +891,7 @@ class TestChangelogStore:
         changelog.append(
             ChangelogEvent(
                 func_id="func_cc",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="created",
                 description="",
                 source="",
@@ -906,7 +906,7 @@ class TestChangelogStore:
         changelog.append(
             ChangelogEvent(
                 func_id="func_cp",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(UTC),
                 event_type="created",
                 description="Persist",
                 source="",
@@ -1120,9 +1120,8 @@ def test_create_store_rejects_when_configured_path_unusable(monkeypatch, caplog,
                 raise PermissionError("denied")
 
     monkeypatch.setattr(storage_mod, "LiteMemoryStore", FlakyStore)
-    with caplog.at_level(logging.WARNING, logger="memplex.storage"):
-        with pytest.raises(PermissionError, match="denied"):
-            storage_mod.create_store("lite", path=str(tmp_path / "nope"))
+    with caplog.at_level(logging.WARNING, logger="memplex.storage"), pytest.raises(PermissionError, match="denied"):
+        storage_mod.create_store("lite", path=str(tmp_path / "nope"))
     assert not any("falling back" in r.message for r in caplog.records)
 
 

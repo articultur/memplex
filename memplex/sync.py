@@ -28,9 +28,10 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable, Iterable
 from contextvars import ContextVar
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.auth import AuthorizationContext, resolve_environment_authorization
 from memplex.config import validate_sync_remote_url
@@ -69,7 +70,7 @@ class _AuthorizedSyncableStore:
     the call target.
     """
 
-    def __init__(self, store: "SyncableStore", context: AuthorizationContext) -> None:
+    def __init__(self, store: SyncableStore, context: AuthorizationContext) -> None:
         self._store = store
         self._context = context
 
@@ -181,7 +182,7 @@ class RemoteSyncConfig:
         )
         self.agent_id = os.environ.get("MEMPLEX_AGENT_ID", "")
         self.session_id = os.environ.get("MEMPLEX_SESSION_ID", "")
-        self.authorization: Optional[AuthorizationContext] = None
+        self.authorization: AuthorizationContext | None = None
         registry_configured = os.environ.get("MEMPLEX_PRINCIPALS_JSON") is not None
         if self.active and (registry_configured or profile == "production"):
             self.authorization = resolve_environment_authorization(
@@ -248,10 +249,10 @@ class SyncableStore:
     the local store (``memplex sync pull``).
     """
 
-    def __init__(self, local: Any, config: Optional[RemoteSyncConfig] = None) -> None:
+    def __init__(self, local: Any, config: RemoteSyncConfig | None = None) -> None:
         self._local = local
         self._config = config or RemoteSyncConfig()
-        self._last_pull_at: Optional[str] = None
+        self._last_pull_at: str | None = None
         self._push_failures = 0
         # Injectable HTTP layer (defaults to the real `requests` module,
         # lazily imported so sync stays optional). Tests replace this with
@@ -269,12 +270,12 @@ class SyncableStore:
         self._push_pending = 0
         self._push_workers: list[threading.Thread] = []
         # Auto-pull worker state (started by start_auto_pull).
-        self._auto_pull_thread: Optional[threading.Thread] = None
+        self._auto_pull_thread: threading.Thread | None = None
         self._auto_pull_stop = threading.Event()
         # SSE push-notification listener state. `_sse_thread` points at the
         # first listener thread (backward-compatible single-target view);
         # `_sse_threads` tracks all of them (one per sync target).
-        self._sse_thread: Optional[threading.Thread] = None
+        self._sse_thread: threading.Thread | None = None
         self._sse_threads: list = []
         self._sse_stop = threading.Event()
 
@@ -297,7 +298,7 @@ class SyncableStore:
             raise TypeError("context must be an AuthorizationContext")
         return _AuthorizedSyncableStore(self, context)
 
-    def _local_for_context(self, context: Optional[AuthorizationContext] = None) -> Any:
+    def _local_for_context(self, context: AuthorizationContext | None = None) -> Any:
         """Return local storage constrained by the explicit active identity.
 
         This helper intentionally does *not* use the managed remote identity
@@ -335,7 +336,7 @@ class SyncableStore:
         return self._local
 
     @property
-    def last_pull_at(self) -> Optional[str]:
+    def last_pull_at(self) -> str | None:
         return self._last_pull_at
 
     # ── Write methods: local first, then best-effort push ──────────
@@ -430,7 +431,7 @@ class SyncableStore:
             return
         try:
             payload = {"functions": [_node_to_payload(f) for f in funcs]}
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.debug("sync push serialisation failed")
             return
         for target in self._config.all_targets():
@@ -457,7 +458,7 @@ class SyncableStore:
                 "preferences": [_node_to_payload(p) for p in preferences],
                 "observations": [_node_to_payload(o) for o in observations],
             }
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.debug("sync typed-node push serialisation failed")
             return
         for target in self._config.all_targets():
@@ -470,7 +471,7 @@ class SyncableStore:
             return []
         try:
             return list(lister(limit=100000))
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.debug("local %s unavailable", method_name)
             return []
 
@@ -539,7 +540,7 @@ class SyncableStore:
             operation, args = self._push_queue.get()
             try:
                 operation(*args)
-            except BaseException:
+            except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 self._push_failures += 1
                 logger.debug("sync legacy push worker failed")
             finally:
@@ -568,7 +569,7 @@ class SyncableStore:
             if resp.status_code >= 400:
                 logger.debug("sync legacy push rejected (HTTP %s)", resp.status_code)
                 self._push_failures += 1
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.debug("sync legacy push transport failed")
             self._push_failures += 1
 
@@ -595,7 +596,7 @@ class SyncableStore:
             if resp.status_code >= 400:
                 logger.debug("sync legacy delete rejected (HTTP %s)", resp.status_code)
                 self._push_failures += 1
-        except Exception:
+        except Exception:  # noqa: BLE001 - logged degradation path
             logger.debug("sync legacy delete transport failed")
             self._push_failures += 1
 
@@ -617,7 +618,7 @@ class SyncableStore:
 
     # ── Pull ───────────────────────────────────────────────────────
 
-    def pull_incremental(self, since: Optional[str] = None) -> dict:
+    def pull_incremental(self, since: str | None = None) -> dict:
         """Pull changes newer than *since* (ISO-8601) from the remote.
 
         Applies Functions, Facts, Preferences and Observations with LWW
@@ -705,7 +706,7 @@ class SyncableStore:
                 tombstones.extend(data.get("tombstones", []))
                 if data.get("server_time"):
                     server_time = data["server_time"]
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.debug("sync legacy pull transport failed")
 
         applied = 0
@@ -728,7 +729,7 @@ class SyncableStore:
                     SourceDocument(type="sync_pull", source_type=SourceType.WIKI),
                 )
                 applied += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("sync pull: skip unparseable change %s: %s", func_id, exc)
 
         from memplex.models import Fact, Observation, Preference
@@ -792,7 +793,7 @@ class SyncableStore:
         changes: list[dict[str, Any]],
         *,
         cls: type[MemoryNode],
-        getter_name: Optional[str],
+        getter_name: str | None,
         adder_name: str,
     ) -> tuple[int, int]:
         """Apply pulled Fact/Preference/Observation changes locally with LWW.
@@ -811,7 +812,7 @@ class SyncableStore:
         if not callable(adder):
             return applied, rejected_older
         getter = getattr(local_store, getter_name, None) if getter_name else None
-        index: Optional[dict] = None
+        index: dict | None = None
         if not callable(getter):
             index = {n.id: n for n in self._safe_list("list_observations")}
         for raw in changes:
@@ -820,7 +821,7 @@ class SyncableStore:
                 continue
             try:
                 existing = getter(node_id) if callable(getter) else (index or {}).get(node_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 existing = None
             # LWW: reject if incoming is older than or equal to local.
             if existing is not None and (raw.get("updated_at") or "") <= (
@@ -834,13 +835,13 @@ class SyncableStore:
             except NotImplementedError:
                 logger.debug("sync pull: local store has no %s storage", cls.__name__)
                 break
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("sync pull: skip unparseable %s %s: %s", cls.__name__, node_id, exc)
         return applied, rejected_older
 
     # ── Auto-pull worker (periodic background sync) ────────────────
 
-    def start_auto_pull(self, interval: Optional[int] = None) -> None:
+    def start_auto_pull(self, interval: int | None = None) -> None:
         """Start a daemon thread that pulls from the remote on a cadence.
 
         Parameters
@@ -866,7 +867,7 @@ class SyncableStore:
             while not self._auto_pull_stop.wait(interval):
                 try:
                     self.pull_incremental()
-                except Exception:
+                except Exception:  # noqa: BLE001 - logged degradation path
                     logger.debug("auto-pull tick failed; will retry")
 
         self._auto_pull_thread = threading.Thread(
@@ -943,9 +944,9 @@ class SyncableStore:
                             logger.debug("SSE event received; triggering pull")
                             try:
                                 self.pull_incremental()
-                            except Exception:
+                            except Exception:  # noqa: BLE001 - logged degradation path
                                 logger.debug("SSE-triggered pull failed")
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 if not self._sse_stop.is_set():
                     logger.debug(
                         "SSE listener disconnected; reconnecting in %ss",

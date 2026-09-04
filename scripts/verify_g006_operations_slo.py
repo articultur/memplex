@@ -13,14 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from memplex.config import load_config  # noqa: E402
+from memplex.config import load_config
 from memplex.operations import (
     OperationsEvidenceError,
     OperationsReadinessBinding,
     load_operations_report,
     load_operations_signing_key,
 )
-from memplex.readiness_evidence import (  # noqa: E402
+from memplex.readiness_evidence import (
     ReadinessEvidenceError,
     load_deployment_evidence_binding_from_environment,
 )

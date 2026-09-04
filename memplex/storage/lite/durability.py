@@ -13,11 +13,12 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Optional
 
 from memplex.sync_protocol import (
     SyncBatchResult,
@@ -173,7 +174,7 @@ def _load_fcntl() -> Any:
         import fcntl
 
         if not callable(getattr(fcntl, "flock", None)):
-            raise AttributeError("flock")
+            raise AttributeError("flock")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         return fcntl
     except (ImportError, AttributeError) as exc:
         raise LiteStorageIntegrityError("persistent Lite requires POSIX flock") from exc
@@ -192,8 +193,8 @@ def _digest(value: Any) -> str:
 def _pair_record(
     pair: LitePair,
     *,
-    memory_digest: Optional[str] = None,
-    changelog_digest: Optional[str] = None,
+    memory_digest: str | None = None,
+    changelog_digest: str | None = None,
 ) -> dict[str, Any]:
     # Digests may be precomputed by the caller: each is a full canonical
     # encode of the payload, and a commit needs them for both the envelopes
@@ -251,12 +252,12 @@ def _require_aware_timestamp(value: Any, *, label: str) -> datetime:
         raise LiteStorageIntegrityError(f"invalid Lite {label}") from exc
     if when.tzinfo is None or when.utcoffset() is None:
         raise LiteStorageIntegrityError(f"invalid Lite {label}")
-    if when.utcoffset() != timezone.utc.utcoffset(when):
+    if when.utcoffset() != UTC.utcoffset(when):
         raise LiteStorageIntegrityError(f"invalid Lite {label}")
-    canonical = when.astimezone(timezone.utc).isoformat()
+    canonical = when.astimezone(UTC).isoformat()
     if value != canonical:
         raise LiteStorageIntegrityError(f"invalid Lite {label}")
-    return when.astimezone(timezone.utc)
+    return when.astimezone(UTC)
 
 
 def _require_canonical_json(value: Any, *, label: str) -> None:
@@ -536,7 +537,7 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
     _validate_sync_inbound_cursors_items(inbound_cursors,
         label=label)
 
-    snapshot_ids, snapshot_requests = _validate_sync_snapshots_items(snapshots,
+    snapshot_ids, _ = _validate_sync_snapshots_items(snapshots,
         payload=payload,
         label=label)
 
@@ -667,7 +668,7 @@ class LiteDurability:
         memory_path: Path,
         changelog_path: Path,
         *,
-        semantic_validator: Optional[Callable[[LitePair], Any]] = None,
+        semantic_validator: Callable[[LitePair], Any] | None = None,
     ) -> None:
         self._memory_path = _canonical(memory_path)
         self._changelog_path = _canonical(changelog_path)
@@ -685,7 +686,7 @@ class LiteDurability:
         self._semantic_validator = semantic_validator
         # Digest record of the last committed target (== the next commit's
         # base); lets the commit path skip re-encoding the base record.
-        self._last_commit_target_record: Optional[dict[str, Any]] = None
+        self._last_commit_target_record: dict[str, Any] | None = None
         # Fail at persistent construction, not module import.  This is also a
         # useful early guard for factories which historically hid this error.
         try:
@@ -736,8 +737,8 @@ class LiteDurability:
         self,
         pair: LitePair,
         *,
-        memory_digest: Optional[str] = None,
-        changelog_digest: Optional[str] = None,
+        memory_digest: str | None = None,
+        changelog_digest: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         _validate_memory_payload(
             pair.memory, allow_legacy_missing_schema=pair.transaction_id == "legacy"
@@ -937,7 +938,7 @@ class LiteDurability:
         target: LitePair,
         *,
         base_verified: bool = False,
-        base_record: Optional[dict[str, Any]] = None,
+        base_record: dict[str, Any] | None = None,
         target_validated: bool = False,
     ) -> LitePair:
         # ``base_verified`` is only passed by callers holding this flock

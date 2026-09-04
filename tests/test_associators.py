@@ -155,7 +155,7 @@ class TestRefLinker:
         ref = {"target": "implicit_next", "type": "sequential", "confidence": 0.6}
         known = {"First": ["func_1"], "Second": ["func_2"]}
         ctx = {"next_entity": "Second"}
-        result, conf = self.linker.resolve_implicit_reference(ref, known, ctx)
+        result, _ = self.linker.resolve_implicit_reference(ref, known, ctx)
         assert result == "func_2"
 
 

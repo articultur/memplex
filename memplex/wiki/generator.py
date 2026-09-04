@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 from memplex.llm.sanitizer import LLMPromptSanitizer
 from memplex.models import (
@@ -82,7 +82,7 @@ class LLMWikiGenerator:
         )
         return await self._llm.llm.complete(prompt)
 
-    async def generate_summary(self, functions: List[Function]) -> str:
+    async def generate_summary(self, functions: list[Function]) -> str:
         """Use LLM to generate a domain summary from multiple Functions.
 
         Produces a concept-level overview including core responsibilities,
@@ -103,7 +103,7 @@ class LLMWikiGenerator:
     async def generate_concept_page(
         self,
         domain: str,
-        functions: List[Function],
+        functions: list[Function],
     ) -> str:
         """Generate a concept page that aggregates Functions by domain.
 
@@ -135,8 +135,8 @@ class LLMWikiGenerator:
 
     async def update_cross_references(
         self,
-        pages: List[WikiPage],
-    ) -> List[WikiPage]:
+        pages: list[WikiPage],
+    ) -> list[WikiPage]:
         """Use LLM to discover and update cross-references across pages.
 
         For each page, the LLM analyses the content and suggests relevant
@@ -166,7 +166,7 @@ class LLMWikiGenerator:
                     break
             page_summaries.append({"id": p.page_id, "summary": summary})
 
-        updated: List[WikiPage] = []
+        updated: list[WikiPage] = []
         for page in pages:
             try:
                 candidates = [s for s in page_summaries if s["id"] != page.page_id][:20]
@@ -230,7 +230,7 @@ class LLMWikiGenerator:
 
     async def generate_community_page(
         self,
-        community_funcs: List[Function],
+        community_funcs: list[Function],
         community_id: int,
     ) -> dict:
         """Generate a Concept Page for a GraphRAG-detected community.

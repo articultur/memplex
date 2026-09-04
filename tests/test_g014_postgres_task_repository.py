@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 import pytest
 
@@ -30,7 +30,7 @@ def postgres_task_repository(pg_function_dsn: str):
 
 
 def _task(task_id: str, *, max_retries: int = 1) -> TaskInfo:
-    future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    future = datetime(2099, 1, 1, tzinfo=UTC)
     return TaskInfo(
         task_id=task_id,
         task_type=BackgroundTask.BUILD_INDEX,

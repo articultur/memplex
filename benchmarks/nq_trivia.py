@@ -18,9 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Optional
 
 from benchmarks.base import (
     BenchmarkResult,
@@ -40,13 +40,13 @@ logger = logging.getLogger(__name__)
 # ── Answer extraction helpers (for HuggingFace configs) ────────────────────────
 
 
-def _extract_nq_answer(item: Dict[str, Any]) -> Any:
+def _extract_nq_answer(item: dict[str, Any]) -> Any:
     """Extract answer from Natural Questions format."""
     if "annotations" in item and isinstance(item["annotations"], list):
         annotations = item["annotations"]
         if annotations:
             ann = annotations[0]
-            if "short_answers" in ann and ann["short_answers"]:
+            if ann.get("short_answers"):
                 short_ans = ann["short_answers"][0]
                 if isinstance(short_ans, dict):
                     return short_ans.get("text", "")
@@ -57,7 +57,7 @@ def _extract_nq_answer(item: Dict[str, Any]) -> Any:
     return item.get("answer", "")
 
 
-def _extract_triviaqa_answer(item: Dict[str, Any]) -> Any:
+def _extract_triviaqa_answer(item: dict[str, Any]) -> Any:
     """Extract answer from TriviaQA format."""
     answer = item.get("answer", {})
     if isinstance(answer, dict):
@@ -65,7 +65,7 @@ def _extract_triviaqa_answer(item: Dict[str, Any]) -> Any:
     return answer
 
 
-def _build_triviaqa_context(item: Dict[str, Any]) -> str:
+def _build_triviaqa_context(item: dict[str, Any]) -> str:
     """Build context string from TriviaQA search results."""
     search_results = item.get("search_results", {})
     if isinstance(search_results, dict):
@@ -116,7 +116,7 @@ def _normalize_text(text: str) -> str:
     return normalize_answer_text(text)
 
 
-def _extract_answer_aliases(answer: Any) -> List[str]:
+def _extract_answer_aliases(answer: Any) -> list[str]:
     """Extract answer string(s) from NQ/TriviaQA answer format.
 
     NQ answers can be:
@@ -130,7 +130,7 @@ def _extract_answer_aliases(answer: Any) -> List[str]:
 
     Returns a list of normalized answer strings for flexible matching.
     """
-    aliases: List[str] = []
+    aliases: list[str] = []
 
     if answer is None:
         return aliases
@@ -156,8 +156,8 @@ def _extract_answer_aliases(answer: Any) -> List[str]:
         for item in answer:
             aliases.extend(_extract_answer_aliases(item))
 
-    seen: Set[str] = set()
-    unique: List[str] = []
+    seen: set[str] = set()
+    unique: list[str] = []
     for a in aliases:
         if a and a not in seen:
             seen.add(a)
@@ -192,10 +192,10 @@ class NQTriviaDataset(EvaluationDataset):
 
     def __init__(self, dataset_name: str = "nq_trivia") -> None:
         self.dataset_name = dataset_name
-        self._samples: List[BenchmarkSample] = []
+        self._samples: list[BenchmarkSample] = []
         self._hf_loaded = False
 
-    def download(self, num_samples: Optional[int] = None) -> str:
+    def download(self, num_samples: int | None = None) -> str:
         """Download dataset from HuggingFace and save locally.
 
         Args:
@@ -216,8 +216,8 @@ class NQTriviaDataset(EvaluationDataset):
 
     def _download_from_huggingface(
         self,
-        config: Dict[str, Any],
-        num_samples: Optional[int] = None,
+        config: dict[str, Any],
+        num_samples: int | None = None,
     ) -> str:
         """Download a specific dataset configuration from HuggingFace."""
         try:
@@ -246,7 +246,7 @@ class NQTriviaDataset(EvaluationDataset):
                 ds = load_dataset(hf_id, config_name, split=split)
             else:
                 ds = load_dataset(hf_id, split=split)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning(
                 "Failed to load %s with config %s: %s. Retrying without config...",
                 hf_id,
@@ -321,7 +321,7 @@ class NQTriviaDataset(EvaluationDataset):
         self._hf_loaded = True
         return str(cache_file)
 
-    def _download_generic(self, num_samples: Optional[int] = None) -> str:
+    def _download_generic(self, num_samples: int | None = None) -> str:
         """Generic HuggingFace download attempt."""
         hf_id = (
             "natural_questions" if "natural" in self.dataset_name.lower() else "mAlexSie/TriviaQA"
@@ -347,7 +347,7 @@ class NQTriviaDataset(EvaluationDataset):
                 ds = load_dataset("natural_questions", split="validation")
             else:
                 ds = load_dataset("mAlexSie/TriviaQA", split="train")
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             ds = None
 
         if ds is None:
@@ -425,7 +425,7 @@ class NQTriviaDataset(EvaluationDataset):
         self._hf_loaded = True
         return str(cache_file)
 
-    def load(self, path: str) -> List[BenchmarkSample]:
+    def load(self, path: str) -> list[BenchmarkSample]:
         """Load benchmark samples from a JSON/JSONL file or HuggingFace.
 
         First tries to load from the given path. If the file does not exist,
@@ -458,7 +458,7 @@ class NQTriviaDataset(EvaluationDataset):
                     f"Dataset file not found: {path}, and HuggingFace download failed: {download_exc}"
                 ) from download_exc
 
-        samples: List[BenchmarkSample] = []
+        samples: list[BenchmarkSample] = []
         file_ext = file_path.suffix.lower()
 
         try:
@@ -487,7 +487,7 @@ class NQTriviaDataset(EvaluationDataset):
             logger.error("Failed to load dataset from %s: %s", path, exc)
             raise
 
-    def _load_json(self, file_path: Path) -> List[BenchmarkSample]:
+    def _load_json(self, file_path: Path) -> list[BenchmarkSample]:
         """Load samples from a JSON file.
 
         Supports two formats:
@@ -501,7 +501,7 @@ class NQTriviaDataset(EvaluationDataset):
             data = data["data"]
 
         if not isinstance(data, list):
-            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")
+            raise ValueError(f"Expected list of samples in JSON file, got {type(data).__name__}")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
 
         samples = []
         for item in data:
@@ -511,7 +511,7 @@ class NQTriviaDataset(EvaluationDataset):
 
         return samples
 
-    def _load_jsonl(self, file_path: Path) -> List[BenchmarkSample]:
+    def _load_jsonl(self, file_path: Path) -> list[BenchmarkSample]:
         """Load samples from a JSONL (JSON Lines) file."""
         samples = []
         with open(file_path, "r", encoding="utf-8") as f:
@@ -530,7 +530,7 @@ class NQTriviaDataset(EvaluationDataset):
 
         return samples
 
-    def _parse_sample(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_sample(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a single dataset item into a BenchmarkSample.
 
         Handles both NQ and TriviaQA formats by detecting available fields.
@@ -545,7 +545,7 @@ class NQTriviaDataset(EvaluationDataset):
 
         return self._parse_generic(item)
 
-    def _parse_triviaqa(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_triviaqa(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a TriviaQA format item."""
         question = item.get("question", item.get("question_text", ""))
         if not question:
@@ -582,7 +582,7 @@ class NQTriviaDataset(EvaluationDataset):
             },
         )
 
-    def _parse_natural_questions(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_natural_questions(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a Natural Questions format item."""
         question = item.get("question", item.get("question_text", ""))
         if not question:
@@ -597,7 +597,7 @@ class NQTriviaDataset(EvaluationDataset):
             annotations = item["annotations"]
             if annotations:
                 ann = annotations[0]
-                if "short_answers" in ann and ann["short_answers"]:
+                if ann.get("short_answers"):
                     short_ans = ann["short_answers"][0]
                     if isinstance(short_ans, dict):
                         answer_data = short_ans.get("text", "")
@@ -625,7 +625,7 @@ class NQTriviaDataset(EvaluationDataset):
             },
         )
 
-    def _parse_generic(self, item: Dict[str, Any]) -> Optional[BenchmarkSample]:
+    def _parse_generic(self, item: dict[str, Any]) -> BenchmarkSample | None:
         """Parse a generic item with minimal required fields."""
         question = (
             item.get("query")
@@ -688,7 +688,7 @@ class NQTriviaDataset(EvaluationDataset):
 
 def _answer_in_summary(
     summary: str,
-    answer_aliases: List[str],
+    answer_aliases: list[str],
 ) -> bool:
     """Check if any answer alias appears in the summary text."""
     if not summary or not answer_aliases:
@@ -701,10 +701,10 @@ def _answer_in_summary(
 
 
 def _compute_retrieval_metrics(
-    retrieved_summaries: List[str],
-    answer_aliases: List[str],
-    k_values: List[int] = [1, 5, 10],
-) -> Dict[str, float]:
+    retrieved_summaries: list[str],
+    answer_aliases: list[str],
+    k_values: list[int] | None = None,
+) -> dict[str, float]:
     """Compute retrieval metrics for a single query.
 
     Args:
@@ -715,7 +715,7 @@ def _compute_retrieval_metrics(
     Returns:
         Dict mapping metric names to values.
     """
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     mrr = 0.0
     for rank, summary in enumerate(retrieved_summaries, 1):
@@ -729,6 +729,8 @@ def _compute_retrieval_metrics(
     # convention, same as popqa): 1.0 when any alias appears in the top-k.
     # The previous formula divided by the alias count (often 10-30), which
     # structurally capped recall near 0.1 even on perfect retrieval.
+    if k_values is None:
+        k_values = [1, 5, 10]
     for k in k_values:
         top_k_summaries = retrieved_summaries[:k]
         relevant_slots = sum(
@@ -745,8 +747,8 @@ def _compute_retrieval_metrics(
 
 def _compute_qa_metrics(
     prediction: str,
-    answer_aliases: List[str],
-) -> Dict[str, float]:
+    answer_aliases: list[str],
+) -> dict[str, float]:
     """Compute QA metrics for a single prediction.
 
     Args:
@@ -756,7 +758,7 @@ def _compute_qa_metrics(
     Returns:
         Dict mapping metric names to values.
     """
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     if not answer_aliases:
         return metrics
@@ -793,9 +795,9 @@ class NQTriviaRunner(BenchmarkRunner):
     def run_retrieval(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
+        samples: list[BenchmarkSample],
         top_k: int = 10,
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run retrieval benchmark on the given samples.
 
         Args:
@@ -809,11 +811,11 @@ class NQTriviaRunner(BenchmarkRunner):
         if not samples:
             return []
 
-        results: List[BenchmarkResult] = []
+        results: list[BenchmarkResult] = []
 
-        recall_scores: Dict[str, List[float]] = {f"recall@{k}": [] for k in self._k_values}
-        precision_scores: Dict[str, List[float]] = {f"precision@{k}": [] for k in self._k_values}
-        mrr_scores: List[float] = []
+        recall_scores: dict[str, list[float]] = {f"recall@{k}": [] for k in self._k_values}
+        precision_scores: dict[str, list[float]] = {f"precision@{k}": [] for k in self._k_values}
+        mrr_scores: list[float] = []
         latencies = LatencyStats()
 
         for sample in samples:
@@ -838,7 +840,7 @@ class NQTriviaRunner(BenchmarkRunner):
                 precision_scores[f"precision@{k}"].append(metrics.get(f"precision@{k}", 0.0))
 
         avg_latency = latencies.mean
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         avg_mrr = sum(mrr_scores) / len(mrr_scores) if mrr_scores else 0.0
         results.append(
@@ -901,8 +903,8 @@ class NQTriviaRunner(BenchmarkRunner):
     def run_generation(
         self,
         service: MemplexService,
-        samples: List[BenchmarkSample],
-    ) -> List[BenchmarkResult]:
+        samples: list[BenchmarkSample],
+    ) -> list[BenchmarkResult]:
         """Run generation benchmark on the given samples.
 
         This evaluates the quality of answers generated by retrieving
@@ -918,11 +920,11 @@ class NQTriviaRunner(BenchmarkRunner):
         if not samples:
             return []
 
-        results: List[BenchmarkResult] = []
+        results: list[BenchmarkResult] = []
         latencies = LatencyStats()
 
-        em_scores: List[float] = []
-        f1_scores: List[float] = []
+        em_scores: list[float] = []
+        f1_scores: list[float] = []
 
         for sample in samples:
             answer_aliases = sample.metadata.get("aliases", [])
@@ -945,7 +947,7 @@ class NQTriviaRunner(BenchmarkRunner):
             f1_scores.append(qa_metrics.get("f1", 0.0))
 
         avg_latency = latencies.mean
-        timestamp = datetime.utcnow().isoformat() + "Z"
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         avg_em = sum(em_scores) / len(em_scores) if em_scores else 0.0
         results.append(

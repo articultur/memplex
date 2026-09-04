@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 import argparse
 import hashlib
 import json
@@ -20,7 +24,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
@@ -41,7 +45,7 @@ _SESSION = "g009-session"
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _memory_bytes() -> int:
@@ -318,16 +322,16 @@ def _workload_worker(
                         (_TENANT,),
                     )
                     cursor.fetchall()
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 failed = True
                 try:
                     cursor.close()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
+                    logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
                 try:
                     connection.close()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
+                    logger.debug("suppressed Exception in cleanup/degradation path: %s", exc)
                 connection = _connect(dsn)
                 connection.autocommit = True
                 cursor = connection.cursor()
@@ -437,8 +441,8 @@ def _network_chaos(dsn: str) -> float:
     )
     try:
         broken = psycopg2.connect(bad_dsn)
-    except psycopg2.Error:
-        pass
+    except psycopg2.Error as exc:
+        logger.debug("suppressed psycopg2.Error in cleanup/degradation path: %s", exc)
     else:
         broken.close()
         raise RuntimeError("network_chaos_not_triggered")
@@ -456,8 +460,8 @@ def _disk_chaos(workdir: Path) -> None:
     try:
         try:
             (fault / "must-fail").write_bytes(b"x")
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("suppressed OSError in cleanup/degradation path: %s", exc)
         else:
             raise RuntimeError("disk_chaos_not_triggered")
     finally:
@@ -767,7 +771,7 @@ def main() -> int:
             )
         )
         return 0
-    except Exception:
+    except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
         print('{"error":"capacity_chaos_verification_failed","verified":false}')
         return 1
     finally:

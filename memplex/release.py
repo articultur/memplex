@@ -17,10 +17,11 @@ import tarfile
 import tomllib
 import uuid
 import zipfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, NoReturn
+from typing import Any, NoReturn
 
 _RELEASE_SCHEMA_VERSION = 1
 _SEMVER_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")

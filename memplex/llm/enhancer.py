@@ -83,7 +83,7 @@ class LLMEnhancer:
         try:
             result = await self.llm.complete_json(prompt)
             return result.get("hypothetical_memory", query)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("HyDE enhancement failed, returning original query: %s", exc)
             return query
 
@@ -127,7 +127,7 @@ class LLMEnhancer:
                 if compressed:
                     return compressed[:max_length]
                 logger.debug("Observation compression returned empty, using rule truncation")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug(
                     "Observation compression failed, using rule-based truncation: %s", exc
                 )
@@ -177,7 +177,7 @@ class LLMEnhancer:
                 return []
             cleaned = [str(f).strip() for f in facts if isinstance(f, str) and str(f).strip()]
             return cleaned[:max_facts]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("Factual capture failed, returning no facts: %s", exc)
             return []
 

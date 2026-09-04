@@ -15,9 +15,10 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 from memplex.sync_protocol import (
     SyncApplyResult,
@@ -191,11 +192,11 @@ class SyncDispatcher:
     def _response_json(self, response: object) -> object:
         iter_content = getattr(response, "iter_content", None)
         if not callable(iter_content):
-            raise ValueError("remote response body is unavailable")
+            raise ValueError("remote response body is unavailable")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
         content = bytearray()
         for chunk in iter_content(chunk_size=64 * 1024):
             if not isinstance(chunk, bytes):
-                raise ValueError("remote response body is invalid")
+                raise ValueError("remote response body is invalid")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
             if len(content) + len(chunk) > self._max_response_bytes:
                 raise ValueError(
                     "remote response body exceeds the configured limit"
@@ -212,7 +213,7 @@ class SyncDispatcher:
         if callable(close):
             try:
                 close()
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.warning("sync_remote_response_close_failed")
 
     @staticmethod
@@ -308,7 +309,7 @@ class SyncDispatcher:
                 timeout=self._request_timeout,
                 stream=True,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
             self._fail(deliveries, "transport_unavailable", now, terminal=False)
             return 0, len(deliveries)
 
@@ -339,7 +340,7 @@ class SyncDispatcher:
             try:
                 result = self._parse_result(self._response_json(response))
                 self._validate_result(batch, deliveries, result)
-            except Exception:
+            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 self._fail(
                     deliveries,
                     "remote_protocol_error",
@@ -354,10 +355,10 @@ class SyncDispatcher:
 
     def dispatch_once(self, now: datetime | None = None) -> DispatchResult:
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
         if not isinstance(now, datetime) or now.tzinfo is None:
             raise TypeError("now must be an aware datetime")
-        now = now.astimezone(timezone.utc)
+        now = now.astimezone(UTC)
         claimed = delivered = failed = 0
         scheduled_batches = 0
         for target_id, target_url in self._targets.items():
@@ -574,7 +575,7 @@ class SyncDispatcher:
 
     def _schedule_once(self) -> int:
         scheduled = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for target_id, target_url in self._targets.items():
             with self._state_condition:
                 if self._stop_event.is_set() or not self._reserve_target(target_id):
@@ -628,7 +629,7 @@ class SyncDispatcher:
                     )
                 else:
                     self._send(target_id, target_url, deliveries, now)
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.warning("sync_dispatch_worker_failed")
             finally:
                 self._release_target(target_id)
@@ -638,7 +639,7 @@ class SyncDispatcher:
         while not self._stop_event.is_set():
             try:
                 scheduled = self._schedule_once()
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.warning("sync_dispatch_scheduler_failed")
                 scheduled = 0
             if scheduled == 0:
@@ -682,7 +683,7 @@ class SyncDispatcher:
                     now,
                     terminal=False,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - logged degradation path
                 logger.warning("sync_dispatch_shutdown_release_failed")
             finally:
                 self._release_target(target_id)

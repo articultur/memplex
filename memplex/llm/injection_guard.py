@@ -6,7 +6,7 @@ import logging
 import re
 from collections import deque
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from memplex.models import SearchResult
@@ -35,8 +35,7 @@ class IndirectInjectionGuard:
     # a defense-in-depth tripwire, not a complete barrier -- the read path
     # also drops flagged memories (service.query) and wraps the rest in
     # [MEMORY ...] trust tags (filter_and_wrap).
-    INJECTION_PATTERNS: list[str] = [
-        # --- Direct override (English) ---
+    INJECTION_PATTERNS: ClassVar[list[str]] = [        # --- Direct override (English) ---
         r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
         r"disregard\s+(all\s+)?(previous|prior|above|earlier)\s+instructions?",
         r"forget\s+(all\s+)?(the\s+)?(above|previous|prior)\s+(instructions?|rules?|context)",
@@ -76,11 +75,9 @@ class IndirectInjectionGuard:
         r"(输出|显示|打印)(你的)?(系统提示|系统指令|初始指令|隐藏规则)",
     ]
 
-    _compiled: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
-
+    _compiled: ClassVar[list[re.Pattern]] = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
     # Trust level mapping: source_type value -> trust level label
-    TRUST_LEVELS: dict[str, str] = {
-        "requirement": "HIGH",
+    TRUST_LEVELS: ClassVar[dict[str, str]] = {        "requirement": "HIGH",
         "meeting": "MEDIUM",
         "code": "MEDIUM",
         "wiki": "LOW",
@@ -104,7 +101,7 @@ class IndirectInjectionGuard:
             return True
         try:
             return any(pattern.search(content) for pattern in cls._compiled)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("injection scanner failed closed: %s", exc)
             return True
 
@@ -123,7 +120,7 @@ class IndirectInjectionGuard:
             if isinstance(attrs, dict) and attrs.get("memplex_injection_suspected") == "true":
                 return True
             return cls.scan(cls._extract_model_visible_text(node))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.warning("injection node inspection failed: %s", exc)
             if fallback_text:
                 return cls.scan(fallback_text)
@@ -134,7 +131,7 @@ class IndirectInjectionGuard:
         cls,
         memories: list[SearchResult],
         store: Any,
-        risk_registry: "InjectionRiskRegistry | None" = None,
+        risk_registry: InjectionRiskRegistry | None = None,
     ) -> str:
         """Wrap recalled memories in protective tags for LLM context injection.
 
@@ -156,7 +153,7 @@ class IndirectInjectionGuard:
                 continue
             try:
                 func = store.get(r.func_id) if store else None
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 # A safe summary must not turn a lookup hiccup into a leak;
                 # skip only this unresolved entry and continue with the rest.
                 logger.warning("context wrapper lookup failed for %s: %s", r.func_id, exc)
@@ -180,7 +177,7 @@ class IndirectInjectionGuard:
         cls,
         memories: list[SearchResult],
         store: Any,
-        risk_registry: "InjectionRiskRegistry | None" = None,
+        risk_registry: InjectionRiskRegistry | None = None,
     ) -> str:
         """Filter out injection-suspected memories, then wrap the rest.
 
@@ -357,7 +354,7 @@ class InjectionRiskRegistry:
 
 
 def _result_is_injection_suspected(
-    result: "SearchResult",
+    result: SearchResult,
     store: Any,
     *,
     risk_registry: InjectionRiskRegistry | None = None,
@@ -367,7 +364,7 @@ def _result_is_injection_suspected(
         return True
     try:
         node = store.get(result.func_id) if store else None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - logged degradation path
         logger.warning("injection filter: store.get failed for %s: %s", result.func_id, exc)
         node = None
     suspected = IndirectInjectionGuard.is_suspected(
@@ -380,17 +377,17 @@ def _result_is_injection_suspected(
 
 
 def drop_injection_suspected(
-    results: list["SearchResult"],
+    results: list[SearchResult],
     store: Any,
     *,
     risk_registry: InjectionRiskRegistry | None = None,
-) -> list["SearchResult"]:
+) -> list[SearchResult]:
     """Drop flagged or content-suspected results for every typed memory.
 
     A failed lookup does not erase unrelated safe results: its already
     retrieved summary is scanned and only a suspicious summary is withheld.
     """
-    kept: list["SearchResult"] = []
+    kept: list[SearchResult] = []
     for r in results:
         if not _result_is_injection_suspected(r, store, risk_registry=risk_registry):
             kept.append(r)

@@ -40,7 +40,8 @@ def _run_bridge(action: str, payload: dict, storage_path: Path) -> dict:
         capture_output=True,
         text=True,
         timeout=30,
-        env=_storage_env(storage_path),
+        env=_storage_env(storage_path),check=False
+    
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -187,7 +188,8 @@ process.stdout.write(JSON.stringify({ hooks, tools }));
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},
+        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},check=False
+    
     )
     assert registered.returncode == 0, registered.stderr
     contract = json.loads(registered.stdout)
@@ -243,7 +245,8 @@ await recall({ prompt: "identity root probe" }, {});
             "OPENCLAW_CONFIG_DIR": str(tmp_path / "ambient-openclaw"),
             "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js"),
             "MEMPLEX_TEST_HOST_ROOT": str(observed),
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -278,7 +281,8 @@ def test_openclaw_generated_launcher_rejects_identity_for_another_host_root(tmp_
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},
+        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},check=False
+    
     )
 
     assert result.returncode != 0
@@ -373,7 +377,8 @@ def test_openclaw_generated_launcher_rejects_damaged_identity(tmp_path, damage):
         capture_output=True,
         text=True,
         timeout=30,
-        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},
+        env={**os.environ, "MEMPLEX_PLUGIN_ENTRY": str(extension / "index.js")},check=False
+    
     )
 
     assert result.returncode != 0
@@ -508,7 +513,8 @@ process.stdout.write(JSON.stringify(recalled));
             "MEMPLEX_PLUGIN_CONFIG": json.dumps(entry_config),
             "MEMPLEX_WORKSPACE": str(workspace),
             "MEMPLEX_TEST_TOKEN": token,
-        },
+        },check=False
+    
     )
 
     assert result.returncode == 0, result.stderr
@@ -623,7 +629,8 @@ def test_openclaw_cli_loads_memplex_runtime_from_an_isolated_profile(tmp_path):
         capture_output=True,
         text=True,
         timeout=30,
-        env=env,
+        env=env,check=False
+    
     )
 
     assert inspected.returncode == 0, inspected.stderr

@@ -10,8 +10,8 @@ import os
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 
-from memplex.core.extractors.markdown import MarkdownExtractor  # noqa: E402
-from memplex.core.extractors.vision_mapper import VisionMapper  # noqa: E402
+from memplex.core.extractors.markdown import MarkdownExtractor
+from memplex.core.extractors.vision_mapper import VisionMapper
 
 # ── MarkdownExtractor ────────────────────────────────────────────────
 

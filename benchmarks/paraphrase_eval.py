@@ -1,10 +1,12 @@
-"""Paraphrase-robustness evaluation for the default lexical retriever.
+"""Paraphrase-robustness evaluation for the lite retrieval stack.
 
 Quantifies the lexical-vs-semantic gap: seeds the paraphrase dataset
 (:mod:`benchmarks.paraphrase_data`) plus PopQA distractor documents into a
 throwaway lite-backend store, runs every paraphrase query through
 ``MemplexService.query``, and reports recall@k (k=1,5,10) overall and
-stratified by lexical-overlap level (high/medium/low).
+stratified by lexical-overlap level (high/medium/low). Run with the
+default ``MEMPLEX_EMBEDDING_MODEL`` for the pure lexical baseline, or a
+semantic model id for the hybrid stack; the report labels which one ran.
 
 Usage::
 
@@ -31,9 +33,10 @@ import math
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any
 
 if __package__ in (None, ""):  # direct `python benchmarks/paraphrase_eval.py`
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -61,9 +64,9 @@ TOP_KS = (1, 5, 10)
 
 def load_distractors(
     path: Path,
-    facts: Sequence[Dict[str, str]],
+    facts: Sequence[dict[str, str]],
     limit: int = 200,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """Load PopQA entries as distractor documents, skipping subject collisions.
 
     A PopQA entry is skipped when its subject appears in any fact text, or any
@@ -75,7 +78,7 @@ def load_distractors(
     fact_texts = [f["text"].lower() for f in facts]
     fact_subjects = [f["subject"].lower() for f in facts]
 
-    distractors: List[Dict[str, str]] = []
+    distractors: list[dict[str, str]] = []
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             if len(distractors) >= limit:
@@ -132,7 +135,7 @@ def _seed_one(service: Any, doc_id: str, text: str) -> None:
     service.store.add(func, source)
 
 
-def seed_documents(service: Any, documents: Iterable[Dict[str, str]]) -> int:
+def seed_documents(service: Any, documents: Iterable[dict[str, str]]) -> int:
     """Seed ``{"id", "text"}`` documents into the service store."""
     count = 0
     for doc in documents:
@@ -145,9 +148,9 @@ def seed_documents(service: Any, documents: Iterable[Dict[str, str]]) -> int:
 
 
 def compute_recall(
-    records: Sequence[Dict[str, Any]],
+    records: Sequence[dict[str, Any]],
     ks: Sequence[int] = TOP_KS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Compute recall@k overall and per overlap level.
 
     Each record: ``{"fact_id", "overlap", "retrieved_ids"}`` where
@@ -155,14 +158,14 @@ def compute_recall(
     k when its ``fact_id`` appears within the first k retrieved IDs.
     """
 
-    def _hit_fraction(subset: Sequence[Dict[str, Any]], k: int) -> float:
+    def _hit_fraction(subset: Sequence[dict[str, Any]], k: int) -> float:
         if not subset:
             return 0.0
         hits = sum(1 for r in subset if r["fact_id"] in r["retrieved_ids"][:k])
         return round(hits / len(subset), 4)
 
     overall = {f"recall@{k}": _hit_fraction(records, k) for k in ks}
-    by_overlap: Dict[str, Any] = {}
+    by_overlap: dict[str, Any] = {}
     for level in OVERLAP_LEVELS:
         subset = [r for r in records if r["overlap"] == level]
         by_overlap[level] = {
@@ -176,7 +179,7 @@ def compute_recall(
     }
 
 
-def _latency_summary(samples: Sequence[float]) -> Dict[str, float]:
+def _latency_summary(samples: Sequence[float]) -> dict[str, float]:
     """Mean/p50/p99 (nearest-rank) in milliseconds over float-ms samples."""
     if not samples:
         return {"mean": 0.0, "p50": 0.0, "p99": 0.0}
@@ -198,12 +201,12 @@ def _latency_summary(samples: Sequence[float]) -> Dict[str, float]:
 
 def run_queries(
     service: Any,
-    queries: Sequence[Dict[str, Any]],
+    queries: Sequence[dict[str, Any]],
     top_k: int = max(TOP_KS),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run every query and return per-query records plus latency stats."""
-    records: List[Dict[str, Any]] = []
-    latencies: List[float] = []
+    records: list[dict[str, Any]] = []
+    latencies: list[float] = []
     for query in queries:
         start = time.perf_counter()
         result = service.query(query["text"], top_k=top_k)
@@ -231,20 +234,38 @@ def build_service(storage_path: str) -> Any:
     return MemplexService(config=config)
 
 
+def _retriever_description() -> str:
+    """Describe the actual retrieval stack the run used.
+
+    The embedding model is read from the environment (MEMPLEX_EMBEDDING_MODEL)
+    so a semantic run can never be mislabelled as the TF-IDF default and
+    vice versa -- the report must describe what ran, not what usually runs.
+    """
+    model = os.environ.get("MEMPLEX_EMBEDDING_MODEL", "default")
+    if model in {"default", "tfidf", "offline", "lite", "local"}:
+        return (
+            "default lexical stack (TF-IDF embedder + FTS5/BM25 sidecar); "
+            "no semantic embedding model"
+        )
+    return (
+        f"hybrid stack: FTS5/BM25 + semantic vector leg "
+        f"(MEMPLEX_EMBEDDING_MODEL={model})"
+    )
+
+
 def build_report(
-    records: Sequence[Dict[str, Any]],
-    latency_ms: Dict[str, float],
+    records: Sequence[dict[str, Any]],
+    latency_ms: dict[str, float],
     num_distractors: int,
     ks: Sequence[int] = TOP_KS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Assemble the JSON-serializable baseline report."""
     metrics = compute_recall(records, ks)
     return {
         "dataset": "paraphrase_robustness",
         "dataset_version": DATASET_VERSION,
         "backend": "lite",
-        "retriever": "default lexical stack (TF-IDF embedder + FTS5/BM25 sidecar); "
-        "no semantic embedding model",
+        "retriever": _retriever_description(),
         "num_facts": len(FACTS),
         "num_queries": len(QUERIES),
         "num_distractors": num_distractors,
@@ -253,14 +274,14 @@ def build_report(
         "overall": metrics["overall"],
         "by_overlap": metrics["by_overlap"],
         "latency_ms": latency_ms,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
-def main(argv: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     """Run the paraphrase baseline and write the JSON report."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--popqa", type=Path, default=DEFAULT_POPQA_PATH,

@@ -13,12 +13,12 @@ from queue import Full
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-from datetime import datetime, timedelta, timezone  # noqa: E402
+from datetime import UTC, datetime, timedelta, timezone
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models import BackgroundTask, TaskInfo, TaskStatus  # noqa: E402
-from memplex.worker import (  # noqa: E402
+from memplex.models import BackgroundTask, TaskInfo, TaskStatus
+from memplex.worker import (
     BackgroundWorker,
     TaskStore,
     TaskStoreIntegrityError,
@@ -32,7 +32,7 @@ def _info(tid="t1", status=TaskStatus.PENDING, payload=None):
         task_id=tid,
         task_type=BackgroundTask.BUILD_INDEX,
         status=status,
-        created_at=datetime.now(),
+        created_at=datetime.now(UTC),
         payload=payload or {},
     )
 
@@ -248,7 +248,7 @@ def test_worker_replay_queue_hint_failure_keeps_durable_replay(tmp_path, monkeyp
 
 def test_worker_retry_survives_restart_without_timer(tmp_path):
     path = tmp_path / "tasks.json"
-    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 11, tzinfo=UTC)
     first = BackgroundWorker(storage_path=path, clock=lambda: now)
     task_id = first.submit(BackgroundTask.BUILD_INDEX, {})
     first._dispatch = lambda *_: (_ for _ in ()).throw(RuntimeError("offline"))

@@ -11,4 +11,4 @@ from memplex.adapters.cli import main as cli_main
 from memplex.adapters.http_api import create_app
 from memplex.adapters.mcp_server import MCPServer
 
-__all__ = ["cli_main", "create_app", "MCPServer"]
+__all__ = ["MCPServer", "cli_main", "create_app"]

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from memplex.models import BackgroundTask, TaskInfo, TaskStatus
 from memplex.task_repository import TaskRepository
@@ -14,7 +14,7 @@ from memplex.worker import BackgroundWorker, TaskStore
 
 
 def _task(task_id: str, *, max_retries: int = 1) -> TaskInfo:
-    now = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 13, tzinfo=UTC)
     return TaskInfo(
         task_id=task_id,
         task_type=BackgroundTask.BUILD_INDEX,
@@ -46,7 +46,7 @@ def test_postgres_application_acl_includes_exact_task_table_rights() -> None:
 
 def test_lite_repository_rejects_stale_lease_completion_and_retry(tmp_path) -> None:
     repository = TaskStore(tmp_path / "tasks.json")
-    first_now = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    first_now = datetime(2026, 8, 13, tzinfo=UTC)
     repository.admit_pending(_task("leased"), capacity=10)
 
     first = repository.claim_due(limit=1, lease_seconds=5, now=first_now)[0]
@@ -92,7 +92,7 @@ def test_lite_repository_rejects_stale_lease_completion_and_retry(tmp_path) -> N
 
 def test_worker_accepts_an_injected_repository_and_fences_completion(tmp_path) -> None:
     repository = TaskStore(tmp_path / "tasks.json")
-    now = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 13, tzinfo=UTC)
     worker = BackgroundWorker(
         storage_path=tmp_path / "unused.json",
         task_repository=repository,
@@ -109,7 +109,7 @@ def test_worker_accepts_an_injected_repository_and_fences_completion(tmp_path) -
 
 def test_retry_transitions_to_dead_letter_then_replays_with_same_identity(tmp_path) -> None:
     repository = TaskStore(tmp_path / "tasks.json")
-    now = datetime(2026, 8, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 13, tzinfo=UTC)
     repository.admit_pending(_task("dead-letter", max_retries=1), capacity=10)
 
     first = repository.claim_due(limit=1, lease_seconds=30, now=now)[0]

@@ -17,14 +17,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 try:
-    import benchmarks as _benchmarks_package  # noqa: F401
-    import memplex as _memplex_package  # noqa: F401
+    import benchmarks as _benchmarks_package
+    import memplex as _memplex_package
 except ModuleNotFoundError:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from benchmarks.memory_eval import MemoryBenchmarkDataset, MemoryBenchmarkRunner  # noqa: E402
-from memplex.config import MemplexConfig, StorageConfig  # noqa: E402
-from memplex.service import MemplexService  # noqa: E402
+from benchmarks.memory_eval import MemoryBenchmarkDataset, MemoryBenchmarkRunner
+from memplex.config import MemplexConfig, StorageConfig
+from memplex.service import MemplexService
 
 TOP_K = 10
 NUM_FACTS = 50

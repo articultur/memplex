@@ -14,10 +14,10 @@ os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from memplex.adapters.http_api import create_app  # noqa: E402
-from memplex.config import MemplexConfig  # noqa: E402
+from memplex.adapters.http_api import create_app
+from memplex.config import MemplexConfig
 
 
 def _digest(token: str) -> str:

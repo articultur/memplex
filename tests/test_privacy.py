@@ -11,10 +11,10 @@ import os
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models import SourceDocument, SourceType  # noqa: E402
-from memplex.privacy import strip_private_tags  # noqa: E402
+from memplex.models import SourceDocument, SourceType
+from memplex.privacy import strip_private_tags
 
 # ── strip_private_tags unit behaviour ────────────────────────────────
 

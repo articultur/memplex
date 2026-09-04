@@ -7,7 +7,7 @@ import multiprocessing
 import sqlite3
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -60,7 +60,7 @@ def _tenant_function(identifier: str) -> Function:
 
 
 def _valid_nonempty_sync_state() -> dict:
-    occurred_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    occurred_at = datetime(2026, 8, 11, tzinfo=UTC)
     event_id = str(uuid.UUID(int=101))
     batch_id = str(uuid.UUID(int=102))
     snapshot_id = str(uuid.UUID(int=103))
@@ -170,7 +170,7 @@ def _valid_nonempty_sync_state() -> dict:
                 "consumer_id": "consumer-a",
                 "request_id": "request-a",
                 "resume_seq": 1,
-                "expires_at": datetime(2026, 8, 12, tzinfo=timezone.utc).isoformat(),
+                "expires_at": datetime(2026, 8, 12, tzinfo=UTC).isoformat(),
             }
         ],
         "snapshot_items": [
@@ -301,7 +301,7 @@ def _preopen_then_add(root: str, identifier: str, ready, start, result) -> None:
     try:
         store.add(_function(identifier), _source())
         result.put("ok")
-    except Exception as exc:  # pragma: no cover - asserted in parent
+    except Exception as exc:  # pragma: no cover - asserted in parent  # noqa: BLE001 - broad catch with explicit fallback handling
         result.put(f"error:{exc}")
 
 
@@ -325,7 +325,7 @@ def _preopen_action(root: str, action: str, ready, start, result) -> None:
         else:  # pragma: no cover - test wiring
             raise AssertionError(action)
         result.put("ok")
-    except Exception as exc:  # pragma: no cover - asserted in parent
+    except Exception as exc:  # pragma: no cover - asserted in parent  # noqa: BLE001 - broad catch with explicit fallback handling
         result.put(f"error:{exc}")
 
 

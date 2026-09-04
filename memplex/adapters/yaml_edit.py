@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import yaml
 
@@ -152,7 +153,7 @@ def yaml_path_value(text: str, path: Sequence[str]) -> tuple[bool, Any]:
     if parent_value is None:
         return False, None
     if not isinstance(parent_value, dict):
-        raise ValueError(f"YAML path component {parent!r} is not a mapping")
+        raise ValueError(f"YAML path component {parent!r} is not a mapping")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     return leaf in parent_value, parent_value.get(leaf)
 
 
@@ -170,7 +171,7 @@ def _mapping_document(text: str) -> dict[str, Any]:
     if loaded is None:
         return {}
     if not isinstance(loaded, dict):
-        raise ValueError("YAML document root must be a mapping")
+        raise ValueError("YAML document root must be a mapping")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
     return loaded
 
 

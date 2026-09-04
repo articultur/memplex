@@ -12,9 +12,9 @@ from pathlib import Path
 
 os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
 
-import pytest  # noqa: E402
+import pytest
 
-from memplex.models import (  # noqa: E402
+from memplex.models import (
     Fact,
     FieldValue,
     Function,
@@ -25,10 +25,10 @@ from memplex.models import (  # noqa: E402
     SourceType,
     WikiPage,
 )
-from memplex.wiki.community import Community, GraphCommunityDetector  # noqa: E402
-from memplex.wiki.compiler import WikiCompiler  # noqa: E402
-from memplex.wiki.generator import LLMWikiGenerator  # noqa: E402
-from memplex.wiki.search import DualIndexSearch  # noqa: E402
+from memplex.wiki.community import Community, GraphCommunityDetector
+from memplex.wiki.compiler import WikiCompiler
+from memplex.wiki.generator import LLMWikiGenerator
+from memplex.wiki.search import DualIndexSearch
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

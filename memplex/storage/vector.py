@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
 # Re-export the list[float] alias for convenience
-Vector = List[float]
+Vector = list[float]
 
 
 @dataclass
@@ -42,15 +42,15 @@ class VectorSearchResult:
 class VectorStore(Protocol):
     """Minimal vector store interface."""
 
-    def add(self, id: str, text: str, metadata: Optional[dict] = None) -> None: ...
+    def add(self, id: str, text: str, metadata: dict | None = None) -> None: ...
 
     def upsert(self, id: str, vector: Vector, text: str = "") -> None: ...
 
-    def upsert_batch(self, items: Dict[str, Vector]) -> None: ...
+    def upsert_batch(self, items: dict[str, Vector]) -> None: ...
 
     def search(
-        self, query: str, top_k: int = 5, query_vector: Optional[Vector] = None
-    ) -> List[VectorSearchResult]: ...
+        self, query: str, top_k: int = 5, query_vector: Vector | None = None
+    ) -> list[VectorSearchResult]: ...
 
     def delete(self, id: str) -> None: ...
 
@@ -67,11 +67,11 @@ class InMemoryVectorStore:
     """
 
     def __init__(self) -> None:
-        self._vectors: Dict[str, tuple] = {}  # id -> (text, embedding)
-        self._stored_vectors: Dict[str, Vector] = {}  # id -> pre-stored vector
+        self._vectors: dict[str, tuple] = {}  # id -> (text, embedding)
+        self._stored_vectors: dict[str, Vector] = {}  # id -> pre-stored vector
         self._all_words: set = set()
 
-    def add(self, id: str, text: str, metadata: Optional[dict] = None) -> None:
+    def add(self, id: str, text: str, metadata: dict | None = None) -> None:
         words = self._get_words(text)
         self._all_words.update(words)
         embedding = self._encode_with_vocab(text, words)
@@ -82,7 +82,7 @@ class InMemoryVectorStore:
         self._stored_vectors[id] = vector
         self._vectors[id] = (text, [0])  # placeholder text embedding
 
-    def upsert_batch(self, items: Dict[str, Vector]) -> None:
+    def upsert_batch(self, items: dict[str, Vector]) -> None:
         for id, vector in items.items():
             self.upsert(id, vector)
 
@@ -90,14 +90,14 @@ class InMemoryVectorStore:
         self,
         query: str,
         top_k: int = 5,
-        query_vector: Optional[Vector] = None,
-    ) -> List[VectorSearchResult]:
+        query_vector: Vector | None = None,
+    ) -> list[VectorSearchResult]:
         if query_vector is not None:
             return self._search_by_vector(query_vector, top_k)
         query_emb = self._encode_with_vocab(query, self._get_words(query))
         return self._search_by_embedding(query_emb, top_k)
 
-    def _search_by_vector(self, query_vec: Vector, top_k: int) -> List[VectorSearchResult]:
+    def _search_by_vector(self, query_vec: Vector, top_k: int) -> list[VectorSearchResult]:
         scores: list = []
         for vid, vec in self._stored_vectors.items():
             score = self._cosine(query_vec, vec)
@@ -106,7 +106,7 @@ class InMemoryVectorStore:
         scores.sort(key=lambda x: x[1], reverse=True)
         return [VectorSearchResult(id=s[0], score=s[1], text=s[2]) for s in scores[:top_k]]
 
-    def _search_by_embedding(self, query_emb: list, top_k: int) -> List[VectorSearchResult]:
+    def _search_by_embedding(self, query_emb: list, top_k: int) -> list[VectorSearchResult]:
         scores: list = []
         for vid, (text, emb) in self._vectors.items():
             score = self._cosine(query_emb, emb)
@@ -129,7 +129,7 @@ class InMemoryVectorStore:
     def _get_words(text: str) -> set:
         text_lower = text.lower()
         if any("一" <= c <= "鿿" for c in text):
-            return set(list(text_lower))
+            return set(text_lower)
         return set(text_lower.split())
 
     def _encode_with_vocab(self, text: str, words: set) -> list:
@@ -179,7 +179,7 @@ class ChromaVectorStore:
             self._model = SentenceTransformer(self._embedding_model)
         return self._model
 
-    def add(self, id: str, text: str, metadata: Optional[dict] = None) -> None:
+    def add(self, id: str, text: str, metadata: dict | None = None) -> None:
         embedding = self._get_model().encode([text])[0]
         self.collection.upsert(
             ids=[id],
@@ -196,7 +196,7 @@ class ChromaVectorStore:
             metadatas=[{}],
         )
 
-    def upsert_batch(self, items: Dict[str, Vector]) -> None:
+    def upsert_batch(self, items: dict[str, Vector]) -> None:
         ids = list(items.keys())
         vectors = [v if isinstance(v, list) else list(v) for v in items.values()]
         self.collection.upsert(
@@ -210,8 +210,8 @@ class ChromaVectorStore:
         self,
         query: str,
         top_k: int = 5,
-        query_vector: Optional[Vector] = None,
-    ) -> List[VectorSearchResult]:
+        query_vector: Vector | None = None,
+    ) -> list[VectorSearchResult]:
         if query_vector is not None:
             q_emb = query_vector if isinstance(query_vector, list) else list(query_vector)
         else:

@@ -6,8 +6,8 @@ from memplex.wiki.generator import LLMWikiGenerator
 from memplex.wiki.search import DualIndexSearch
 
 __all__ = [
-    "WikiCompiler",
-    "LLMWikiGenerator",
     "DualIndexSearch",
     "GraphCommunityDetector",
+    "LLMWikiGenerator",
+    "WikiCompiler",
 ]

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,8 @@ class SleepTimeAgent:
         self._idle_grace = max(0.0, float(idle_grace_seconds))
         self._top_k = max(1, int(precompute_top_k))
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self.last_report: Dict[str, Any] = {}
+        self._thread: threading.Thread | None = None
+        self.last_report: dict[str, Any] = {}
 
     # ── Public lifecycle ─────────────────────────────────────────────
 
@@ -72,12 +72,12 @@ class SleepTimeAgent:
         try:
             if self._service._worker.queue_depth > 0:
                 return -1.0
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort fallback value
             return -1.0
         return time.monotonic()  # caller pairs this with a grace window
 
     def _run_loop(self) -> None:
-        idle_mark: Optional[float] = None
+        idle_mark: float | None = None
         while not self._stop_event.wait(1.0):
             try:
                 if self._service._worker.queue_depth > 0:
@@ -92,22 +92,22 @@ class SleepTimeAgent:
                 self.run_once()
                 idle_mark = None
                 self._stop_event.wait(self._interval)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.debug("sleep-time pass failed (will retry): %s", exc)
                 idle_mark = None
                 self._stop_event.wait(self._interval)
 
     # ── The pass itself (synchronous, testable) ──────────────────────
 
-    def run_once(self) -> Dict[str, Any]:
-        report: Dict[str, Any] = {"improved": {}, "pinned_inferences": 0}
+    def run_once(self) -> dict[str, Any]:
+        report: dict[str, Any] = {"improved": {}, "pinned_inferences": 0}
         try:
             report["improved"] = self._service.improve()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sleep-time improve failed: %s", exc)
         try:
             report["pinned_inferences"] = self._precompute_inferences()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sleep-time inference precompute failed: %s", exc)
         self.last_report = report
         return report
@@ -125,8 +125,8 @@ class SleepTimeAgent:
         context = local_development_context()
         store = self._service._store_for(context)
         try:
-            functions: List = list(store.list_functions(limit=100000))
-        except Exception as exc:
+            functions: list = list(store.list_functions(limit=100000))
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sleep-time list_functions failed: %s", exc)
             return 0
         functions.sort(
@@ -158,7 +158,7 @@ class SleepTimeAgent:
         return pinned
 
     @staticmethod
-    def _neighbour_names(store: Any, func_id: str) -> List[str]:
+    def _neighbour_names(store: Any, func_id: str) -> list[str]:
         """One-hop graph neighbours of *func_id* via the store's graph API.
 
         The store contract is ``get_graph(func_ids: Optional[List[str]])``
@@ -167,9 +167,9 @@ class SleepTimeAgent:
         """
         try:
             data = store.get_graph([func_id])
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort fallback value
             return []
-        names: List[str] = []
+        names: list[str] = []
         for edge in getattr(data, "edges", None) or []:
             source = getattr(edge, "source", None)
             target = getattr(edge, "target", None)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional
+from collections.abc import Callable
 
 from memplex.core.hooks.hook_event import HookEvent
 
@@ -32,8 +32,8 @@ class HookRegistry:
         are logged and swallowed.  Default: ``None``.
     """
 
-    def __init__(self, on_error: Optional[Callable[[HookEvent, Exception], None]] = None) -> None:
-        self._handlers: Dict[HookEvent, List[Callable]] = defaultdict(list)
+    def __init__(self, on_error: Callable[[HookEvent, Exception], None] | None = None) -> None:
+        self._handlers: dict[HookEvent, list[Callable]] = defaultdict(list)
         self._lock = threading.RLock()
         self._on_error = on_error
 
@@ -65,7 +65,7 @@ class HookRegistry:
 
     # ── Dispatch ─────────────────────────────────────────────────
 
-    def trigger(self, event: HookEvent, context: Optional[dict] = None) -> None:
+    def trigger(self, event: HookEvent, context: dict | None = None) -> None:
         """Fire *event* with *context* to all registered handlers.
 
         Handlers are called sequentially in registration order.  If a handler
@@ -86,7 +86,7 @@ class HookRegistry:
         for handler in handlers:
             try:
                 handler(context)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
                 if self._on_error is not None:
                     self._on_error(event, exc)
                 else:
@@ -99,12 +99,12 @@ class HookRegistry:
 
     # ── Introspection ────────────────────────────────────────────
 
-    def list_events(self) -> List[HookEvent]:
+    def list_events(self) -> list[HookEvent]:
         """Return all event types that have at least one registered handler."""
         with self._lock:
             return [e for e in HookEvent if self._handlers[e]]
 
-    def list_handlers(self, event: HookEvent) -> List[Callable]:
+    def list_handlers(self, event: HookEvent) -> list[Callable]:
         """Return a snapshot of handlers registered for *event*."""
         with self._lock:
             return list(self._handlers.get(event, []))
@@ -113,7 +113,7 @@ class HookRegistry:
 # ── Global default registry ────────────────────────────────────────────
 
 
-_default_registry: Optional[HookRegistry] = None
+_default_registry: HookRegistry | None = None
 _default_registry_lock = threading.Lock()
 
 

@@ -3,4 +3,4 @@
 from .confidence_calculator import ConfidenceCalculator
 from .conflict_resolver import Conflict, ConflictResolver
 
-__all__ = ["ConflictResolver", "Conflict", "ConfidenceCalculator"]
+__all__ = ["ConfidenceCalculator", "Conflict", "ConflictResolver"]

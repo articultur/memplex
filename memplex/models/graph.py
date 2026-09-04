@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
 
 
 def domain_node_id(domain: str) -> str:
@@ -37,11 +36,11 @@ class GraphEdge:
     target: str
     edge_type: str
     weight: float = 1.0
-    evidence: List[str] = field(default_factory=list)
-    created_at: Optional[datetime] = None
+    evidence: list[str] = field(default_factory=list)
+    created_at: datetime | None = None
 
 
 @dataclass
 class GraphData:
     nodes: list = field(default_factory=list)  # List[MemoryNode]
-    edges: List[GraphEdge] = field(default_factory=list)
+    edges: list[GraphEdge] = field(default_factory=list)
