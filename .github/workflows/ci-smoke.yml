@@ -1,0 +1,12 @@
+name: CI Smoke
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [chore/ruff-0.16-unpin]
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "smoke ok"
