@@ -70,7 +70,7 @@ def release_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "--output",
             str(output),
             "--tag",
-            "v3.3.1",
+            "v3.3.2",
             "--source-date-epoch",
             "1704067200",
             "--allow-dirty",
@@ -117,7 +117,7 @@ def test_wheel_fresh_install_reinstall_assets_and_uninstall_are_isolated(
     venv = tmp_path / "venv"
     _run(["uv", "venv", "--python", python, str(venv)], cwd=tmp_path, env=env)
     venv_python = _python_path(venv)
-    wheel = release_bundle / "memplex-3.3.1-py3-none-any.whl"
+    wheel = release_bundle / "memplex-3.3.2-py3-none-any.whl"
 
     for _ in range(2):
         _run(
@@ -146,7 +146,7 @@ def test_wheel_fresh_install_reinstall_assets_and_uninstall_are_isolated(
         env=env,
     )
     payload = json.loads(smoke.stdout)
-    assert payload["version"] == "3.3.1"
+    assert payload["version"] == "3.3.2"
     assert payload["migrations"] == [1, 2, 3, 4, 5, 6]
     assert payload["assets"] == {
         name: hashlib.sha256((PROJECT_ROOT / "memplex" / name).read_bytes()).hexdigest()
@@ -198,7 +198,7 @@ def test_sdist_installs_in_isolated_python_environment(
             "install",
             "--python",
             str(python),
-            str(release_bundle / "memplex-3.3.1.tar.gz"),
+            str(release_bundle / "memplex-3.3.2.tar.gz"),
         ],
         cwd=tmp_path,
         env=env,
@@ -208,7 +208,7 @@ def test_sdist_installs_in_isolated_python_environment(
         cwd=tmp_path,
         env=env,
     )
-    assert result.stdout.strip() == "3.3.1"
+    assert result.stdout.strip() == "3.3.2"
 
 
 def test_npm_tgz_fresh_install_reinstall_dry_run_and_uninstall_are_isolated(
@@ -218,7 +218,7 @@ def test_npm_tgz_fresh_install_reinstall_dry_run_and_uninstall_are_isolated(
     node_major = int(_run(["node", "--version"], cwd=tmp_path, env=env).stdout.split(".")[0][1:])
     assert node_major in {22, 24}
     prefix = tmp_path / "npm-prefix"
-    package = release_bundle / "memplex-3.3.1.tgz"
+    package = release_bundle / "memplex-3.3.2.tgz"
     install = [
         "npm",
         "install",
@@ -264,7 +264,7 @@ def test_failed_npm_install_does_not_replace_verified_package(
 ) -> None:
     env = _isolated_env(tmp_path)
     prefix = tmp_path / "npm-prefix"
-    package = release_bundle / "memplex-3.3.1.tgz"
+    package = release_bundle / "memplex-3.3.2.tgz"
     _run(
         ["npm", "install", "--prefix", str(prefix), "--ignore-scripts", str(package)],
         cwd=tmp_path,

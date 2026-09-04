@@ -1,6 +1,6 @@
 {
   "name": "memplex",
-  "version": "3.3.1",
+  "version": "3.3.2",
   "description": "Multi-agent memory system -- persistent knowledge graph with 3-layer retrieval, compaction, and wiki",
   "author": {
     "name": "articultur",

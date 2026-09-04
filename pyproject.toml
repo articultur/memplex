@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memplex"
-version = "3.3.1"
+version = "3.3.2"
 description = "Memplex - Memory Complex: multi-agent knowledge graph memory system with 3-layer retrieval"
 readme = "README.md"
 license = "MIT"

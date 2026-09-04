@@ -46,7 +46,7 @@ def release_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "--output",
             str(output),
             "--tag",
-            "v3.3.1",
+            "v3.3.2",
             "--source-date-epoch",
             "1704067200",
             "--allow-dirty",
@@ -111,11 +111,11 @@ def test_sbom_rejects_duplicate_or_tampered_component() -> None:
 
 def test_release_bundle_verifies_exact_artifacts_sbom_and_checksums(release_bundle: Path) -> None:
     manifest = verify_release_bundle(PROJECT_ROOT, release_bundle)
-    assert manifest.version == "3.3.1"
+    assert manifest.version == "3.3.2"
     assert {item.name for item in manifest.artifacts} == {
-        "memplex-3.3.1-py3-none-any.whl",
-        "memplex-3.3.1.tar.gz",
-        "memplex-3.3.1.tgz",
+        "memplex-3.3.2-py3-none-any.whl",
+        "memplex-3.3.2.tar.gz",
+        "memplex-3.3.2.tgz",
         "release-sbom.cdx.json",
         "release-checksums.json",
     }
@@ -128,7 +128,7 @@ def test_release_bundle_fails_closed_on_artifact_drift(
     candidate = tmp_path / "candidate"
     shutil.copytree(release_bundle, candidate)
     if mutation == "tamper":
-        (candidate / "memplex-3.3.1.tgz").write_bytes(b"tampered")
+        (candidate / "memplex-3.3.2.tgz").write_bytes(b"tampered")
     elif mutation == "unknown":
         (candidate / "unknown.bin").write_bytes(b"unknown")
     else:
@@ -156,7 +156,7 @@ def test_installed_runtime_readiness_verifies_exact_signed_bundle(release_bundle
         release_bundle,
         evidence.canonical_bytes(),
         signing_key=SIGNING_KEY,
-        expected_version="3.3.1",
+        expected_version="3.3.2",
     )
     assert verified.status == "passed"
 
@@ -170,17 +170,17 @@ def test_installed_runtime_readiness_rejects_version_or_bundle_drift(
             release_bundle,
             evidence.canonical_bytes(),
             signing_key=SIGNING_KEY,
-            expected_version="3.3.2",
+            expected_version="3.3.3",
         )
     candidate = tmp_path / "candidate"
     shutil.copytree(release_bundle, candidate)
-    (candidate / "memplex-3.3.1.tgz").write_bytes(b"tampered")
+    (candidate / "memplex-3.3.2.tgz").write_bytes(b"tampered")
     with pytest.raises(ReleaseIntegrityError):
         verify_release_readiness_evidence(
             candidate,
             evidence.canonical_bytes(),
             signing_key=SIGNING_KEY,
-            expected_version="3.3.1",
+            expected_version="3.3.2",
         )
 
 
@@ -189,7 +189,7 @@ def test_readiness_rejects_self_consistent_archive_with_private_member(
 ) -> None:
     candidate = tmp_path / "candidate"
     shutil.copytree(release_bundle, candidate)
-    npm_path = candidate / "memplex-3.3.1.tgz"
+    npm_path = candidate / "memplex-3.3.2.tgz"
     with tarfile.open(npm_path, "w:gz") as archive:
         for name, payload in (
             ("package/bin/memplex.js", b"node"),
@@ -204,8 +204,8 @@ def test_readiness_rejects_self_consistent_archive_with_private_member(
     checksums.write_bytes(
         build_checksum_document(
             (
-                candidate / "memplex-3.3.1-py3-none-any.whl",
-                candidate / "memplex-3.3.1.tar.gz",
+                candidate / "memplex-3.3.2-py3-none-any.whl",
+                candidate / "memplex-3.3.2.tar.gz",
                 npm_path,
                 candidate / "release-sbom.cdx.json",
             )
@@ -214,10 +214,10 @@ def test_readiness_rejects_self_consistent_archive_with_private_member(
     )
     manifest = build_release_manifest(
         PROJECT_ROOT,
-        tag="v3.3.1",
+        tag="v3.3.2",
         artifacts=(
-            candidate / "memplex-3.3.1-py3-none-any.whl",
-            candidate / "memplex-3.3.1.tar.gz",
+            candidate / "memplex-3.3.2-py3-none-any.whl",
+            candidate / "memplex-3.3.2.tar.gz",
             npm_path,
             candidate / "release-sbom.cdx.json",
             checksums,
@@ -238,7 +238,7 @@ def test_readiness_rejects_self_consistent_archive_with_private_member(
             candidate,
             evidence.canonical_bytes(),
             signing_key=SIGNING_KEY,
-            expected_version="3.3.1",
+            expected_version="3.3.2",
         )
 
 

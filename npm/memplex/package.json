@@ -1,6 +1,6 @@
 {
   "name": "memplex",
-  "version": "3.3.1",
+  "version": "3.3.2",
   "description": "One-command Memplex setup for Codex, Claude Code, OpenClaw, Hermes, and other agents",
   "bin": {
     "memplex": "bin/memplex.js"
@@ -12,5 +12,9 @@
   "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/articultur/memplex.git"
   }
 }

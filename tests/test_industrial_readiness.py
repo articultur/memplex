@@ -62,7 +62,7 @@ def _set_deployment_binding(
     monkeypatch.setenv("MEMPLEX_ARTIFACT_SHA256", artifact_sha256)
     monkeypatch.setenv("MEMPLEX_TARGET_IDENTITY_SHA256", target_identity_sha256)
     return DeploymentEvidenceBinding.from_values(
-        memplex_version="3.3.1",
+        memplex_version="3.3.2",
         source_sha256=source_sha256,
         artifact_sha256=artifact_sha256,
         deployment_id=deployment_id,
@@ -311,7 +311,7 @@ def test_capacity_chaos_gate_accepts_only_current_signed_passing_evidence(
         generated_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         window_started_at=(now - timedelta(seconds=62)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         window_ended_at=(now - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        memplex_version="3.3.1",
+        memplex_version="3.3.2",
         python_version="3.13.5",
         postgres_version="16.4",
         platform="macOS-15.6",
@@ -532,7 +532,7 @@ def test_release_supply_chain_gate_accepts_only_current_signed_bundle(
             "--output",
             str(bundle),
             "--tag",
-            "v3.3.1",
+            "v3.3.2",
             "--source-date-epoch",
             "1704067200",
             "--allow-dirty",
@@ -610,7 +610,7 @@ def test_four_host_gate_accepts_only_current_signed_matrix(
         expected_key_id="g008-local",
     )
     evidence = HostLifecycleEvidence.create(
-        memplex_version="3.3.1",
+        memplex_version="3.3.2",
         host_proofs=tuple(proofs),
         binding=binding,
         key_id="g008-local",

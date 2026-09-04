@@ -32,7 +32,7 @@ def _report(**overrides: object) -> CapacityChaosEvidence:
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "window_started_at": (now - timedelta(seconds=62)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "window_ended_at": (now - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "memplex_version": "3.3.1",
+        "memplex_version": "3.3.2",
         "python_version": "3.13.5",
         "postgres_version": "16.4",
         "platform": "macOS-15.6",
@@ -74,7 +74,7 @@ def _report(**overrides: object) -> CapacityChaosEvidence:
 
 def test_capacity_chaos_evidence_accepts_only_full_industrial_gate() -> None:
     report = _report()
-    report.verify(b"c" * 32, expected_version="3.3.1")
+    report.verify(b"c" * 32, expected_version="3.3.2")
 
     assert report.industrial_gate_closing is True
     assert report.contract_sha256 == capacity_chaos_contract_sha256()
@@ -162,7 +162,7 @@ def test_capacity_chaos_tamper_and_freshness_fail_closed(tmp_path: Path) -> None
     raw["edge_count"] = 1_000_001
     tampered = CapacityChaosEvidence.from_dict(raw)
     with pytest.raises(CapacityChaosEvidenceError, match="capacity_chaos_evidence_invalid"):
-        tampered.verify(b"c" * 32, expected_version="3.3.1")
+        tampered.verify(b"c" * 32, expected_version="3.3.2")
 
     now = datetime.now(UTC)
     stale_end = now - timedelta(hours=25, seconds=1)
@@ -177,12 +177,12 @@ def test_capacity_chaos_tamper_and_freshness_fail_closed(tmp_path: Path) -> None
     for values in cases:
         stale = _report(**values)
         with pytest.raises(CapacityChaosEvidenceError, match="capacity_chaos_freshness_invalid"):
-            stale.verify(b"c" * 32, expected_version="3.3.1")
+            stale.verify(b"c" * 32, expected_version="3.3.2")
 
     path = tmp_path / "capacity.json"
     write_capacity_chaos_evidence(path, report)
     loaded = read_capacity_chaos_evidence(path)
-    loaded.verify(b"c" * 32, expected_version="3.3.1")
+    loaded.verify(b"c" * 32, expected_version="3.3.2")
     assert json.loads(path.read_bytes())["report_id"] == report.report_id
 
 

@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-DEFAULT_PACKAGE="memplex==3.3.1"
+DEFAULT_PACKAGE="memplex==3.3.2"
 
 usage() {
   cat <<'USAGE'
@@ -38,9 +38,9 @@ Environment overrides:
   OPENCLAW_CONFIG_DIR, HERMES_CONFIG_DIR, PYTHON
 
 Examples:
-  npx memplex@3.3.1 setup
-  npx memplex@3.3.1 setup --agent codex
-  npx memplex@3.3.1 setup --agent all
+  npx memplex@3.3.2 setup
+  npx memplex@3.3.2 setup --agent codex
+  npx memplex@3.3.2 setup --agent all
 USAGE
 }
 

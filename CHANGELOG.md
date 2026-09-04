@@ -535,6 +535,14 @@ to [Semantic Versioning](https://semver.org/).
   responsibilities. Six fail-soft `except ...: pass` sites now log at debug
   instead of swallowing silently.
 
+## [3.3.2] - 2026-09-04
+
+### Fixed
+
+- The npm wrapper package declares its `repository` field, which the
+  npm registry requires to match the provenance source repository when
+  publishing with `--provenance`.
+
 ## [3.3.1] - 2026-09-04
 
 ### Fixed

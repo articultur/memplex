@@ -41,7 +41,7 @@ def _build(output: Path, *, locale: str, umask: str) -> dict[str, str]:
             "--output",
             str(output),
             "--tag",
-            "v3.3.1",
+            "v3.3.2",
             "--source-date-epoch",
             "1704067200",
             "--allow-dirty",
@@ -69,9 +69,9 @@ def test_release_artifacts_are_reproducible_across_paths_locale_and_umask(tmp_pa
 
     assert first == second
     assert set(first) == {
-        "memplex-3.3.1-py3-none-any.whl",
-        "memplex-3.3.1.tar.gz",
-        "memplex-3.3.1.tgz",
+        "memplex-3.3.2-py3-none-any.whl",
+        "memplex-3.3.2.tar.gz",
+        "memplex-3.3.2.tgz",
         "release-checksums.json",
         "release-manifest.json",
         "release-sbom.cdx.json",
@@ -82,7 +82,7 @@ def test_release_archives_are_sorted_normalized_and_private_asset_free(tmp_path:
     output = tmp_path / "dist"
     _build(output, locale="C", umask="022")
 
-    wheel = output / "memplex-3.3.1-py3-none-any.whl"
+    wheel = output / "memplex-3.3.2-py3-none-any.whl"
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
         assert names == sorted(names)
@@ -91,7 +91,7 @@ def test_release_archives_are_sorted_normalized_and_private_asset_free(tmp_path:
         assert not any("tests/" in name or ".superpowers" in name for name in names)
         assert not any(b"/Users/nonon/" in archive.read(name) for name in names if not name.endswith("/"))
 
-    for name in ("memplex-3.3.1.tar.gz", "memplex-3.3.1.tgz"):
+    for name in ("memplex-3.3.2.tar.gz", "memplex-3.3.2.tgz"):
         with tarfile.open(output / name, "r:gz") as archive:
             members = archive.getmembers()
             assert [member.name for member in members] == sorted(member.name for member in members)
@@ -101,11 +101,11 @@ def test_release_archives_are_sorted_normalized_and_private_asset_free(tmp_path:
 
     manifest = json.loads((output / "release-manifest.json").read_text())
     assert manifest["schema_version"] == 1
-    assert manifest["tag"] == "v3.3.1"
+    assert manifest["tag"] == "v3.3.2"
     assert [item["name"] for item in manifest["artifacts"]] == [
-        "memplex-3.3.1-py3-none-any.whl",
-        "memplex-3.3.1.tar.gz",
-        "memplex-3.3.1.tgz",
+        "memplex-3.3.2-py3-none-any.whl",
+        "memplex-3.3.2.tar.gz",
+        "memplex-3.3.2.tgz",
         "release-checksums.json",
         "release-sbom.cdx.json",
     ]
