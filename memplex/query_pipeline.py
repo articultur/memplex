@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timezone
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from memplex.llm.injection_guard import drop_injection_suspected
@@ -350,7 +351,16 @@ class QueryPipeline:
         if scope in (QueryScope.SYNTHESIS, QueryScope.ALL):
             searches.append(("wiki", retriever.wiki_search, ()))
         if scope in (QueryScope.RELATION, QueryScope.ALL):
-            searches.append(("graph", retriever.graph_search, (query_vector,)))
+            graph_search = retriever.graph_search
+            # Clamp at the consumption site: env overrides bypass the
+            # dataclass validation, so an out-of-range value must fall
+            # back to the historical bounded one-hop behaviour.
+            hops = self._config.retrieval.graph_max_hops
+            if hops != 1:
+                graph_search = partial(
+                    retriever.graph_search, max_hops=max(1, min(2, int(hops)))
+                )
+            searches.append(("graph", graph_search, (query_vector,)))
 
         per_path, remainder = divmod(candidate_budget, len(searches))
         futures: dict[concurrent.futures.Future, tuple[str, int]] = {}

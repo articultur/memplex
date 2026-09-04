@@ -549,3 +549,67 @@ def test_wiki_search_with_real_dual_index_search(tmp_path):
     # FTS hit ranks first via RRF; store FTS was not consulted.
     assert r[0].func_id == "p1"
     assert store.fts_calls == 0
+
+
+# ── graph_search bounded two-hop ──────────────────────────────────────
+
+
+class _BfsStore(_StubStore):
+    """Store-shaped stub whose get_neighbors honours max_hops like the
+    real backends (BFS is the store's job; the retriever passes depth)."""
+
+    def __init__(self, adjacency, **kwargs):
+        super().__init__(**kwargs)
+        self._adjacency = adjacency
+        self.seen_hops = []
+
+    def get_neighbors(self, func_id, edge_types=None, max_hops=1, limit=None):
+        self.seen_hops.append(max_hops)
+        visited, frontier, ordered = {func_id}, [func_id], []
+        for _hop in range(max_hops):
+            nxt = []
+            for fid in frontier:
+                for n in self._adjacency.get(fid, []):
+                    if n.id not in visited:
+                        visited.add(n.id)
+                        ordered.append(n)
+                        nxt.append(n.id)
+            frontier = nxt
+        return ordered if limit is None else ordered[:limit]
+
+
+def test_graph_search_two_hops_reaches_transitive_neighbor():
+    """max_hops=2 admits two-hop neighbours the one-hop path structurally
+    misses: seed -> hub -> leaf. Bounded expansion, still budget-capped."""
+    seed = _sr("seed", 0.8)
+    hub = _node("hub")
+    leaf = _node("leaf")
+    store = _BfsStore({"seed": [hub], "hub": [leaf]}, vector_hits=[seed])
+    r1 = MultiPathRetriever(store).graph_search("q", top_k=10, max_hops=1)
+    r2 = MultiPathRetriever(store).graph_search("q", top_k=10, max_hops=2)
+    assert {x.func_id for x in r1} == {"seed", "hub"}
+    assert "leaf" in {x.func_id for x in r2}
+    assert store.seen_hops == [1, 2]
+    # Budget is a hard ceiling regardless of hop depth.
+    assert len(r2) <= 10
+
+
+def test_graph_search_two_hops_respects_budget_ceiling():
+    seed = _sr("seed", 0.8)
+    hub = _node("hub")
+    leaves = [_node(f"leaf{i}") for i in range(20)]
+    store = _BfsStore({"seed": [hub], "hub": leaves}, vector_hits=[seed])
+    r = MultiPathRetriever(store).graph_search("q", top_k=4, max_hops=2)
+    assert len(r) <= 4
+
+
+def test_graph_search_default_stays_one_hop():
+    """Default behaviour is unchanged: no config adoption means exactly the
+    historical seed + one-hop expansion."""
+    seed = _sr("seed", 0.8)
+    hub = _node("hub")
+    leaf = _node("leaf")
+    store = _BfsStore({"seed": [hub], "hub": [leaf]}, vector_hits=[seed])
+    r = MultiPathRetriever(store).graph_search("q", top_k=10)
+    assert {x.func_id for x in r} == {"seed", "hub"}
+    assert store.seen_hops == [1]

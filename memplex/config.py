@@ -330,6 +330,11 @@ class RetrievalConfig:
     injection_scan_enabled: bool = True
     retrieval_budget_multiplier: int = 4
     max_retrieval_budget: int = 500
+    # Bounded graph traversal depth for the graph retrieval path. 1 keeps
+    # the historical seed+one-hop behaviour; 2 admits two-hop neighbours
+    # under the same budget ceiling. This is a bounded expansion knob --
+    # it is not a claim of generic multi-hop reasoning.
+    graph_max_hops: int = 1
 
     def __post_init__(self) -> None:
         for name in ("retrieval_budget_multiplier", "max_retrieval_budget"):
@@ -338,6 +343,9 @@ class RetrievalConfig:
                 raise TypeError(f"retrieval.{name} must be an exact int")
             if value <= 0:
                 raise ValueError(f"retrieval.{name} must be positive")
+        hops = self.graph_max_hops
+        if type(hops) is not int or not 1 <= hops <= 2:
+            raise ValueError("retrieval.graph_max_hops must be 1 or 2")
 
 
 @dataclass
@@ -670,6 +678,7 @@ _ENV_TYPE_COERCIONS: dict[str, type] = {
     "retrieval.skill_max_tokens": int,
     "retrieval.injection_scan_enabled": bool,
     "retrieval.retrieval_budget_multiplier": int,
+    "retrieval.graph_max_hops": int,
     "retrieval.max_retrieval_budget": int,
     # LLMConfig
     "llm.query_enhancement": bool,

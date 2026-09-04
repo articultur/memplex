@@ -122,11 +122,15 @@ class MultiPathRetriever:
         text: str,
         top_k: int,
         query_vector: Vector | None = None,
+        max_hops: int = 1,
     ) -> list[SearchResult]:
         """Incremental graph traversal search.
 
         1. Spend part of ``top_k`` on at most three seed Functions.
-        2. Divide the remaining budget across bounded 1-hop reads.
+        2. Divide the remaining budget across bounded neighbour reads of
+           at most *max_hops* hops (1 = the historical seed + one-hop
+           behaviour; 2 = bounded two-hop expansion under the same
+           budget). Bounded expansion, not generic multi-hop reasoning.
         3. Filter to relation-type edges.
 
         The *query_vector* parameter is retained for call-site
@@ -174,7 +178,7 @@ class MultiPathRetriever:
                     neighbors = self._store.get_neighbors(
                         seed.func_id,
                         edge_types=_RELATION_EDGE_TYPES,
-                        max_hops=1,
+                        max_hops=max_hops,
                         limit=quota,
                     )
                 except TypeError:
@@ -183,7 +187,7 @@ class MultiPathRetriever:
                     # unbounded neighbour read.
                     neighbors = self._store.get_neighbors(
                         seed.func_id,
-                        max_hops=1,
+                        max_hops=max_hops,
                         limit=quota,
                     )
             except Exception as exc:  # noqa: BLE001 - logged degradation path
