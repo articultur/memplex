@@ -75,12 +75,13 @@ jobs:
           for artifact in "$RUNNER_TEMP/release-a"/*; do
             cmp "$artifact" "$RUNNER_TEMP/release-b/$(basename "$artifact")"
           done
-          cp -R "$RUNNER_TEMP/release-a" release
+          rm -rf bundle-out && mkdir bundle-out
+          cp "$RUNNER_TEMP"/release-a/* bundle-out/
       - id: release-bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: memplex-release-bundle
-          path: release/*
+          path: bundle-out/*
           if-no-files-found: error
           retention-days: 7
 
