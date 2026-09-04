@@ -234,8 +234,17 @@ jobs:
 
           agent, host_root, isolated_root, phase = sys.argv[1:]
           report = json.load(sys.stdin)
-          installation = report.get("install_state") if isinstance(report, dict) else None
-          runtime = report.get("runtime_status") if isinstance(report, dict) else None
+          installation_report = report.get("install_state") if isinstance(report, dict) else None
+          installation = (
+              installation_report.get("install_state")
+              if isinstance(installation_report, dict)
+              else None
+          )
+          runtime = (
+              installation_report.get("runtime_status")
+              if isinstance(installation_report, dict)
+              else None
+          )
           runtime_state = runtime.get("state") if isinstance(runtime, dict) else None
           resolved_host = pathlib.Path(host_root).resolve()
           resolved_isolated = pathlib.Path(isolated_root).resolve()
@@ -243,7 +252,8 @@ jobs:
               raise SystemExit(f"{phase}: status root escaped G008 isolation")
           if (
               report.get("selected_host") != agent
-              or report.get("status") != "healthy"
+              or not isinstance(installation_report, dict)
+              or installation_report.get("status") != "healthy"
               or not isinstance(installation, dict)
               or not all(installation.get(key) is True for key in ("installed", "selected", "managed"))
               or runtime_state != "healthy"
@@ -294,8 +304,17 @@ jobs:
 
           agent, host_root, isolated_root, phase = sys.argv[1:]
           report = json.load(sys.stdin)
-          installation = report.get("install_state") if isinstance(report, dict) else None
-          runtime = report.get("runtime_status") if isinstance(report, dict) else None
+          installation_report = report.get("install_state") if isinstance(report, dict) else None
+          installation = (
+              installation_report.get("install_state")
+              if isinstance(installation_report, dict)
+              else None
+          )
+          runtime = (
+              installation_report.get("runtime_status")
+              if isinstance(installation_report, dict)
+              else None
+          )
           runtime_state = runtime.get("state") if isinstance(runtime, dict) else None
           resolved_host = pathlib.Path(host_root).resolve()
           resolved_isolated = pathlib.Path(isolated_root).resolve()
@@ -303,7 +322,8 @@ jobs:
               raise SystemExit(f"{phase}: status root escaped G008 isolation")
           if (
               report.get("selected_host") != agent
-              or report.get("status") != "healthy"
+              or not isinstance(installation_report, dict)
+              or installation_report.get("status") != "healthy"
               or not isinstance(installation, dict)
               or not all(installation.get(key) is True for key in ("installed", "selected", "managed"))
               or runtime_state != "healthy"
