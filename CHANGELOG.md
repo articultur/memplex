@@ -535,6 +535,23 @@ to [Semantic Versioning](https://semver.org/).
   responsibilities. Six fail-soft `except ...: pass` sites now log at debug
   instead of swallowing silently.
 
+## [3.3.1] - 2026-09-04
+
+### Fixed
+
+- Release pipeline first-flight fixes: the offline release builder now
+  loads `memplex/release.py` by path (the package `__init__` pulled the
+  runtime dependency set into the network-disabled build venv), the
+  release bundle stages outside the repository's tracked `release/`
+  directory, artifact downloads merge into the target path, and the
+  pinned `gh-action-pypi-publish` moved to v1.14.2 whose container
+  image still exists.
+- G008 real-host lifecycle proof runs against the published wheel:
+  pytest's symlinked `*current` fixture pointers fold into the basetemp
+  digest, agent-identity `source_root` assertions compare against the
+  installed package root, and the four-host status checks read the CLI's
+  nested install report.
+
 ## [3.3.0] - 2026-08-09
 
 ### Added

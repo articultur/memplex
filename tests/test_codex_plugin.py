@@ -65,7 +65,7 @@ def test_codex_real_cli_discovers_plugin_in_isolated_home(tmp_path):
     payload = json.loads(result.stdout)
     installed = {item["pluginId"]: item for item in payload["installed"]}
     assert installed["memplex@memplex"]["enabled"] is True
-    assert installed["memplex@memplex"]["version"] == "3.3.0"
+    assert installed["memplex@memplex"]["version"] == "3.3.1"
 
 
 def _plugin_root(tmp_path, *, user_id="alice", project_path=None):

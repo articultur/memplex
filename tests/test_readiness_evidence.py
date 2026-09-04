@@ -26,7 +26,7 @@ NOW = datetime(2026, 8, 12, 8, 30, tzinfo=UTC)
 
 def _binding() -> DeploymentEvidenceBinding:
     return DeploymentEvidenceBinding.from_values(
-        memplex_version="3.3.0",
+        memplex_version="3.3.1",
         source_sha256="1" * 64,
         artifact_sha256="2" * 64,
         deployment_id="018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
@@ -66,7 +66,7 @@ def test_signed_gate_evidence_binds_all_explicit_deployment_values(tmp_path: Pat
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("memplex_version", "3.3.1"),
+        ("memplex_version", "3.3.2"),
         ("source_sha256", "5" * 64),
         ("artifact_sha256", "5" * 64),
         ("deployment_id", "production-us-east"),
@@ -76,7 +76,7 @@ def test_signed_gate_evidence_binds_all_explicit_deployment_values(tmp_path: Pat
 def test_evidence_verification_rejects_each_binding_mismatch(field: str, value: str) -> None:
     evidence = _evidence()
     values = {
-        "memplex_version": "3.3.0",
+        "memplex_version": "3.3.1",
         "source_sha256": "1" * 64,
         "artifact_sha256": "2" * 64,
         "deployment_id": "018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8",
@@ -210,7 +210,7 @@ def test_serialized_evidence_is_a_canonical_signed_json_object() -> None:
 
 def test_binding_accepts_non_uuid_deployment_identity_and_verification_rejects_gate_swap() -> None:
     binding = DeploymentEvidenceBinding.from_values(
-        memplex_version="3.3.0",
+        memplex_version="3.3.1",
         source_sha256="1" * 64,
         artifact_sha256="2" * 64,
         deployment_id="production-us-east",
@@ -259,7 +259,7 @@ def test_environment_loaders_require_exact_deployment_binding_key_and_key_id(
     monkeypatch.setenv("G012_KEY_ID", KEY_ID)
 
     assert load_deployment_evidence_binding_from_environment(
-        memplex_version="3.3.0"
+        memplex_version="3.3.1"
     ) == _binding()
     assert load_signing_key_from_environment("G012_KEY") == KEY
     assert load_expected_key_id_from_environment("G012_KEY_ID") == KEY_ID
@@ -284,11 +284,11 @@ def test_binding_environment_loader_rejects_missing_and_noncanonical_values(
     monkeypatch.setenv(env_name, value)
 
     with pytest.raises(ReadinessEvidenceError, match="industrial_gate_evidence_invalid"):
-        load_deployment_evidence_binding_from_environment(memplex_version="3.3.0")
+        load_deployment_evidence_binding_from_environment(memplex_version="3.3.1")
 
     monkeypatch.delenv(env_name)
     with pytest.raises(ReadinessEvidenceError, match="industrial_gate_evidence_invalid"):
-        load_deployment_evidence_binding_from_environment(memplex_version="3.3.0")
+        load_deployment_evidence_binding_from_environment(memplex_version="3.3.1")
 
 
 @pytest.mark.parametrize(

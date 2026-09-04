@@ -202,11 +202,11 @@ def test_agent_installer_all_uses_transactional_cli_path(tmp_path):
 def test_npm_hermes_installer_package_shape():
     memplex_package = json.loads(NPM_MEMPLEX_PACKAGE.read_text())
     assert memplex_package["name"] == "memplex"
-    assert memplex_package["version"] == "3.3.0"
+    assert memplex_package["version"] == "3.3.1"
     assert memplex_package["bin"]["memplex"] == "bin/memplex.js"
     memplex_script = NPM_MEMPLEX_BIN.read_text()
     assert "npx memplex setup" in memplex_script
-    assert "memplex==3.3.0" in NPM_MEMPLEX_INSTALLER.read_text()
+    assert "memplex==3.3.1" in NPM_MEMPLEX_INSTALLER.read_text()
     assert "MEMPLEX_INSTALL_SCRIPT_URL" not in memplex_script
     assert "curl" not in memplex_script
     assert "bash" in memplex_script
@@ -216,7 +216,7 @@ def test_npm_hermes_installer_package_shape():
     assert agent_package["name"] == "@articultur/memplex-agent-installer"
     assert agent_package["version"] == "0.2.0"
     assert agent_package["bin"]["memplex-install-agent"] == "bin/memplex-install-agent.js"
-    assert agent_package["dependencies"] == {"memplex": "3.3.0"}
+    assert agent_package["dependencies"] == {"memplex": "3.3.1"}
     agent_script = NPM_AGENT_BIN.read_text()
     assert "MEMPLEX_INSTALL_SCRIPT_URL" not in agent_script
     assert "curl" not in agent_script
@@ -226,7 +226,7 @@ def test_npm_hermes_installer_package_shape():
     assert package["name"] == "@articultur/memplex-hermes-installer"
     assert package["version"] == "0.2.0"
     assert package["bin"]["memplex-install-hermes"] == "bin/memplex-install-hermes.js"
-    assert package["dependencies"] == {"memplex": "3.3.0"}
+    assert package["dependencies"] == {"memplex": "3.3.1"}
     script = NPM_BIN.read_text()
     assert "MEMPLEX_INSTALL_SCRIPT_URL" not in script
     assert "curl" not in script
@@ -260,7 +260,7 @@ def test_npm_memplex_setup_runs_packaged_installer_dry_run(tmp_path):
     
     )
     assert result.returncode == 0, result.stderr
-    assert "memplex==3.3.0" in result.stdout
+    assert "memplex==3.3.1" in result.stdout
     assert "attacker-package" not in result.stdout + result.stderr
     assert "-m memplex agent install --agent codex" in result.stdout
     assert "--project-path /repo/a" in result.stdout

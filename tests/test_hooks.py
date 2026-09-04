@@ -115,7 +115,7 @@ class TestHookRunner:
     def test_setup_reports_installed_version(self):
         r = self._run_hook("setup")
         assert r.returncode == 0, f"stderr: {r.stderr}"
-        assert "v3.3.0" in r.stdout
+        assert "v3.3.1" in r.stdout
         assert "vunknown" not in r.stdout
 
     def test_session_start_outputs_context(self):
@@ -767,7 +767,7 @@ class TestMCPServerProtocol:
         result = mcp_server._handle_initialize({})
         assert result["protocolVersion"] == "2024-11-05"
         assert result["serverInfo"]["name"] == "memplex"
-        assert result["serverInfo"]["version"] == "3.3.0"
+        assert result["serverInfo"]["version"] == "3.3.1"
         assert "tools" in result["capabilities"]
 
     def test_tools_list_returns_definitions(self, mcp_server):
@@ -1872,7 +1872,7 @@ class TestPluginConfig:
             Path(PROJECT_ROOT / "plugin" / ".claude-plugin" / "plugin.json").read_text()
         )
         assert data["name"] == "memplex"
-        assert data["version"] == "3.3.0"
+        assert data["version"] == "3.3.1"
         assert "repository" in data
 
     def test_hooks_json_valid(self):

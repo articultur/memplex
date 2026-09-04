@@ -6,7 +6,7 @@
     "memplex-install-agent": "bin/memplex-install-agent.js"
   },
   "dependencies": {
-    "memplex": "3.3.0"
+    "memplex": "3.3.1"
   },
   "license": "MIT",
   "engines": {

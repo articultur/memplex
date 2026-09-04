@@ -168,8 +168,8 @@ def test_real_host_bundle_verification_rejects_payload_tampering(tmp_path: Path)
     bundle = tmp_path / "g008-release-bundle"
     bundle.mkdir()
     payloads = {
-        "memplex-3.3.0-py3-none-any.whl": b"wheel payload",
-        "memplex-3.3.0.tgz": b"npm payload",
+        "memplex-3.3.1-py3-none-any.whl": b"wheel payload",
+        "memplex-3.3.1.tgz": b"npm payload",
     }
     artifacts = []
     for name, payload in sorted(payloads.items()):
@@ -182,8 +182,8 @@ def test_real_host_bundle_verification_rejects_payload_tampering(tmp_path: Path)
         json.dumps(
             {
                 "schema_version": 1,
-                "version": "3.3.0",
-                "tag": "v3.3.0",
+                "version": "3.3.1",
+                "tag": "v3.3.1",
                 "artifacts": artifacts,
             },
             separators=(",", ":"),
@@ -199,10 +199,10 @@ def test_real_host_bundle_verification_rejects_payload_tampering(tmp_path: Path)
     )
     assert accepted.returncode == 0, accepted.stderr
     exported = github_env.read_text(encoding="utf-8")
-    assert f"MEMPLEX_G008_WHEEL={bundle / 'memplex-3.3.0-py3-none-any.whl'}" in exported
-    assert f"MEMPLEX_G008_NPM_TGZ={bundle / 'memplex-3.3.0.tgz'}" in exported
+    assert f"MEMPLEX_G008_WHEEL={bundle / 'memplex-3.3.1-py3-none-any.whl'}" in exported
+    assert f"MEMPLEX_G008_NPM_TGZ={bundle / 'memplex-3.3.1.tgz'}" in exported
 
-    (bundle / "memplex-3.3.0.tgz").write_bytes(b"Npm payload")
+    (bundle / "memplex-3.3.1.tgz").write_bytes(b"Npm payload")
     rejected = subprocess.run(
         ["bash"], input=step["run"], cwd=ROOT, env=env, capture_output=True, text=True, check=False
     
