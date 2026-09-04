@@ -6,7 +6,17 @@ on:
     branches: [chore/ruff-0.16-unpin]
 
 jobs:
-  echo:
-    runs-on: ubuntu-latest
+  gates-on-self-hosted:
+    runs-on: self-hosted
     steps:
-      - run: echo "smoke ok"
+      - uses: actions/checkout@v4
+      - name: Static gates (ruff / lint-imports / mypy)
+        run: |
+          uv sync --locked --extra dev
+          .venv/bin/ruff check memplex tests benchmarks scripts
+          .venv/bin/lint-imports
+          .venv/bin/mypy
+      - name: Focused suites
+        run: |
+          .venv/bin/python -m pytest tests/test_multi_path.py tests/test_config.py \
+            tests/test_g003_benchmark_runner.py tests/test_capability_manifest.py -q
