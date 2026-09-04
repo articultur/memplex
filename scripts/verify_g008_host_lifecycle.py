@@ -435,7 +435,8 @@ def main() -> int:
         )
         write_host_lifecycle_evidence(args.evidence_output, evidence)
         evidence.verify(signing_key, expected_version=version("memplex"), expected_binding=binding)
-    except (OSError, UnicodeError, ValueError, HostLifecycleIntegrityError):
+    except (OSError, UnicodeError, ValueError, HostLifecycleIntegrityError) as exc:
+        print(repr(exc), file=sys.stderr)
         print('{"schema_version":1,"status":"failed"}')
         return 2
     print(json.dumps({"schema_version": 1, "status": "passed"}, separators=(",", ":")))
