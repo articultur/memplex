@@ -224,4 +224,4 @@ jobs:
           fi
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
       - if: steps.preflight.outputs.publish == 'true'
-        run: npm publish release/*.tgz --access public --provenance
+        run: npm publish ./release/*.tgz --access public --provenance
