@@ -51,12 +51,17 @@ def _fetch_from_huggingface(
 
         logger.info("Fetching %s from HuggingFace: %s", dataset_name, hf_id)
 
-        if dataset_name == "hotpotqa":
-            ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki", split=split)
-        elif dataset_name == "nq":
-            ds = load_dataset("natural_questions", split=split)
-        elif dataset_name == "triviaqa":
-            ds = load_dataset("triviaqa", "rc", split=split)
+        # Parquet-native canonical releases; the historical script-based
+        # ids (natural_questions, triviaqa) stopped loading with datasets
+        # 5.x, and answers only exist on the validation split.
+        _HF_SPECS = {
+            "hotpotqa": ("hotpotqa/hotpot_qa", "fullwiki", "validation"),
+            "nq": ("google-research-datasets/natural_questions", "dev", "validation"),
+            "triviaqa": ("mandarjoshi/trivia_qa", "rc.nocontext", "validation"),
+        }
+        if dataset_name in _HF_SPECS:
+            repo, config, split_override = _HF_SPECS[dataset_name]
+            ds = load_dataset(repo, config, split=split_override)
         elif dataset_name == "popqa":
             # mteb/popqa was removed from the Hub; akariasai/PopQA is the
             # canonical release (subj/prop/obj -> subject/relation/object).
