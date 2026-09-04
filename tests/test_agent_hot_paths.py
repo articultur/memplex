@@ -110,11 +110,18 @@ def test_codex_hot_path_installs_native_plugin_with_identity(tmp_path):
     assert identity["user_id"] == "alice"
     assert identity["project_path"] == str(workspace.resolve())
     assert identity["python"] == sys.executable
-    import memplex as _memplex_module
+    expected_source_root = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import memplex, pathlib; print(pathlib.Path(memplex.__file__).resolve().parent.parent)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
-    assert identity["source_root"] == str(
-        Path(_memplex_module.__file__).resolve().parent.parent
-    )
+    assert identity["source_root"] == expected_source_root
     assert identity["host_root"] == str(codex_home.resolve())
     assert identity["managed"]["by"] == "memplex"
     assert (cache_root / ".codex-plugin" / "plugin.json").exists()

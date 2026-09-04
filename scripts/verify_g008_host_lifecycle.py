@@ -90,6 +90,30 @@ def _tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _pytest_tree_sha256(root: Path) -> str:
+    # pytest's basetemp keeps a "*current" symlink next to every numbered
+    # tmp fixture directory; fold the links into the digest instead of
+    # rejecting them, while keeping everything else strict.
+    if root.is_symlink() or not root.is_dir():
+        raise HostLifecycleIntegrityError("host_lifecycle_isolation_invalid")
+    digest = sha256()
+    entries = [path for path in root.rglob("*") if path.is_file() or path.is_symlink()]
+    for path in sorted(entries, key=lambda item: item.as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\x00")
+        payload = (
+            b"link:" + str(path.readlink()).encode("utf-8")
+            if path.is_symlink()
+            else path.read_bytes()
+        )
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    if not entries:
+        raise HostLifecycleIntegrityError("host_lifecycle_isolation_invalid")
+    return digest.hexdigest()
+
+
 def _run_version(command: list[str], *, expected: str) -> str:
     result = subprocess.run(
         command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=30, check=False
@@ -353,7 +377,7 @@ def _run_lifecycle_suite(
             )
             for host, nodes in required_nodes.items()
         }
-        _tree_sha256(base)
+        _pytest_tree_sha256(base)
         return results, junit_sha256
 
 

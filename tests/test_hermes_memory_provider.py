@@ -230,11 +230,18 @@ def test_hermes_install_selects_official_provider_and_materializes_bootstrap(tmp
     assert provider["user_id"] == "layout-user"
     assert provider["project_path"] == str(workspace.resolve())
     assert provider["tools"] == ["memplex_search", "memplex_conclude"]
-    import memplex as _memplex_module
+    expected_source_root = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import memplex, pathlib; print(pathlib.Path(memplex.__file__).resolve().parent.parent)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
-    assert identity["source_root"] == str(
-        Path(_memplex_module.__file__).resolve().parent.parent
-    )
+    assert identity["source_root"] == expected_source_root
     assert identity["host_root"] == str(hermes_home.resolve())
     assert not (hermes_home / "memory-providers" / "memplex.json").exists()
     bootstrap = (plugin_dir / "__init__.py").read_text(encoding="utf-8")
