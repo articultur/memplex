@@ -149,7 +149,7 @@ def test_real_host_gate_installs_and_verifies_the_upstream_release_bundle() -> N
         "len(wheels) != 1 or len(npm_packages) != 1",
         "uv export --locked --extra dev --no-emit-project",
         'uv venv "$artifact_venv"',
-        'uv pip install --python "$artifact_venv/bin/python" --offline --require-hashes',
+        'uv pip install --python "$artifact_venv/bin/python" --require-hashes',
         '--force-reinstall "$MEMPLEX_G008_WHEEL"',
         '"$MEMPLEX_G008_ARTIFACT_VENV/bin/memplex"',
         '"$MEMPLEX_G008_ARTIFACT_VENV/bin/python" scripts/verify_g008_host_lifecycle.py',

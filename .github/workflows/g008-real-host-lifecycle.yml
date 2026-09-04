@@ -176,9 +176,9 @@ jobs:
           uv export --locked --extra dev --no-emit-project --format requirements-txt \
             --output-file "$RUNNER_TEMP/g008-locked-requirements.txt"
           uv venv "$artifact_venv"
-          uv pip install --python "$artifact_venv/bin/python" --offline --require-hashes \
+          uv pip install --python "$artifact_venv/bin/python" --require-hashes \
             --requirements "$RUNNER_TEMP/g008-locked-requirements.txt"
-          uv pip install --python "$artifact_venv/bin/python" --offline --no-deps \
+          uv pip install --python "$artifact_venv/bin/python" --no-deps \
             --force-reinstall "$MEMPLEX_G008_WHEEL"
           printf 'MEMPLEX_G008_ARTIFACT_VENV=%s\n' "$artifact_venv" >> "$GITHUB_ENV"
           (
