@@ -175,6 +175,13 @@ Memplex 的严格证据纪律（E1 分级、拒绝 synthetic 冒充公开数据�
 5. **claude-mem 是最近的坐标系**：跟踪其混合检索与宿主扩展节奏，把对比维度
    收敛在 typed/时态/授权/本地自主性（无托管默认、无代币）上。
 
+## 后续：公开基线落地
+
+同日第二批工作产出了首批 clean-SHA 公开数据 bundle 与三项工程发现
+（公开模式静默 synthetic 落回的修复、lite 播种超线性退化的容量证据、
+词汇栈权重校准天花板），见
+[public-baseline-2026-09.md](public-baseline-2026-09.md)。
+
 ## 与既有文档的关系
 
 - [positioning.md](../positioning.md)（2026-08-30）仍是公开定位与边界的权威文档；

@@ -597,3 +597,52 @@ def test_public_mode_local_file_beats_hf_and_hf_beats_refusal(
     resolved, kind = runner._resolve_public_dataset("popqa", data_dir, None)
     assert resolved == data_dir / "popqa.json"
     assert kind == "public_local_file"
+
+
+def test_calibration_search_recovers_dominant_dimension(tmp_path: Path) -> None:
+    """Offline search over a recorded fixture: a query where only the
+    semantic dimension separates the expected candidate must drive that
+    weight up and recover recall@1."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "calibrate_reranker", Path("scripts/calibrate_reranker.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    fixture = [
+        {
+            "query_index": 0,
+            "overlap": "low",
+            "candidates": [
+                {"func_id": "noise", "dims": [1.0, 0.0, 1.0, 1.0, 1.0, 1.0], "tiebreak": 1.0, "expected": False},
+                {"func_id": "answer", "dims": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0], "tiebreak": 0.0, "expected": True},
+            ],
+        },
+        {
+            "query_index": 1,
+            "overlap": "high",
+            "candidates": [
+                {"func_id": "answer", "dims": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], "tiebreak": 1.0, "expected": True},
+                {"func_id": "noise", "dims": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "tiebreak": 0.0, "expected": False},
+            ],
+        },
+    ]
+    record_file = tmp_path / "features.json"
+    record_file.write_text(json.dumps(fixture), encoding="utf-8")
+    monkeypatch_target = "os.environ"
+    import os
+
+    old = os.environ.get("CALIBRATION_RECORD")
+    os.environ["CALIBRATION_RECORD"] = str(record_file)
+    try:
+        # baseline weights rank noise first on query 0 (5 dims beat 1)
+        assert module._recall_at_1(fixture, [0.25, 0.30, 0.15, 0.10, 0.10, 0.10]) == 0.5
+        # semantic-dominant weights recover both
+        assert module._recall_at_1(fixture, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]) == 1.0
+    finally:
+        if old is None:
+            os.environ.pop("CALIBRATION_RECORD", None)
+        else:
+            os.environ["CALIBRATION_RECORD"] = old
