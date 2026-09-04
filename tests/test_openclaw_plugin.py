@@ -158,7 +158,11 @@ def test_openclaw_install_writes_a_loadable_native_plugin(tmp_path):
     assert package["openclaw"]["extensions"] == ["./index.js"]
     assert identity["user_id"] == "alice"
     assert identity["project_path"] == str(workspace.resolve())
-    assert identity["source_root"] == str(PROJECT_ROOT)
+    import memplex as _memplex_module
+
+    assert identity["source_root"] == str(
+        Path(_memplex_module.__file__).resolve().parent.parent
+    )
     assert identity["host_root"] == str(target.resolve())
     assert stat.S_IMODE((extension / ".memplex-install-state.json").stat().st_mode) == 0o600
 
