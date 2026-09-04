@@ -66,6 +66,7 @@ jobs:
         with:
           name: ${{ inputs.release-artifact-name }}
           path: ${{ runner.temp }}/g008-release-bundle
+          merge-multiple: true
       - name: Fail closed unless the protected runner has every real-host prerequisite
         shell: bash
         run: |

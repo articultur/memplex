@@ -97,6 +97,7 @@ jobs:
         with:
           name: memplex-release-bundle
           path: release
+          merge-multiple: true
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
@@ -140,6 +141,7 @@ jobs:
         with:
           name: memplex-release-bundle
           path: release
+          merge-multiple: true
       - id: preflight
         name: Enforce PyPI immutability
         run: |
@@ -192,6 +194,7 @@ jobs:
         with:
           name: memplex-release-bundle
           path: release
+          merge-multiple: true
       - name: Install trusted-publishing-capable npm
         run: npm install --global npm@11.5.1
       - id: preflight
