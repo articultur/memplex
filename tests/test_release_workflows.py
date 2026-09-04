@@ -136,6 +136,7 @@ def test_real_host_gate_installs_and_verifies_the_upstream_release_bundle() -> N
     assert download["with"] == {
         "name": "${{ inputs.release-artifact-name }}",
         "path": "${{ runner.temp }}/g008-release-bundle",
+        "merge-multiple": "true",
     }
     assert "MEMPLEX_G008_ARTIFACT_SHA256" not in workflow["on"]["workflow_call"]["secrets"]
     assert "MEMPLEX_G008_ARTIFACT_SHA256: ${{ inputs.release-artifact-sha256 }}" in text
