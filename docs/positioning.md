@@ -31,7 +31,7 @@ valid leaderboard category.
   undifferentiated text store.
 - **Builders that need fact correction history** with retained superseded
   values and `as_of` reads, while accepting that graph retrieval is currently
-  bounded to one-hop expansion.
+  bounded to configurable one- or two-hop expansion.
 - **Operators willing to prove their own deployment** with PostgreSQL,
   authorization, restore, operations, and host-lifecycle evidence rather than
   treating repository tests as production certification.
@@ -69,7 +69,7 @@ These are repository-static design strengths, not comparative winner claims:
 | Build around an evolving temporal relationship graph | **Compare [Graphiti OSS](https://help.getzep.com/graphiti/getting-started/overview) first.** Its primary abstraction is a temporal Context Graph; do not attribute proprietary Zep capabilities to Graphiti OSS. |
 | Adopt a full long-lived agent runtime with agent-owned filesystem memory | **Compare [Letta Code](https://github.com/letta-ai/letta/blob/main/README.md) first.** It supplies the agent harness and Git-backed MemFS model rather than only a host-integrated memory layer. |
 | Compose checkpointed workflows and application-defined cross-thread state | **Compare [LangGraph](https://docs.langchain.com/oss/python/concepts/memory) first.** Its checkpointer and Store primitives sit at the workflow framework layer. |
-| Require generic multi-hop graph reasoning | **Not an established fit.** Memplex currently documents bounded seeds plus one-hop neighbors, not unrestricted traversal or general multi-hop reasoning. |
+| Require generic multi-hop graph reasoning | **Not an established fit.** Memplex currently documents bounded seeds plus one- or two-hop (configurable) neighbours, not unrestricted traversal or general multi-hop reasoning. |
 | Require a turnkey hostile-local-machine security boundary, HA, SLO, or compliance guarantee | **Not established by this repository.** Lite has an explicit local-development boundary, and production claims require fresh deployment evidence. |
 
 ## How the mechanisms differ
@@ -105,7 +105,7 @@ this guide.
 
 | System | Product boundary and primary user | Memory model and lifecycle | Retrieval, scope, and integration | Version context checked |
 | --- | --- | --- | --- | --- |
-| **Memplex** | Host-integrated, multi-agent memory layer for users and teams operating supported local agent hosts. | Typed Function/Fact/Preference/Observation nodes; recall/capture hooks; retained fact supersession and `as_of` reads. | Multi-path retrieval with explicit budgets; tenant/owner/workspace/visibility model; Lite and PostgreSQL backends. | Local checkout declares unreleased `3.3.0`; the [README install section](../README.md#install) identifies public stable `3.2.7`. The retained benchmark artifact is from a dirty worktree and is not release evidence. |
+| **Memplex** | Host-integrated, multi-agent memory layer for users and teams operating supported local agent hosts. | Typed Function/Fact/Preference/Observation nodes; recall/capture hooks; retained fact supersession and `as_of` reads. | Multi-path retrieval with explicit budgets; tenant/owner/workspace/visibility model; Lite and PostgreSQL backends. | Local checkout declares unreleased `3.3.0`; the [README install section](../README.md#install) points users at public stable `3.2.7`. Clean-SHA public-dataset bundles (popqa/hotpotqa/longmemeval) exist as local E1 evidence; signed publication is pending. |
 | **Mem0 OSS** | The official [OSS overview](https://docs.mem0.ai/open-source/overview) describes an embeddable Python/Node library and a self-hosted server for application developers. | The official [memory evaluation guide](https://docs.mem0.ai/core-concepts/memory-evaluation) describes extraction and retrieval phases. This row makes no claim about Platform V3 write behavior. | The OSS overview documents configurable LLM, embedding, vector-store, and reranking components. Reviewed OSS sources do not establish a Memplex-equivalent authorization proof. | [Python SDK v2.0.19](https://github.com/mem0ai/mem0/releases/tag/v2.0.19), checked 2026-08-30. Mem0 Platform APIs and behavior are outside this OSS row. |
 | **Graphiti OSS** | The official [Graphiti overview](https://help.getzep.com/graphiti/getting-started/overview) describes a temporal Context Graph framework for applications that ingest changing conversational or structured data. | Episodes incrementally produce entities and temporal relationships; invalidated facts retain historical context. The upstream [architecture paper](https://arxiv.org/abs/2501.13956) is design evidence, not an independent product ranking. | The overview documents time, full-text, semantic, and graph retrieval. It also separates local Graphiti OSS from Zep's proprietary managed Context Graph Engine and Context Lake. | [Graphiti v0.29.3](https://github.com/getzep/graphiti/releases/tag/v0.29.3), checked 2026-08-30. Zep enterprise claims do not transfer to Graphiti OSS. |
 | **Letta Code** | The [Letta project README](https://github.com/letta-ai/letta/blob/main/README.md) points to Letta Code as the current stateful-agent runtime and marks the legacy V1 server as historical. | Official [MemFS documentation](https://github.com/letta-ai/letta-docs-md/blob/main/concepts/memfs/index.md) describes agent-owned, Git-backed Markdown memory; [memory configuration docs](https://github.com/letta-ai/letta-docs-md/blob/main/configuration/memory/index.md) describe durable updates and dreaming. | `system/` memory is loaded into context and other files are discovered on demand. Semantic/hybrid MemFS search requires the documented optional search tooling; shared Git-backed repositories are a separate collaboration shape. | [Letta Code v0.31.6](https://github.com/letta-ai/letta-code/releases/tag/v0.31.6), checked 2026-08-30. |
@@ -164,7 +164,7 @@ following:
 - Memplex is benchmark-qualified, better, faster, more accurate, more
   token-efficient, or production-superior to a peer.
 - Memplex supports true generic multi-hop reasoning. The documented graph
-  mechanism is bounded one-hop expansion.
+  mechanism is bounded one- or two-hop expansion (retrieval.graph_max_hops, default one-hop).
 - Public LongMemEval, LoCoMo, NQ, TriviaQA, PopQA, or HotpotQA results were run.
   The retained bundle contains generated synthetic inputs only.
 - The retained artifact represents a current clean SHA, released `3.2.7`, or

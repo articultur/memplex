@@ -14,6 +14,8 @@ sample_ids_digest 可供独立复核）。
 | --- | --- | --- | --- | ---: | --- |
 | `/tmp/g003-public-popqa-final` | `ef917ea` | false | akariasai/PopQA（HF） | 100 | mrr 0.9917；recall@1 0.99；recall@10 1.0；生成 f1 0.2008 |
 | `/tmp/g003-public-longmemeval-5` | `ef917ea` | false | xiaowu0162/longmemeval-cleaned（官方 JSON 本地放置） | 5 | token_f1 0.0449；substring_hit 0.2 |
+| `/tmp/g003-public-hotpotqa-n100` | 二跳提交前 | false | hotpotqa/hotpot_qa fullwiki validation（HF parquet） | 100 | mrr 0.0751；multihop_accuracy 0.0；hop_coverage 0.0 |
+| `/tmp/g003-public-triviaqa-clean` | 二跳提交 | false | mandarjoshi/trivia_qa rc.nocontext validation | 100 | 全零——解析器与 parquet schema 不兼容（适配器 TODO，非检索结论） |
 
 两者均通过 strict verifier（`evidence_level=E1`）。longmemeval 为
 seed=17 分层子集（5 类 question_type 各 1）；全量 500 条因下述容量问题
@@ -56,7 +58,20 @@ high/low 层无变化），**低于预设的 ≥+2pp 应用门槛，故不改变
 正确用法是语义栈落地后的重新校准（彼时 semantic_similarity 维携带
 真实信号，权重分配才有信息量）。
 
-## 未接线项
+## 未接线项（更新）
+
+- **nq / triviaqa 解析器适配**：parquet 原生 release 可下载，但
+  `natural_questions` 的 annotations 结构与 `trivia_qa` 的 answer 结构
+  与现有解析器不兼容（triviaqa 实测全零），需按新 schema 适配
+  `_parse_natural_questions` / `_extract_answer_aliases` 后重跑。
+- **BEAM**：仓库无对应 runner/loader 模块，属新功能开发。
+- **locomo 官方数据**：需从 snap-research 仓库手工获取。
+- **Actions**：已于 2026-09-04 启用（enabled=true, allowed=all），
+  workflow 均注册为 active；但 run 在 startup_failure（0 jobs），
+  症状指向**账户级 billing 阻断**（需仓库所有者在 GitHub 设置中
+  处理 spending limit/unpaid balance，一键解封后 dispatch 即可）。
+  PR #24 已开，解封后自动获得全矩阵 check runs。
+
 
 - **BEAM**：仓库无对应 runner/loader 模块，属新功能开发（需按其官方
   协议接入），本轮如实记为 not-integrated。
