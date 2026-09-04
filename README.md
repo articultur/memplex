@@ -46,36 +46,36 @@ configured warn threshold. Manual compaction remains available from the CLI.
 ## Install
 
 No source checkout is required. The public registry's latest stable
-release is **3.2.7** (this checkout tracks unreleased 3.3.0 development):
+release is **3.3.2** (published 2026-09-04):
 
 ```bash
-npx memplex@3.2.7 setup
+npx memplex@3.3.2 setup
 ```
 
 Install into a specific agent:
 
 ```bash
-npx memplex@3.2.7 setup --agent codex --project-path "$PWD"
-npx memplex@3.2.7 setup --agent claude-code --project-path "$PWD"
-npx memplex@3.2.7 setup --agent openclaw --project-path "$PWD"
-npx memplex@3.3.0 setup --agent hermes --project-path "$PWD"
+npx memplex@3.3.2 setup --agent codex --project-path "$PWD"
+npx memplex@3.3.2 setup --agent claude-code --project-path "$PWD"
+npx memplex@3.3.2 setup --agent openclaw --project-path "$PWD"
+npx memplex@3.3.2 setup --agent hermes --project-path "$PWD"
 ```
 
 Install every supported local agent:
 
 ```bash
-npx memplex@3.3.0 setup --agent all --project-path "$PWD"
+npx memplex@3.3.2 setup --agent all --project-path "$PWD"
 ```
 
 Uninstall is symmetrical:
 
 ```bash
-npx memplex@3.3.0 uninstall --agent all
+npx memplex@3.3.2 uninstall --agent all
 ```
 
-The current public stable release is `3.3.0`. Its npm wrapper creates a
+The current public stable release is `3.3.2`. Its npm wrapper creates a
 persistent Python environment at `~/.local/share/memplex/agent-venv`, installs
-`memplex==3.3.0`, detects local
+`memplex==3.3.2`, detects local
 agent config directories, and registers Memplex into the selected hosts. It uses
 `uv` when available and falls back to `python -m venv` plus `pip`.
 
@@ -84,7 +84,7 @@ OpenClaw 入口对宿主有 `peerDependencies` 兼容约束：`openclaw >= 2026.
 Python-first users can skip npm:
 
 ```bash
-uv tool install memplex==3.3.0
+uv tool install memplex==3.3.2
 memplex setup --agent all --project-path "$PWD"
 ```
 
@@ -136,7 +136,7 @@ memplex --output json agent recall \
 For a no-write preview:
 
 ```bash
-npx memplex@3.3.0 setup --agent all --project-path "$PWD" --dry-run
+npx memplex@3.3.2 setup --agent all --project-path "$PWD" --dry-run
 ```
 
 ## Offline And Mainland China
@@ -145,7 +145,7 @@ Memplex's default local retrieval uses a SQLite FTS5 sidecar index with
 `bm25()` ranking plus generated trigram tokens for Chinese, code symbols,
 paths, and short memory fragments. If SQLite FTS5 is unavailable, it falls back
 to pure-Python local BM25/trigram matching. The agent hot path does not need
-HuggingFace, so `npx memplex@3.3.0 setup`, capture, recall, MCP tools, and hooks
+HuggingFace, so `npx memplex@3.3.2 setup`, capture, recall, MCP tools, and hooks
 continue to work when HuggingFace is blocked or unavailable.
 
 The embedding fallback is also local. To force that path explicitly:
@@ -235,10 +235,10 @@ reproduction commands.
 
 ## From Source
 
-The checkout declares `3.3.0`, which is also the current public stable
-release (see `## [3.3.0] - 2026-08-09` in CHANGELOG.md). Use editable
+The checkout declares `3.3.2`, which is also the current public stable
+release (see `## [3.3.2] - 2026-09-04` in CHANGELOG.md). Use editable
 installation for source testing; `npx memplex@latest` installs the published
-stable `3.3.0` build from the registry, not this checkout.
+stable `3.3.2` build from the registry, not this checkout.
 
 ```bash
 git clone https://github.com/articultur/memplex.git

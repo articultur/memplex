@@ -40,6 +40,27 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
 本轮已做完并全部过门禁（lite 3371+ passed / PG 413 / ruff 0.16.6
 零违规 / mypy / lint-imports / lock）。
 
+## 2026-09-04 发布完成：**80 / 100**
+
+双注册表发布闭环（Release workflow 首次端到端全绿，run 33921542854）：
+
+- **凭证**：npm + PyPI Trusted Publisher（OIDC，零 token）全部配置
+  （owner articultur / repo memplex / workflow release.yml /
+  environments pypi+npm，Touch ID 过码）。
+- **发布链首飞修复**（该 workflow 此前从未运行过）：离线构建导入路径
+  （release.py 按文件加载）、wheelhouse 污染干净检出、artifact 双层
+  嵌套（upload 平铺 + merge-multiple 下载）、pypi-publish action 重钉
+  v1.14.2（旧镜像已删）、npm 本地路径 `./` 前缀、npm package.json
+  repository 字段（provenance 校验要求）。
+- **G008 四主机真机门禁首飞**：self-hosted runner 网络代理、uv 托管
+  CPython（替代需要 sudo 的 setup-python）、runner PATH Node 版本
+  解析（openclaw 要求）、pytest basetemp symlink 摘要、wheel 安装下
+  identity source_root 断言、四主机状态检查的嵌套键路径。
+- **产物**：PyPI 3.3.0/3.3.1/3.3.2（不可变推进）+ npm 3.3.2（带
+  sigstore provenance，透明度日志 logIndex 2716255795 起历次）；版本
+  集九处声明同步，README 安装指令现实化为 3.3.2。
+- 评分：DX/运维 2.5→5、签名公开制品达成 → **≈ 80/100**。
+
 ## 禁止性口径
 
 本卡为内部差距分析；"benchmark-qualified" 仍以 G001 资格线（75 分 +
