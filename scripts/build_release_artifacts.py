@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import importlib.util
 import json
 import os
 import shutil
@@ -16,18 +17,43 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from types import ModuleType
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-from memplex.release import (
-    ReleaseIntegrityError,
-    build_checksum_document,
-    build_cyclonedx_sbom,
-    build_release_manifest,
-    validate_release_member_names,
-)
+
+def _load_release_module() -> ModuleType:
+    # `from memplex.release import ...` would execute memplex/__init__.py and
+    # pull the full runtime dependency set (yaml, ...), which the offline
+    # CI build venv deliberately does not install; release.py itself is
+    # stdlib-only, so load it directly by path. Registering it under
+    # "memplex.release" (without going through the import system, so the
+    # package __init__ never runs) keeps the class identity identical to a
+    # regular import for tests that compare exceptions.
+    existing = sys.modules.get("memplex.release")
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        "memplex.release", PROJECT_ROOT / "memplex" / "release.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("release_module_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[spec.name]
+        raise
+    return module
+
+
+_release = _load_release_module()
+ReleaseIntegrityError = _release.ReleaseIntegrityError
+build_checksum_document = _release.build_checksum_document
+build_cyclonedx_sbom = _release.build_cyclonedx_sbom
+build_release_manifest = _release.build_release_manifest
+validate_release_member_names = _release.validate_release_member_names
 
 _SOURCE_FILES = ("pyproject.toml", "README.md", "LICENSE")
 _IGNORED_COPY_NAMES = {
