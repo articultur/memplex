@@ -269,6 +269,17 @@ jobs:
           check_host_status before claude-code
           check_host_status before openclaw
           check_host_status before hermes
+      - name: Diagnose host CLI version probes
+        shell: bash
+        run: |
+          set +e
+          echo "HOME=$HOME USER=$(whoami) CI=${CI:-}"
+          echo "PATH=$PATH"
+          for cli in codex claude openclaw hermes; do
+            path="$(command -v "$cli")" || { echo "== $cli: NOT ON PATH"; continue; }
+            out="$("$path" --version 2>&1)"; rc=$?
+            echo "== $cli ($path) rc=$rc out=[$(echo "$out" | head -c 200)]"
+          done
       - name: Verify the signed, deployment-bound four-host lifecycle
         shell: bash
         run: |
