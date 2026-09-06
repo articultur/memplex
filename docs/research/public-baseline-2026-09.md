@@ -121,5 +121,15 @@ BELONGS_TO 边队列，发布/重载/周期审计保留全量契约）、merge p
 结构性为零（不是检索结论）。改用 `rc` 配置并适配 parquet 的
 dict-of-parallel-lists 形状（原始 JSON 的嵌套 web_results 与 wiki
 entity_pages 兜底同supported），契约测试覆盖三种形状
-（`tests/test_triviaqa_parquet_shape.py`）。nq 的 long-answer span 重建
-仍为 TODO（诚实标注）。
+（`tests/test_triviaqa_parquet_shape.py`）。
+
+## 2026-09-06 NQ parquet 适配与 long-answer span 重建
+
+parquet 原生 NQ 行（question 为结构体）会让旧解析器在 `.strip()` 上
+崩掉（被逐样本容错吞食 → 0 样本）。现支持：question 结构体取
+`text` 序列、第一标注者的 short-answer token span 切片（优先匹配
+目标）、long-answer 从 `document.tokens` 重建（HTML token 过滤、
+no-answer 标注返回空、候选 -1 短路）、无 short 时以重建段落为匹配
+目标与播种证据。契约测试覆盖七种形状/边界
+（`tests/test_nq_parquet_span_rebuild.py`）。triviaqa/nq 适配器缺口
+关闭；真实数据 bundle 待 HF 网络窗口随语义栈战役一起产出。

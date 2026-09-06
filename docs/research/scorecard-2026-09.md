@@ -83,8 +83,10 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   pgserver 自包含（干净环境全量重建实测 412 passed/3 skipped/114s +
   追加 store 套件 317 passed）与 CI 同构外部容器两条路径、DSN/pgvector
   的 fail-closed 语义、pg_dump 主版本对齐坑、六/十文件差异如实口径。
-- 累计 ≈ **82 / 100**。剩余：语义栈公开对照 bundle（HF 网络
-  窗口）、治理文档实质化、nq span 重建。
+- **NQ parquet 适配 + long-answer span 重建**：检索评测的最后一个
+  适配器缺口关闭（七形状契约测试；详见 public-baseline 文档）。
+- 累计 ≈ **82.5 / 100**。剩余：语义栈公开对照 bundle（HF 网络
+  窗口）、longmemeval 全量实跑（数据文件）。
 
 ## 禁止性口径
 
