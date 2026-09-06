@@ -37,7 +37,7 @@ synthetic 生成器，而 runner 会把结果标注为 `public_huggingface`—�
 `akariasai/PopQA` 并做字段重映射。这正是"公开基线"最容易出错的地方：
 不是跑不动，而是悄悄跑了假数据。
 
-## 发现 2：lite 播种路径在多千文档规模超线性退化（未修复，已记录）
+## 发现 2：lite 播种路径超线性退化（2026-09-06 两轮战役修复，137 倍提速）
 
 longmemeval 每个样本向服务播种完整 haystack（数百条会话）。实测 CPU
 时间：3 样本 ≈ 1 分钟，10 样本 > 21 分钟（未完成即终止），50 样本
@@ -86,3 +86,33 @@ high/low 层无变化），**低于预设的 ≥+2pp 应用门槛，故不改变
     --num-samples 100 --top-k 10 --seed 17 --run-dir <fresh-dir>
 .venv/bin/python scripts/run_g003_benchmark.py verify --run-dir <fresh-dir>
 ```
+
+## 2026-09-06 性能战役：播种路径 137 倍提速（两轮）
+
+profile 实测（600 文档，每写全量提交链 958s，per-doc 63ms→4561ms，72 倍超线性）：
+
+1. **批量提交**（`refactor: batch lite seeding into one durable commit per
+   scope`）：`deferred_commit()` 上下文把每个 mutator 的全量
+   serialize→双 decode→fsync 摊还成每个外层批次一次；变异边界全量验证
+   新节点/边（provenance/namespace 键类型含内）、每 32 次提交或任何
+   重载跑全量 decode 审计、空库的 absent 指纹停止批量下的强制重载。
+   600 文档 958s→33s。
+2. **图构建索引化**（`refactor: reuse the graph builder and index corpus
+   names`）：engine 复用单个 GraphBuilder（语料缓存由 lite pair 指纹守护，
+   任何新 pair 发布即失效），DEPENDS_ON 扫描改为预小写名字条目对每函数
+   拼一次的 action/trigger 文本做子串连接。1500 文档 538s→50s；600 文档
+   基准累计 **958s→约 7s**。
+
+剩余每写 O(corpus) 项（下一战役候选）：`_detect_conflict` 全库遍历、
+merge preflight 的 candidate 全集验证、`_validate_resident_graph` 的
+每写 O(F+E)。15 万文档级（longmemeval 全量 500 样本累积播种）需要这三
+项增量化和/或 Aho-Corasick 名字匹配。
+
+## 2026-09-06 TriviaQA 适配器修复
+
+`rc.nocontext` 无证据文本——播种只索引了裸问题，answer-in-summary 指标
+结构性为零（不是检索结论）。改用 `rc` 配置并适配 parquet 的
+dict-of-parallel-lists 形状（原始 JSON 的嵌套 web_results 与 wiki
+entity_pages 兜底同supported），契约测试覆盖三种形状
+（`tests/test_triviaqa_parquet_shape.py`）。nq 的 long-answer span 重建
+仍为 TODO（诚实标注）。
