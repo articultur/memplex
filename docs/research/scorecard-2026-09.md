@@ -61,6 +61,26 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   集九处声明同步，README 安装指令现实化为 3.3.2。
 - 评分：DX/运维 2.5→5、签名公开制品达成 → **≈ 80/100**。
 
+## 2026-09-06 SOTA 推进：容量与可观测性
+
+- **播种容量三个数量级**（`refactor` 三连，988840c 等）：批次提交
+  （600 文档 958s→33s）、builder 复用与名字索引（1500 文档 538s→50s）、
+  增量居民校验 + **图边 O(N²) 病根治理**（ASSOCIATED_WITH 同域完全图
+  与 DEPENDS_ON 共享词互连无边数上限——混合语料 3000 文档 165 万边
+  + 11G RSS；加 per-function 上限后 5000 文档 **65s、~13ms/文档、
+  10.3 万条线性边**）。latency_capacity 维度从"首个实测短板"到
+  15 万文档级估算小时级——时间/多跳与真实用户任务的聚合任务评测
+  （longmemeval 全量）容量解锁。
+- **TriviaQA 适配器**：rc.nocontext 无证据文本导致全零的结构性缺陷
+  修复（rc 配置 + parquet 形状适配 + 契约测试）。
+- **可观测性 2.5→3.5**：新鲜签名 G006 报告达成（1661 请求 / p95
+  5.77ms / 可用性 1.0 / ≥300s 窗口，HMAC+binding+alert-rules 全过，
+  `report_id 0a53692b…`）；本地生成 runbook 固化在
+  `docs/runbooks/production-operations.md`（含 /tmp symlink 与并发
+  p95 两个坑）。
+- 累计 ≈ **81.5~82 / 100**。剩余：语义栈公开对照 bundle（HF 网络
+  窗口）、多租户第三方复跑、治理文档实质化、nq span 重建。
+
 ## 禁止性口径
 
 本卡为内部差距分析；"benchmark-qualified" 仍以 G001 资格线（75 分 +

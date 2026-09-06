@@ -82,3 +82,28 @@ memplex --output json readiness --strict
 
 G001-G009 工程验收已经完成，但任一部署缺少当前有效的 G007-G009 或其他机器证据时，
 整体仍为 `not_ready`；只有全部门禁同时通过才报告 `ready / industrial`。
+
+### 本地生成一份合格签名 G006 报告（2026-09-06 实测 runbook）
+
+一份能通过 `verify_readiness` 的报告必须同时满足硬阈值：
+**观察窗口 ≥ 300 秒、请求 ≥ 1000、延迟样本 ≥ 128、可用性 ≥ 0.999、
+错误率 ≤ 0.001、p95 ≤ 250ms、优雅排空且未超停机期限**。步骤：
+
+1. 环境变量（全部必填）：
+   `MEMPLEX_OPERATIONS_HMAC_KEY`（base64 of 32 bytes，签名与验证必须同一把）、
+   `MEMPLEX_SOURCE_SHA256` / `MEMPLEX_ARTIFACT_SHA256` /
+   `MEMPLEX_TARGET_IDENTITY_SHA256`（各 64 hex，部署绑定）、
+   `MEMPLEX_DEPLOYMENT_ID`、`MEMPLEX_OPERATIONS_REPORT_KEY_ID`
+   （非空；与 config `operations.report_key_id` 一致）、
+   `MEMPLEX_G006_REPORT_OUTPUT`（**输出路径的每一级都不能是符号链接**——
+   `_open_pinned_parent` 带 `O_NOFOLLOW`，macOS 的 `/tmp` 会被拒绝，
+   用 `/private/tmp/...`）。
+2. 进程内起 uvicorn（`create_app()`），就绪门控后**单连接顺序**打满
+   1600+ 个请求（并发压测会把本机回环 p95 推到 500ms+ 而触发 SLO 拒绝），
+   保持窗口 310 秒后 `should_exit = True` 优雅停机——报告在停机钩子里写出。
+3. 同一环境（同一把 HMAC key）下
+   `python scripts/verify_g006_operations_slo.py --report <path>`。
+
+2026-09-06 实测产出：`report_id 0a53692b…`，1661 请求、p95 5.77ms、
+可用性 1.0，签名/binding/alert-rules 哈希全部通过（本地审计证据，
+按部署绑定归档，不入库）。
