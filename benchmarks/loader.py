@@ -57,7 +57,10 @@ def _fetch_from_huggingface(
         _HF_SPECS = {
             "hotpotqa": ("hotpotqa/hotpot_qa", "fullwiki", "validation"),
             "nq": ("google-research-datasets/natural_questions", "dev", "validation"),
-            "triviaqa": ("mandarjoshi/trivia_qa", "rc.nocontext", "validation"),
+            # rc (not rc.nocontext): the nocontext config has no evidence
+            # text, so seeding would inject bare questions and the
+            # answer-in-summary metrics stay structurally zero.
+            "triviaqa": ("mandarjoshi/trivia_qa", "rc", "validation"),
         }
         if dataset_name in _HF_SPECS:
             repo, config, split_override = _HF_SPECS[dataset_name]

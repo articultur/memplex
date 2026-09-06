@@ -66,16 +66,44 @@ def _extract_triviaqa_answer(item: dict[str, Any]) -> Any:
 
 
 def _build_triviaqa_context(item: dict[str, Any]) -> str:
-    """Build context string from TriviaQA search results."""
+    """Build context string from TriviaQA search results.
+
+    Handles both shapes the corpus appears in: the original JSON releases
+    nest a list of web-result dicts under ``search_results.web_results``,
+    while the parquet-native HuggingFace rows expand the same struct into
+    a dict of parallel lists (``description``, ``title``, ``rank`` ...).
+    """
     search_results = item.get("search_results", {})
+    web_results: list[Any] = []
     if isinstance(search_results, dict):
         web_results = search_results.get("web_results", [])
-        if web_results:
-            return " ".join(
-                r.get("description", r.get("snippet", ""))
-                for r in web_results[:3]
-                if isinstance(r, dict)
-            )
+        if not web_results:
+            # Parquet shape: dict of parallel lists.
+            descriptions = search_results.get("description")
+            if isinstance(descriptions, list) and descriptions:
+                titles = search_results.get("title")
+                web_results = [
+                    {
+                        "description": desc,
+                        "title": titles[i] if isinstance(titles, list) and i < len(titles) else "",
+                    }
+                    for i, desc in enumerate(descriptions)
+                    if isinstance(desc, str)
+                ]
+    if web_results:
+        return " ".join(
+            r.get("description", r.get("snippet", ""))
+            for r in web_results[:3]
+            if isinstance(r, dict)
+        )
+    # rc also ships wiki entity pages; fall back to the first page body.
+    entity_pages = item.get("entity_pages", {})
+    if isinstance(entity_pages, dict):
+        wiki_contents = entity_pages.get("wiki_content")
+        if isinstance(wiki_contents, list):
+            for content in wiki_contents:
+                if isinstance(content, str) and content.strip():
+                    return content[:8000]
     return ""
 
 
@@ -96,7 +124,9 @@ _HF_CONFIGS = {
     },
     "triviaqa": {
         "dataset_id": "mandarjoshi/trivia_qa",
-        "config": "rc.nocontext",
+        # rc carries the evidence text (search_results / entity_pages);
+        # rc.nocontext has neither, leaving nothing for seeding to index.
+        "config": "rc",
         "split": "validation",
         "max_samples": 100,
         "field_mapping": {
@@ -555,16 +585,7 @@ class NQTriviaDataset(EvaluationDataset):
         aliases = _extract_answer_aliases(answer_data)
         primary_answer = aliases[0] if aliases else ""
 
-        context = ""
-        search_results = item.get("search_results", {})
-        if isinstance(search_results, dict):
-            web_results = search_results.get("web_results", [])
-            if web_results and len(web_results) > 0:
-                context = " ".join(
-                    r.get("description", r.get("snippet", ""))
-                    for r in web_results[:3]
-                    if isinstance(r, dict)
-                )
+        context = _build_triviaqa_context(item)
 
         sample_id = str(item.get("question_id", item.get("id", "")))
         if not sample_id:
