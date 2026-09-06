@@ -252,7 +252,16 @@ class LiteSyncRepository(AbstractSyncRepository):
         if type(event) is not SyncEvent:
             raise TypeError("event must be an exact SyncEvent")
         self._bind_tenant(event.scope.tenant_id)
-        if any(item["event_id"] == event.event_id for item in self._state["outbox"]):
+        outbox = self._state["outbox"]
+        # Duplicate detection over a cached id set: a linear outbox scan is
+        # quadratic over a seeding run (every captured event walks the whole
+        # outbox). The cache is rebuilt lazily whenever the outbox length
+        # drifts (dispatch/ack trims entries).
+        known_ids = getattr(self, "_outbox_event_ids", None)
+        if known_ids is None or len(known_ids) != len(outbox):
+            known_ids = {item["event_id"] for item in outbox}
+            self._outbox_event_ids = known_ids
+        if event.event_id in known_ids:
             raise ValueError("event_id already exists")
         enabled_targets = [
             target
@@ -262,7 +271,8 @@ class LiteSyncRepository(AbstractSyncRepository):
         self._assert_quota(len(enabled_targets))
         stream_seq = self._state["next_stream_seq"]
         self._state["next_stream_seq"] = stream_seq + 1
-        self._state["outbox"].append(self._event_to_raw(stream_seq, event))
+        outbox.append(self._event_to_raw(stream_seq, event))
+        known_ids.add(event.event_id)
         version_raw = {
             "node_type": event.node_type.value,
             "entity_key": str(event.entity_key),
@@ -272,12 +282,25 @@ class LiteSyncRepository(AbstractSyncRepository):
             "last_stream_seq": stream_seq,
         }
         key = (event.node_type.value, str(event.entity_key))
-        self._state["entity_versions"] = [
-            item
-            for item in self._state["entity_versions"]
-            if (item["node_type"], item["entity_key"]) != key
-        ]
-        self._state["entity_versions"].append(version_raw)
+        entity_versions = self._state["entity_versions"]
+        # Same-key replacement via a positional index instead of rebuilding
+        # the whole list per event: a seeding run captures one event per
+        # record, and the list rebuild made capture quadratic.
+        positions = getattr(self, "_entity_version_positions", None)
+        if positions is None or positions.get("_len") != len(entity_versions):
+            positions = {
+                (item["node_type"], item["entity_key"]): index
+                for index, item in enumerate(entity_versions)
+            }
+            positions["_len"] = len(entity_versions)
+            self._entity_version_positions = positions
+        position = positions.get(key)
+        if position is None:
+            positions[key] = len(entity_versions)
+            positions["_len"] = len(entity_versions) + 1
+            entity_versions.append(version_raw)
+        else:
+            entity_versions[position] = version_raw
         now = SyncVersion.parse(event.version).occurred_at
         for target in enabled_targets:
             self._state["deliveries"].append(

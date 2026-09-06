@@ -403,6 +403,23 @@ class BenchmarkEvaluator:
             for sample in samples:
                 try:
                     source_doc = dataset.to_memories(sample)
+                    # Datasets like longmemeval materialize their evidence
+                    # as typed Observation lists; seed them directly
+                    # instead of falling through to write().
+                    if isinstance(source_doc, list) and source_doc:
+                        seeded_ok = True
+                        for memory in source_doc:
+                            mem_type = type(memory).__name__.lower()
+                            try:
+                                self._seed_direct_memory(memory, mem_type)
+                            except Exception as exc:  # noqa: BLE001 - per-item degradation
+                                logger.warning(
+                                    "Failed to seed observation for %s: %s", sample.id, exc
+                                )
+                                seeded_ok = False
+                        if seeded_ok:
+                            seeded += 1
+                            continue
                     metadata = getattr(source_doc, "metadata", None) or {}
 
                     # Check for direct memory seeding (memory_benchmark style)
@@ -436,7 +453,7 @@ class BenchmarkEvaluator:
 
         Converts typed benchmark memories to searchable Function records.
         """
-        from memplex.models.memory import Fact, Function, Observation, Preference
+        from memplex.models.memory import Fact, FieldValue, Function, Observation, Preference
         from memplex.models.source import SourceDocument, SourceType
 
         if memory_type == "fact" and isinstance(memory, Fact):
@@ -485,7 +502,13 @@ class BenchmarkEvaluator:
             self.service.store.add(func, source)
 
         elif memory_type == "observation" and isinstance(memory, Observation):
-            name = memory.name or f"Observed: {memory.event[:50]}"
+            # The observation's event is a role ("user"/"assistant") and its
+            # context is the turn text: name on the content (suffixed with the
+            # id fragment so distinct turns never merge into one Function)
+            # and carry the text in an action FieldValue so the search index
+            # has something to score.
+            text = (memory.context or "").strip() or memory.event
+            name = memory.name or f"Observed: {text[:60]} [{memory.id[-10:]}]"
             func = Function(
                 id=memory.id,
                 name=name,
@@ -495,10 +518,11 @@ class BenchmarkEvaluator:
                 source_type=memory.source_type,
                 created_at=memory.created_at,
                 updated_at=memory.updated_at,
+                action=[FieldValue(desc=text[:2000])],
             )
             source = SourceDocument(
                 type="benchmark",
-                content=f"{memory.event} {memory.context}".strip(),
+                content=f"{memory.event} {text}"[:4000],
                 source_type=SourceType.WIKI,
             )
             self.service.store.add(func, source)
