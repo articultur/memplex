@@ -352,7 +352,7 @@ class CrossEncoderReranker:
         if self._model is not None:
             return
         try:
-            from sentence_transformers import CrossEncoder  # type: ignore
+            from sentence_transformers import CrossEncoder
 
             self._model = CrossEncoder(self.model_name)
             logger.info("CrossEncoder loaded: %s", self.model_name)

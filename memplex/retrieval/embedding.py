@@ -456,19 +456,23 @@ class EmbeddingService:
         else:
             model_name = self._MODEL_MAP.get(model_lookup_key, model_key)
 
+        # An explicitly requested semantic model must not silently degrade
+        # to TF-IDF: a benchmark or deployment labelled "minilm" would then
+        # measure the lexical stack and publish it as semantic evidence.
         try:
             return _SentenceTransformerEmbedder(model_name, dimension)
-        except ImportError:
-            logger.info("sentence-transformers not available, falling back to TF-IDF embedder")
-            return _SimpleTFIDFEmbedder(dimension=dimension)
-        except Exception as exc:  # noqa: BLE001 - logged degradation path
-            logger.warning(
-                "Failed to load sentence-transformers model %s: %s. "
-                "Falling back to TF-IDF embedder",
-                model_name,
-                exc,
-            )
-            return _SimpleTFIDFEmbedder(dimension=dimension)
+        except ImportError as exc:
+            raise RuntimeError(
+                f"sentence-transformers is required for embedding model "
+                f"{model_key!r} (resolved to {model_name!r}) but is not "
+                f"installed; install the 'embedding' extra or use a "
+                f"'default'/'offline' model."
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load embedding model {model_name!r} "
+                f"(requested {model_key!r}): {exc}"
+            ) from exc
 
     @classmethod
     def _resolve_local_onnx_model_path(

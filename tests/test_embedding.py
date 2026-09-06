@@ -113,18 +113,19 @@ def test_explicit_hf_models_opt_into_sentence_transformers(monkeypatch):
     ]
 
 
-def test_hf_model_load_failure_falls_back_to_tfidf(monkeypatch):
+def test_hf_model_load_failure_fails_closed(monkeypatch):
     monkeypatch.setattr(
         embedding,
         "_SentenceTransformerEmbedder",
         _BrokenSentenceTransformerEmbedder,
     )
 
-    service = EmbeddingService(model="bge-m3", dimension=5)
-    vector = service.embed("huggingface blocked fallback")
+    import pytest
 
-    assert len(vector) == 5
-    assert any(value != 0.0 for value in vector)
+    # An explicitly requested semantic model must not silently degrade to
+    # TF-IDF: that would relabel lexical-stack results as semantic ones.
+    with pytest.raises(RuntimeError, match="Failed to load embedding model"):
+        EmbeddingService(model="bge-m3", dimension=5)
 
 
 def test_default_auto_enables_local_onnx_when_model_env_is_set(monkeypatch, tmp_path):

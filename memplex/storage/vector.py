@@ -174,7 +174,7 @@ class ChromaVectorStore:
 
     def _get_model(self) -> Any:
         if self._model is None:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            from sentence_transformers import SentenceTransformer
 
             self._model = SentenceTransformer(self._embedding_model)
         return self._model

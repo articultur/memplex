@@ -146,7 +146,7 @@ def test_agent_capture_recall_closed_loop_works_offline(tmp_path):
     assert "sentence-transformers" not in output
 
 
-def test_explicit_huggingface_failure_falls_back_through_service(monkeypatch, tmp_path):
+def test_explicit_huggingface_failure_fails_closed_through_service(monkeypatch, tmp_path):
     def fail_if_loaded(model_name: str, dimension: int):
         raise RuntimeError(f"{model_name} unavailable in offline test")
 
@@ -159,15 +159,17 @@ def test_explicit_huggingface_failure_falls_back_through_service(monkeypatch, tm
     cfg.embedding.dimension = 16
     cfg.llm.query_enhancement = False
 
-    service = MemplexService(config=cfg)
-    try:
-        service.write_text("explicit-hf-fallback-token: offline fallback still writes and recalls.")
-        result = service.query("explicit-hf-fallback-token")
-    finally:
-        service.stop()
+    # An explicitly configured semantic model must not degrade to the
+    # lexical stack mid-service: the failure surfaces at construction
+    # instead of relabelling lexical writes/recalls as semantic ones.
+    import pytest
 
-    assert result.results
-    assert "explicit-hf-fallback-token" in result.results[0].summary
+    with pytest.raises(RuntimeError, match="Failed to load embedding model"):
+        service = MemplexService(config=cfg)
+        try:
+            service.write_text("explicit-hf-fallback-token")
+        finally:
+            service.stop()
 
 
 def test_release_version_surfaces_stay_in_sync_for_fresh_installs():

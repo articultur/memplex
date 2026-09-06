@@ -82,9 +82,15 @@ def test_embedding_strategy_enum_members():
     assert EmbeddingStrategy.SEMANTIC.value == "semantic"
 
 
-def test_unknown_hf_model_falls_back_locally():
-    """An hf: model that cannot load must fall back to TF-IDF, not raise."""
-    vec = EmbeddingService(
-        model="hf:definitely-not-a-real-model-xyz", dimension=8, storage=None
-    ).embed("fallback test")
-    assert len(vec) == 8
+def test_unknown_hf_model_fails_closed():
+    """An explicitly requested hf: model that cannot load must raise.
+
+    Silent TF-IDF fallback would let a benchmark labelled with a semantic
+    model measure the lexical stack and publish it as semantic evidence.
+    """
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Failed to load embedding model"):
+        EmbeddingService(
+            model="hf:definitely-not-a-real-model-xyz", dimension=8, storage=None
+        )

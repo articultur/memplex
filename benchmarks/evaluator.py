@@ -45,9 +45,13 @@ def make_benchmark_service() -> MemplexService:
     keep their configured DSN (isolating the schema is the operator's
     responsibility).
     """
-    from memplex.config import MemplexConfig
+    from memplex.config import load_config
 
-    config = MemplexConfig()
+    # load_config applies MEMPLEX_* env overrides (e.g. the documented
+    # MEMPLEX_EMBEDDING_MODEL=minilm semantic-stack switch); a bare
+    # MemplexConfig() here would silently run every stack as lexical
+    # defaults no matter what the operator exported.
+    config = load_config()
     if config.storage.backend == "lite":
         config.storage.path = tempfile.mkdtemp(prefix="memplex-bench-")
     return MemplexService(config=config)
