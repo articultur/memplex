@@ -107,6 +107,87 @@ def _build_triviaqa_context(item: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_nq_question_text(item: dict[str, Any]) -> str:
+    """NQ question: plain string in legacy JSON, {text: [...]} in parquet."""
+    question = item.get("question", item.get("question_text", ""))
+    if isinstance(question, dict):
+        parts = question.get("text")
+        if isinstance(parts, list):
+            return " ".join(str(part) for part in parts)
+        return ""
+    return question if isinstance(question, str) else ""
+
+
+def _rebuild_nq_long_answer(item: dict[str, Any]) -> str:
+    """Rebuild the annotated long-answer passage from document tokens.
+
+    Parquet-native NQ rows carry the document as parallel token/is_html
+    lists and the first annotator's long answer as token spans. HTML
+    tokens are dropped; a no-answer annotation (start_token == -1 or
+    candidate_index == -1) yields an empty passage.
+    """
+    document = item.get("document")
+    annotations = item.get("annotations")
+    if not isinstance(document, dict) or not isinstance(annotations, dict):
+        return ""
+    tokens_struct = document.get("tokens")
+    if not isinstance(tokens_struct, dict):
+        return ""
+    tokens = tokens_struct.get("token")
+    if not isinstance(tokens, list):
+        return ""
+    long_answer = annotations.get("long_answer")
+    if not isinstance(long_answer, dict):
+        return ""
+    start_span = long_answer.get("start_token")
+    end_span = long_answer.get("end_token")
+    candidates = long_answer.get("candidate_index")
+    if not isinstance(start_span, list) or not isinstance(end_span, list):
+        return ""
+    if not start_span or not end_span:
+        return ""
+    if isinstance(candidates, list) and candidates and candidates[0] == -1:
+        return ""
+    start, end = start_span[0], end_span[0]
+    if start is None or end is None or start < 0 or end <= start:
+        return ""
+    is_html = tokens_struct.get("is_html")
+    pieces = []
+    for index in range(start, min(end, len(tokens))):
+        if isinstance(is_html, list) and index < len(is_html) and is_html[index]:
+            continue
+        token = tokens[index]
+        if isinstance(token, str) and token:
+            pieces.append(token)
+    return " ".join(pieces)
+
+
+def _extract_nq_short_answer(item: dict[str, Any]) -> str:
+    """First annotator's short answer rebuilt from document token spans."""
+    annotations = item.get("annotations")
+    document = item.get("document")
+    if not isinstance(annotations, dict) or not isinstance(document, dict):
+        return ""
+    short = annotations.get("short_answers")
+    if not isinstance(short, list) or not short:
+        return ""
+    first = short[0]
+    tokens_struct = document.get("tokens")
+    tokens = tokens_struct.get("token") if isinstance(tokens_struct, dict) else None
+    if not isinstance(first, dict) or not isinstance(tokens, list):
+        return ""
+    starts = first.get("start_token")
+    ends = first.get("end_token")
+    if not isinstance(starts, list) or not isinstance(ends, list) or not starts or not ends:
+        return ""
+    start, end = starts[0], ends[0]
+    if start is None or end is None or start < 0 or end <= start:
+        return ""
+    return " ".join(
+        token for token in tokens[start : min(end, len(tokens))] if isinstance(token, str)
+    )
+
+
 # ── HuggingFace dataset configurations ─────────────────────────────────────────
 
 _HF_CONFIGS = {
@@ -604,12 +685,20 @@ class NQTriviaDataset(EvaluationDataset):
         )
 
     def _parse_natural_questions(self, item: dict[str, Any]) -> BenchmarkSample | None:
-        """Parse a Natural Questions format item."""
-        question = item.get("question", item.get("question_text", ""))
+        """Parse a Natural Questions format item.
+
+        Handles the legacy JSON shape (string question, list annotations,
+        pre-extracted answer text) and the parquet-native shape (question
+        struct, dict-of-lists annotations, document token spans): for the
+        latter the first annotator's short answer — or, failing that, the
+        long-answer passage rebuilt from document tokens — becomes both
+        the seedable evidence and the match target.
+        """
+        question = _extract_nq_question_text(item)
         if not question:
             return None
 
-        answer_data = None
+        answer_data: Any = None
 
         if "answer" in item:
             answer_data = item["answer"]
@@ -623,9 +712,24 @@ class NQTriviaDataset(EvaluationDataset):
                     if isinstance(short_ans, dict):
                         answer_data = short_ans.get("text", "")
 
-        context = item.get("context", item.get("document", ""))
+        if isinstance(item.get("annotations"), dict):
+            # Parquet shape: rebuild spans from document tokens.
+            short_answer = _extract_nq_short_answer(item)
+            long_answer = _rebuild_nq_long_answer(item)
+            if short_answer:
+                answer_data = short_answer
+            elif long_answer:
+                answer_data = long_answer
+
+        context = item.get("context", "")
+        if not context:
+            long_answer = _rebuild_nq_long_answer(item)
+            if long_answer:
+                context = long_answer
         if isinstance(context, dict):
-            context = context.get("text", str(context))
+            context = context.get("text", "")
+        if not isinstance(context, str):
+            context = str(context) if context else ""
 
         aliases = _extract_answer_aliases(answer_data)
         primary_answer = aliases[0] if aliases else ""
