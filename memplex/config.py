@@ -297,6 +297,14 @@ class GraphConfig:
 
     semantic_similar_threshold: float = 0.85
     semantic_similar_max_edges: int = 10
+    # Heuristic name-reference (DEPENDS_ON) edges are capped per Function so
+    # corpora whose texts share common terms cannot grow the graph
+    # quadratically; the most specific (longest matched name) references win.
+    depends_on_max_edges: int = 20
+    # Same-domain ASSOCIATED_WITH edges are likewise capped per Function
+    # (deterministic id order) — a complete same-domain subgraph grows
+    # quadratically and adds no ranking signal over BELONGS_TO.
+    associated_with_max_edges: int = 20
     community_detection_enabled: bool = True
     community_min_size: int = 3
 

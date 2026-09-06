@@ -87,6 +87,9 @@ class GraphBuilder:
         validate_domain(func.domain)
         edges: list[GraphEdge] = []
         existing_set = self._edge_set(existing_graph)
+        # Batch-local nodes join the conflict scan through the same
+        # domain grouping as the stored corpus.
+        self._batch_nodes = existing_graph.nodes if existing_graph is not None else []
 
         # 1. REFERENCES -- from cross_references field
         for ref in func.cross_references:
@@ -117,45 +120,60 @@ class GraphBuilder:
                 edges.append(edge)
                 existing_set.add(self._edge_key(edge))
 
-        # 2. DEPENDS_ON -- from action field references
+        # 2. DEPENDS_ON -- from action field references. Matches are capped
+        # per Function (longest matched name first: a longer name is a more
+        # specific reference), keeping corpus-wide term sharing from growing
+        # the graph quadratically.
         all_funcs = self._get_all_funcs()
         action_text, trigger_text = self._name_reference_texts(func)
+        max_depends = (
+            self._graph_config.depends_on_max_edges if self._graph_config else 20
+        )
+        matches: list[tuple[int, str]] = []
         for other_id, other_name_lower in self._lowered_name_entries():
             if other_id == func.id:
                 continue
             if other_name_lower in action_text or other_name_lower in trigger_text:
-                key = (func.id, other_id, EdgeType.DEPENDS_ON.value)
-                if key not in existing_set:
-                    other_name = self._func_name_by_id(all_funcs, other_id)
-                    edges.append(
-                        self._make_edge(
-                            source=func.id,
-                            target=other_id,
-                            edge_type=EdgeType.DEPENDS_ON.value,
-                            evidence=[f"{func.name} references {other_name}"],
-                        )
+                matches.append((len(other_name_lower), other_id))
+        matches.sort(reverse=True)
+        for _, other_id in matches[:max_depends]:
+            key = (func.id, other_id, EdgeType.DEPENDS_ON.value)
+            if key not in existing_set:
+                other_name = self._func_name_by_id(all_funcs, other_id)
+                edges.append(
+                    self._make_edge(
+                        source=func.id,
+                        target=other_id,
+                        edge_type=EdgeType.DEPENDS_ON.value,
+                        evidence=[f"{func.name} references {other_name}"],
                     )
-                    existing_set.add(key)
+                )
+                existing_set.add(key)
 
-        # 3. CONFLICTS_WITH -- same domain, overlapping trigger/action
-        for other in all_funcs:
-            if other.id == func.id:
-                continue
-            if self._detect_conflict(func, other):
-                key = (func.id, other.id, EdgeType.CONFLICTS_WITH.value)
-                rev_key = (other.id, func.id, EdgeType.CONFLICTS_WITH.value)
-                if key not in existing_set and rev_key not in existing_set:
-                    edges.append(
-                        self._make_edge(
-                            source=func.id,
-                            target=other.id,
-                            edge_type=EdgeType.CONFLICTS_WITH.value,
-                            evidence=[
-                                f"conflicting definitions in domain {func.domain or 'unknown'}"
-                            ],
+        # 3. CONFLICTS_WITH -- same domain, overlapping trigger/action.
+        # Only functions in the same (non-empty) domain can ever conflict,
+        # so the scan joins against a domain-grouped index instead of the
+        # whole corpus; batch nodes join through the same grouping.
+        if func.domain:
+            func_triggers = {fv.desc.lower() for fv in func.trigger}
+            for other_id, other_triggers in self._conflict_candidates(
+                func.domain, exclude_id=func.id
+            ):
+                if func_triggers & other_triggers:
+                    key = (func.id, other_id, EdgeType.CONFLICTS_WITH.value)
+                    rev_key = (other_id, func.id, EdgeType.CONFLICTS_WITH.value)
+                    if key not in existing_set and rev_key not in existing_set:
+                        edges.append(
+                            self._make_edge(
+                                source=func.id,
+                                target=other_id,
+                                edge_type=EdgeType.CONFLICTS_WITH.value,
+                                evidence=[
+                                    f"conflicting definitions in domain {func.domain or 'unknown'}"
+                                ],
+                            )
                         )
-                    )
-                    existing_set.add(key)
+                        existing_set.add(key)
 
         # 4. BELONGS_TO -- domain membership
         if func.domain:
@@ -172,19 +190,28 @@ class GraphBuilder:
                 )
                 existing_set.add(key)
 
-        # 5. ASSOCIATED_WITH -- shared domain with other functions
+        # 5. ASSOCIATED_WITH -- shared domain with other functions, capped
+        # per Function in deterministic id order so same-domain subgraphs
+        # stay linear instead of complete.
         if func.domain:
-            for other in all_funcs:
-                if other.id == func.id:
-                    continue
-                if other.domain == func.domain:
-                    key = (func.id, other.id, EdgeType.ASSOCIATED_WITH.value)
-                    rev_key = (other.id, func.id, EdgeType.ASSOCIATED_WITH.value)
+            max_associated = (
+                self._graph_config.associated_with_max_edges
+                if self._graph_config
+                else 20
+            )
+            same_domain_ids = sorted(
+                other.id
+                for other in all_funcs
+                if other.id != func.id and other.domain == func.domain
+            )
+            for other_id in same_domain_ids[:max_associated]:
+                    key = (func.id, other_id, EdgeType.ASSOCIATED_WITH.value)
+                    rev_key = (other_id, func.id, EdgeType.ASSOCIATED_WITH.value)
                     if key not in existing_set and rev_key not in existing_set:
                         edges.append(
                             self._make_edge(
                                 source=func.id,
-                                target=other.id,
+                                target=other_id,
                                 edge_type=EdgeType.ASSOCIATED_WITH.value,
                                 weight=0.5,
                                 evidence=[f"shared domain: {func.domain}"],
@@ -232,6 +259,38 @@ class GraphBuilder:
             if target_name in fv.desc.lower():
                 return True
         return False
+
+    def _conflict_candidates(
+        self, domain: str, *, exclude_id: str
+    ) -> list[tuple[str, frozenset[str]]]:
+        """(func_id, lowered triggers) of same-domain conflict candidates.
+
+        Stored corpus entries come from a fingerprint-guarded grouped
+        index; batch-local nodes (not yet stored) join ad hoc.
+        """
+        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
+        if not hasattr(self, "_conflict_groups") or getattr(
+            self, "_conflict_groups_fingerprint", _NO_FINGERPRINT
+        ) != fingerprint:
+            groups: dict[str, list[tuple[str, frozenset[str]]]] = {}
+            for func in self._get_all_funcs():
+                if func.domain:
+                    groups.setdefault(func.domain, []).append(
+                        (func.id, frozenset(fv.desc.lower() for fv in func.trigger))
+                    )
+            self._conflict_groups = groups
+            self._conflict_groups_fingerprint = fingerprint
+        candidates = [
+            (fid, triggers)
+            for fid, triggers in self._conflict_groups.get(domain, ())
+            if fid != exclude_id
+        ]
+        for node in getattr(self, "_batch_nodes", ()):
+            if node.domain == domain and node.id != exclude_id:
+                candidates.append(
+                    (node.id, frozenset(fv.desc.lower() for fv in node.trigger))
+                )
+        return candidates
 
     def _detect_conflict(self, a: Function, b: Function) -> bool:
         """Detect if two Functions in the same domain conflict.
@@ -434,6 +493,8 @@ class GraphBuilder:
             del self._embedding_cache
         if hasattr(self, "_name_entries"):
             del self._name_entries
+        if hasattr(self, "_conflict_groups"):
+            del self._conflict_groups
 
 
 # ── Rule-based fallback (no store) ───────────────────────────────────

@@ -53,6 +53,7 @@ from memplex.models import (
     SearchResult,
     SourceDocument,
     SourceType,
+    domain_node_id,
     validate_belongs_to_edges,
     validate_domain,
     validate_func_id,
@@ -613,6 +614,12 @@ class LiteMemoryStore:
         # Batching: while >0, mutators validate in memory but the durable
         # pair is written once at the outermost deferred_commit() exit.
         self._commit_defer_depth = 0
+        # Incremental BELONGS_TO validation state: the resident id→domain
+        # index (rebuilt on every publish) plus edges queued for the next
+        # incremental _validate_resident_graph pass. Full audits run on
+        # publishes, reloads, and the periodic commit audit.
+        self._domain_by_id: dict[str, str] = {}
+        self._pending_belongs_edges: list[GraphEdge] = []
         # Commits since the last full pre-durable decode audit (see
         # _commit_current_state); bounded by _FULL_DECODE_AUDIT_INTERVAL.
         self._commits_since_full_decode_audit = 0
@@ -1019,6 +1026,7 @@ class LiteMemoryStore:
         else:
             self._functions[func.id] = func
             self._name_index[norm] = func.id
+            self._index_resident_function(func)
 
             self._changelog.append(
                 ChangelogEvent(
@@ -1538,6 +1546,7 @@ class LiteMemoryStore:
         removed = self._functions.pop(func_id, None)
         if removed is None:
             return
+        self._domain_by_id.pop(func_id, None)
         # Remove from name index
         to_remove = [norm for norm, fid in self._name_index.items() if fid == func_id]
         for norm in to_remove:
@@ -1597,9 +1606,21 @@ class LiteMemoryStore:
             if key in seen_edge_keys:
                 raise ValueError("LiteMemoryStore merge contains duplicate GraphEdge key")
             seen_edge_keys.add(key)
-        candidate_functions = dict(self._functions)
-        candidate_functions.update({node.id: node for node in nodes})
-        validate_belongs_to_edges(candidate_functions.values(), sub_graph.edges)
+        # BELONGS_TO contract over the merged view: new nodes were already
+        # id/domain-validated above, resident nodes resolve through the
+        # incremental domain index — O(new nodes + new edges) instead of
+        # copying and re-auditing the whole corpus per merge.
+        incoming_domains = {node.id: (node.domain or "") for node in nodes}
+        for edge in sub_graph.edges:
+            if edge.edge_type != "BELONGS_TO":
+                continue
+            domain = incoming_domains.get(
+                edge.source, self._domain_by_id.get(edge.source)
+            )
+            if domain is None:
+                raise ValueError("BELONGS_TO source 必须是持久 Function")
+            if not domain or edge.target != domain_node_id(domain):
+                raise ValueError("BELONGS_TO target 必须匹配 source domain")
 
         result = MergeResult(merged=True)
         # Merge nodes
@@ -1619,6 +1640,7 @@ class LiteMemoryStore:
                 norm = _normalize_name(node.name_normalized or node.name)
                 if norm:
                     self._name_index[norm] = func_id
+                self._index_resident_function(node)
                 result.new_functions += 1
 
         # Merge edges (skip duplicates)
@@ -1629,6 +1651,8 @@ class LiteMemoryStore:
             if key not in existing_edge_keys:
                 self._edges.append(edge)
                 self._index_edge(edge)
+                if edge.edge_type == "BELONGS_TO":
+                    self._pending_belongs_edges.append(edge)
                 existing_edge_keys.add(key)
                 added_edges.append(edge)
                 result.new_edges += 1
@@ -1667,6 +1691,8 @@ class LiteMemoryStore:
         self._name_index.clear()
         self._edges.clear()
         self._edges_by_node.clear()
+        self._domain_by_id.clear()
+        self._pending_belongs_edges = []
         self._observations.clear()
         self._facts.clear()
         self._preferences.clear()
@@ -1706,6 +1732,8 @@ class LiteMemoryStore:
         norm = _normalize_name(func.name_normalized or func.name)
         if norm:
             self._name_index[norm] = func.id
+        self._index_resident_function(func)
+        self._requeue_outgoing_belongs_edges(func.id)
         self._commit_sync_changes(
             nodes=[(func, SyncNodeType.FUNCTION, SyncOperation.UPSERT)]
         )
@@ -1939,6 +1967,10 @@ class LiteMemoryStore:
                         # non-string mapping key (for example provenance {1: x})
                         # into a different durable key.
                         self._decode_pair(target)
+                        # Same audit cadence re-runs the whole-graph
+                        # BELONGS_TO contract, keeping the incremental
+                        # resident validation honest.
+                        self._validate_resident_graph(full=True)
                     # Full JSON round trip is the type boundary for the
                     # mutable dataclasses before a durable decision is made.
                     target = LitePair(
@@ -2328,6 +2360,9 @@ class LiteMemoryStore:
         if pair.generation != getattr(self, "_generation", 0):
             self._fts_index._signature = None
         self._generation = pair.generation
+        # The decoded collections passed the full belongs-to audit inside
+        # _decode_pair; rebuild the incremental index from them.
+        self._rebuild_belongs_incremental_state()
         self._refresh_fingerprint()
         # Every published pair is the durable on-disk state at this moment;
         # the commit path reuses it as the authoritative base while the
@@ -2398,9 +2433,50 @@ class LiteMemoryStore:
         self._refresh_for_read()
         return self._generation, copy.deepcopy(list(self._functions.values()))
 
-    def _validate_resident_graph(self) -> None:
-        """Reject mutable Function/domain or virtual-edge drift before saving."""
-        validate_belongs_to_edges(self._functions.values(), self._edges)
+    def _validate_resident_graph(self, *, full: bool = False) -> None:
+        """Reject mutable Function/domain or virtual-edge drift before saving.
+
+        Incremental by default: only BELONGS_TO edges queued since the last
+        pass (new edges, plus edges re-queued when a function's domain
+        changed or its record was removed) are checked against the resident
+        id→domain index, so a mutator pays O(delta) instead of O(graph).
+        ``full=True`` runs the original whole-graph audit — publishes,
+        reloads, and the periodic commit audit keep that safety net.
+        """
+        if full:
+            validate_belongs_to_edges(self._functions.values(), self._edges)
+            self._pending_belongs_edges = []
+            return
+        if not self._pending_belongs_edges:
+            return
+        for edge in self._pending_belongs_edges:
+            domain = self._domain_by_id.get(edge.source)
+            if domain is None:
+                raise ValueError("BELONGS_TO source 必须是持久 Function")
+            if not domain or edge.target != domain_node_id(domain):
+                raise ValueError("BELONGS_TO target 必须匹配 source domain")
+        self._pending_belongs_edges = []
+
+    def _index_resident_function(self, func: Function) -> None:
+        """Track one resident Function in the incremental domain index."""
+        self._domain_by_id[func.id] = func.domain or ""
+
+    def _requeue_outgoing_belongs_edges(self, func_id: str) -> None:
+        """Re-validate a function's BELONGS_TO out-edges after a change."""
+        node_edges = self._edges_by_node.get(func_id)
+        if not node_edges:
+            return
+        for edges in node_edges.values():
+            self._pending_belongs_edges.extend(
+                edge for edge in edges if edge.edge_type == "BELONGS_TO"
+            )
+
+    def _rebuild_belongs_incremental_state(self) -> None:
+        """Rebuild the incremental index after a full publish/audit."""
+        self._domain_by_id = {
+            func_id: (func.domain or "") for func_id, func in self._functions.items()
+        }
+        self._pending_belongs_edges = []
 
     # ── Internal helpers ────────────────────────────────────────────
 
