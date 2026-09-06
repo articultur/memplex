@@ -103,10 +103,17 @@ profile 实测（600 文档，每写全量提交链 958s，per-doc 63ms→4561ms
    拼一次的 action/trigger 文本做子串连接。1500 文档 538s→50s；600 文档
    基准累计 **958s→约 7s**。
 
-剩余每写 O(corpus) 项（下一战役候选）：`_detect_conflict` 全库遍历、
-merge preflight 的 candidate 全集验证、`_validate_resident_graph` 的
-每写 O(F+E)。15 万文档级（longmemeval 全量 500 样本累积播种）需要这三
-项增量化和/或 Aho-Corasick 名字匹配。
+剩余每写 O(corpus) 项已于 2026-09-06 第三轮战役修复
+（`refactor: incremental resident validation and capped heuristic graph
+edges`）：`_validate_resident_graph` 增量化（常驻 id→domain 索引 + 待验
+BELONGS_TO 边队列，发布/重载/周期审计保留全量契约）、merge preflight
+改合并视图检查、CONFLICTS_WITH 走 domain 分组索引。**同时发现并治理了
+图本身的 O(N²) 病根**：ASSOCIATED_WITH 同域完全图与 DEPENDS_ON 共享词
+互连均无上限——混合语料 3000 文档即产生 165 万条边并伴随 11G RSS。两族
+边加 per-function 上限（`graph.associated_with_max_edges` /
+`graph.depends_on_max_edges`，默认 20；确定性 id 序 / 最长名优先）后：
+**5000 文档 65s、~13ms/文档均摊、10.3 万条线性增长的边**。15 万文档级
+（longmemeval 全量 500 样本累积播种）从不可行变为小时级估算可行。
 
 ## 2026-09-06 TriviaQA 适配器修复
 
