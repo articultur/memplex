@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Self
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import OpenerDirector, ProxyHandler, Request, build_opener, urlopen
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,9 +210,17 @@ class UrllibSession:
         del stream
         request = Request(url, data=data, headers=headers, method="POST")
         try:
-            return UrllibResponse(urlopen(request, timeout=timeout))
+            return UrllibResponse(self._opener().open(request, timeout=timeout))
         except HTTPError as exc:
             return UrllibResponse(exc)
+
+    @staticmethod
+    def _opener() -> OpenerDirector:
+        # Loopback traffic must never be routed through a system HTTP proxy
+        # (a local VPN/privacy proxy hijacking 127.0.0.1 turns these
+        # reliability tests into proxy errors instead of exercising the
+        # dispatcher's fault paths).
+        return build_opener(ProxyHandler({}))
 
     def get(
         self,
@@ -227,6 +235,6 @@ class UrllibSession:
         query = urlencode(params)
         request = Request(f"{url}?{query}", headers=headers, method="GET")
         try:
-            return UrllibResponse(urlopen(request, timeout=timeout))
+            return UrllibResponse(self._opener().open(request, timeout=timeout))
         except HTTPError as exc:
             return UrllibResponse(exc)

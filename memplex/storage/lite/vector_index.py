@@ -28,6 +28,37 @@ logger = logging.getLogger(__name__)
 Vector = list[float]
 
 
+def _batch_cosine(query: Vector, vectors: dict[str, Vector]) -> list[tuple[str, float]]:
+    """Cosine scores of one query against many vectors, matching _cosine."""
+    try:
+        import numpy as np  # pylint: disable=import-outside-toplevel
+    except ImportError:  # pragma: no cover - numpy is a core extra
+        return [
+            (doc_id, _cosine(query, vector))
+            for doc_id, vector in vectors.items()
+            if len(vector) == len(query)
+        ]
+    dim = len(query)
+    matching = [(doc_id, vector) for doc_id, vector in vectors.items() if len(vector) == dim]
+    if not matching:
+        return []
+    matrix = np.fromiter(
+        (value for _, vector in matching for value in vector),
+        dtype=np.float64,
+        count=len(matching) * dim,
+    ).reshape(len(matching), dim)
+    query_array = np.asarray(query, dtype=np.float64)
+    dots = matrix @ query_array
+    doc_norms = np.sqrt((matrix * matrix).sum(axis=1))
+    query_norm = float(np.sqrt((query_array * query_array).sum()))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sims = np.where(
+            (doc_norms > 0) & (query_norm > 0), dots / (doc_norms * query_norm), 0.0
+        )
+    sims = np.clip(sims, 0.0, 1.0)
+    return [(doc_id, float(sim)) for (doc_id, _), sim in zip(matching, sims)]
+
+
 def _cosine(a: Vector, b: Vector) -> float:
     """Cosine similarity of two equal-length vectors, clipped to [0, 1].
 
@@ -100,11 +131,11 @@ class VectorSearchIndex:
             return []
 
         vectors = self._vectors_for(documents)
-        scored: list[tuple[str, float]] = []
-        for doc_id, vector in vectors.items():
-            if len(vector) != len(query_vector):
-                continue
-            scored.append((doc_id, _cosine(query_vector, vector)))
+        # Matrix scoring: a pure-Python per-document cosine walk is
+        # O(corpus x dim) per query and dominates once the corpus reaches
+        # the hundred-thousand-document class. numpy keeps the exact
+        # _cosine semantics (clip to [0, 1], zero vectors score 0).
+        scored = _batch_cosine(query_vector, vectors)
         scored.sort(key=lambda item: (-item[1], item[0]))
         return scored[:top_k]
 

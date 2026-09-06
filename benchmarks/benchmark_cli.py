@@ -96,6 +96,7 @@ def run_benchmark_command(
     parallel: bool = False,
     auto_download: bool = True,
     force_synthetic: bool = False,
+    capture_traces: bool = True,
 ) -> dict[str, list[BenchmarkResult]]:
     """Run one or more benchmarks from the CLI.
 
@@ -135,6 +136,7 @@ def run_benchmark_command(
             svc,
             output_dir=str(Path(output).parent),
             output_file=Path(output).name,
+            capture_traces=capture_traces,
         )
 
         # Resolve datasets

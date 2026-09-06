@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -260,9 +261,19 @@ class LongMemEvalRunner(BenchmarkRunner):
         The RAG path searches the Function FTS index, so typed memories are
         seeded as Function nodes whose name carries the session text — the
         same approach ``benchmarks/memory_eval.py`` uses for fact retention.
+        Seeding runs inside one deferred_commit scope per sample: a bare
+        per-turn add pays the whole-state durability chain per turn, which
+        is quadratic over a 500-sample haystack corpus.
         """
         from memplex.models import Function, SourceDocument, SourceType
 
+        batch = getattr(service.store, "deferred_commit", None)
+        scope = batch() if callable(batch) else _nullcontext()
+        with scope:
+            self._seed_turns(service, observations, Function, SourceDocument, SourceType)
+
+    @staticmethod
+    def _seed_turns(service, observations, Function, SourceDocument, SourceType) -> None:
         for index, observation in enumerate(observations):
             text = f"{observation.event}: {observation.context}".strip()
             name = text[:120] or f"longmemeval-session-{index}"

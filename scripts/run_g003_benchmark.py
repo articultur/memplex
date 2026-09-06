@@ -64,6 +64,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--top-k", type=_positive_int, default=10)
     run.add_argument("--seed", type=int, default=17)
     run.add_argument("--run-dir", type=Path, required=True)
+    run.add_argument(
+        "--no-traces",
+        action="store_true",
+        help="skip per-query retrieval traces (large-corpus runs)",
+    )
 
     verify = subparsers.add_parser("verify", help="verify an existing bundle")
     verify.add_argument("--run-dir", type=Path, required=True)
@@ -239,6 +244,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 parallel=False,
                 auto_download=False,
                 force_synthetic=not public,
+                capture_traces=not getattr(args, "no_traces", False),
             )
             dataset_results = [
                 result
