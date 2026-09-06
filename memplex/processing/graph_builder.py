@@ -20,6 +20,7 @@ import logging
 from datetime import UTC, datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
+_NO_FINGERPRINT: Any = object()  # stores without a pair fingerprint never match this
 from memplex.models import (
     EdgeType,
     Function,
@@ -118,18 +119,20 @@ class GraphBuilder:
 
         # 2. DEPENDS_ON -- from action field references
         all_funcs = self._get_all_funcs()
-        for other in all_funcs:
-            if other.id == func.id:
+        action_text, trigger_text = self._name_reference_texts(func)
+        for other_id, other_name_lower in self._lowered_name_entries():
+            if other_id == func.id:
                 continue
-            if self._has_name_reference(func, other):
-                key = (func.id, other.id, EdgeType.DEPENDS_ON.value)
+            if other_name_lower in action_text or other_name_lower in trigger_text:
+                key = (func.id, other_id, EdgeType.DEPENDS_ON.value)
                 if key not in existing_set:
+                    other_name = self._func_name_by_id(all_funcs, other_id)
                     edges.append(
                         self._make_edge(
                             source=func.id,
-                            target=other.id,
+                            target=other_id,
                             edge_type=EdgeType.DEPENDS_ON.value,
-                            evidence=[f"{func.name} references {other.name}"],
+                            evidence=[f"{func.name} references {other_name}"],
                         )
                     )
                     existing_set.add(key)
@@ -380,13 +383,48 @@ class GraphBuilder:
         return None
 
     def _get_all_funcs(self) -> list[Function]:
-        """Retrieve all stored Functions (cached per build batch)."""
-        if not hasattr(self, "_funcs_cache"):
+        """Retrieve all stored Functions (cached per build batch).
+
+        The cache is guarded by the store's pair fingerprint when the store
+        exposes one (lite backend): publishing a new pair — local or peer —
+        invalidates it, so a long-lived builder never scans a stale corpus.
+        Stores without a fingerprint keep the historical per-build fetch.
+        """
+        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
+        if not hasattr(self, "_funcs_cache") or fingerprint != getattr(
+            self, "_funcs_fingerprint", _NO_FINGERPRINT
+        ):
             try:
                 self._funcs_cache = self._store.list_functions(limit=100000)
+                self._funcs_fingerprint = fingerprint
             except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
                 self._funcs_cache = []
+                self._funcs_fingerprint = fingerprint
         return self._funcs_cache
+
+    def _lowered_name_entries(self) -> list[tuple[str, str]]:
+        """(func_id, lowered_name) pairs for the DEPENDS_ON scan, cached."""
+        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
+        if not hasattr(self, "_name_entries") or getattr(
+            self, "_name_entries_fingerprint", _NO_FINGERPRINT
+        ) != fingerprint:
+            self._name_entries = [
+                (func.id, func.name.lower()) for func in self._get_all_funcs() if func.name
+            ]
+            self._name_entries_fingerprint = fingerprint
+        return self._name_entries
+
+    def _func_name_by_id(self, funcs: list[Function], func_id: str) -> str:
+        for func in funcs:
+            if func.id == func_id:
+                return func.name
+        return func_id
+
+    def _name_reference_texts(self, source: Function) -> tuple[str, str]:
+        """Lowercased action/trigger text of one function, built once."""
+        action_text = "\n".join(fv.desc.lower() for fv in source.action)
+        trigger_text = "\n".join(fv.desc.lower() for fv in source.trigger)
+        return action_text, trigger_text
 
     def invalidate_cache(self) -> None:
         """Clear the internal function list and embedding caches."""
@@ -394,6 +432,8 @@ class GraphBuilder:
             del self._funcs_cache
         if hasattr(self, "_embedding_cache"):
             del self._embedding_cache
+        if hasattr(self, "_name_entries"):
+            del self._name_entries
 
 
 # ── Rule-based fallback (no store) ───────────────────────────────────

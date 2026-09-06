@@ -124,6 +124,10 @@ class CoreEngine:
 
         # ── Graph builder (optional store) ──────────────────────────
         self._store = store
+        # Reused across builds: the builder's corpus caches are guarded by
+        # the store's pair fingerprint, so a published new pair refreshes
+        # them while unchanged corpora cost one list fetch per process.
+        self._graph_builder: GraphBuilder | None = None
 
     # ════════════════════════════════════════════════════════════════
     #  Public API
@@ -577,10 +581,12 @@ class CoreEngine:
         edges = []
 
         if self._store is not None:
-            # Use store-aware GraphBuilder
+            # Use store-aware GraphBuilder; reused across builds because its
+            # corpus caches self-invalidate on the store's pair fingerprint.
             try:
-                builder = GraphBuilder(store=self._store)
-                edges = builder.build_from_batch(functions)
+                if self._graph_builder is None or self._graph_builder._store is not self._store:
+                    self._graph_builder = GraphBuilder(store=self._store)
+                edges = self._graph_builder.build_from_batch(functions)
             except Exception as exc:  # noqa: BLE001 - logged degradation path
                 logger.warning("GraphBuilder failed: %s", exc)
                 edges = build_edges_rule_based(functions)
