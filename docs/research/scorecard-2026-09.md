@@ -78,8 +78,13 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   `report_id 0a53692b…`）；本地生成 runbook 固化在
   `docs/runbooks/production-operations.md`（含 /tmp symlink 与并发
   p95 两个坑）。
-- 累计 ≈ **81.5~82 / 100**。剩余：语义栈公开对照 bundle（HF 网络
-  窗口）、多租户第三方复跑、治理文档实质化、nq span 重建。
+- **多租户/安全 3→3.5**：第三方复跑 runbook 落地
+  （[postgres-fidelity-rerun.md](../runbooks/postgres-fidelity-rerun.md)）：
+  pgserver 自包含（干净环境全量重建实测 412 passed/3 skipped/114s +
+  追加 store 套件 317 passed）与 CI 同构外部容器两条路径、DSN/pgvector
+  的 fail-closed 语义、pg_dump 主版本对齐坑、六/十文件差异如实口径。
+- 累计 ≈ **82 / 100**。剩余：语义栈公开对照 bundle（HF 网络
+  窗口）、治理文档实质化、nq span 重建。
 
 ## 禁止性口径
 
