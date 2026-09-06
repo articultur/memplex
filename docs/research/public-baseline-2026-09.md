@@ -133,3 +133,22 @@ no-answer 标注返回空、候选 -1 短路）、无 short 时以重建段落�
 目标与播种证据。契约测试覆盖七种形状/边界
 （`tests/test_nq_parquet_span_rebuild.py`）。triviaqa/nq 适配器缺口
 关闭；真实数据 bundle 待 HF 网络窗口随语义栈战役一起产出。
+
+## 2026-09-06 语义栈对照 bundle 与两项完整性修复
+
+**发现并修复两个让 `MEMPLEX_EMBEDDING_MODEL` 变成空标签的缺陷**：
+evaluator 用裸 `MemplexConfig()` 构建服务（env 覆盖从未应用——所有
+历史 benchmark 实际都跑在词汇栈，无论导出什么模型）；显式 HF 模型
+加载失败静默回退 TF-IDF（`embed_query` 对未见词汇返回全零向量）。
+两者均与 G003 的 fail-closed 姿势对齐修复（显式模型失败即抛错）。
+
+**语义栈（minilm，HF 离线缓存）对照结果**：
+- popqa n=100（E1）：mrr 0.9917→**1.0000**、recall@1 0.99→**1.00**、
+  recall@5 →1.00、f1 0.2008→0.2028——英文单跳实体匹配满贯。
+- hotpotqa n=100（E1）：mrr 0.0748 vs 词汇栈 0.0751，多跳指标仍
+  全零——**诚实的负结果**：多跳瓶颈在图聚合/评测语义，不在向量层。
+- reranker 权重重校准（语义维携带真实 minilm 信号）：baseline
+  0.5816 → 最优 0.5918（+1.0pp），**仍低于 ≥+2pp 应用门槛，默认
+  权重不变**。low 层（中文低重叠改写）0.0278 未被 all-MiniLM-L6-v2
+  （英语模型）挽救——多语低重叠需要 bge-m3（模型映射已备，待网络
+  窗口下载后是下一对照项）。
