@@ -23,10 +23,11 @@ import sqlite3
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from memplex.backup import (
     BackupArtifactWriter,
@@ -105,6 +106,13 @@ _PREFERENCE_KEYS = _BASE_NODE_KEYS | {"aspect", "preference", "subject_id"}
 _OBSERVATION_KEYS = _BASE_NODE_KEYS | {"event", "context", "observed_at", "actor", "category"}
 _FIELD_VALUE_KEYS = {"desc", "sources", "source_method", "weight", "observation", "created_at", "status"}
 _EDGE_KEYS = {"source", "target", "edge_type", "weight", "evidence", "created_at"}
+# Every Nth commit pays the full double pre-durable decode audit even while
+# batching is not active, so a serializer regression cannot outlive an audit
+# window undetected (loads stay fail-closed full decodes regardless).
+_FULL_DECODE_AUDIT_INTERVAL = 32
+# Sentinel fingerprint for a fresh store where neither pair file exists yet;
+# a normal fingerprint is always a 4-tuple, so equality can never confuse them.
+_PAIR_FILES_ABSENT: Final[tuple[str]] = ("__pair_files_absent__",)
 _G002_MISSING_IDENTITY_KEYS = {
     "tenant_id", "owner_subject_id", "workspace_id", "visibility", "provenance",
 }
@@ -146,10 +154,16 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
                 # A mutation may have escaped mid-way, leaving resident state
                 # ahead of the durable pair.  Invalidate the cached pair /
                 # fingerprint so the next reload re-reads from disk instead
-                # of building on the speculative state.
-                self._pair_fingerprint = None
-                self._committed_pair = None
-                self._committed_record = None
+                # of building on the speculative state.  Under deferred_commit
+                # the failed mutation never reached a durable decision, and
+                # the batch's consistent prefix must survive until the
+                # outermost exit revalidates it fail-closed.
+                if getattr(self, "_commit_defer_depth", 0) > 0:
+                    logger.debug("keeping resident prefix after failure under deferred_commit")
+                else:
+                    self._pair_fingerprint = None
+                    self._committed_pair = None
+                    self._committed_record = None
                 raise
 
     wrapped.__name__ = method.__name__
@@ -220,8 +234,12 @@ def _require_finite_number(value: Any, label: str) -> None:
 def _validate_node_for_read(node: Any) -> None:
     """Reject weakly typed payloads before a read/search can consume them."""
     for name in ("id", "name"):
-        _require_exact_string(getattr(node, name), f"node {name}")
-    _require_exact_string(getattr(node, "domain", None), "node domain", optional=True)
+        value = getattr(node, name)
+        if type(value) is not str:
+            raise ValueError(_INVALID_LITE_FIELD.format(field=f"node {name}"))
+    value = getattr(node, "domain", None)
+    if value is not None and type(value) is not str:
+        raise ValueError(_INVALID_LITE_FIELD.format(field="node domain"))
     _require_finite_number(node.confidence, "node confidence")
     if not isinstance(node.source_type, SourceType):
         raise ValueError("invalid Lite node source_type")  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
@@ -230,7 +248,9 @@ def _validate_node_for_read(node: Any) -> None:
         "created_at", "updated_at", "origin_session", "last_accessed_at",
         "needs_review_until", "content_hash",
     ):
-        _require_exact_string(getattr(node, name, None), f"node {name}", optional=True)
+        value = getattr(node, name, None)
+        if value is not None and type(value) is not str:
+            raise ValueError(_INVALID_LITE_FIELD.format(field=f"node {name}"))
     if type(node.version) is not int or node.version < 0:
         raise ValueError("invalid Lite node version")
     if type(node.access_count) is not int or node.access_count < 0:
@@ -243,6 +263,15 @@ def _validate_node_for_read(node: Any) -> None:
         raise ValueError("invalid Lite node source_paragraphs")
     if type(node.provenance) is not dict or type(node.namespace) is not dict:
         raise ValueError("invalid Lite node mappings")
+    for name in ("provenance", "namespace"):
+        mapping = getattr(node, name)
+        if any(
+            type(key) is not str or type(value) is not str for key, value in mapping.items()
+        ):
+            # Same rule the raw-decode path enforces: a non-string mapping
+            # key would be silently coerced by JSON and change the durable
+            # payload, so reject it at the mutation boundary.
+            raise ValueError(_INVALID_LITE_FIELD.format(field=name))
 
 
 def _validate_function_for_read(func: Function) -> None:
@@ -265,8 +294,12 @@ def _validate_function_for_read(func: Function) -> None:
 
 
 def _validate_edge_for_read(edge: GraphEdge) -> None:
-    for name in ("source", "target", "edge_type"):
-        _require_exact_string(getattr(edge, name), f"GraphEdge {name}")
+    if type(edge.source) is not str:
+        raise ValueError(_INVALID_LITE_FIELD.format(field="GraphEdge source"))
+    if type(edge.target) is not str:
+        raise ValueError(_INVALID_LITE_FIELD.format(field="GraphEdge target"))
+    if type(edge.edge_type) is not str:
+        raise ValueError(_INVALID_LITE_FIELD.format(field="GraphEdge edge_type"))
     _require_finite_number(edge.weight, "GraphEdge weight")
     if type(edge.evidence) is not list or any(type(item) is not str for item in edge.evidence):
         raise ValueError("invalid Lite GraphEdge evidence")
@@ -325,9 +358,10 @@ def _validate_raw_node_discriminators(raw: Any, expected_memory_type: str, *, le
 
 
 def _validate_raw_keys(raw: dict, allowed: set[str], *, legacy: bool, label: str) -> None:
-    if not set(raw) <= allowed:
+    keys = raw.keys()
+    if not keys <= allowed:
         raise ValueError(f"invalid Lite {label} keys")
-    if not legacy and set(raw) != allowed:
+    if not legacy and keys != allowed:
         raise ValueError(f"incomplete Lite {label} schema")
 
 
@@ -481,13 +515,23 @@ def _validate_raw_edge(raw: Any, *, legacy: bool) -> None:
     if type(raw) is not dict:
         raise ValueError("invalid Lite GraphEdge")
     _validate_raw_keys(raw, _EDGE_KEYS, legacy=legacy, label="GraphEdge")
-    if any(name in raw and type(raw[name]) is not str for name in ("source", "target", "edge_type")):
+    source = raw.get("source")
+    target = raw.get("target")
+    edge_type = raw.get("edge_type")
+    if (
+        type(source) is not str
+        or type(target) is not str
+        or type(edge_type) is not str
+    ):
         raise ValueError("invalid Lite GraphEdge endpoints")
     if "weight" in raw:
         _require_finite_number(raw["weight"], "raw GraphEdge weight")
-    if "evidence" in raw and (type(raw["evidence"]) is not list or any(type(item) is not str for item in raw["evidence"])):
-        raise ValueError("invalid Lite GraphEdge evidence")
-    if raw.get("created_at") is not None and type(raw["created_at"]) is not str:
+    if "evidence" in raw:
+        evidence = raw["evidence"]
+        if type(evidence) is not list or any(type(item) is not str for item in evidence):
+            raise ValueError("invalid Lite GraphEdge evidence")
+    created_at = raw.get("created_at")
+    if created_at is not None and type(created_at) is not str:
         raise ValueError("invalid Lite GraphEdge created_at")
 
 
@@ -566,6 +610,12 @@ class LiteMemoryStore:
         # commit (None after any disk reload); reused as the next commit's
         # journal base_record to skip re-encoding the base digests.
         self._committed_record: dict[str, Any] | None = None
+        # Batching: while >0, mutators validate in memory but the durable
+        # pair is written once at the outermost deferred_commit() exit.
+        self._commit_defer_depth = 0
+        # Commits since the last full pre-durable decode audit (see
+        # _commit_current_state); bounded by _FULL_DECODE_AUDIT_INTERVAL.
+        self._commits_since_full_decode_audit = 0
         self._sync_state: dict[str, Any] = durability_module._empty_sync_state()
         self._generation = 0
         changelog_path = (
@@ -870,7 +920,14 @@ class LiteMemoryStore:
             self._commit_current_state()
         except BaseException:
             try:
-                self._reload_for_mutation(force=True)
+                if self._commit_defer_depth > 0:
+                    # Batching: keep the batch's consistent prefix resident —
+                    # the outermost deferred_commit() exit owns the durable
+                    # decision, and its full decode/digest audit stays
+                    # fail-closed against any half-applied mutation.
+                    logger.debug("skipping mutation reload under deferred_commit")
+                else:
+                    self._reload_for_mutation(force=True)
             except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 logger.debug("suppressed BaseException in cleanup/degradation path: %s", exc)
             raise
@@ -884,10 +941,15 @@ class LiteMemoryStore:
                 self._add_unlocked(func, source)
             except BaseException:
                 # See _with_writer_lock: never let a speculative mutation
-                # survive behind the fingerprint short-circuit.
-                self._pair_fingerprint = None
-                self._committed_pair = None
-                self._committed_record = None
+                # survive behind the fingerprint short-circuit — except
+                # under deferred_commit, where the batch's consistent
+                # prefix must survive for the outermost exit to revalidate.
+                if self._commit_defer_depth > 0:
+                    logger.debug("keeping resident prefix after add failure under deferred_commit")
+                else:
+                    self._pair_fingerprint = None
+                    self._committed_pair = None
+                    self._committed_record = None
                 raise
 
     def _add_unlocked(self, func: Function, source: SourceDocument) -> None:
@@ -900,6 +962,16 @@ class LiteMemoryStore:
         # an otherwise valid Function into GraphBuilder's virtual namespace.
         validate_func_id(func.id)
         validate_domain(func.domain)
+        # Every incoming node is fully validated at the mutation boundary
+        # (the same read-side rules the decode audit enforces), so the
+        # commit-time audits only guard unchanged members against
+        # serializer regressions.
+        try:
+            _validate_function_for_read(func)
+        except ValueError as exc:
+            raise LiteStorageIntegrityError(
+                "invalid Lite target payload before durable decision"
+            ) from exc
         norm = _normalize_name(func.name_normalized or func.name)
         existing_id = self._name_index.get(norm)
 
@@ -1504,11 +1576,23 @@ class LiteMemoryStore:
                 raise ValueError(_GRAPH_NODES_MUST_BE_FUNCTIONS.format(backend="LiteMemoryStore"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
             validate_func_id(node.id)
             validate_domain(node.domain)
+            try:
+                _validate_function_for_read(node)
+            except ValueError as exc:
+                raise LiteStorageIntegrityError(
+                    "invalid Lite target payload before durable decision"
+                ) from exc
             if node.id in seen_node_ids:
                 raise ValueError("LiteMemoryStore merge contains duplicate Function id")
             seen_node_ids.add(node.id)
         seen_edge_keys: set[tuple[str, str, str]] = set()
         for edge in sub_graph.edges:
+            try:
+                _validate_edge_for_read(edge)
+            except ValueError as exc:
+                raise LiteStorageIntegrityError(
+                    "invalid Lite target payload before durable decision"
+                ) from exc
             key = (edge.source, edge.target, edge.edge_type)
             if key in seen_edge_keys:
                 raise ValueError("LiteMemoryStore merge contains duplicate GraphEdge key")
@@ -1767,6 +1851,27 @@ class LiteMemoryStore:
 
     # ── Persistence ─────────────────────────────────────────────────
 
+    @contextmanager
+    def deferred_commit(self) -> Iterator[None]:
+        """Batch many mutators into one durable pair.
+
+        While the outermost scope is active, each mutator still validates
+        the resident graph in memory, but the expensive full
+        serialize→validate→fsync chain runs once at scope exit.  This is
+        the seeding fast path: per-write cost drops from O(state) to
+        O(delta) plus one amortized commit.  An exception propagates after
+        the best-effort final commit, so the consistent prefix of the batch
+        survives (the commit's own failure recovery republishes the last
+        durable pair and its error replaces the original).
+        """
+        self._commit_defer_depth += 1
+        try:
+            yield
+        finally:
+            self._commit_defer_depth -= 1
+            if self._commit_defer_depth == 0:
+                self._commit_current_state()
+
     def _raw_memory(self) -> dict[str, Any]:
         """Serialize the complete resident state, never a partial sidecar."""
         return {
@@ -1795,6 +1900,11 @@ class LiteMemoryStore:
         post-decision failure is recovered/republished before its exception
         escapes.
         """
+        if self._commit_defer_depth > 0:
+            # Batching: validate the resident invariants now, but let the
+            # outermost deferred_commit() exit pay the durable pair once.
+            self._validate_resident_graph()
+            return
         self._validate_resident_graph()
         try:
             with self._durability.writer_lock():
@@ -1810,10 +1920,25 @@ class LiteMemoryStore:
                     transaction_id=uuid.uuid4().hex,
                 )
                 try:
-                    # Validate the raw serializers before JSON can coerce a
-                    # non-string mapping key (for example provenance {1: x})
-                    # into a different durable key.
-                    self._decode_pair(target)
+                    # Full pre-durable decode audits are periodic, not
+                    # per-commit: unchanged objects passed the identical
+                    # serialize→decode chain in the commit that introduced
+                    # them, the durability digest covers the canonical
+                    # bytes of every pair, and a load-side full decode
+                    # stays fail-closed.  A reload (base_verified=False),
+                    # the first commit of a process, and every
+                    # _FULL_DECODE_AUDIT_INTERVAL-th commit still pay the
+                    # complete double decode so a serializer regression
+                    # cannot survive an audit window undetected.
+                    full_decode_audit = (
+                        not base_verified
+                        or self._commits_since_full_decode_audit >= _FULL_DECODE_AUDIT_INTERVAL
+                    )
+                    if full_decode_audit:
+                        # Validate the raw serializers before JSON can coerce a
+                        # non-string mapping key (for example provenance {1: x})
+                        # into a different durable key.
+                        self._decode_pair(target)
                     # Full JSON round trip is the type boundary for the
                     # mutable dataclasses before a durable decision is made.
                     target = LitePair(
@@ -1825,7 +1950,11 @@ class LiteMemoryStore:
                     # JSON syntax is not sufficient: this is the same full
                     # model/changelog deserialization used by publication and
                     # must succeed before a journal can become durable.
-                    self._decode_pair(target)
+                    if full_decode_audit:
+                        self._decode_pair(target)
+                        self._commits_since_full_decode_audit = 0
+                    else:
+                        self._commits_since_full_decode_audit += 1
                 except Exception as exc:
                     self._publish_pair(base)
                     raise LiteStorageIntegrityError(
@@ -1840,11 +1969,12 @@ class LiteMemoryStore:
                         target,
                         base_verified=base_verified,
                         base_record=self._committed_record if base_verified else None,
-                        # ``target`` just passed this store's ``_decode_pair``
-                        # — the same callable registered as the durability
-                        # semantic validator — so the in-commit revalidation
-                        # would be a third identical full decode.
-                        target_validated=True,
+                        # ``target_validated`` is only claimed when the full
+                        # pre-durable decode audit actually ran on this
+                        # payload — the same callable registered as the
+                        # durability semantic validator — so the in-commit
+                        # revalidation is never skipped without it.
+                        target_validated=full_decode_audit,
                     )
                 except Exception:
                     # Never retain a speculative state after a failed write.
@@ -1861,6 +1991,15 @@ class LiteMemoryStore:
     def _pair_files_unchanged(self) -> bool:
         """Stat-based check: both pair files unchanged since the last publish."""
         if self._pair_fingerprint is None:
+            return False
+        if self._pair_fingerprint is _PAIR_FILES_ABSENT:
+            try:
+                self._path.stat()
+                self._path.with_name("changelog.json").stat()
+            except OSError:
+                # Still absent: the resident state published from the same
+                # emptiness stays authoritative (no peer pair can exist).
+                return True
             return False
         try:
             memory_stat = self._path.stat()
@@ -2053,6 +2192,7 @@ class LiteMemoryStore:
         legacy = pair.transaction_id == "legacy"
         g002_historical = not legacy and _is_recognized_g002_enveloped_v1(raw)
         loaded_observations: list[Observation] = []
+        loaded_observation_ids: set[str] = set()
         loaded_facts: dict[str, Fact] = {}
         loaded_preferences: dict[str, Preference] = {}
 
@@ -2087,8 +2227,9 @@ class LiteMemoryStore:
                 for name in ("event", "context", "actor", "category"):
                     _require_exact_string(getattr(observation, name), f"Observation {name}")
                 _require_exact_string(observation.observed_at, "Observation observed_at", optional=True)
-                if any(existing.id == observation.id for existing in loaded_observations):
+                if observation.id in loaded_observation_ids:
                     raise ValueError(_DUPLICATE_OBSERVATION_ID)
+                loaded_observation_ids.add(observation.id)
                 loaded_observations.append(observation)
                 continue
 
@@ -2208,7 +2349,18 @@ class LiteMemoryStore:
                 changelog_stat.st_size,
             )
         except OSError:
-            self._pair_fingerprint = None
+            # A fresh store has neither file yet: record that absence
+            # explicitly so an unchanged check under batching (or repeated
+            # retries on an empty store) does not force an authoritative
+            # reload before every mutation.  A fingerprint of None means
+            # "unknown" (e.g. only one file exists) and keeps the reload.
+            try:
+                self._path.stat()
+                self._path.with_name("changelog.json").stat()
+            except OSError:
+                self._pair_fingerprint = _PAIR_FILES_ABSENT
+            else:
+                self._pair_fingerprint = None
 
     def _publish_committed_locally(self, committed: LitePair) -> None:
         """Bind commit results without re-decoding the freshly written pair.

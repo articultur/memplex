@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext as _nullcontext
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -392,34 +393,37 @@ class BenchmarkEvaluator:
         standard datasets, uses write() to extract and store Functions.
         """
         seeded = 0
-        for sample in samples:
-            try:
-                source_doc = dataset.to_memories(sample)
-                metadata = getattr(source_doc, "metadata", None) or {}
+        deferred = getattr(self.service.store, "deferred_commit", None)
+        batch = deferred() if callable(deferred) else _nullcontext()
+        with batch:
+            for sample in samples:
+                try:
+                    source_doc = dataset.to_memories(sample)
+                    metadata = getattr(source_doc, "metadata", None) or {}
 
-                # Check for direct memory seeding (memory_benchmark style)
-                if hasattr(dataset, "get_memory_id"):
-                    mem_type = metadata.get("memory_type", "fact")
-                    memory = metadata.get("memory")
-                    if memory is not None:
-                        self._seed_direct_memory(memory, mem_type)
+                    # Check for direct memory seeding (memory_benchmark style)
+                    if hasattr(dataset, "get_memory_id"):
+                        mem_type = metadata.get("memory_type", "fact")
+                        memory = metadata.get("memory")
+                        if memory is not None:
+                            self._seed_direct_memory(memory, mem_type)
+                            seeded += 1
+                            continue
+
+                    # Check for memory_objects list (locomo style)
+                    memory_objects = metadata.get("memory_objects", [])
+                    if memory_objects:
+                        mem_type = metadata.get("memory_type", "fact")
+                        for mem_obj in memory_objects:
+                            self._seed_direct_memory(mem_obj, mem_type)
                         seeded += 1
                         continue
 
-                # Check for memory_objects list (locomo style)
-                memory_objects = metadata.get("memory_objects", [])
-                if memory_objects:
-                    mem_type = metadata.get("memory_type", "fact")
-                    for mem_obj in memory_objects:
-                        self._seed_direct_memory(mem_obj, mem_type)
+                    self.service.write(source_doc)
                     seeded += 1
+                except Exception as exc:  # noqa: BLE001 - logged degradation path
+                    logger.warning("Failed to seed sample %s: %s", sample.id, exc)
                     continue
-
-                self.service.write(source_doc)
-                seeded += 1
-            except Exception as exc:  # noqa: BLE001 - logged degradation path
-                logger.warning("Failed to seed sample %s: %s", sample.id, exc)
-                continue
 
         logger.info("Seeded %d/%d memories", seeded, len(samples))
 
