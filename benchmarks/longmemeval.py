@@ -53,6 +53,7 @@ This module:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -98,7 +99,12 @@ class LongMemEvalSample:
     question_id: str | None = None
 
     def to_benchmark_sample(self) -> BenchmarkSample:
-        slug = self.question_id or f"{abs(hash(self.question)) & 0xFFFFFF:06x}"
+        # Stable slug: builtin hash() is randomized per process, which made
+        # sample ids (and therefore retrieval tie-breaks) flip run to run on
+        # datasets without explicit question ids.
+        slug = self.question_id or (
+            f"{hashlib.sha1(self.question.encode('utf-8')).hexdigest()[:6]}"
+        )
         return BenchmarkSample(
             id=f"longmemeval-{slug}",
             query=self.question,

@@ -377,15 +377,22 @@ class QueryPipeline:
                 )
 
             all_results: list[list[SearchResult]] = []
+            # Merge in path-definition order, never completion order:
+            # as_completed ordering is scheduler-dependent, and the
+            # downstream merge tie-breaks across path lists, so completion
+            # order made retrieval results non-deterministic run to run.
+            results_by_path: dict[str, list[SearchResult]] = {}
+            stages_by_path: dict[str, dict[str, Any]] = {}
+            failed_paths: set[str] = set()
             for future in as_completed(futures):
                 path, path_budget = futures[future]
                 try:
                     path_results, duration_ms = future.result()
-                    all_results.append(path_results)
+                    results_by_path[path] = path_results
                     if trace is not None:
                         # Candidate refs carry controlled references only
                         # (id/score/rank) -- never memory content.
-                        stage: dict[str, Any] = {
+                        stages_by_path[path] = {
                             "stage": f"{path}_search",
                             "status": "ok" if path_results else "empty",
                             "duration_ms": round(duration_ms, 3),
@@ -401,22 +408,31 @@ class QueryPipeline:
                             ],
                         }
                         if not path_results:
-                            stage["degraded_reason"] = "path returned no candidates"
-                        trace["stages"].append(stage)
+                            stages_by_path[path]["degraded_reason"] = "path returned no candidates"
                 except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.warning("Search path %s failed: %s", path, exc)
+                    failed_paths.add(path)
                     if trace is not None:
-                        trace["stages"].append(
-                            {
-                                "stage": f"{path}_search",
-                                "status": "failed",
-                                "error": str(exc),
-                                "degraded_reason": str(exc),
-                                "candidate_budget": path_budget,
-                                "candidates": 0,
-                                "candidate_refs": [],
-                            }
-                        )
+                        stages_by_path[path] = {
+                            "stage": f"{path}_search",
+                            "status": "failed",
+                            "error": str(exc),
+                            "degraded_reason": str(exc),
+                            "candidate_budget": path_budget,
+                            "candidates": 0,
+                            "candidate_refs": [],
+                        }
+
+            # Deterministic emission: definition order of `searches`.
+            for path, _, _ in searches:
+                if path in results_by_path:
+                    all_results.append(results_by_path[path])
+            if trace is not None:
+                trace["stages"].extend(
+                    stages_by_path[path]
+                    for path, _, _ in searches
+                    if path in stages_by_path or path in failed_paths
+                )
 
         return all_results
 

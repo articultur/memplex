@@ -54,13 +54,22 @@ class EmbeddingStrategy(Enum):
 
 
 class _SentenceTransformerEmbedder:
-    """Wraps ``sentence_transformers.SentenceTransformer``."""
+    """Wraps ``sentence_transformers.SentenceTransformer``.
+
+    The device comes from ``MEMPLEX_EMBEDDING_DEVICE`` (e.g. ``mps`` on
+    Apple Silicon, ``cuda`` on GPU hosts); the default is CPU, which keeps
+    behaviour identical for environments that never set the variable.
+    """
 
     def __init__(self, model_name: str, dimension: int) -> None:
         from sentence_transformers import SentenceTransformer  # type: ignore
 
         self.model_name = model_name
-        self._model = SentenceTransformer(model_name)
+        device = os.environ.get("MEMPLEX_EMBEDDING_DEVICE", "").strip()
+        if device:
+            self._model = SentenceTransformer(model_name, device=device)
+        else:
+            self._model = SentenceTransformer(model_name)
         self.dimension = dimension
 
     def encode(self, text: str) -> Vector:
@@ -69,6 +78,10 @@ class _SentenceTransformerEmbedder:
     def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
         embeddings = self._model.encode(texts, batch_size=batch_size)
         return [e.tolist() for e in embeddings]
+
+    def encode_query_batch(self, texts: list[str]) -> list[Vector]:
+        """Stateless backend: identical to :meth:`encode_batch`."""
+        return self.encode_batch(texts)
 
 
 class _SimpleTFIDFEmbedder:
@@ -131,7 +144,14 @@ class _SimpleTFIDFEmbedder:
         return vec
 
     def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
+        # Batch convenience: document-side semantics (mutates stats), kept
+        # for parity with the stateless backends.
         return [self.encode(t) for t in texts]
+
+    def encode_query_batch(self, texts: list[str]) -> list[Vector]:
+        """Transform-only batch: query-time encoding must never drift the
+        corpus statistics (same contract as :meth:`encode_query`)."""
+        return [self.encode_query(t) for t in texts]
 
 
 class _LocalONNXEmbedder:
@@ -316,6 +336,24 @@ class EmbeddingService:
         if batch_size is None:
             batch_size = self.batch_size
         return self._embedder.encode_batch(texts, batch_size=batch_size)
+
+    def embed_query_batch(self, texts: list[str], batch_size: int | None = None) -> list[Vector]:
+        """Batch transform-only embeddings (see :meth:`embed_query`).
+
+        Stats-carrying backends (TF-IDF) implement the non-mutating
+        ``encode_query_batch``; stateless backends fall back to their
+        regular batch encoding.
+        """
+        if not texts:
+            return []
+        encode_query_batch = getattr(self._embedder, "encode_query_batch", None)
+        if callable(encode_query_batch):
+            return list(encode_query_batch(texts))
+        batch_size = batch_size or self.batch_size
+        vectors: list[Vector] = []
+        for start in range(0, len(texts), max(1, batch_size)):
+            vectors.extend(self._embedder.encode(texts[start : start + max(1, batch_size)]))
+        return vectors
 
     def embed_function(
         self,

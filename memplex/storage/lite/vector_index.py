@@ -178,13 +178,27 @@ class VectorSearchIndex:
             else:
                 misses.append((doc_id, text))
 
-        for doc_id, text in misses:
-            vector = self._embed_transform_only(text)
-            if not vector:
-                continue
-            digest = sha1(text.encode("utf-8")).hexdigest()
-            self._cache[doc_id] = (digest, vector)
-            resolved[doc_id] = vector
+        if misses:
+            # Batch the backfill: one forward pass per batch instead of one
+            # per document — on CPU-bound semantic models (bge-m3) this is
+            # the difference between minutes and hours on a 500-document
+            # haystack. Falls back to per-document when the backend does
+            # not expose batch encoding.
+            # Query-time backfill must be transform-only on stats-carrying
+            # backends (TF-IDF); encode_batch there would drift corpus
+            # statistics with every newly seeded document.
+            embed_query_batch = getattr(self._embedder, "encode_query_batch", None)
+            if callable(embed_query_batch):
+                texts = [text for _, text in misses]
+                embedded = embed_query_batch(texts)
+            else:
+                embedded = [self._embed_transform_only(text) for _, text in misses]
+            for (doc_id, text), vector in zip(misses, embedded):
+                if not vector:
+                    continue
+                digest = sha1(text.encode("utf-8")).hexdigest()
+                self._cache[doc_id] = (digest, vector)
+                resolved[doc_id] = vector
         return resolved
 
     def _embed_transform_only(self, text: str) -> Vector:

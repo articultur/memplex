@@ -225,13 +225,31 @@ class MultiPathRetriever:
         """Fill ``vector_cache`` with each result's OWN embedding.
 
         Skipped when no embedding service is configured; the Reranker then
-        embeds result summaries itself.
+        embeds result summaries itself. One batched call for all missing
+        vectors: per-result encode on a large semantic model (bge-m3) was
+        the dominant query-time cost on aggregate-task corpora.
         """
         if self._embedding_service is None:
             return
-        for r in results:
-            if r.vector_cache is None:
+        missing = [r for r in results if r.vector_cache is None]
+        if not missing:
+            return
+        # Transform-only batch: query-time backfill must not drift
+        # TF-IDF corpus statistics (pinned by
+        # test_query_does_not_pollute_tfidf_stats).
+        embed_query_batch = getattr(self._embedding_service, "embed_query_batch", None)
+        if not callable(embed_query_batch):
+            # Minimal services expose only per-text methods.
+            for r in missing:
                 r.vector_cache = self._embed_query_text(r.summary)
+            return
+        batch_size = max(1, int(getattr(self._embedding_service, "batch_size", 32) or 32))
+        texts = [r.summary for r in missing]
+        vectors: list[Vector] = []
+        for start in range(0, len(texts), batch_size):
+            vectors.extend(embed_query_batch(texts[start : start + batch_size]))
+        for r, vector in zip(missing, vectors):
+            r.vector_cache = vector
 
     def _embed_query_text(self, text: str) -> Vector:
         """Embed query-time text without polluting TF-IDF corpus statistics."""
