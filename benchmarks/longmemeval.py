@@ -370,20 +370,21 @@ class LongMemEvalRunner(BenchmarkRunner):
                 )
             )
         for qtype, outcomes in sorted(per_type.items()):
-            value = sum(s["token_f1"] for s in outcomes) / len(outcomes)
-            results.append(
-                BenchmarkResult(
-                    name="longmemeval_answer_quality",
-                    dataset=f"{self.DATASET_NAME}::{qtype}",
-                    metric="token_f1",
-                    value=round(value, 4),
-                    latency_ms=latencies.mean,
-                    samples=len(outcomes),
-                    timestamp=timestamp,
-                    latency_p50_ms=latencies.p50,
-                    latency_p99_ms=latencies.p99,
+            for key in ("token_f1", "substring_hit"):
+                value = sum(s[key] for s in outcomes) / len(outcomes)
+                results.append(
+                    BenchmarkResult(
+                        name="longmemeval_answer_quality",
+                        dataset=f"{self.DATASET_NAME}::{qtype}",
+                        metric=key,
+                        value=round(value, 4),
+                        latency_ms=latencies.mean,
+                        samples=len(outcomes),
+                        timestamp=timestamp,
+                        latency_p50_ms=latencies.p50,
+                        latency_p99_ms=latencies.p99,
+                    )
                 )
-            )
         return results
 
     def run_generation(self, service, samples: list[BenchmarkSample]):
