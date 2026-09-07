@@ -152,3 +152,27 @@ evaluator 用裸 `MemplexConfig()` 构建服务（env 覆盖从未应用——�
   权重不变**。low 层（中文低重叠改写）0.0278 未被 all-MiniLM-L6-v2
   （英语模型）挽救——多语低重叠需要 bge-m3（模型映射已备，待网络
   窗口下载后是下一对照项）。
+
+## 2026-09-06 longmemeval 全量 500 样本达成（发现 2 的最终关闭）
+
+数据经代理重新取回（xiaowu0162/longmemeval-cleaned S split，streaming
+绕开 M 变体的 arrow int32 溢出；24.7 万 turn 的字符串化 JSON 修复）。
+全链路修复后 **500 样本 18m29s**（原始基线：50 样本 >14h 不可行）：
+
+- 播种链四缺陷：evaluator 无 Observation 列表分支（每样本静默失败）、
+  turn 以 role 命名导致同名合并吞掉整个 haystack、sync 捕获双平方
+  （outbox 线性查重 + entity_versions 全量重建）、runner 逐 turn 全量
+  提交。
+- 查询段：vector leg 纯 Python 余弦 O(corpus×dim)/查询 → numpy 矩阵化
+  （与标量路径逐位等价）；**最终根因是跨样本共享 store**——每样本
+  commit 走累积全库（O(总²)）且样本间语料泄漏；按 LongMemEval 协议
+  改为每样本独立 store。
+- G003 runner：`--no-traces`（大库跑禁逐查询 trace）；本地数据文件
+  现在尊重 `--num-samples`（子集副本，不改原文件）。
+
+**全量 500 结果（词汇栈，E1）**：substring_hit 0.444、token_f1 0.0358、
+exact_match 0——真实全 haystack 下的诚实基线（跨样本聚合检索远难于
+单跳实体匹配；exact_match 为零与该任务的标准难度一致，业界有生成器
+的系统通常也只报 F1/hit）。六类问题覆盖（multi-session 133、
+temporal-reasoning 133、knowledge-update 78 等）。语义栈对照与分类型
+分解是下一步。
