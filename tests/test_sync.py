@@ -1274,6 +1274,39 @@ def test_legacy_push_queue_is_bounded_and_drains_without_futures(tmp_path, monke
     assert store.pending_push_tasks == 0
 
 
+def test_legacy_push_drops_are_audited_and_never_reported_pending(
+    tmp_path, monkeypatch
+):
+    """The legacy drop path must be countable: every queue-full rejection
+    increments the failure counter exactly once and never shows up as a
+    pending task, so best-effort loss is observable rather than silent.
+    This audit contract is the recorded precondition for removing the
+    legacy queue (docs/research/sync-semantics-boundary.md).
+    """
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    store = SyncableStore(LiteMemoryStore(path=tmp_path / "audit.json"), config=_active_config())
+    release = threading.Event()
+
+    def _blocked_push() -> None:
+        release.wait(timeout=5.0)
+
+    before_failures = store._push_failures
+    accepted = [
+        store._enqueue_push(_blocked_push)
+        for _ in range(store._push_queue_capacity + 5)
+    ]
+    dropped = sum(1 for ok in accepted if not ok)
+    assert dropped == 5
+    # every rejection audited exactly once
+    assert store._push_failures == before_failures + dropped
+    # dropped tasks never count as pending work
+    assert store.pending_push_tasks == store._push_queue_capacity
+
+    release.set()
+    store.flush_push(timeout=5.0)
+    assert store.pending_push_tasks == 0
+
+
 @pytest.mark.parametrize(
     ("node", "add_method", "delete_method", "get_method"),
     (
