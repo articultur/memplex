@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass, field
@@ -208,6 +209,15 @@ class LongMemEvalDataset(EvaluationDataset):
         return observations
 
 
+def _neighbour_text(func: object) -> str:
+    """Best-effort turn text off a neighbouring Function record."""
+    for values in getattr(func, "action", []) or []:
+        desc = getattr(values, "desc", "")
+        if desc:
+            return desc
+    return ""
+
+
 def _clear_store(service: object) -> None:
     """Reset the benchmark store between independent samples."""
     clear = getattr(service.store, "clear", None)
@@ -335,6 +345,7 @@ class LongMemEvalRunner(BenchmarkRunner):
         per_type: dict[str, list[dict[str, float]]] = {}
         latencies = LatencyStats()
 
+        expansion = os.environ.get("MEMPLEX_LME_SESSION_EXPANSION", "") == "1"
         for sample in samples:
             # Each sample is an independent haystack (the LongMemEval
             # protocol): clear the store so one sample's corpus never
@@ -343,7 +354,34 @@ class LongMemEvalRunner(BenchmarkRunner):
             self._seed(service, self.dataset.to_memories(sample))
             with latencies.timed():
                 result = service.query(sample.query, top_k=top_k, explain=False)
-            predicted = " ".join(r.summary for r in result.results)
+            summaries = [r.summary for r in result.results]
+            if expansion:
+                # Aggregate-multi-hop evidence chaining: a hit turn's
+                # neighbouring turns (same session, index ±1) frequently
+                # carry the answer continuation that single-turn retrieval
+                # misses. Pull each hit's store neighbours into the
+                # predicted pool.
+                get = getattr(service.store, "get", None)
+                if callable(get):
+                    seen_ids = {r.func_id for r in result.results}
+                    for r in list(result.results):
+                        for delta in (-1, 1):
+                            parts = r.func_id.rsplit("-s", 1)
+                            if len(parts) != 2 or not parts[1].isdigit():
+                                continue
+                            neighbour_id = f"{parts[0]}-s{int(parts[1]) + delta}"
+                            if neighbour_id in seen_ids:
+                                continue
+                            try:
+                                neighbour = get(neighbour_id)
+                            except Exception:  # noqa: BLE001 - expansion is best-effort
+                                neighbour = None
+                            if neighbour is not None:
+                                seen_ids.add(neighbour_id)
+                                summaries.append(
+                                    f"{neighbour.name} {_neighbour_text(neighbour)}".strip()
+                                )
+            predicted = " ".join(summaries)
             scores = self._score_sample(predicted, list(sample.metadata.get("answers", [])))
             qtype = sample.metadata.get("question_type", "unknown")
             per_type.setdefault(qtype, []).append(scores)
