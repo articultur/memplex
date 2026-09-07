@@ -112,12 +112,22 @@ def record() -> None:
         run_queries,
         seed_documents,
     )
+    from memplex.config import load_config
     from memplex.service import MemplexService
 
     documents = [{"id": f["id"], "text": f["text"]} for f in FACTS]
     documents += load_distractors(DEFAULT_POPQA_PATH, FACTS, limit=200)
 
-    svc = MemplexService()
+    # load_config applies the MEMPLEX_* env overrides (the documented
+    # MEMPLEX_EMBEDDING_MODEL semantic-stack switch included); a bare
+    # MemplexService() here silently recorded lexical-stack features no
+    # matter which model was exported, so semantic-stack calibration
+    # evidence could never exist.
+    config = load_config()
+    config.storage.backend = "lite"
+    config.storage.path = os.environ["MEMPLEX_STORAGE_PATH"]
+    config.llm.query_enhancement = False
+    svc = MemplexService(config=config)
     svc.start()
     try:
         seed_documents(svc, documents)
