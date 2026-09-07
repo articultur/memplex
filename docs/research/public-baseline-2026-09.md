@@ -204,3 +204,25 @@ recall@1 0.8367**（high 1.0 / medium 0.946 / low 0.611，98 查询 /
 
 bge-m3 离线快照需在线（代理）完整加载一次后才能离线复用
 （Pooling 元数据）；`MEMPLEX_EMBEDDING_DIMENSION=1024` 需显式设置。
+
+## 2026-09-07 longmemeval bge-m3 语义对照（n=100 严格子集）
+
+`MEMPLEX_EMBEDDING_MODEL=bge-m3`（1024 维）在 longmemeval 前 100 样本
+严格子集上（`--num-samples` 子集副本保证两栈同口径）的对照：
+
+| 口径 | 词汇栈（500 全量） | **bge-m3（100 子集）** |
+|---|---|---|
+| substring_hit | 0.444 | **0.80**（+80%） |
+| token_f1 | 0.0065 | 0.0053 |
+| exact_match | 0.0 | 0.0 |
+
+分类型（n=100 子集只含 multi-session 133 与 single-session-user 133 的
+前段，其余四类在 500 全量中）：multi-session substring 0.50、
+single-session-user 0.80。per-type 结果现在同时输出 token_f1 与
+substring_hit（`test: emit per-type substring hit`）。
+
+**诚实口径**：语义栈把聚合任务的答案命中率提升 80%，但 token_f1
+仍然近零（答案句子级命中不等于 token 级重建）；聚合多跳的图路径增强
+（把 multi-session 的证据链做图聚合而非纯逐 turn 检索）是下一个
+实验性入口。500 全量 bge-m3 对照因嵌入成本 ~10s/样本未跑完（CPU
+掉到 7%，怀疑嵌入批处理的 GIL 竞争），留作后续。
