@@ -151,6 +151,21 @@ def _resolve_public_dataset(name: str, data_dir: Path, num_samples: int | None) 
 
     local = data_dir / f"{name}.json"
     if local.exists():
+        if num_samples is not None:
+            # Honor --num-samples for pre-placed files too: truncating to a
+            # subset copy keeps the original untouched while the run stays
+            # bounded (a full local corpus would otherwise ignore the cap).
+            import json
+
+            records = json.loads(local.read_text(encoding="utf-8"))
+            if num_samples < len(records):
+                truncated = data_dir / f"{name}.subset-{num_samples}.json"
+                if not truncated.exists():
+                    truncated.write_text(
+                        json.dumps(records[:num_samples], ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                return truncated, "public_local_file_subset"
         return local, "public_local_file"
     if name not in HF_DATASET_IDS:
         raise ValueError(

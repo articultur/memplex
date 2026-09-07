@@ -208,6 +208,16 @@ class LongMemEvalDataset(EvaluationDataset):
         return observations
 
 
+def _clear_store(service: object) -> None:
+    """Reset the benchmark store between independent samples."""
+    clear = getattr(service.store, "clear", None)
+    if callable(clear):
+        clear()
+        return
+    # Backends without a bulk clear (e.g. per-sample temp stores) are
+    # already isolated; nothing to do.
+
+
 def _normalise(text: str) -> str:
     lowered = text.lower().strip()
     collapsed = re.sub(r"\s+", " ", lowered)
@@ -326,6 +336,10 @@ class LongMemEvalRunner(BenchmarkRunner):
         latencies = LatencyStats()
 
         for sample in samples:
+            # Each sample is an independent haystack (the LongMemEval
+            # protocol): clear the store so one sample's corpus never
+            # compounds into the next one's commits and queries.
+            _clear_store(service)
             self._seed(service, self.dataset.to_memories(sample))
             with latencies.timed():
                 result = service.query(sample.query, top_k=top_k, explain=False)
@@ -333,6 +347,7 @@ class LongMemEvalRunner(BenchmarkRunner):
             scores = self._score_sample(predicted, list(sample.metadata.get("answers", [])))
             qtype = sample.metadata.get("question_type", "unknown")
             per_type.setdefault(qtype, []).append(scores)
+        _clear_store(service)
 
         all_scores = [score for scores in per_type.values() for score in scores]
         total = len(all_scores)

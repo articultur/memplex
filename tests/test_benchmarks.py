@@ -376,7 +376,7 @@ class TestOutputFile:
         captured = {}
 
         class FakeEvaluator:
-            def __init__(self, svc, output_dir, output_file="results.jsonl"):
+            def __init__(self, svc, output_dir, output_file="results.jsonl", capture_traces=True):
                 captured["output_dir"] = output_dir
                 captured["output_file"] = output_file
 
@@ -495,7 +495,7 @@ class TestForceSynthetic:
         captured = {}
 
         class FakeEvaluator:
-            def __init__(self, svc, output_dir, output_file="results.jsonl"):
+            def __init__(self, svc, output_dir, output_file="results.jsonl", capture_traces=True):
                 pass
 
             def run_all(self, dataset_paths, **kwargs):
@@ -534,7 +534,7 @@ class TestForceSynthetic:
         captured = {}
 
         class FakeEvaluator:
-            def __init__(self, svc, output_dir, output_file="results.jsonl"):
+            def __init__(self, svc, output_dir, output_file="results.jsonl", capture_traces=True):
                 pass
 
             def run_all(self, dataset_paths, **kwargs):
@@ -612,7 +612,7 @@ def test_cli_all_resolves_self_generated_without_download(tmp_path, monkeypatch)
     downloaded = []
 
     class FakeEvaluator:
-        def __init__(self, svc, output_dir, output_file="results.jsonl"):
+        def __init__(self, svc, output_dir, output_file="results.jsonl", capture_traces=True):
             pass
 
         def run_all(self, dataset_paths, **kwargs):
