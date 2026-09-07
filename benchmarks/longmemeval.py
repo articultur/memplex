@@ -97,6 +97,10 @@ class LongMemEvalSample:
     session_history: list[dict[str, str]]
     evidence_session_ids: list[Any] = field(default_factory=list)
     question_id: str | None = None
+    # Original per-session turn structure (official schema only); the
+    # session-graph aggregation path needs session boundaries, which the
+    # flattened session_history loses.
+    sessions: list[list[dict[str, str]]] = field(default_factory=list)
 
     def to_benchmark_sample(self) -> BenchmarkSample:
         # Stable slug: builtin hash() is randomized per process, which made
@@ -117,6 +121,7 @@ class LongMemEvalSample:
                 "question_date": self.question_date,
                 "evidence_session_ids": list(self.evidence_session_ids),
                 "session_history": list(self.session_history),
+                "sessions": [list(session) for session in self.sessions],
             },
         )
 
@@ -146,15 +151,19 @@ def _parse_official_entry(item: dict[str, Any]) -> LongMemEvalSample:
     raw_answer = item.get("answer")
     candidates = raw_answer if isinstance(raw_answer, list) else [raw_answer]
     answers = [str(a) for a in candidates if a is not None and str(a).strip()]
-    session_history = [
-        turn for session in item.get("haystack_sessions", []) for turn in session
+    sessions = [
+        [dict(turn) for turn in session]
+        for session in item.get("haystack_sessions", [])
+        if isinstance(session, list)
     ]
+    session_history = [turn for session in sessions for turn in session]
     return LongMemEvalSample(
         question=str(item.get("question", "")),
         answers=answers,
         question_type=str(item.get("question_type", "single-hop-user")),
         question_date=str(item.get("question_date", "")),
         session_history=session_history,
+        sessions=sessions,
         evidence_session_ids=list(item.get("answer_session_ids", [])),
         question_id=str(item["question_id"]) if item.get("question_id") else None,
     )
@@ -291,7 +300,7 @@ class LongMemEvalRunner(BenchmarkRunner):
         per-turn add pays the whole-state durability chain per turn, which
         is quadratic over a 500-sample haystack corpus.
         """
-        from memplex.models import Function, SourceDocument, SourceType
+        from memplex.models import FieldValue, Function, SourceDocument, SourceType
 
         batch = getattr(service.store, "deferred_commit", None)
         scope = batch() if callable(batch) else _nullcontext()
@@ -326,6 +335,77 @@ class LongMemEvalRunner(BenchmarkRunner):
             service.store.add(func, source)
 
     @staticmethod
+    def _seed_session_graph(service, sample, sessions) -> None:
+        """Seed per turn with session-aware ids (session-graph path)."""
+        from memplex.models import FieldValue, Function, SourceDocument, SourceType
+
+        batch = getattr(service.store, "deferred_commit", None)
+        scope = batch() if callable(batch) else _nullcontext()
+        with scope:
+            for session_index, session in enumerate(sessions):
+                for turn_index, turn in enumerate(session):
+                    text = f"{turn.get('role', 'user')}: {turn.get('content', '')}".strip()
+                    if not text:
+                        continue
+                    func_id = f"lme-{sample.id}-g{session_index}-t{turn_index}"
+                    name = (text[:120] or func_id) + f" [g{session_index}t{turn_index}]"
+                    func = Function(
+                        id=func_id,
+                        name=name,
+                        name_normalized=name.lower().strip().replace(" ", "_"),
+                        domain=None,
+                        memory_type="function",
+                        source_type=SourceType.MEETING,
+                        action=[FieldValue(desc=text[:2000])],
+                    )
+                    service.store.add(
+                        func,
+                        SourceDocument(type="longmemeval", content=text, source_type=SourceType.MEETING),
+                    )
+
+    def _aggregate_sessions(self, service, sample, results, top_k: int) -> list[str]:
+        """Session-level evidence aggregation.
+
+        Score sessions by the reranked hits landing in them, take the top
+        two sessions, and pool ALL their turns as evidence — the
+        aggregate-multi-hop answers usually span turns adjacent to the
+        hits rather than the hits alone.
+        """
+        session_hits: dict[int, float] = {}
+        hit_turns: dict[int, list[int]] = {}
+        for rank, r in enumerate(results):
+            marker = r.func_id.rsplit("-g", 1)[-1] if "-g" in r.func_id else ""
+            if "t" not in marker:
+                continue
+            session_part, turn_part = marker.split("t", 1)
+            if not session_part.isdigit() or not turn_part.isdigit():
+                continue
+            session_index = int(session_part)
+            session_hits[session_index] = session_hits.get(session_index, 0.0) + 1.0 / (rank + 1)
+            hit_turns.setdefault(session_index, []).append(int(turn_part))
+        top_sessions = sorted(session_hits, key=lambda s: -session_hits[s])[:2]
+        summaries: list[str] = [r.summary for r in results]
+        get = getattr(service.store, "get", None)
+        if not callable(get):
+            return summaries
+        for session_index in top_sessions:
+            session = ((sample.metadata or {}).get("sessions") or [])[session_index] if isinstance(
+                (sample.metadata or {}).get("sessions"), list
+            ) else []
+            for turn_index, turn in enumerate(session):
+                func_id = f"lme-{sample.id}-g{session_index}-t{turn_index}"
+                try:
+                    func = get(func_id)
+                except Exception:  # noqa: BLE001 - aggregation is best-effort
+                    func = None
+                if func is None:
+                    continue
+                text = _neighbour_text(func)
+                if text and text not in summaries:
+                    summaries.append(text)
+        return summaries
+
+    @staticmethod
     def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
         """Score one prediction against its gold answers (max over golds)."""
         f1 = max((token_f1(predicted, gold) for gold in gold_answers), default=0.0)
@@ -352,15 +432,26 @@ class LongMemEvalRunner(BenchmarkRunner):
         latencies = LatencyStats()
 
         expansion = os.environ.get("MEMPLEX_LME_SESSION_EXPANSION", "") == "1"
+        session_graph = os.environ.get("MEMPLEX_LME_SESSION_GRAPH", "") == "1"
         for sample in samples:
             # Each sample is an independent haystack (the LongMemEval
             # protocol): clear the store so one sample's corpus never
             # compounds into the next one's commits and queries.
             _clear_store(service)
-            self._seed(service, self.dataset.to_memories(sample))
-            with latencies.timed():
-                result = service.query(sample.query, top_k=top_k, explain=False)
-            summaries = [r.summary for r in result.results]
+            observations = self.dataset.to_memories(sample)
+            sessions = (sample.metadata or {}).get("sessions") or []
+            if session_graph and sessions:
+                self._seed_session_graph(service, sample, sessions)
+                with latencies.timed():
+                    result = service.query(sample.query, top_k=top_k, explain=False)
+                summaries = self._aggregate_sessions(
+                    service, sample, result.results, top_k
+                )
+            else:
+                self._seed(service, observations)
+                with latencies.timed():
+                    result = service.query(sample.query, top_k=top_k, explain=False)
+                summaries = [r.summary for r in result.results]
             if expansion:
                 # Aggregate-multi-hop evidence chaining: a hit turn's
                 # neighbouring turns (same session, index ±1) frequently
