@@ -176,3 +176,28 @@ exact_match 0——真实全 haystack 下的诚实基线（跨样本聚合检索
 的系统通常也只报 F1/hit）。六类问题覆盖（multi-session 133、
 temporal-reasoning 133、knowledge-update 78 等）。语义栈对照与分类型
 分解是下一步。
+
+## 2026-09-07 bge-m3 多语对照：低重叠层 24 倍，语义栈假设闭环
+
+bge-m3（BAAI/bge-m3，1024 维，经代理下载 2.1G）在 paraphrase 混合栈
+上的对照（离线缓存，`MEMPLEX_EMBEDDING_MODEL=bge-m3`）：
+
+| 层 | 词汇栈 recall@1 | minilm | **bge-m3** |
+|---|---|---|---|
+| high | 0.96 | 0.96 | 0.96 |
+| medium | 0.86 | 0.87 | **0.974** |
+| **low（多语低重叠）** | **0.028** | **0.028** | **0.676**（recall@5 0.946） |
+| overall | 0.58 | 0.58 | **0.86** |
+
+语义栈战役的假设闭环：低重叠层的瓶颈是**模型的多语能力**而非权重
+分配——英语 MiniLM 对中文改写无能为力（0.028），bge-m3 直接把该层
+拉到 0.676（recall@1）/0.946（recall@5）。这是"哪个组件欠账"的
+最终实测答案；部署语义栈时应默认 bge-m3。
+
+附注（工具 TODO）：`scripts/calibrate_reranker.py` 在导出
+`MEMPLEX_EMBEDDING_MODEL` 后输出与词汇栈逐字相同——该工具疑似固定
+词汇栈路径，修其 env 透传是下次校准的前置；本次校准结论（+1.0pp，
+低于 ≥+2pp 门槛）维持词汇栈口径不变。
+
+bge-m3 离线快照需在线（代理）完整加载一次后才能离线复用
+（Pooling 元数据）；`MEMPLEX_EMBEDDING_DIMENSION=1024` 需显式设置。
