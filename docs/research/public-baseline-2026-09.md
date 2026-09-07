@@ -194,10 +194,13 @@ bge-m3（BAAI/bge-m3，1024 维，经代理下载 2.1G）在 paraphrase 混合�
 拉到 0.676（recall@1）/0.946（recall@5）。这是"哪个组件欠账"的
 最终实测答案；部署语义栈时应默认 bge-m3。
 
-附注（工具 TODO）：`scripts/calibrate_reranker.py` 在导出
-`MEMPLEX_EMBEDDING_MODEL` 后输出与词汇栈逐字相同——该工具疑似固定
-词汇栈路径，修其 env 透传是下次校准的前置；本次校准结论（+1.0pp，
-低于 ≥+2pp 门槛）维持词汇栈口径不变。
+附注更新（2026-09-07 已修复）：`calibrate_reranker` 的 service 构建用
+裸 `MemplexService()`（与 evaluator 同款 env 绕过），永远录制词汇栈
+特征。修为 `load_config()` 后在 bge-m3 上重录重搜：**baseline
+recall@1 0.8367**（high 1.0 / medium 0.946 / low 0.611，98 查询 /
+3920 候选的真实语义特征），坐标下降**找不到任何改进**——默认权重即
+该特征集最优（语义信号足够强后权重不再敏感），权重维持。**语义栈的
+权重校准证据至此成立**。
 
 bge-m3 离线快照需在线（代理）完整加载一次后才能离线复用
 （Pooling 元数据）；`MEMPLEX_EMBEDDING_DIMENSION=1024` 需显式设置。
