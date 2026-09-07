@@ -226,3 +226,25 @@ substring_hit（`test: emit per-type substring hit`）。
 （把 multi-session 的证据链做图聚合而非纯逐 turn 检索）是下一个
 实验性入口。500 全量 bge-m3 对照因嵌入成本 ~10s/样本未跑完（CPU
 掉到 7%，怀疑嵌入批处理的 GIL 竞争），留作后续。
+
+## 2026-09-07 会话邻接扩展实验：总体 +1pp，multi-session +3.3pp
+
+`MEMPLEX_LME_SESSION_EXPANSION=1`（命中 turn 的相邻 ±1 回合进证据池，
+bge-m3，n=100 严格子集）对照：
+
+| 口径 | 基线 | 扩展 |
+|---|---|---|
+| substring_hit_rate | 0.71 | **0.72** |
+| multi-session substring | 0.50 | **0.533**（+3.3pp） |
+| single-session-user | 0.80 | 0.80 |
+
+结论：邻接扩展对 multi-session 有正向但小的改善——单回合 ±1 邻接
+不足以覆盖跨会话的证据链（LongMemEval 的 multi-session 问题需要在
+多个不相邻会话间聚合）。**实验性入口成立但需真正的图路径**：按
+session_id 建图、以实体/主题为桥接做证据链聚合——这是聚合多跳
+维度 level 4 的实质工程，非 flag 级改动。
+
+另发现一个**预先存在的顺序 flake**（与扩展无关，HEAD 复现 3/6）：
+合成数据 e2e 测试的 substring_hit 在 2/3 与 1.0 间漂移——
+`_parallel_scope_search` 的三线程合并顺序影响并列候选的 top-k 选择，
+修复属检索确定性战役。
