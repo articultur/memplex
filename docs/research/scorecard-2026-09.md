@@ -118,9 +118,15 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   已评估立项**——聚合多跳 level 4 的实质工程入口。顺带发现预先存在
   的检索顺序 flake（三线程合并顺序影响并列 top-k，HEAD 复现 3/6，
   待确定性战役）。
-- 累计维持 ≈ **87 / 100**（扩展为 opt-in 不改默认口径）。剩余：
-  聚合多跳图路径增强（实验设计已出）、检索顺序确定性修复、bge-m3
-  500 全量（算力预算 ~7h，MPS 已启用）。
+- **检索确定性修复（2026-09-08）**：顺序 flake 双根因消除——
+  `_parallel_scope_search` 按 as_completed 顺序合并路径（并列 tie-break
+  跨路径翻转）→ 按路径定义序合并；合成样本 id 用 `hash()`（进程随机）
+  → sha1 稳定 slug。途中发现并修复第三类完整性缺陷：批量预填充/回填
+  曾走变异的 `encode_batch`（TF-IDF 统计随查询漂移），新增
+  transform-only 的 `embed_query_batch`/`encode_query_batch` API 并双
+  站点切换——`test_query_does_not_pollute_tfidf_stats` 契约恢复。
+- 累计维持 ≈ **87 / 100**。剩余：聚合多跳图路径增强（session_id
+  建图 + 实体桥接）、bge-m3 500 全量（算力预算 ~7h，MPS 已启用）。
 
 ## 禁止性口径
 
