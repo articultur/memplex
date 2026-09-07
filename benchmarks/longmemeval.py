@@ -274,9 +274,15 @@ class LongMemEvalRunner(BenchmarkRunner):
 
     @staticmethod
     def _seed_turns(service, observations, Function, SourceDocument, SourceType) -> None:
+        from memplex.models.memory import FieldValue
+
         for index, observation in enumerate(observations):
             text = f"{observation.event}: {observation.context}".strip()
-            name = text[:120] or f"longmemeval-session-{index}"
+            # Name on the content with an id fragment so distinct turns
+            # never merge into one Function (a shared prefix alone
+            # collapses a whole haystack), and carry the text in an
+            # action FieldValue so the search index can score it.
+            name = (text[:120] or f"longmemeval-session-{index}") + f" [{observation.id[-8:]}]"
             func = Function(
                 id=observation.id,
                 name=name,
@@ -284,6 +290,7 @@ class LongMemEvalRunner(BenchmarkRunner):
                 domain=None,
                 memory_type="function",
                 source_type=SourceType.MEETING,
+                action=[FieldValue(desc=text[:2000])],
             )
             source = SourceDocument(
                 type="longmemeval",
