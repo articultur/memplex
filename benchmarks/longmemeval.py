@@ -405,6 +405,45 @@ class LongMemEvalRunner(BenchmarkRunner):
                     summaries.append(text)
         return summaries
 
+    def _entity_bridged_pool(self, service, results) -> list[str]:
+        """Entity-bridged evidence chains: turns sharing a rare term
+        (appearing in <=3 turns of the corpus) with a hit, plus +-1
+        adjacency -- precision-preserving chains instead of whole-session
+        pooling."""
+        summaries: list[str] = [r.summary for r in results]
+        all_turns = getattr(self, "_turn_texts", {})
+        if not all_turns:
+            return summaries
+        term_docs: dict[str, set[str]] = {}
+        for turn_id, text in all_turns.items():
+            for token in set(_normalise(text).split()):
+                if len(token) >= 3:
+                    term_docs.setdefault(token, set()).add(turn_id)
+        summaries_extra: list[str] = []
+        seen_ids: set[str] = {r.func_id for r in results}
+        for r in results:
+            hit_text = _normalise(all_turns.get(r.func_id, ""))
+            hit_terms = {
+                token
+                for token in hit_text.split()
+                if token and len(term_docs.get(token, set())) <= 3
+            }
+            bridge_ids: set[str] = set()
+            for token in hit_terms:
+                bridge_ids |= term_docs.get(token, set())
+            parts = r.func_id.rsplit("-s", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                base = int(parts[1])
+                bridge_ids.add(f"{parts[0]}-s{base - 1}")
+                bridge_ids.add(f"{parts[0]}-s{base + 1}")
+            bridge_ids -= seen_ids
+            for bridge_id in sorted(bridge_ids):
+                seen_ids.add(bridge_id)
+                text = all_turns.get(bridge_id)
+                if text:
+                    summaries_extra.append(text)
+        return summaries + summaries_extra
+
     @staticmethod
     def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
         """Score one prediction against its gold answers (max over golds)."""
@@ -432,6 +471,7 @@ class LongMemEvalRunner(BenchmarkRunner):
         latencies = LatencyStats()
 
         expansion = os.environ.get("MEMPLEX_LME_SESSION_EXPANSION", "") == "1"
+        entity_bridge = os.environ.get("MEMPLEX_LME_ENTITY_BRIDGE", "") == "1"
         session_graph = os.environ.get("MEMPLEX_LME_SESSION_GRAPH", "") == "1"
         for sample in samples:
             # Each sample is an independent haystack (the LongMemEval
@@ -447,6 +487,14 @@ class LongMemEvalRunner(BenchmarkRunner):
                 summaries = self._aggregate_sessions(
                     service, sample, result.results, top_k
                 )
+            elif entity_bridge:
+                self._seed(service, observations)
+                self._turn_texts = {
+                    o.id: f"{o.event}: {o.context}".strip() for o in observations
+                }
+                with latencies.timed():
+                    result = service.query(sample.query, top_k=top_k, explain=False)
+                summaries = self._entity_bridged_pool(service, result.results)
             else:
                 self._seed(service, observations)
                 with latencies.timed():
