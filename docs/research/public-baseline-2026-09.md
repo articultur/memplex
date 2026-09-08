@@ -276,3 +276,12 @@ n=50 bge-m3 严格子集：**overall substring_hit_rate 0.86**（邻接扩展
 口径 0.72-0.80）、single-session-user 0.86、E1 证据级。精化对证据池
 的排序提质有效。n=50 子集不含 multi-session 前段样本，精化对该类
 的效果待 500 全量（后台运行中）。
+
+## 2026-09-09 session 图 v2 链式聚合：与 v1 同级的负结果
+
+`MEMPLEX_LME_SESSION_GRAPH=2`（v2：命中回合 ±2 同会话局部链 + 跨会话
+rare-term 实体桥接，bge-m3 n=100）：overall 0.70、multi-session 0.467
+——与 v1 整池聚合同级。三方案全部试毕：**逐 turn 检索 + 任一会话级
+后置聚合都无法收敛 multi-session 与 single-session 的差距**（0.50 上下
+vs 0.80）。聚合多跳的正解在检索之前的图结构（session 实体图上做
+多跳查询本身），或官方管线的生成器——两者均已立项。
