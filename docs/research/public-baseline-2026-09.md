@@ -268,3 +268,11 @@ substring 0.72、multi-session 0.533、single-session-user 0.80——与纯
 邻接扩展完全平价（合成集的答案证据恰好都在相邻回合，桥接无增量；
 其精度保留设计保证不劣化）。桥接的正向价值需在真实 longmemeval
 （证据链跨非相邻回合）上验证。三方案对照全部落档。
+
+## 2026-09-08 第二遍聚焦查询精化验证：n=50 substring 0.86
+
+桥接回合经理 ranker 重打分后（只保留被聚焦查询召回的桥接回合），
+n=50 bge-m3 严格子集：**overall substring_hit_rate 0.86**（邻接扩展
+口径 0.72-0.80）、single-session-user 0.86、E1 证据级。精化对证据池
+的排序提质有效。n=50 子集不含 multi-session 前段样本，精化对该类
+的效果待 500 全量（后台运行中）。
