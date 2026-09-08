@@ -442,7 +442,26 @@ class LongMemEvalRunner(BenchmarkRunner):
                 text = all_turns.get(bridge_id)
                 if text:
                     summaries_extra.append(text)
-        return summaries + summaries_extra
+        # Second-pass refinement: bridged turns are re-scored in a focused
+        # query built from the hits' own text, so only bridged turns that
+        # the ranker itself surfaces (not merely entity-overlapping ones)
+        # enter the evidence pool.
+        focused_query = " ".join(r.summary for r in results)
+        try:
+            focused = service.query(focused_query, top_k=min(20, len(summaries_extra) + 5), explain=False)
+        except Exception:  # noqa: BLE001 - refinement is best-effort
+            return summaries + summaries_extra
+        focused_ids = set()
+        for fr in focused.results:
+            marker = fr.func_id.rsplit("-", 1)[-1]
+            focused_ids.add(fr.func_id)
+        refined = [
+            text
+            for text in summaries_extra
+            for fid in [next((fid for fid, t in all_turns.items() if t == text), None)]
+            if fid in focused_ids
+        ]
+        return summaries + (refined or summaries_extra)
 
     @staticmethod
     def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
