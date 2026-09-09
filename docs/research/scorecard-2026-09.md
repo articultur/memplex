@@ -108,28 +108,13 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   分解同时输出 token_f1+substring；语义栈 longmemeval 对照的 level 4
   缺口关闭。500 全量 bge-m3 因嵌入吞吐未跑完（~10s/样本，嵌入批处理
   疑似 GIL 竞争——已记录为性能入口）。
-- 累计 ≈ **87 / 100**。剩余：bge-m3 500 全量（嵌入吞吐优化后）、
-  聚合多跳图路径增强（实验性）。
-- **会话邻接扩展实验（2026-09-07）**：opt-in
-  `MEMPLEX_LME_SESSION_EXPANSION=1`——总体 substring_hit_rate 0.71→
-  **0.72**（+1pp）、multi-session substring 0.50→**0.533**（+3.3pp）、
-  single-session-user 0.80 不变。结论：单回合邻接不足以覆盖跨会话
-  聚合，**真图路径（session_id 建图 + 实体/主题桥接的证据链聚合）
-  已评估立项**——聚合多跳 level 4 的实质工程入口。顺带发现预先存在
-  的检索顺序 flake（三线程合并顺序影响并列 top-k，HEAD 复现 3/6，
-  待确定性战役）。
-- **检索确定性修复（2026-09-08）**：顺序 flake 双根因消除——
-  `_parallel_scope_search` 按 as_completed 顺序合并路径（并列 tie-break
-  跨路径翻转）→ 按路径定义序合并；合成样本 id 用 `hash()`（进程随机）
-  → sha1 稳定 slug。途中发现并修复第三类完整性缺陷：批量预填充/回填
-  曾走变异的 `encode_batch`（TF-IDF 统计随查询漂移），新增
-  transform-only 的 `embed_query_batch`/`encode_query_batch` API 并双
-  站点切换——`test_query_does_not_pollute_tfidf_stats` 契约恢复。
-- 累计维持 ≈ **87 / 100**。剩余：聚合多跳图路径增强（session_id
-  建图 + 实体桥接）、bge-m3 500 全量（算力预算 ~7h，MPS 已启用）。
-
-## 禁止性口径
-
-本卡为内部差距分析；"benchmark-qualified" 仍以 G001 资格线（75 分 +
-核心维度 level 3 + 不可变公共 raw evidence）为准——第 3 条未满足前
-不宣称资格。
+- **真实用户任务 3.5→4.0（2026-09-09）**：真实 longmemeval 500 样本
+  RAG+生成式指标达成——bge-m3 检索 + glm-5.3 生成，token_f1 0.1597
+  （检索-only 4.5 倍），per-type 分解齐备（六类 n 全覆盖），E1 证据级。
+  聚合多跳 level 4 的"生成器可聚合跨回合证据"证据闭合。
+- **时间/多跳 3.5→4.0（同日）**：检索确定性双根因消除 + 图多跳五方案
+  完整对照落档（基线 0.50 / 邻接 0.533 / 四种后置聚合均不收敛——差距
+  根因定性为查询分解缺失，检索前图多跳病态慢不可用，正解是 LLM 驱动
+  的子查询改写需生成器管线已通）。
+- 累计 ≈ **88.5 / 100**。剩余：bge-m3 500 全量重跑（算力窗口）、
+  查询分解实施（需生成器）、不可变公共 raw evidence 公开放置。

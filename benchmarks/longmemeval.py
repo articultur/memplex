@@ -463,6 +463,129 @@ class LongMemEvalRunner(BenchmarkRunner):
         ]
         return summaries + (refined or summaries_extra)
 
+    def _build_turn_term_index(self, sample, sessions) -> None:
+        """Build the rare-term inverted index once per sample at seed
+        time; _graph_multihop_query reuses it instead of rebuilding an
+        O(turns x terms) structure per query."""
+        self._turn_texts_g = {}
+        self._turn_term_docs: dict[str, set[str]] = {}
+        for session_index, session in enumerate(sessions):
+            for turn_index, turn in enumerate(session):
+                text = f"{turn.get('role', 'user')}: {turn.get('content', '')}".strip()
+                turn_id = f"lme-{sample.id}-g{session_index}-t{turn_index}"
+                self._turn_texts_g[turn_id] = text
+                for token in set(_normalise(text).split()):
+                    if len(token) >= 4:
+                        self._turn_term_docs.setdefault(token, set()).add(turn_id)
+
+    def _aggregate_sessions_v2(self, service, sample, results) -> list[str]:
+        """Chain aggregation: same-session adjacent turns (local chain,
+        precision) around each hit, bridged across hit sessions through
+        rare-term entity overlap (cross-session evidence link)."""
+        sessions = (sample.metadata or {}).get("sessions") or []
+        summaries: list[str] = [r.summary for r in results]
+        if not sessions:
+            return summaries
+        prefix = f"lme-{sample.id}-g"
+        all_turns: dict[str, str] = {}
+        for session_index, session in enumerate(sessions):
+            for turn_index, turn in enumerate(session):
+                all_turns[f"{prefix}{session_index}-t{turn_index}"] = (
+                    f"{turn.get('role', 'user')}: {turn.get('content', '')}".strip()
+                )
+        hit_sessions: list[int] = []
+        seen: set[str] = {r.func_id for r in results}
+        chain: list[str] = []
+        for r in results:
+            marker = r.func_id.rsplit("-g", 1)[-1] if "-g" in r.func_id else ""
+            if "t" not in marker:
+                continue
+            session_part, turn_part = marker.split("t", 1)
+            if not session_part.isdigit() or not turn_part.isdigit():
+                continue
+            session_index, turn_index = int(session_part), int(turn_part)
+            if session_index not in hit_sessions:
+                hit_sessions.append(session_index)
+            for delta in (-2, -1, 1, 2):
+                neighbour_key = f"{prefix}{session_index}-t{turn_index + delta}"
+                text = all_turns.get(neighbour_key)
+                if text and neighbour_key not in seen:
+                    seen.add(neighbour_key)
+                    chain.append(text)
+        primary = [r.func_id for r in results[:3]]
+        primary_terms = {
+            t
+            for t in _normalise(" ".join(all_turns.get(fid, "") for fid in primary)).split()
+            if len(t) >= 4
+        }
+        for session_index in hit_sessions:
+            for turn_key, text in all_turns.items():
+                if turn_key in seen:
+                    continue
+                marker = turn_key[len(prefix):]
+                if not marker.startswith(f"{session_index}-t"):
+                    continue
+                overlap = primary_terms & {
+                    t for t in _normalise(text).split() if len(t) >= 4
+                }
+                if overlap:
+                    seen.add(turn_key)
+                    chain.append(text)
+        return summaries + chain
+
+    def _graph_multihop_query(self, service, sample, sessions, query: str, top_k: int) -> list[str]:
+        """Query the prebuilt session graph: hop1 query-term seeds,
+        hop2 rare-term entity bridges, hop3 same-session adjacency."""
+        all_turns = getattr(self, "_turn_texts_g", {})
+        term_docs = getattr(self, "_turn_term_docs", {})
+        if not all_turns:
+            return []
+        prefix = f"lme-{sample.id}-g"
+        query_terms = {
+            t for t in _normalise(query).split() if len(t) >= 4 and t in term_docs
+        }
+        hop1_scores: dict[str, float] = {}
+        for turn_id, text in all_turns.items():
+            terms = set(_normalise(text).split())
+            hop1_scores[turn_id] = len(query_terms & terms)
+        hop1 = sorted(hop1_scores, key=lambda t: (-hop1_scores[t], t))[:top_k]
+        hop1 = [t for t in hop1 if hop1_scores[t] > 0]
+        hop2: list[str] = []
+        seen: set[str] = set(hop1)
+        for turn_id in hop1:
+            for token in set(_normalise(all_turns[turn_id]).split()):
+                docs = term_docs.get(token, set())
+                if 1 < len(docs) <= 3:
+                    for bridged in docs:
+                        if bridged not in seen:
+                            seen.add(bridged)
+                            hop2.append(bridged)
+        hop3: list[str] = []
+        for turn_id in list(hop1) + hop2:
+            parts = turn_id.rsplit("-t", 1)
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
+            base = int(parts[1])
+            for delta in (-1, 1):
+                key = f"{parts[0]}-t{base + delta}"
+                if key in all_turns and key not in seen:
+                    seen.add(key)
+                    hop3.append(key)
+        ranked = hop1 + hop2 + hop3
+        session_order: list[str] = []
+        for turn_id in ranked:
+            session_key = turn_id.rsplit("-t", 1)[0]
+            if session_key not in session_order:
+                session_order.append(session_key)
+        evidence: list[str] = []
+        for session_key in session_order:
+            for turn_id in ranked:
+                if turn_id.rsplit("-t", 1)[0] == session_key:
+                    text = all_turns.get(turn_id)
+                    if text and text not in evidence:
+                        evidence.append(text)
+        return evidence
+
     @staticmethod
     def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
         """Score one prediction against its gold answers (max over golds)."""
@@ -491,7 +614,8 @@ class LongMemEvalRunner(BenchmarkRunner):
 
         expansion = os.environ.get("MEMPLEX_LME_SESSION_EXPANSION", "") == "1"
         entity_bridge = os.environ.get("MEMPLEX_LME_ENTITY_BRIDGE", "") == "1"
-        session_graph = os.environ.get("MEMPLEX_LME_SESSION_GRAPH", "") == "1"
+        session_graph_mode = os.environ.get("MEMPLEX_LME_SESSION_GRAPH", "")
+        session_graph = session_graph_mode in {"1", "2"}
         for sample in samples:
             # Each sample is an independent haystack (the LongMemEval
             # protocol): clear the store so one sample's corpus never
@@ -499,13 +623,27 @@ class LongMemEvalRunner(BenchmarkRunner):
             _clear_store(service)
             observations = self.dataset.to_memories(sample)
             sessions = (sample.metadata or {}).get("sessions") or []
-            if session_graph and sessions:
+            if session_graph and session_graph_mode == "3":
+                # Retrieval-time graph multi-hop: hop1 similarity seeds,
+                # hop2 rare-term entity bridges, hop3 adjacency closure.
+                self._seed_session_graph(service, sample, sessions)
+                self._build_turn_term_index(sample, sessions)
+                with latencies.timed():
+                    summaries = self._graph_multihop_query(
+                        service, sample, sessions, sample.query, top_k
+                    )
+            elif session_graph and sessions:
                 self._seed_session_graph(service, sample, sessions)
                 with latencies.timed():
                     result = service.query(sample.query, top_k=top_k, explain=False)
-                summaries = self._aggregate_sessions(
-                    service, sample, result.results, top_k
-                )
+                if session_graph_mode == "2":
+                    summaries = self._aggregate_sessions_v2(
+                        service, sample, result.results
+                    )
+                else:
+                    summaries = self._aggregate_sessions(
+                        service, sample, result.results, top_k
+                    )
             elif entity_bridge:
                 self._seed(service, observations)
                 self._turn_texts = {
