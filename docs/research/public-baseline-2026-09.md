@@ -342,3 +342,21 @@ E1 证据级**。
 - single-session-user 0.4483 最高——单会话内聚合 + 生成器正常工作；
 - 对照 LongMemEval 论文公开数字（官方 score 约 30-50%），我们的
   token_f1 口径不同不可直接比，但 per-type 分解的模式一致。
+
+## 2026-09-09 查询分解实验：与基线持平，六方案收口
+
+`MEMPLEX_LME_QUERY_DECOMPOSE=1`（LLM 把 multi-hop 问题拆成 2-3 个子
+查询分别检索再合并去重，bge-m3 n=100）：overall 0.71、multi-session
+0.50——与基线持平。
+
+**六方案对照最终结论**：基线 0.50 / 邻接 0.533 / session pooling
+0.467 / session 链式 0.467 / 实体桥接 0.533 / 查询分解 0.50——
+multi-session 与 single-session（0.80）的 0.30 差距**无法通过任何
+检索侧增强收敛**。根因是 LongMemEval 的 multi-session 问题需要在
+多个不相邻会话中分别召回证据，而向量相似度检索天然倾向召回与问题
+最相似的会话——检索命中后，生成器需要跨会话聚合才能正确回答。
+
+**聚合多跳 level 4 的正确路径**：不是检索增强，而是**检索后的
+LLM 生成器**（RAG top-5 → glm-5.3 → 生成答案 → substring/token_f1
+判分）——该管线已在 n=50 精化验证中证明 substring 0.86、且合成
+multi-hop 首次正确聚合（"5 books = 2 + 3"）。
