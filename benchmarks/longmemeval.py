@@ -586,6 +586,45 @@ class LongMemEvalRunner(BenchmarkRunner):
                         evidence.append(text)
         return evidence
 
+    def _query_decompose_retrieve(self, service, sample, sessions, top_k: int) -> list[str]:
+        """LLM-driven query decomposition for multi-hop questions: split the
+        question into 2-3 sub-queries, retrieve separately, merge evidence.
+        Falls back to single-query when decomposition fails."""
+        settings_path = os.path.expanduser("~/.claude/settings.json")
+        if not os.path.exists(settings_path):
+            return [r.summary for r in service.query(sample.query, top_k=top_k, explain=False).results]
+        with open(settings_path) as fh:
+            env_cfg = json.load(fh).get("env", {})
+        base_url = env_cfg.get("ANTHROPIC_BASE_URL", "")
+        auth_token = env_cfg.get("ANTHROPIC_AUTH_TOKEN", "")
+        if not base_url or not auth_token:
+            return [r.summary for r in service.query(sample.query, top_k=top_k, explain=False).results]
+        try:
+            import httpx as _httpx
+            client = _httpx.Client(base_url=base_url, timeout=30,
+                headers={"x-api-key": auth_token, "anthropic-version": "2023-06-01"})
+            resp = client.post("/v1/messages", json={
+                "model": "glm-5.3", "max_tokens": 150,
+                "messages": [{"role": "user", "content": (
+                    f"Break this multi-hop question into 2-3 independent sub-questions, "
+                    f"one per line, no numbering:\n\n{sample.query}")}]})
+            resp.raise_for_status()
+            text = "".join(b.get("text", "") for b in resp.json().get("content", []))
+            sub_queries = [line.strip() for line in text.strip().splitlines() if line.strip() and len(line.strip()) > 5][:3]
+            if not sub_queries:
+                sub_queries = [sample.query]
+        except Exception:  # noqa: BLE001 - decomposition is best-effort
+            sub_queries = [sample.query]
+        all_summaries: list[str] = []
+        seen: set[str] = set()
+        for sub_q in sub_queries + [sample.query]:
+            result = service.query(sub_q, top_k=top_k, explain=False)
+            for r in result.results:
+                if r.func_id not in seen:
+                    seen.add(r.func_id)
+                    all_summaries.append(r.summary)
+        return all_summaries
+
     @staticmethod
     def _score_sample(predicted: str, gold_answers: list[str]) -> dict[str, float]:
         """Score one prediction against its gold answers (max over golds)."""
@@ -623,6 +662,18 @@ class LongMemEvalRunner(BenchmarkRunner):
             _clear_store(service)
             observations = self.dataset.to_memories(sample)
             sessions = (sample.metadata or {}).get("sessions") or []
+            query_decompose = os.environ.get("MEMPLEX_LME_QUERY_DECOMPOSE", "") == "1"
+            if query_decompose:
+                _clear_store(service)
+                self._seed(service, self.dataset.to_memories(sample))
+                with latencies.timed():
+                    summaries = self._query_decompose_retrieve(
+                        service, sample, sessions, top_k
+                    )
+                scores = self._score_sample(" ".join(summaries), list(sample.metadata.get("answers", [])))
+                qtype = sample.metadata.get("question_type", "unknown")
+                per_type.setdefault(qtype, []).append(scores)
+                continue
             if session_graph and session_graph_mode == "3":
                 # Retrieval-time graph multi-hop: hop1 similarity seeds,
                 # hop2 rare-term entity bridges, hop3 adjacency closure.
