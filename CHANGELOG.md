@@ -6,6 +6,22 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+2026-09-14 fail-closed gate for unpatched ChromaDB advisories:
+
+- Every released chromadb 0.4.17–1.5.9 (latest) sits inside at least one
+  published advisory with no fixed upstream release (2 critical code
+  injection, 2 high cross-tenant access). `create_vector_store("chroma")`
+  now raises while the installed version is inside a known-unpatched
+  range, and `create_vector_store("auto")` degrades to the
+  dependency-free InMemory backend with an error log. Both gates lift
+  automatically for versions outside every published range; explicit
+  opt-in remains available via `allow_vulnerable_chroma=True` or
+  `MEMPLEX_ALLOW_VULNERABLE_CHROMA=1`. Default deployments (Lite /
+  PostgreSQL + pgvector) never load chromadb and are unaffected. The
+  advisory table and mitigations are documented in `SECURITY.md`.
+
 ### Fixed
 
 2026-08-28 multi-dimensional review remediation:

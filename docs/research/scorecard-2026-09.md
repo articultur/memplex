@@ -135,3 +135,13 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   Discussions 有意不开：SUPPORT.md 明确 issue forms 是唯一支持通道。
   上轮"剩余"中的 raw evidence 公开放置已由 f33d852（E1 bundle 入库
   推送）解决。G001 审计日 49.5 → 社区表面维度达标杆清单。
+- **开源安全面闭环（2026-09-14，同日）**：推送暴露 Dependabot 4 个
+  chromadb 未修复公告（2 critical 预auth代码注入 + 2 high 跨租户访问，
+  上游最新 1.5.9 即受影响终点、无修复版）。落地 fail-closed 门禁——
+  `create_vector_store("chroma")` 在已知漏洞区间内抛 RuntimeError、
+  `"auto"` 降级 InMemory 并记 error 日志，显式 `allow_vulnerable_chroma`
+  / `MEMPLEX_ALLOW_VULNERABLE_CHROMA=1` 才放行；区间字面量编码，
+  未来 chromadb 越出全部公告区间自动放行。8 个新测试（含不可解析
+  版本 fail-closed、参数/env 双覆盖、auto 降级与安全版优先 chroma）。
+  SECURITY.md 增设"可选依赖已知公告"段（GHSA 表 + 影响面声明：默认
+  lite/PG+pgvector 路径不加载 chromadb）+ CHANGELOG Security 段。

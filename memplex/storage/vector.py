@@ -17,6 +17,8 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -157,6 +159,54 @@ except ImportError:
     chromadb = None
 
 
+# Known-unpatched chromadb advisories (Dependabot, checked 2026-09-14).
+# Every released version inside these ranges is affected and upstream has
+# shipped no fix yet -- the latest release (1.5.9) is the affected ceiling
+# -- so construction fails closed unless the caller explicitly accepts the
+# risk. Ranges are encoded literally so a future chromadb outside all of
+# them clears the gate without a code change.
+_CHROMA_ADVISORIES: tuple[tuple[str, tuple[int, int, int], tuple[int, int, int]], ...] = (
+    ("GHSA-36p7-vc44-83pf", (0, 4, 17), (1, 5, 9)),  # critical: code injection
+    ("GHSA-f4j7-r4q5-qw2c", (1, 0, 0), (1, 5, 9)),  # critical: pre-auth code injection
+    ("GHSA-2wm9-hf6c-p5cr", (0, 4, 17), (1, 5, 9)),  # high: cross-tenant data access
+    ("GHSA-xph7-9rjv-w5fr", (0, 5, 0), (1, 5, 9)),  # high: RBAC not scoped to tenant/db/collection
+)
+
+
+def _chroma_version_tuple() -> tuple[int, int, int] | None:
+    """Installed chromadb version as a comparable tuple, None if unknowable."""
+    if not _CHROMA_AVAILABLE or chromadb is None:
+        return None
+    raw = str(getattr(chromadb, "__version__", "") or "")
+    parts: list[int] = []
+    for piece in raw.split(".")[:3]:
+        digits = re.match(r"\d+", piece.strip())
+        parts.append(int(digits.group()) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
+
+
+def _chroma_advisory_hits() -> list[str]:
+    """GHSA ids whose known-vulnerable range covers the installed chromadb.
+
+    An importable but unversionable chromadb cannot be proven outside any
+    range, so it fails closed (all advisories reported).
+    """
+    version = _chroma_version_tuple()
+    if version is None:
+        return [advisory for advisory, _, _ in _CHROMA_ADVISORIES]
+    return [
+        advisory
+        for advisory, low, high in _CHROMA_ADVISORIES
+        if low <= version <= high
+    ]
+
+
+def _chroma_risk_accepted(allow: bool) -> bool:
+    return allow or os.environ.get("MEMPLEX_ALLOW_VULNERABLE_CHROMA") == "1"
+
+
 class ChromaVectorStore:
     """ChromaDB-backed vector store with sentence-transformers embeddings."""
 
@@ -235,7 +285,11 @@ class ChromaVectorStore:
 # ── Factory ──────────────────────────────────────────────────────────
 
 
-def create_vector_store(backend: str = "auto") -> VectorStore:
+def create_vector_store(
+    backend: str = "auto",
+    *,
+    allow_vulnerable_chroma: bool = False,
+) -> VectorStore:
     """Create a vector store by backend name.
 
     Parameters
@@ -244,6 +298,15 @@ def create_vector_store(backend: str = "auto") -> VectorStore:
         ``"inmemory"`` | ``"chroma"`` | ``"auto"`` (default).
         ``"auto"`` prefers ChromaDB and falls back to InMemory.
         ``"chroma"`` without chromadb installed raises ``ImportError``.
+    allow_vulnerable_chroma:
+        Explicitly accept the known-unpatched chromadb advisories
+        (``_CHROMA_ADVISORIES``; no fixed upstream release exists yet)
+        and construct the ChromaDB backend anyway. Without this (or the
+        ``MEMPLEX_ALLOW_VULNERABLE_CHROMA=1`` env var), ``"chroma"``
+        raises ``RuntimeError`` and ``"auto"`` degrades to InMemory with
+        an error log. Default deployments (lite/PostgreSQL paths) never
+        touch chromadb and are unaffected.
+
     """
     if backend == "chroma":
         if not _CHROMA_AVAILABLE:
@@ -252,11 +315,31 @@ def create_vector_store(backend: str = "auto") -> VectorStore:
                 "pip install chromadb sentence-transformers "
                 "(or use backend='inmemory')."
             )
+        hits = _chroma_advisory_hits()
+        if hits and not _chroma_risk_accepted(allow_vulnerable_chroma):
+            raise RuntimeError(
+                "installed chromadb is inside known-unpatched advisory "
+                f"ranges: {', '.join(hits)}. No fixed upstream release "
+                "exists yet. Use backend='inmemory' (default deployments "
+                "are unaffected), or pass allow_vulnerable_chroma=True / "
+                "set MEMPLEX_ALLOW_VULNERABLE_CHROMA=1 to explicitly "
+                "accept the risk."
+            )
         return ChromaVectorStore()
     if backend == "inmemory":
         return InMemoryVectorStore()
     if backend == "auto":
         if _CHROMA_AVAILABLE:
+            hits = _chroma_advisory_hits()
+            if hits and not _chroma_risk_accepted(allow_vulnerable_chroma):
+                logger.error(
+                    "chromadb is installed but inside known-unpatched "
+                    "advisory ranges (%s); degrading 'auto' to "
+                    "InMemoryVectorStore. Set MEMPLEX_ALLOW_VULNERABLE_CHROMA=1 "
+                    "to override.",
+                    ", ".join(hits),
+                )
+                return InMemoryVectorStore()
             return ChromaVectorStore()
         return InMemoryVectorStore()
     raise ValueError(f"Unknown vector store backend: {backend!r}")

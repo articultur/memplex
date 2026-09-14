@@ -3,6 +3,42 @@
 Use the [canonical real-value CLI guide](docs/guides/real-value-cli.md) for tested command forms
 and the limits of local, agent, sync, and backup evidence.
 
+## Known advisories in optional dependencies
+
+The optional `vector` extra (`pip install memplex[vector]`) pulls in
+[ChromaDB](https://pypi.org/project/chromadb/). As of 2026-09-14 every
+released ChromaDB version from 0.4.17 through 1.5.9 (the latest) falls
+inside at least one published advisory with **no fixed upstream release
+yet**:
+
+| GHSA | Severity | Summary |
+| --- | --- | --- |
+| [GHSA-f4j7-r4q5-qw2c](https://github.com/advisories/GHSA-f4j7-r4q5-qw2c) | critical | Pre-authentication code injection (≥ 1.0.0) |
+| [GHSA-36p7-vc44-83pf](https://github.com/advisories/GHSA-36p7-vc44-83pf) | critical | Code injection (≥ 0.4.17) |
+| [GHSA-2wm9-hf6c-p5cr](https://github.com/advisories/GHSA-2wm9-hf6c-p5cr) | high | Cross-tenant data access (≥ 0.4.17) |
+| [GHSA-xph7-9rjv-w5fr](https://github.com/advisories/GHSA-xph7-9rjv-w5fr) | high | RBAC not scoped to tenant/database/collection (≥ 0.5.0) |
+
+Scope and mitigation:
+
+- Memplex's default deployments — the Lite store with its built-in
+  vector index, and the PostgreSQL + pgvector path — **never load
+  chromadb**. The package is only reachable when user code explicitly
+  requests the `chroma`/`auto` vector-store backend from
+  `memplex.storage.vector`.
+- `create_vector_store("chroma")` **fails closed** (raises) while the
+  installed chromadb is inside a known-unpatched range, and
+  `create_vector_store("auto")` degrades to the dependency-free
+  InMemory backend with an error log. Both gates lift automatically for
+  chromadb versions outside every published range.
+- To explicitly accept the risk on an isolated network, pass
+  `allow_vulnerable_chroma=True` or set
+  `MEMPLEX_ALLOW_VULNERABLE_CHROMA=1`. Do not expose a chroma-backed
+  deployment to untrusted networks while the advisories are open.
+- The literal advisory ranges live in
+  [`memplex/storage/vector.py`](memplex/storage/vector.py)
+  (`_CHROMA_ADVISORIES`); this section and that table are updated
+  together.
+
 ## Reporting a vulnerability
 
 Report vulnerabilities privately through the repository's vulnerability-only GitHub Security

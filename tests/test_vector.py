@@ -180,6 +180,71 @@ def test_create_vector_store_chroma_unavailable_raises():
         create_vector_store("chroma")
 
 
+# ── create_vector_store advisory gate (unpatched chromadb CVEs) ──────
+
+
+def _simulate_chroma(monkeypatch, version):
+    """Pretend chromadb is importable at `version` without installing it."""
+    import memplex.storage.vector as vec
+
+    monkeypatch.setattr(vec, "_CHROMA_AVAILABLE", True)
+    monkeypatch.setattr(vec, "_chroma_version_tuple", lambda: version)
+    return vec
+
+
+def test_chroma_gate_refuses_vulnerable_version(monkeypatch):
+    vec = _simulate_chroma(monkeypatch, (1, 5, 9))
+    with pytest.raises(RuntimeError, match="GHSA-f4j7-r4q5-qw2c"):
+        vec.create_vector_store("chroma")
+
+
+def test_chroma_gate_refuses_unversionable_chroma(monkeypatch):
+    """Importable but unknowable version cannot be proven safe: all four
+    advisories are reported and construction still fails closed."""
+    vec = _simulate_chroma(monkeypatch, None)
+    with pytest.raises(RuntimeError, match="GHSA-36p7-vc44-83pf"):
+        vec.create_vector_store("chroma")
+
+
+def test_chroma_gate_allows_version_outside_all_ranges(monkeypatch):
+    sentinel = object()
+    vec = _simulate_chroma(monkeypatch, (1, 5, 10))
+    monkeypatch.setattr(vec, "ChromaVectorStore", lambda: sentinel)
+    assert vec.create_vector_store("chroma") is sentinel
+
+
+def test_chroma_gate_param_override_constructs_vulnerable(monkeypatch):
+    sentinel = object()
+    vec = _simulate_chroma(monkeypatch, (1, 5, 9))
+    monkeypatch.setattr(vec, "ChromaVectorStore", lambda: sentinel)
+    assert (
+        vec.create_vector_store("chroma", allow_vulnerable_chroma=True) is sentinel
+    )
+
+
+def test_chroma_gate_env_override_constructs_vulnerable(monkeypatch):
+    sentinel = object()
+    vec = _simulate_chroma(monkeypatch, (1, 5, 9))
+    monkeypatch.setattr(vec, "ChromaVectorStore", lambda: sentinel)
+    monkeypatch.setenv("MEMPLEX_ALLOW_VULNERABLE_CHROMA", "1")
+    assert vec.create_vector_store("chroma") is sentinel
+
+
+def test_auto_degrades_to_inmemory_on_vulnerable_chroma(monkeypatch, caplog):
+    vec = _simulate_chroma(monkeypatch, (1, 5, 9))
+    with caplog.at_level("ERROR"):
+        store = vec.create_vector_store("auto")
+    assert isinstance(store, InMemoryVectorStore)
+    assert "GHSA" in caplog.text
+
+
+def test_auto_still_prefers_chroma_when_safe(monkeypatch):
+    sentinel = object()
+    vec = _simulate_chroma(monkeypatch, (1, 5, 10))
+    monkeypatch.setattr(vec, "ChromaVectorStore", lambda: sentinel)
+    assert vec.create_vector_store("auto") is sentinel
+
+
 # ── VectorStore protocol conformance ─────────────────────────────────
 
 
