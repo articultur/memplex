@@ -124,3 +124,14 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   在聚合多跳上正向有效。双栈全量对照 E1 证据闭环。
 - 累计 ≈ **88.5 / 100**。剩余：查询分解生成端（需 LLM key）、
   不可变公共 raw evidence 公开放置。
+- **开源标杆表面闭环（2026-09-14）**：社区文件基线本已齐备
+  （CHANGELOG/CODE_OF_CONDUCT/CONTRIBUTING/GOVERNANCE/SECURITY/SUPPORT
+  + issue forms + dependabot）；本轮补齐四项缺口——README 徽章墙 +
+  快速导航表、pyproject PyPI 元数据（authors/urls/keywords×7/
+  classifiers×10，uv lock 校验通过）、`examples/` 两个离线可跑示例
+  （quickstart 写入→检索闭环、双时态 as_of 修正史，冒烟断言通过）、
+  GitHub Releases 补齐 v3.2.7–v3.3.2 四标签（CHANGELOG 段落为发布
+  说明，v3.3.2 标 Latest）、仓库 topics×15 + homepage。GitHub
+  Discussions 有意不开：SUPPORT.md 明确 issue forms 是唯一支持通道。
+  上轮"剩余"中的 raw evidence 公开放置已由 f33d852（E1 bundle 入库
+  推送）解决。G001 审计日 49.5 → 社区表面维度达标杆清单。

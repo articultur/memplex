@@ -1,5 +1,11 @@
 # Memplex
 
+[![CI](https://github.com/articultur/memplex/actions/workflows/ci.yml/badge.svg)](https://github.com/articultur/memplex/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/memplex.svg)](https://pypi.org/project/memplex/)
+[![npm](https://img.shields.io/npm/v/memplex.svg)](https://www.npmjs.com/package/memplex)
+[![Python](https://img.shields.io/pypi/pyversions/memplex.svg)](https://pypi.org/project/memplex/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Memplex is a **multi-agent** long-term memory layer for AI agents. It gives
 Codex, Claude Code, OpenClaw, Hermes, and similar agents the same closed
 loop: recall useful memory before a turn, capture what happened after the
@@ -42,6 +48,19 @@ tier.
 Background compaction is automatic: the Claude Code hook loop compacts on
 Stop, and writes on any path trigger compaction once the corpus crosses the
 configured warn threshold. Manual compaction remains available from the CLI.
+
+## Key links
+
+| Want to… | Go to |
+| --- | --- |
+| Get started locally | [docs/getting-started.md](docs/getting-started.md) · [examples/](examples/) |
+| Understand the architecture | [docs/architecture.md](docs/architecture.md) |
+| See retrieval benchmark results | [docs/benchmarks.md](docs/benchmarks.md) · [docs/research/](docs/research/) |
+| Read the evidence ladder / audit trail | [docs/evidence/](docs/evidence/) |
+| Deploy with industrial gates | [docs/production-readiness.md](docs/production-readiness.md) |
+| Integrate an agent host | [docs/agent-integration.md](docs/agent-integration.md) |
+| Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) |
+| Report a vulnerability | [SECURITY.md](SECURITY.md) |
 
 ## Install
 
