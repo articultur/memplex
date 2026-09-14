@@ -24,6 +24,7 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+.coverage.*
 
 # OMC / Serena
 .omc/
@@ -42,13 +43,15 @@ venv/
 .venv-pgcheck/
 env/
 
-# Temp
-~/output/
+# Temp (one-off scratch outputs; benchmark bundles worth keeping go to docs/evidence)
+/output/
+/tmp/
 /_g008_dyn/
 /_tmp_mem/
 /_tmp_rate
 /_tmp_home/
 /artifacts/
+benchmarks/results/
 
 # Internal planning and local review artifacts
 /docs/superpowers/
