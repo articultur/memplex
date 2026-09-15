@@ -6,6 +6,24 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+2026-09-15 official LongMemEval judge-protocol scoring:
+
+- `scripts/run_lme_official_j.py` runs the official `evaluate_qa.py`
+  yes/no judge protocol (all six question-type prompts verbatim plus the
+  abstention branch, temperature 0) over bge-m3 top-10 retrieval and
+  glm-5.3 generation, with per-question checkpointing, question-type
+  filtering, exponential rate-limit backoff, and thinking-model judge
+  budgets. Full 500-question S split (cleaned release): **J = 0.810**
+  with all 500 questions judged; per-type, ablation against the pre-fix
+  baseline (0.660), and disclosed protocol deviations are recorded in
+  `docs/research/public-baseline-2026-09.md` with an E1 evidence bundle
+  at `docs/evidence/g003-lme500-official-j/`.
+- LongMemEval seeding now carries per-session timestamps
+  (`haystack_dates`) into the seeded turn text and `observed_at`, making
+  temporal-reasoning questions answerable (+28.7pp on that type).
+
 ### Security
 
 2026-09-14 fail-closed gate for unpatched ChromaDB advisories:

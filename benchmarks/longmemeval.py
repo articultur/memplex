@@ -151,12 +151,22 @@ def _parse_official_entry(item: dict[str, Any]) -> LongMemEvalSample:
     raw_answer = item.get("answer")
     candidates = raw_answer if isinstance(raw_answer, list) else [raw_answer]
     answers = [str(a) for a in candidates if a is not None and str(a).strip()]
+    dates = [str(d) for d in item.get("haystack_dates", [])]
     sessions = [
         [dict(turn) for turn in session]
         for session in item.get("haystack_sessions", [])
         if isinstance(session, list)
     ]
-    session_history = [turn for session in sessions for turn in session]
+    # Each turn is tagged with its session timestamp so downstream seeding
+    # can expose dates to retrieval/generation -- temporal-reasoning
+    # questions are unanswerable from text alone.
+    session_history = []
+    for position, session in enumerate(sessions):
+        date = dates[position] if position < len(dates) else ""
+        for turn in session:
+            if date:
+                turn.setdefault("session_date", date)
+            session_history.append(turn)
     return LongMemEvalSample(
         question=str(item.get("question", "")),
         answers=answers,
@@ -212,13 +222,17 @@ class LongMemEvalDataset(EvaluationDataset):
         observed = metadata.get("question_date", "")
         observations = []
         for index, turn in enumerate(history):
+            content = str(turn.get("content", ""))[:2000]
+            session_date = str(turn.get("session_date", ""))
+            if session_date:
+                content = f"[{session_date}] {content}"
             observations.append(
                 Observation(
                     id=f"lme-{sample.id}-s{index}",
                     event=str(turn.get("role", "user")),
-                    context=str(turn.get("content", ""))[:2000],
+                    context=content,
                     category="note",
-                    observed_at=observed or None,
+                    observed_at=session_date or observed or None,
                 )
             )
         return observations

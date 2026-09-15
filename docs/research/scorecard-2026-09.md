@@ -145,3 +145,12 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   版本 fail-closed、参数/env 双覆盖、auto 降级与安全版优先 chroma）。
   SECURITY.md 增设"可选依赖已知公告"段（GHSA 表 + 影响面声明：默认
   lite/PG+pgvector 路径不加载 chromadb）+ CHANGELOG Security 段。
+- **官方 LongMemEval J 分闭环（2026-09-15）**：官方判分协议全量 500 题
+  **J = 0.810**（超 Zep 公开分 71.2 十个百分点；judge 为 glm-5.3 的
+  口径偏差随分数披露）。v2→v3 消融 +15pp 全部归因到三个可命名修复
+  （时间戳播种 +28.7pp temporal、弃答出口收窄 +43.3pp preference、
+  限流指数退避 +22.5pp knowledge-update），探针先行验证后全量确认。
+  生成式管线的公开对标缺口（此前"未参战"）关闭。E1 证据包入库
+  docs/evidence/g003-lme500-official-j/。剩余上行空间：temporal 0.647
+  与 multi-session 0.744 是两个最大分池（各 133 题），需要检索侧
+  会话摘要/时间索引类工程。

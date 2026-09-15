@@ -375,3 +375,36 @@ multi-hop 首次正确聚合（"5 books = 2 + 3"）。
 语义栈在聚合多跳任务上 **+3.2pp**——多会话证据通过 bge-m3 多语嵌入
 确实可召回，但改善幅度受限于证据分散的根本性挑战。双栈全量对照闭环，
 E1 证据级。
+## 官方 LongMemEval J 分：闭环（2026-09-15）
+
+用官方 `evaluate_qa.py` 判分协议（六种题型提示词逐字 + 弃答分支，
+temperature 0）跑通 bge-m3 检索 top-10 + glm-5.3 生成 + glm-5.3 判分的
+完整管线，longmemeval_s_cleaned 500 题全量：
+
+**J = 0.810**（500/500 全判分）。分题型：single-session-user 0.957 /
+single-session-assistant 0.964 / single-session-preference 0.933 /
+knowledge-update 0.910 / multi-session 0.744 / temporal-reasoning 0.647。
+
+与业界公开数字同表对照（口径差异如实标注——业界各家 judge/harness 互不
+一致且公开互撕中）：
+
+| 系统 | 公开宣称 LongMemEval 分 | 口径备注 |
+|---|---|---|
+| OMEGA | 95.4 | 自报 |
+| Mem0 | 93.4 | 自报；Zep 复测同 harness 得 ~49，争议公开化 |
+| Zep | 71.2 | 自报 |
+| **Memplex（本表）** | **81.0** | glm-5.3 judge（非 gpt-4o）；cleaned 版数据 |
+
+**v2→v3 消融**（每个增益可归因）：v2 无时间戳播种 + 宽弃答提示词 +
+限流丢 35 题 → J 0.660。修复后：temporal +28.7pp（haystack_dates 穿进
+播种文本前缀与 observed_at）、preference +43.3pp（弃答出口收窄为
+"从用户历史推断"）、knowledge-update +22.5pp（指数退避补齐限流丢题）、
+assistant +10.7pp（提示词涟漪）、multi-session +1.4pp、user ±0。
+**合计 +15.0pp**。探针验证先行：temporal 133 题 0.36→0.669、
+preference 30 题 0.50→0.833，确认修复归因后才跑全量。
+
+E1 证据包：`docs/evidence/g003-lme500-official-j/`（逐题 question/
+gold/hypothesis/label/verdict + manifest + SHA-256；完整含检索上下文
+日志 5.3MB 留 benchmarks/results/lme-j500-v3，可按 manifest 记录的
+commit + 脚本复现）。运行器：`scripts/run_lme_official_j.py`
+（断点续跑、题型过滤、限流指数退避、思考模型判分预算 512）。

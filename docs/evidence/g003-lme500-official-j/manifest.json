@@ -1,0 +1,17 @@
+{
+  "benchmark": "longmemeval_s_official_j",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts (verbatim, all six type branches + abstention), temperature 0",
+  "judge_model": "glm-5.3 (canonical protocol judge is gpt-4o-2024-08-06; deviation disclosed)",
+  "generation": "bge-m3 retrieval top-10 (20000-char context budget, abstention-aware prompt) + glm-5.3 generation",
+  "dataset": {"name": "longmemeval_s_cleaned", "source": "huggingface.co/datasets/xiaowu0162/longmemeval-cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "1095285f21748c34db47748d479307290057d451"},
+  "results": {"J_overall": 0.81, "judged": 500, "total": 500},
+  "ablation_baseline_v2": {"J_overall": 0.6602, "run_dir": "benchmarks/results/lme-j500-v2 (untracked)", "notes": "no date metadata + wide abstention prompt + 35 rate-limited judgments"},
+  "deviations": [
+    "judge model glm-5.3 instead of gpt-4o-2024-08-06 (thinking model; 512-token judge budget so the thinking block cannot starve the verdict)",
+    "dataset is the 2026 cleaned re-release; published competitor numbers used the pre-clean release",
+    "retrieved_context omitted from hypotheses.jsonl here; full per-question context log (5.3MB) at benchmarks/results/lme-j500-v3 (untracked), reproducible via scripts/run_lme_official_j.py at the recorded commit"
+  ],
+  "evidence_level": "E1",
+  "timestamp": "2026-09-15T09:09:22Z"
+}
