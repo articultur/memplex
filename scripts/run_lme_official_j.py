@@ -38,27 +38,32 @@ os.environ.setdefault("MEMPLEX_EMBEDDING_MODEL", "bge-m3")
 os.environ.setdefault("MEMPLEX_EMBEDDING_DIMENSION", "1024")
 os.environ.setdefault("MEMPLEX_EMBEDDING_DEVICE", "mps")
 
-import httpx  # noqa: E402
+import httpx
 
-from benchmarks.longmemeval import LongMemEvalDataset, LongMemEvalRunner, _clear_store  # noqa: E402
-from memplex.config import load_config  # noqa: E402
-from memplex.service import MemplexService  # noqa: E402
+from benchmarks.longmemeval import LongMemEvalDataset, LongMemEvalRunner, _clear_store
+from memplex.config import load_config
+from memplex.service import MemplexService
 
 DATASET_PATH = (
     _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval_s_cleaned.json"
 )
 GENERATION_MODEL = "glm-5.3"
 JUDGE_MODEL = "glm-5.3"  # canonical protocol judge is gpt-4o-2024-08-06
-TOP_K = 10
-CONTEXT_CHAR_BUDGET = 20000
+TOP_K = 24
+CONTEXT_CHAR_BUDGET = 40000
 GENERATION_PROMPT = (
-    "Answer using ONLY the memory excerpts below. When the excerpts do not "
-    "state the answer explicitly, infer it from the user's history in the "
-    "excerpts -- for preference or recommendation questions, base the "
-    "answer on what the excerpts show about the user. Only say the "
-    "information is not available if the excerpts contain nothing relevant "
-    "to the question. Each excerpt carries a [date] prefix; use those "
-    "dates for any time or ordering question.\n\n"
+    "Answer using ONLY the memory excerpts below. The current date is "
+    "{question_date}. When the excerpts do not state the answer explicitly, "
+    "infer it from the user's history in the excerpts -- for preference or "
+    "recommendation questions, base the answer on what the excerpts show "
+    "about the user. Only say the information is not available if the "
+    "excerpts contain nothing relevant to the question.\n"
+    "For any time, duration or ordering question: first write the relevant "
+    "dates in YYYY/MM/DD form, compute the difference explicitly, then "
+    "answer.\n"
+    "For any question that asks how many, or to list items: first quote "
+    "every matching excerpt with its date, then count the quoted items, "
+    "then answer with the total.\n\n"
     "Excerpts:\n{context}\n\nQuestion: {question}\n\nAnswer concisely:"
 )
 
@@ -89,7 +94,7 @@ class Proxy:
     """Anthropic-compatible bigmodel proxy client (authorized by the user)."""
 
     def __init__(self) -> None:
-        settings = json.load(open(os.path.expanduser("~/.claude/settings.json")))["env"]
+        settings = json.loads(pathlib.Path(os.path.expanduser("~/.claude/settings.json")).read_text())["env"]
         self._client = httpx.Client(
             base_url=settings["ANTHROPIC_BASE_URL"],
             timeout=120,
@@ -175,7 +180,9 @@ def main() -> int:
                     done.add(record["question_id"])
     print(f"dataset={len(samples)} already_done={len(done)}", flush=True)
 
-    out = open(hyp_path, "a", encoding="utf-8")
+    # Append-log kept open for the whole run: per-record flush is the
+    # checkpoint contract, a context manager would add nothing.
+    out = open(hyp_path, "a", encoding="utf-8")  # noqa: SIM115
     t0 = time.time()
     for index, sample in enumerate(samples):
         metadata = sample.metadata or {}
@@ -195,9 +202,11 @@ def main() -> int:
         try:
             answer = proxy.complete(
                 GENERATION_PROMPT.format(
-                    context=context[:CONTEXT_CHAR_BUDGET], question=question
+                    question_date=metadata.get("question_date", "unknown"),
+                    context=context[:CONTEXT_CHAR_BUDGET],
+                    question=question,
                 ),
-                max_tokens=1024,
+                max_tokens=2048,
                 temperature=0.0,
             ).strip()
         except Exception as exc:  # noqa: BLE001 - one failed generation must not kill the run

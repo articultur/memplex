@@ -216,7 +216,15 @@ class LongMemEvalDataset(EvaluationDataset):
         return samples
 
     def to_memories(self, sample: BenchmarkSample):
-        """Materialise the session history as typed Observation memories."""
+        """Materialise the session history as typed Observation memories.
+
+        Emits one Observation per turn AND one session-level unit per
+        session (its full text, date-prefixed). Session units give the
+        retriever a coarse granularity that matches question-to-session
+        semantics: an evidence turn missed by turn-level ranking is often
+        inside a retrieved session unit (LongMemEval index-expansion
+        recipe, deterministic full-text variant).
+        """
         metadata = sample.metadata or {}
         history = metadata.get("session_history", [])
         observed = metadata.get("question_date", "")
@@ -233,6 +241,41 @@ class LongMemEvalDataset(EvaluationDataset):
                     context=content,
                     category="note",
                     observed_at=session_date or observed or None,
+                )
+            )
+        session_of_turn: list[list[dict]] = []
+        for turn in history:
+            if session_of_turn and not turn.get("session_break"):
+                session_of_turn[-1].append(turn)
+            else:
+                session_of_turn.append([turn])
+        # The flattened history loses session boundaries; sessions in
+        # metadata (parsed official entries) rebuild them exactly.
+        sessions = metadata.get("sessions") or []
+        units = (
+            [[dict(t) for t in session] for session in sessions]
+            if sessions
+            else session_of_turn
+        )
+        for position, session in enumerate(units):
+            if not session:
+                continue
+            date = str(session[0].get("session_date", ""))
+            body = " | ".join(
+                f"{t.get('role', 'user')}: {str(t.get('content', ''))[:600]}"
+                for t in session
+            )[:6000]
+            if date:
+                body = f"[{date}] Session record: {body}"
+            else:
+                body = f"Session record: {body}"
+            observations.append(
+                Observation(
+                    id=f"lme-{sample.id}-sess{position}",
+                    event="session",
+                    context=body,
+                    category="note",
+                    observed_at=date or observed or None,
                 )
             )
         return observations

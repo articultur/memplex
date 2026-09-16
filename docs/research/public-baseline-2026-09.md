@@ -408,3 +408,29 @@ gold/hypothesis/label/verdict + manifest + SHA-256；完整含检索上下文
 日志 5.3MB 留 benchmarks/results/lme-j500-v3，可按 manifest 记录的
 commit + 脚本复现）。运行器：`scripts/run_lme_official_j.py`
 （断点续跑、题型过滤、限流指数退避、思考模型判分预算 512）。
+
+## 检索扩展战役：J 0.810 → 0.880（2026-09-16）
+
+对 v3 的 81 个失败（temporal 47 + multi-session 34）做 LLM 辅助精确归因
+（scripts/autopsy_lme_fails.py，glm-5.3 对照检索上下文分类）：**87% 在检索侧**
+（48 证据摘录未检回 + 23 日期/时间信息不全），9 生成写错。据此实施三项：
+
+1. **会话级检索单元**（官方 index-expansion 的确定性全文本变体）：每场会话
+   额外播种一条 `[日期] Session record: 全文` 记录——回合级排序漏掉的证据
+   整段躺在会话单元里被检回；
+2. **参照日期进生成提示词**（"The current date is {question_date}"）：相对
+   时间问题（"多久之前"）首次有了计算锚点；
+3. **top-24 / 40k 上下文**：为会话单元腾槽位。
+
+探针先行验证：temporal 133 题 0.647→0.805（top-14）→ 全量 0.865；
+multi-session 0.744→0.767（top-14）→0.790（top-24）。全量 v4：
+
+**J = 0.880**（500/500 全判分）。分题型：ss-user 0.971 / ss-assistant 0.964 /
+knowledge-update 0.923 / ss-preference 0.900 / temporal **0.865**（+21.7pp）/
+multi-session 0.782（+3.8pp）。v2→v3→v4 消融：0.660 → 0.810 → 0.880，
+每一档增益均有探针与逐题日志背书。E1 证据包
+`docs/evidence/g003-lme500-official-j-v4/`。
+
+剩余 60 失败的下一杠杆（v5，生成端）：multi 计数题下数不足（答 2 实 3）→
+"先逐条引用匹配摘录再计数"；temporal 日期算术错（答 0 天实 24 天）→
+"先写 YYYY/MM/DD 再显式算差"。

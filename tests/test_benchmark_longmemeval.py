@@ -120,7 +120,16 @@ def test_loader_parses_official_schema(tmp_path):
     history = first.metadata["session_history"]
     assert [turn["role"] for turn in history] == ["user", "assistant", "user"]
     assert history[0]["content"] == "I just bought a guitar."
-    assert len(dataset.to_memories(first)) == 3
+    memories = dataset.to_memories(first)
+    # 3 turn-level units plus one session-level unit per haystack session
+    # (the first fixture entry has two sessions; only s1 carries turns for
+    # this question's flattened history -- both emit a session unit).
+    turns = [m for m in memories if m.event != "session"]
+    sessions = [m for m in memories if m.event == "session"]
+    assert len(turns) == 3
+    assert len(sessions) == 2
+    assert sessions[0].context.startswith("[2023/4/1 10:00] Session record:")
+    assert sessions[0].observed_at == "2023/4/1 10:00"
 
 
 def test_loader_autodetects_per_entry_and_skips_answerless(tmp_path):

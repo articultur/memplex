@@ -1,0 +1,19 @@
+{
+  "benchmark": "longmemeval_s_official_j_v4",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts (verbatim, all six type branches + abstention), temperature 0",
+  "judge_model": "glm-5.3 (canonical protocol judge is gpt-4o-2024-08-06; deviation disclosed)",
+  "generation": "bge-m3 retrieval top-24 (40000-char budget, abstention-aware prompt, question-date reference) + glm-5.3 generation",
+  "retrieval_expansion": "session-level units (date-prefixed full-session records seeded alongside turn records; deterministic variant of the official index-expansion recipe)",
+  "dataset": {"name": "longmemeval_s_cleaned", "source": "huggingface.co/datasets/xiaowu0162/longmemeval-cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "e411e7da9c25ed72825e970a6a8853de5fcdd67e"},
+  "results": {"J_overall": 0.88, "judged": 500, "total": 500},
+  "failure_autopsy_v3": {"method": "glm-5.3 classified all 81 v3 failures against their retrieved context", "finding": "87% retrieval-side (48 evidence-miss + 23 date-miss), 9 generation-miss", "records": "benchmarks/results/lme-autopsy/autopsy.jsonl (untracked)"},
+  "ablation": {"v2": 0.6602, "v3": 0.810, "v4": 0.88, "v4_delta_drivers": "temporal +21.7pp / multi-session +3.8pp / knowledge-update +1.3pp vs v3"},
+  "deviations": [
+    "judge model glm-5.3 instead of gpt-4o-2024-08-06 (thinking model; 512-token judge budget so the thinking block cannot starve the verdict)",
+    "dataset is the 2026 cleaned re-release; published competitor numbers used the pre-clean release",
+    "retrieved_context omitted here; full per-question context log at benchmarks/results/lme-j500-v4 (untracked), reproducible via scripts/run_lme_official_j.py at the recorded commit"
+  ],
+  "evidence_level": "E1",
+  "timestamp": "2026-09-16T03:59:10Z"
+}
