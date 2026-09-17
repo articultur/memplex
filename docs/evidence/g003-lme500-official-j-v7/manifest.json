@@ -1,0 +1,18 @@
+{
+  "benchmark": "longmemeval_s_official_j_v7",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts (verbatim, all six type branches + abstention), temperature 0",
+  "judge_model": "glm-5.3 (canonical protocol judge is gpt-4o-2024-08-06; deviation disclosed)",
+  "generation": "bge-m3 retrieval top-24 (40k budget) + adjacency expansion (+/-1 neighbour turns of each hit) + glm-5.3 generation with stepwise date-arithmetic and quote-then-count instructions",
+  "retrieval_expansion": "session-level units + turn adjacency (both deterministic)",
+  "dataset": {"name": "longmemeval_s_cleaned", "source": "huggingface.co/datasets/xiaowu0162/longmemeval-cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "1dfbf2a9b1ee01127f08450f8be6944d8e9181ab"},
+  "results": {"J_overall": 0.882, "judged": 500, "total": 500},
+  "ablation": {"v2": 0.6602, "v3": 0.810, "v4": 0.880, "v7": 0.882, "v7_type_detail": "multi 0.8045 (+2.3pp adjacency), temporal 0.8797 (+1.5pp date-arithmetic prompt), small types -1..-3pp from verbose quote-style answers", "depth_saturation": "multi top-40 0.790 vs top-24 0.782; temporal top-40 regressed to 0.865 -- top-24 is the sweet spot"},
+  "deviations": [
+    "judge model glm-5.3 instead of gpt-4o-2024-08-06",
+    "dataset is the 2026 cleaned re-release",
+    "full per-question context log at benchmarks/results/lme-j500-v7 (untracked)"
+  ],
+  "evidence_level": "E1",
+  "timestamp": "2026-09-17T07:59:51Z"
+}

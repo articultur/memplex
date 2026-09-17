@@ -40,7 +40,12 @@ os.environ.setdefault("MEMPLEX_EMBEDDING_DEVICE", "mps")
 
 import httpx
 
-from benchmarks.longmemeval import LongMemEvalDataset, LongMemEvalRunner, _clear_store
+from benchmarks.longmemeval import (
+    LongMemEvalDataset,
+    LongMemEvalRunner,
+    _clear_store,
+    _neighbour_text,
+)
 from memplex.config import load_config
 from memplex.service import MemplexService
 
@@ -63,7 +68,9 @@ GENERATION_PROMPT = (
     "answer.\n"
     "For any question that asks how many, or to list items: first quote "
     "every matching excerpt with its date, then count the quoted items, "
-    "then answer with the total.\n\n"
+    "then answer with the total. For all other questions, skip the "
+    "step-by-step lists and answer in one short sentence with the key "
+    "fact only.\n\n"
     "Excerpts:\n{context}\n\nQuestion: {question}\n\nAnswer concisely:"
 )
 
@@ -197,7 +204,33 @@ def main() -> int:
         _clear_store(svc)
         runner._seed(svc, ds.to_memories(sample))
         result = svc.query(question, top_k=TOP_K, explain=False)
-        context = "\n".join(f"- {r.summary}" for r in result.results[:TOP_K])
+        context_items = [r.summary for r in result.results[:TOP_K]]
+        # Adjacency expansion: a hit turn's neighbours (index +/-1 in the
+        # flattened history, i.e. same or adjacent session) frequently
+        # carry the continuation that single-turn retrieval misses --
+        # the multi-session counting fails are evidence-starved, and
+        # deeper top-k saturates (0.782 @24 vs 0.790 @40).
+        get = getattr(svc.store, "get", None)
+        if callable(get):
+            seen_ids = {r.func_id for r in result.results[:TOP_K]}
+            for r in result.results[:TOP_K]:
+                for delta in (-1, 1):
+                    parts = r.func_id.rsplit("-s", 1)
+                    if len(parts) != 2 or not parts[1].isdigit():
+                        continue
+                    neighbour_id = f"{parts[0]}-s{int(parts[1]) + delta}"
+                    if neighbour_id in seen_ids:
+                        continue
+                    try:
+                        neighbour = get(neighbour_id)
+                    except Exception:  # noqa: BLE001 - expansion is best-effort
+                        neighbour = None
+                    if neighbour is not None:
+                        seen_ids.add(neighbour_id)
+                        context_items.append(
+                            f"{neighbour.name} {_neighbour_text(neighbour)}".strip()
+                        )
+        context = "\n".join(f"- {item}" for item in context_items)
 
         try:
             answer = proxy.complete(

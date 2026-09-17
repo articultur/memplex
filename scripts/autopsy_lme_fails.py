@@ -26,8 +26,9 @@ import time
 
 import httpx
 
-RUN = pathlib.Path("benchmarks/results/lme-j500-v3")
-OUT = pathlib.Path("benchmarks/results/lme-autopsy")
+import sys
+RUN = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/results/lme-j500-v3")
+OUT = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else "benchmarks/results/lme-autopsy")
 OUT.mkdir(parents=True, exist_ok=True)
 
 PROMPT = """You are auditing a retrieval-augmented QA failure. I give you the question, the correct answer, and the EXACT context that was retrieved and shown to the answer model (each excerpt prefixed with [date]). The answer model answered incorrectly.
