@@ -1,0 +1,36 @@
+{
+  "benchmark": "longmemeval_s_official_j",
+  "dataset": "longmemeval_s_cleaned (500)",
+  "judge_model": "glm-5.3",
+  "judge_protocol": "official evaluate_qa.py yes/no prompts, temperature 0",
+  "generation": "bge-m3 retrieval top-24 + glm-5.3 generation (40000-char context budget, abstention-aware prompt)",
+  "samples_judged": 500,
+  "samples_total": 500,
+  "J": 0.886,
+  "by_type": {
+    "knowledge-update": {
+      "J": 0.9231,
+      "n": 78
+    },
+    "multi-session": {
+      "J": 0.8045,
+      "n": 133
+    },
+    "single-session-assistant": {
+      "J": 0.9464,
+      "n": 56
+    },
+    "single-session-preference": {
+      "J": 0.8667,
+      "n": 30
+    },
+    "single-session-user": {
+      "J": 0.9857,
+      "n": 70
+    },
+    "temporal-reasoning": {
+      "J": 0.8722,
+      "n": 133
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned", "metric": "J", "samples": 500, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.886}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/knowledge-update", "metric": "J", "samples": 78, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.9231}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/multi-session", "metric": "J", "samples": 133, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.8045}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/single-session-assistant", "metric": "J", "samples": 56, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.9464}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/single-session-preference", "metric": "J", "samples": 30, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.8667}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/single-session-user", "metric": "J", "samples": 70, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.9857}
+{"benchmark": "longmemeval_s_official_j_v8", "dataset": "longmemeval_s_cleaned/temporal-reasoning", "metric": "J", "samples": 133, "timestamp": "2026-09-17T20:43:55.585687+00:00", "value": 0.8722}
