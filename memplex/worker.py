@@ -102,6 +102,10 @@ class TaskStore(TaskRepository):
         self._tasks: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
         self._poisoned = False
+        # mkdir-once cache for _disk_lock: the poll cadence paid a mkdir
+        # syscall per poll; invalidated on any lock failure so an
+        # externally deleted directory heals on the next call.
+        self._lock_dir_ready = False
         self._load()
 
     def _assert_healthy(self) -> None:
@@ -112,9 +116,23 @@ class TaskStore(TaskRepository):
 
     @contextmanager
     def _disk_lock(self) -> Iterator[None]:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_path.touch(exist_ok=True)
-        with open(self._lock_path, "r+b") as lock_file:
+        if not self._lock_dir_ready:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock_dir_ready = True
+        try:
+            self._lock_path.touch(exist_ok=True)
+            # The handle is context-managed at the `with lock_file:` below;
+            # the linter cannot track the assignment-through-retry flow.
+            lock_file = open(self._lock_path, "r+b")  # noqa: SIM115
+        except OSError:
+            # The cached directory vanished (external deletion): rebuild
+            # once and retry before surfacing the failure.
+            self._lock_dir_ready = False
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock_dir_ready = True
+            self._lock_path.touch(exist_ok=True)
+            lock_file = open(self._lock_path, "r+b")  # noqa: SIM115
+        with lock_file:
             try:
                 import fcntl
 
@@ -875,14 +893,25 @@ class BackgroundWorker:
 
     def _run_loop(self) -> None:
         """Main loop: dequeue tasks and execute them."""
+        idle_wait = 0.1
         while True:
             with self._state_lock:
                 if not self._running:
                     return
             try:
-                if not self._run_once(require_running=True):
-                    self._wake.wait(timeout=0.1)
+                if self._run_once(require_running=True):
+                    idle_wait = 0.1
+                else:
+                    # Idle backoff: one empty poll costs several filesystem
+                    # syscalls (mkdir/touch/flock/read) that measurably
+                    # contend with heavy writers on large corpora. The
+                    # historical fixed 100ms cadence burned ~10 polls/s for
+                    # nothing; submit() sets _wake so admitted tasks are
+                    # still picked up immediately -- only disk-side retry
+                    # wake-ups can wait up to the 2s cap.
+                    self._wake.wait(timeout=idle_wait)
                     self._wake.clear()
+                    idle_wait = min(idle_wait * 2, 2.0)
             except BaseException:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
                 logger.error("worker_loop_failed")
 
