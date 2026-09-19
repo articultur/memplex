@@ -167,3 +167,18 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   `service.query(orchestrated=True)`，把 harness 验证过的分解+并集+
   邻接管线变成核心能力，使 0.894 成为产品路径的数字而非 benchmark
   配方的数字。
+- **P0/P1/P2 三役落地（2026-09-20）**：
+  **P0 检索编排产品化**——`service.query(orchestrated=True)`：
+  LLM 分解子查询在核心管线内扇出+确定性合并去重，一次增强调用
+  同时供 scope 与子查询（历史上 expanded_queries 被丢弃），
+  fail-closed 回退单查询；产品 trace 透出 orchestrated_fanout；
+  附带修复思考模型 provider 兼容/模型可配/超时可配。6 契约测试。
+  **P1 存储扩缩（证据修正版）**——审计停顿假设实测证伪（×0.9）；
+  真热点两修：名字指纹索引+changelog 浅拷 → 100k 级 57 docs/s
+  （+19%）、提交尾延迟减半；worker 退避卫生修复（无基准增益，
+  负结果入档）；余留超线性定位为每次提交的全量 pair 序列化
+  （存储格式代际，超出本役范围）。**P2 嵌入服务边界**——
+  `RemoteEmbedder`（OpenAI 兼容 /embeddings，fail-closed，分块 16，
+  索引重排）：远端 embedding-3 37.1 texts/s vs 进程内 bge-m3 10.4
+  ——3.6×单客户端 + 并发扩展空间。三役全量 lite 3422 passed/
+  cov 80.3%、PG 730 passed 零回归。
