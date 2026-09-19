@@ -182,3 +182,12 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   索引重排）：远端 embedding-3 37.1 texts/s vs 进程内 bge-m3 10.4
   ——3.6×单客户端 + 并发扩展空间。三役全量 lite 3422 passed/
   cov 80.3%、PG 730 passed 零回归。
+- **P0 产品路径对等验证闭环（2026-09-20）**：`--product-orchestration`
+  探针（multi-session 133 题全量，纯 `svc.query(orchestrated=True)` 路径，
+  零 harness 侧检索配方）**J = 0.797** vs harness 编排配方 0.8045——
+  差 1 题，在运行方差内，判定**对等**。产品路径缺回合邻接（历史
+  +2.3pp）但用完整多路栈（词汇+语义+图）跑子查询补回。0.894 级的
+  编排能力自此是产品能力而非 benchmark 配方；邻接产品化（走图路径）
+  留作增量项。深研（40 子代理）同时产出两大池的下一步证据背书清单
+  （时间窗剪枝、PAR 伪答案检索、复述式生成、计数完备性注入）：
+  deep-research-report-multisession-temporal-2026-09.md。
