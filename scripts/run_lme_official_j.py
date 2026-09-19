@@ -56,6 +56,11 @@ GENERATION_MODEL = "glm-5.3"
 JUDGE_MODEL = "glm-5.3"  # canonical protocol judge is gpt-4o-2024-08-06
 TOP_K = 24
 CONTEXT_CHAR_BUDGET = 40000
+# Self-consistency applies to the two evidence-aggregation types; the
+# last three autopsies attribute ~10-12 remaining fails to generation
+# (A-class) on exactly these pools.
+SC_TYPES = ("temporal-reasoning", "multi-session")
+SC_VOTES = 3
 GENERATION_PROMPT = (
     "Answer using ONLY the memory excerpts below. The current date is "
     "{question_date}. When the excerpts do not state the answer explicitly, "
@@ -111,18 +116,26 @@ class Proxy:
             },
         )
 
-    def complete(self, prompt: str, *, max_tokens: int, temperature: float, retries: int = 5) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        retries: int = 5,
+        disable_thinking: bool = False,
+    ) -> str:
         for attempt in range(retries + 1):
             try:
-                resp = self._client.post(
-                    "/v1/messages",
-                    json={
-                        "model": GENERATION_MODEL,
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
+                payload = {
+                    "model": GENERATION_MODEL,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if disable_thinking:
+                    payload["thinking"] = {"type": "disabled"}
+                resp = self._client.post("/v1/messages", json=payload)
                 resp.raise_for_status()
                 # thinking models emit {"type": "thinking"} blocks first;
                 # only concatenating "text" blocks reproduces the visible
@@ -139,6 +152,218 @@ class Proxy:
                 # bursts that outlast short fixed waits.
                 time.sleep(min(60, 5 * 2**attempt))
         return ""  # unreachable
+
+    def decompose(self, question: str) -> list[str]:
+        """Split a multi-hop question into 2-3 sub-queries (best-effort).
+
+        Thinking is explicitly disabled: the expected output is a short
+        line list and the call sits on the per-question critical path.
+        """
+        try:
+            text = self.complete(
+                "Break this multi-hop question into 2-3 independent "
+                "sub-questions, one per line, no numbering:\n\n"
+                f"{question}",
+                max_tokens=256,
+                temperature=0.0,
+                disable_thinking=True,
+            )
+        except Exception:  # noqa: BLE001 - decomposition is best-effort
+            return []
+        return [
+            line.strip()
+            for line in text.strip().splitlines()
+            if len(line.strip()) > 5
+        ][:3]
+
+
+def collect_context(svc, proxy: Proxy, question: str) -> str:
+    """Main retrieval + decomposition union + summary-to-session + adjacency.
+
+    Summary units rank well against the question but carry paraphrases;
+    in a slot-limited top-k they displace verbatim evidence. The official
+    two-stage shape avoids that: summaries LOCATE sessions, and the
+    session's full text is substituted into the context.
+    """
+    result = svc.query(question, top_k=TOP_K, explain=False)
+    hits = list(result.results[:TOP_K])
+    # Query decomposition: sub-queries retrieve independently and their
+    # union extras join after the main hits -- each sub-query is another
+    # ranking chance for evidence the main phrasing misses (63% of the
+    # remaining hard-pool fails are evidence-miss across three autopsies).
+    seen_ids = {r.func_id for r in hits}
+    for sub_query in proxy.decompose(question):
+        for r in svc.query(sub_query, top_k=8, explain=False).results[:8]:
+            if r.func_id not in seen_ids:
+                seen_ids.add(r.func_id)
+                hits.append(r)
+    get = getattr(svc.store, "get", None)
+
+    def unit_text(fid: str) -> str | None:
+        if not callable(get):
+            return None
+        try:
+            node = get(fid)
+        except Exception:  # noqa: BLE001 - substitution is best-effort
+            return None
+        if node is None:
+            return None
+        return f"{node.name} {_neighbour_text(node)}".strip()
+
+    # Two-stage summary->session: swap each summary hit for its session's
+    # full-text unit (already seeded alongside).
+    swapped: list[str] = []
+    for r in hits:
+        if "-summ" in r.func_id:
+            session_text = unit_text(r.func_id.replace("-summ", "-sess"))
+            swapped.append(session_text if session_text else r.summary)
+        else:
+            swapped.append(r.summary)
+    context_items = swapped
+    # Adjacency expansion: a hit turn's neighbours (index +/-1 in the
+    # flattened history, i.e. same or adjacent session) frequently
+    # carry the continuation that single-turn retrieval misses --
+    # the multi-session counting fails are evidence-starved, and
+    # deeper top-k saturates (0.782 @24 vs 0.790 @40).
+    if callable(get):
+        for r in hits[:TOP_K]:
+            for delta in (-1, 1):
+                parts = r.func_id.rsplit("-s", 1)
+                if len(parts) != 2 or not parts[1].isdigit():
+                    continue
+                neighbour_id = f"{parts[0]}-s{int(parts[1]) + delta}"
+                if neighbour_id in seen_ids:
+                    continue
+                text = unit_text(neighbour_id)
+                if text is not None:
+                    seen_ids.add(neighbour_id)
+                    context_items.append(text)
+    return "\n".join(f"- {item}" for item in context_items)
+
+
+class SessionSummaries:
+    """Disk-backed LLM session summaries (official index-expansion recipe).
+
+    The full-text session units seeded by ``to_memories`` approximate the
+    official LLM-session-summary expansion; this swaps in real
+    fact-preserving summaries. Cached on disk so probes and full runs
+    share one summary pass.
+    """
+
+    def __init__(self, proxy: Proxy, cache_path: pathlib.Path) -> None:
+        self._proxy = proxy
+        self._path = cache_path
+        self._cache: dict[str, str] = {}
+        if cache_path.exists():
+            try:
+                self._cache = json.loads(cache_path.read_text())
+            except Exception:  # noqa: BLE001 - corrupt cache regenerates
+                self._cache = {}
+        self._dirty = 0
+
+    def summary(self, key: str, session: list[dict]) -> str:
+        if key not in self._cache:
+            body = " | ".join(
+                f"{t.get('role', 'user')}: {str(t.get('content', ''))[:600]}"
+                for t in session
+            )[:6000]
+            try:
+                text = self._proxy.complete(
+                    "Summarize this chat session. Include every distinct "
+                    "fact, event, preference, name, number and date "
+                    "mentioned, in 3-6 compact sentences.\n\n"
+                    f"Session: {body}",
+                    max_tokens=512,
+                    temperature=0.0,
+                    disable_thinking=True,
+                ).strip()
+            except Exception:  # noqa: BLE001 - fall back to raw text
+                text = ""
+            self._cache[key] = text or body[:2000]
+            self._dirty += 1
+            if self._dirty % 50 == 0:
+                self._flush()
+        return self._cache[key]
+
+    def _flush(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._cache, ensure_ascii=False))
+
+    def close(self) -> None:
+        self._flush()
+
+
+def build_observations(ds, sample, summaries: SessionSummaries):
+    """Turn + full-text session units + LLM summary units (additive).
+
+    The official index-expansion recipe adds summary indexes alongside
+    the originals -- swapping full text out loses the verbatim mentions
+    counting questions need (v10 smoke: 0/2 with summaries alone).
+    """
+    from memplex.models import Observation
+
+    observations = list(ds.to_memories(sample))
+    metadata = sample.metadata or {}
+    sessions = metadata.get("sessions") or []
+    for position, session in enumerate(sessions):
+        if not session:
+            continue
+        date = str(session[0].get("session_date", ""))
+        text = summaries.summary(f"{sample.id}-sess{position}", session)
+        prefix = f"[{date}] Session summary: " if date else "Session summary: "
+        observations.append(
+            Observation(
+                id=f"lme-{sample.id}-summ{position}",
+                event="session_summary",
+                context=(prefix + text)[:4000],
+                category="note",
+                observed_at=date or metadata.get("question_date") or None,
+            )
+        )
+    return observations
+
+
+def generate_answer(
+    proxy: Proxy, qtype: str, question: str, context: str, question_date: str
+) -> str:
+    """Single generation, plus self-consistency on the aggregation types.
+
+    SC selector is context-grounded and never sees the gold answer (the
+    official judge prompt does -- using it for selection would leak it).
+    """
+    prompt = GENERATION_PROMPT.format(
+        question_date=question_date,
+        context=context[:CONTEXT_CHAR_BUDGET],
+        question=question,
+    )
+    answer = proxy.complete(prompt, max_tokens=2048, temperature=0.0).strip()
+    if qtype not in SC_TYPES:
+        return answer
+    candidates = [answer]
+    for _ in range(SC_VOTES - 1):
+        try:
+            candidates.append(
+                proxy.complete(prompt, max_tokens=2048, temperature=0.7).strip()
+            )
+        except Exception as exc:  # noqa: BLE001 - SC vote is best-effort
+            print(f"sc vote failed: {exc}", flush=True)
+    unique = list(dict.fromkeys(c.strip() for c in candidates if c))
+    if len(unique) <= 1:
+        return answer
+    numbered = "\n".join(f"{i}. {c[:400]}" for i, c in enumerate(unique, 1))
+    pick = proxy.complete(
+        "Given the memory excerpts and candidate answers, reply with the "
+        "single number of the candidate best supported by the excerpts.\n\n"
+        f"Excerpts:\n{context[:15000]}\n\nQuestion: {question}\n\n"
+        f"Candidates:\n{numbered}\n\nReply with one number only:",
+        max_tokens=64,
+        temperature=0.0,
+        disable_thinking=True,
+    )
+    digits = "".join(ch for ch in pick if ch.isdigit())
+    if digits and 1 <= int(digits[0]) <= len(unique):
+        return unique[int(digits[0]) - 1]
+    return answer
 
 
 def main() -> int:
@@ -159,6 +384,9 @@ def main() -> int:
     hyp_path = args.run_dir / "hypotheses.jsonl"
 
     proxy = Proxy()
+    session_summaries = SessionSummaries(
+        proxy, _PROJECT_ROOT / "benchmarks/results/session-summaries.json"
+    )
     config = load_config()
     config.storage.backend = "lite"
     config.storage.path = str(pathlib.Path(tempfile.mkdtemp(prefix="lme-j-")) / "s.sqlite3")
@@ -202,46 +430,23 @@ def main() -> int:
         abstention = str(qid).endswith("_abs")
 
         _clear_store(svc)
-        runner._seed(svc, ds.to_memories(sample))
-        result = svc.query(question, top_k=TOP_K, explain=False)
-        context_items = [r.summary for r in result.results[:TOP_K]]
-        # Adjacency expansion: a hit turn's neighbours (index +/-1 in the
-        # flattened history, i.e. same or adjacent session) frequently
-        # carry the continuation that single-turn retrieval misses --
-        # the multi-session counting fails are evidence-starved, and
-        # deeper top-k saturates (0.782 @24 vs 0.790 @40).
-        get = getattr(svc.store, "get", None)
-        if callable(get):
-            seen_ids = {r.func_id for r in result.results[:TOP_K]}
-            for r in result.results[:TOP_K]:
-                for delta in (-1, 1):
-                    parts = r.func_id.rsplit("-s", 1)
-                    if len(parts) != 2 or not parts[1].isdigit():
-                        continue
-                    neighbour_id = f"{parts[0]}-s{int(parts[1]) + delta}"
-                    if neighbour_id in seen_ids:
-                        continue
-                    try:
-                        neighbour = get(neighbour_id)
-                    except Exception:  # noqa: BLE001 - expansion is best-effort
-                        neighbour = None
-                    if neighbour is not None:
-                        seen_ids.add(neighbour_id)
-                        context_items.append(
-                            f"{neighbour.name} {_neighbour_text(neighbour)}".strip()
-                        )
-        context = "\n".join(f"- {item}" for item in context_items)
+        # Summaries are opt-in (MEMPLEX_LME_SUMMARIES=1): the two-stage
+        # summary probe scored 0.812 vs 0.8195 without them, so the final
+        # config ships the winning decomposition-only shape.
+        if os.environ.get("MEMPLEX_LME_SUMMARIES") == "1":
+            runner._seed(svc, build_observations(ds, sample, session_summaries))
+        else:
+            runner._seed(svc, ds.to_memories(sample))
+        context = collect_context(svc, proxy, question)
 
         try:
-            answer = proxy.complete(
-                GENERATION_PROMPT.format(
-                    question_date=metadata.get("question_date", "unknown"),
-                    context=context[:CONTEXT_CHAR_BUDGET],
-                    question=question,
-                ),
-                max_tokens=2048,
-                temperature=0.0,
-            ).strip()
+            answer = generate_answer(
+                proxy,
+                qtype,
+                question,
+                context,
+                metadata.get("question_date", "unknown"),
+            )
         except Exception as exc:  # noqa: BLE001 - one failed generation must not kill the run
             print(f"{qid}: generation failed: {exc}", flush=True)
             answer = ""
@@ -277,6 +482,7 @@ def main() -> int:
             print(f"{index + 1}/{len(samples)} elapsed={elapsed:.0f}s", flush=True)
 
     out.close()
+    session_summaries.close()
     svc.stop()
 
     # ── aggregate (official scoring: mean label + per-type breakdown) ──

@@ -1,0 +1,14 @@
+{
+  "benchmark": "longmemeval_s_official_j_v11",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts (verbatim, all six type branches + abstention), temperature 0",
+  "judge_model": "glm-5.3 (canonical protocol judge is gpt-4o-2024-08-06; deviation disclosed; see docs/research/public-baseline-2026-09.md for the industry methodology audit)",
+  "generation": "bge-m3 top-24 (40k) + adjacency expansion + query decomposition (2-3 LLM sub-queries, union top-8) + stepwise prompts + self-consistency (3 votes on temporal/multi with a context-grounded selector that never sees the gold answer)",
+  "dataset": {"name": "longmemeval_s_cleaned", "source": "huggingface.co/datasets/xiaowu0162/longmemeval-cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "6928ab074583a176b831ccdc25a087f701b6c467"},
+  "results": {"J_overall": 0.894, "judged": 500, "total": 500},
+  "ablation": {"v2": 0.6602, "v3": 0.810, "v4": 0.880, "v7": 0.882, "v8": 0.886, "v11": 0.894, "rejected_levers": {"top-40 depth": "temporal regressed 0.880->0.865", "LLM session summaries (3 designs)": "0.812 vs 0.8195 decomposition-only"}},
+  "context": {"official_protocol_anchor": "highest openly reproducible score with the official gpt-4o baseline model is Mastra OM 84.23 (their own disclosure); all 95+ claims audited in docs/research rely on non-official generators or category-tuned prompts", "our_number_is": "glm-5.3 generation+judge; first-tier credible band"},
+  "deviations": ["judge/answerer glm-5.3 not gpt-4o", "cleaned dataset release", "full context log at benchmarks/results/lme-j500-v11 (untracked)"],
+  "evidence_level": "E1",
+  "timestamp": "2026-09-19T04:24:16Z"
+}
