@@ -35,7 +35,7 @@ class AnthropicProvider:
         self,
         api_key: str,
         model: str = "claude-sonnet-4-6",
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
         *,
         client=None,
     ) -> None:
@@ -59,7 +59,15 @@ class AnthropicProvider:
             max_tokens=max_tokens or self._max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
-        return resp.content[0].text
+        # Thinking models emit {"type": "thinking"} blocks first; only
+        # text blocks carry the answer (content[0] may be thinking).
+        # Blocks without a ``type`` attribute are treated as text so
+        # duck-typed fakes and legacy SDK shapes keep working.
+        return "".join(
+            block.text
+            for block in resp.content
+            if getattr(block, "type", "text") == "text"
+        )
 
     async def _raw_complete_json(self, prompt: str) -> dict:
         """Complete with JSON response expectation and parse the result."""

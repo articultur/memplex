@@ -92,6 +92,7 @@ class QueryPipeline:
         explain: bool = False,
         *,
         context: AuthorizationContext,
+        sub_queries: list[str] | None = None,
     ) -> QueryResult:
         """Execute the six-stage query pipeline and return a QueryResult.
 
@@ -102,6 +103,14 @@ class QueryPipeline:
         4. Rerank (6-dim bi-encoder + optional cross-encoder).
         5. Update ``access_count`` (persisted).
         6. Token budget truncation (greedy by ``relevance_score``).
+
+        ``sub_queries`` enables orchestrated retrieval: each decomposed
+        sub-query (capped at 3 by the caller) fans out through the same
+        scoped multi-path search with its own embedding, and the per-path
+        result lists join the main query's before the shared
+        merge/dedupe -- the union semantics ``merge_multi_path`` already
+        provides. ``None`` (default) keeps the historical single-query
+        behaviour byte-for-byte.
         """
         store = self._store
         # A compiled wiki index is not tenant-addressable.  On a scoped
@@ -164,6 +173,10 @@ class QueryPipeline:
         all_results = self._parallel_scope_search(
             retriever, text, scope, candidate_budget, query_vector, trace
         )
+        if sub_queries:
+            all_results = self._orchestrated_fanout(
+                retriever, sub_queries, scope, top_k, all_results, trace
+            )
         # Merge results
         results = MultiPathRetriever.merge_multi_path(all_results)
         if trace is not None:
@@ -329,6 +342,48 @@ class QueryPipeline:
             truncated=truncated,
             explanation=build_query_explanation(trace),
         )
+
+    def _orchestrated_fanout(
+        self,
+        retriever: MultiPathRetriever,
+        sub_queries: list[str],
+        scope: QueryScope,
+        top_k: int,
+        all_results: list[list[SearchResult]],
+        trace: dict[str, Any] | None,
+    ) -> list[list[SearchResult]]:
+        """Retrieve per decomposed sub-query and join the union pool.
+
+        Sub-queries ride the same scoped paths and budget discipline as
+        the main query; their per-path lists join before merge so
+        dedupe/rerank/authorization see one union pool (the semantics
+        ``merge_multi_path`` already provides).
+        """
+        fanout_budget = min(
+            max(int(top_k), 8), self._config.retrieval.max_retrieval_budget
+        )
+        for sub in sub_queries[:3]:
+            sub_vector = None
+            if self._embedding_service is not None:
+                try:
+                    sub_vector = self._embedding_service.embed_query(sub)
+                except Exception:  # noqa: BLE001 - fan-out degrades to lexical legs
+                    sub_vector = None
+            all_results.extend(
+                self._parallel_scope_search(
+                    retriever, sub, scope, fanout_budget, sub_vector, None
+                )
+            )
+        if trace is not None:
+            trace["stages"].append(
+                {
+                    "stage": "orchestrated_fanout",
+                    "sub_queries": len(sub_queries[:3]),
+                    "fanout_budget": fanout_budget,
+                    "note": "decomposed sub-queries merged into the union pool",
+                }
+            )
+        return all_results
 
     def _parallel_scope_search(
         self,

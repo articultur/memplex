@@ -86,6 +86,14 @@ def build_query_explanation(
             retrieval["merged_candidates"] = stage.get("candidates", 0)
             if stage.get("candidate_budget") is not None:
                 retrieval["candidate_budget"] = stage["candidate_budget"]
+        elif name == "orchestrated_fanout":
+            # Key present only when orchestration actually ran, so the
+            # empty-trace default stays exactly {"paths": []}.
+            retrieval["orchestrated_fanout"] = {
+                "sub_queries": stage.get("sub_queries", 0),
+                "fanout_budget": stage.get("fanout_budget"),
+                "note": stage.get("note"),
+            }
         elif name == "namespace_filter":
             filters.append(
                 {

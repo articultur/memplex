@@ -41,8 +41,15 @@ class ChangelogStore:
             self._save()
 
     def snapshot(self) -> list[ChangelogEvent]:
-        """Return a detached snapshot; managed Lite owns disk publication."""
-        return copy.deepcopy(self._events)
+        """Return a detached snapshot; managed Lite owns disk publication.
+
+        The list is fresh; event objects are shared. ChangelogEvents are
+        immutable after append (created once, never mutated in place --
+        this is the store's contract), so sharing them avoids a full
+        deepcopy of the whole history on every commit, which profiled at
+        O(N) per commit on large corpora.
+        """
+        return list(self._events)
 
     def replace(self, events: list[ChangelogEvent]) -> None:
         """Replace in-memory events.  Managed stores never write independently."""

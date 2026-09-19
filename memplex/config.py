@@ -343,6 +343,11 @@ class RetrievalConfig:
     # under the same budget ceiling. This is a bounded expansion knob --
     # it is not a claim of generic multi-hop reasoning.
     graph_max_hops: int = 1
+    # Orchestrated retrieval: decompose the query into sub-queries (LLM,
+    # fail-closed) and fan each out through the multi-path retrieval before
+    # the shared merge/rerank. Off by default; the per-call
+    # ``MemplexService.query(orchestrated=True)`` flag overrides it.
+    orchestrated: bool = False
 
     def __post_init__(self) -> None:
         for name in ("retrieval_budget_multiplier", "max_retrieval_budget"):
@@ -367,6 +372,12 @@ class LLMConfig:
     factual_capture: bool = False
     provider: str = "anthropic"
     anthropic_api_key: str | None = None  # falls back to ANTHROPIC_API_KEY env var
+    anthropic_model: str = "claude-sonnet-4-6"  # any anthropic-compatible endpoint model
+    # Round-trip budget for the query-enhancement LLM call (intent +
+    # orchestrated sub-queries). Thinking models on anthropic-compatible
+    # endpoints need tens of seconds; the 5s default keeps historical
+    # claude-sonnet latency expectations.
+    enhancement_timeout_seconds: float = 5.0
     local_endpoint: str | None = None
     local_model: str | None = None
     fallback_chain: list[str] = field(default_factory=lambda: ["anthropic"])
@@ -688,6 +699,7 @@ _ENV_TYPE_COERCIONS: dict[str, type] = {
     "retrieval.retrieval_budget_multiplier": int,
     "retrieval.graph_max_hops": int,
     "retrieval.max_retrieval_budget": int,
+    "retrieval.orchestrated": bool,
     # LLMConfig
     "llm.query_enhancement": bool,
     "llm.factual_capture": bool,
@@ -702,6 +714,8 @@ _ENV_TYPE_COERCIONS: dict[str, type] = {
     "llm.observation_compression": bool,
     "llm.provider": str,
     "llm.anthropic_api_key": str,
+    "llm.anthropic_model": str,
+    "llm.enhancement_timeout_seconds": float,
     "llm.local_endpoint": str,
     "llm.local_model": str,
     "llm.max_input_length": int,

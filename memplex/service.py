@@ -53,6 +53,7 @@ from memplex.llm.provider import create_provider
 from memplex.models import (
     CompactionResult,
     CompactionScope,
+    EnhancedQuery,
     ExtractedData,
     Fact,
     FeedbackVerdict,
@@ -609,6 +610,7 @@ class MemplexService:
             provider = create_provider(
                 provider=cfg.llm.provider,
                 anthropic_api_key=cfg.llm.anthropic_api_key,
+                anthropic_model=cfg.llm.anthropic_model,
                 local_endpoint=cast(str, cfg.llm.local_endpoint),
                 local_model=cast(str, cfg.llm.local_model),
                 fallback_chain=cfg.llm.fallback_chain,
@@ -745,6 +747,7 @@ class MemplexService:
         explain: bool = False,
         *,
         authorization: AuthorizationContext | None = None,
+        orchestrated: bool | None = None,
     ) -> QueryResult:
         """Unified query entry point.
 
@@ -774,12 +777,31 @@ class MemplexService:
         explain:
             Include a product-facing retrieval trace that explains the stages,
             filters, budgets, and final injected candidates.
+        orchestrated:
+            Decompose the query into sub-queries (LLM, fail-closed) and fan
+            each out through multi-path retrieval before the shared
+            merge/rerank -- the retrieval-orchestration recipe validated on
+            LongMemEval (see docs/research/public-baseline-2026-09.md).
+            ``None`` falls back to ``retrieval.orchestrated`` (default off).
 
         The stage-by-stage machinery lives in
         :class:`memplex.query_pipeline.QueryPipeline`; this method resolves
         authorization, binds the current collaborators, and delegates.
         """
         context = self._require_authorization(authorization)
+        detect_scope: Callable[[str], QueryScope] = self._detect_scope
+        sub_queries: list[str] | None = None
+        if orchestrated is None:
+            orchestrated = bool(self._config.retrieval.orchestrated)
+        if orchestrated:
+            # One enhancement call feeds both the scope (replacing the
+            # pipeline's own LLM intent round-trip) and the sub-queries --
+            # the LLM's expanded_queries were historically discarded after
+            # intent detection.
+            enhanced = self._enhanced_query_once(text)
+            if enhanced is not None:
+                sub_queries = self._orchestration_sub_queries(text, enhanced)
+                detect_scope = self._scope_from_enhanced(enhanced)
         # The pipeline is built per call from the service's current
         # attributes so monkeypatched instance attributes (reranker /
         # retriever / _detect_scope in tests) stay live.
@@ -794,7 +816,7 @@ class MemplexService:
             cross_reranker=self._cross_reranker,
             injection_risks=self._injection_risks,
             auth=self._auth,
-            detect_scope=self._detect_scope,
+            detect_scope=detect_scope,
             compute_hyde_vector=self._compute_hyde_vector,
         )
         return pipeline.run(
@@ -805,6 +827,7 @@ class MemplexService:
             namespace_filter=namespace_filter,
             explain=explain,
             context=context,
+            sub_queries=sub_queries,
         )
 
     async def query_async(
@@ -817,6 +840,7 @@ class MemplexService:
         explain: bool = False,
         *,
         authorization: AuthorizationContext | None = None,
+        orchestrated: bool | None = None,
     ) -> QueryResult:
         """Async version of :meth:`query`.
 
@@ -836,12 +860,62 @@ class MemplexService:
                 namespace_filter=namespace_filter,
                 explain=explain,
                 authorization=context,
+                orchestrated=orchestrated,
             ),
         )
 
     # ════════════════════════════════════════════════════════════════
     #  Intent detection
     # ════════════════════════════════════════════════════════════════
+
+    def _enhanced_query_once(self, text: str) -> EnhancedQuery | None:
+        """One fail-closed ``enhance_query`` round-trip (thread-pool safe).
+
+        Mirrors the LLM leg of :meth:`_detect_scope`; any failure or a
+        disabled enhancement config returns ``None`` so callers degrade to
+        the historical single-query behaviour.
+        """
+        if self._llm is None or not self._llm.config.query_enhancement:
+            return None
+        try:
+            try:
+                asyncio.get_running_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                    return _pool.submit(
+                        asyncio.run, self._llm.enhance_query(text)
+                    ).result(
+                        timeout=self._config.llm.enhancement_timeout_seconds
+                    )
+            except RuntimeError:
+                return asyncio.run(self._llm.enhance_query(text))
+        except Exception as exc:  # noqa: BLE001 - orchestrated retrieval degrades to single-query
+            logger.debug("orchestrated enhance_query failed, degrading: %s", exc)
+            return None
+
+    @staticmethod
+    def _orchestration_sub_queries(
+        text: str, enhanced: EnhancedQuery
+    ) -> list[str] | None:
+        """Sanitize the LLM's expanded queries into fan-out sub-queries."""
+        original = text.strip()
+        subs = [
+            q.strip()
+            for q in enhanced.expanded
+            if isinstance(q, str) and q.strip() and q.strip() != original
+        ]
+        return subs[:3] or None
+
+    @staticmethod
+    def _scope_from_enhanced(enhanced: EnhancedQuery) -> Callable[[str], QueryScope]:
+        """Scope detector closure reusing one enhancement round-trip."""
+        intent_map = {
+            "search": QueryScope.IMMEDIATE,
+            "understand": QueryScope.SYNTHESIS,
+            "compare": QueryScope.ALL,
+            "relation": QueryScope.RELATION,
+        }
+        scope = intent_map.get(enhanced.intent, QueryScope.IMMEDIATE)
+        return lambda _text: scope
 
     def _detect_scope(self, text: str) -> QueryScope:
         """Intent detection: LLM path (priority) then keyword fallback.

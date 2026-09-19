@@ -474,10 +474,27 @@ class GraphBuilder:
         return self._name_entries
 
     def _func_name_by_id(self, funcs: list[Function], func_id: str) -> str:
-        for func in funcs:
-            if func.id == func_id:
-                return func.name
-        return func_id
+        """Resolve a function name by id in O(1) via a fingerprint-guarded
+        index.
+
+        The historical linear scan over *funcs* cost O(N) per DEPENDS_ON
+        match (up to ``depends_on_max_edges`` scans per added function) --
+        a per-write superlinear term on large corpora. Cache misses are
+        batch-local nodes not yet in the stored corpus; only those pay a
+        scan of the passed list.
+        """
+        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
+        index = getattr(self, "_name_by_id", None)
+        if index is None or getattr(
+            self, "_name_by_id_fingerprint", _NO_FINGERPRINT
+        ) != fingerprint:
+            index = {f.id: f.name for f in funcs}
+            self._name_by_id = index
+            self._name_by_id_fingerprint = fingerprint
+        name = index.get(func_id)
+        if name is not None:
+            return name
+        return next((f.name for f in funcs if f.id == func_id), func_id)
 
     def _name_reference_texts(self, source: Function) -> tuple[str, str]:
         """Lowercased action/trigger text of one function, built once."""
@@ -495,6 +512,8 @@ class GraphBuilder:
             del self._name_entries
         if hasattr(self, "_conflict_groups"):
             del self._conflict_groups
+        if hasattr(self, "_name_by_id"):
+            del self._name_by_id
 
 
 # ── Rule-based fallback (no store) ───────────────────────────────────

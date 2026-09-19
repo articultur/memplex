@@ -177,6 +177,17 @@ class Proxy:
         ][:3]
 
 
+def product_context(svc, question: str) -> str:
+    """Product-path retrieval: ``svc.query(orchestrated=True)`` only.
+
+    Parity probe surface: the decomposition/fan-out must come from the
+    SERVICE (LLMEnhancer expanded_queries -> pipeline fan-out), not from
+    this harness. What the product returns is what builds the context.
+    """
+    result = svc.query(question, top_k=TOP_K, orchestrated=True, explain=False)
+    return "\n".join(f"- {r.summary}" for r in result.results[:TOP_K])
+
+
 def collect_context(svc, proxy: Proxy, question: str) -> str:
     """Main retrieval + decomposition union + summary-to-session + adjacency.
 
@@ -370,6 +381,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
+        "--product-orchestration",
+        action="store_true",
+        help="Use the PRODUCT orchestrated path (svc.query(orchestrated=True)) "
+        "for retrieval instead of the harness-side recipe (parity probe).",
+    )
+    parser.add_argument(
         "--only-type",
         default=None,
         help="Restrict the run to one question_type (e.g. temporal-reasoning)",
@@ -391,6 +408,21 @@ def main() -> int:
     config.storage.backend = "lite"
     config.storage.path = str(pathlib.Path(tempfile.mkdtemp(prefix="lme-j-")) / "s.sqlite3")
     config.llm.query_enhancement = False
+    if args.product_orchestration:
+        # Wire the service's own LLM (anthropic-compatible bigmodel proxy)
+        # so orchestrated retrieval decomposes inside the PRODUCT path.
+        settings = json.loads(
+            pathlib.Path(os.path.expanduser("~/.claude/settings.json")).read_text()
+        )["env"]
+        os.environ["ANTHROPIC_BASE_URL"] = settings["ANTHROPIC_BASE_URL"]
+        config.llm.query_enhancement = True
+        config.llm.provider = "anthropic"
+        config.llm.anthropic_api_key = settings["ANTHROPIC_AUTH_TOKEN"]
+        config.llm.anthropic_model = "glm-5.3"
+        # Thinking-model round-trips need tens of seconds; HyDE would add
+        # another LLM leg per query without helping the parity probe.
+        config.llm.enhancement_timeout_seconds = 90.0
+        config.embedding.hyde_enabled = False
     svc = MemplexService(config=config)
     svc.start()
     ds = LongMemEvalDataset()
@@ -437,7 +469,10 @@ def main() -> int:
             runner._seed(svc, build_observations(ds, sample, session_summaries))
         else:
             runner._seed(svc, ds.to_memories(sample))
-        context = collect_context(svc, proxy, question)
+        if args.product_orchestration:
+            context = product_context(svc, question)
+        else:
+            context = collect_context(svc, proxy, question)
 
         try:
             answer = generate_answer(
