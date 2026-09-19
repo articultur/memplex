@@ -250,6 +250,103 @@ class _LocalONNXEmbedder:
         return values
 
 
+# ── Remote embedding service boundary ───────────────────────────────
+
+
+class RemoteEmbedder:
+    """OpenAI-compatible ``/embeddings`` endpoint backend.
+
+    The embedding model as a service boundary: seeding throughput is no
+    longer bound to one process's CPU/MPS (bge-m3 profiled at ~74ms per
+    long text in-process), and embedding workers scale independently of
+    the store. Selected with ``model="remote"`` plus
+    ``embedding.remote_url`` / ``remote_model`` / ``remote_api_key``.
+
+    Fail-closed by contract: HTTP errors, malformed payloads, and
+    dimension mismatches raise -- this backend never silently degrades
+    to TF-IDF (a deployment labelled semantic must stay semantic).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        dimension: int,
+        api_key: str | None = None,
+        timeout: float = 60.0,
+        max_request_size: int = 16,
+    ) -> None:
+        # Managed endpoints cap inputs per request (bigmodel rejects
+        # larger lists with a bare 400); chunk well under the common caps.
+        if not base_url:
+            raise ValueError("remote embedding requires embedding.remote_url")
+        try:
+            import requests
+        except ImportError as exc:  # pragma: no cover - requests is a core dep
+            raise RuntimeError("requests is required for remote embeddings") from exc
+        self._requests = requests
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._dimension = dimension
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._timeout = timeout
+        self._max_request_size = max(1, max_request_size)
+
+    def _post(self, texts: list[str]) -> list[Vector]:
+        resp = self._requests.post(
+            f"{self._base_url}/embeddings",
+            json={"model": self._model, "input": list(texts)},
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        # OpenAI-compatible servers may return data out of order; the
+        # mandatory "index" field restores request order.
+        entries = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
+        if len(entries) != len(texts):
+            raise ValueError(
+                f"remote embedding returned {len(entries)} vectors for "
+                f"{len(texts)} inputs"
+            )
+        vectors: list[Vector] = []
+        for entry in entries:
+            vector = [float(value) for value in entry.get("embedding", [])]
+            if len(vector) != self._dimension:
+                raise ValueError(
+                    f"remote embedding dimension {len(vector)} does not "
+                    f"match configured embedding.dimension {self._dimension}"
+                )
+            vectors.append(vector)
+        return vectors
+
+    def encode(self, text: str) -> Vector:
+        return self._post([text])[0]
+
+    def encode_query(self, text: str) -> Vector:
+        # Stateless backend: query embedding is document embedding.
+        return self.encode(text)
+
+    def encode_batch(self, texts: list[str], batch_size: int = 32) -> list[Vector]:
+        if not texts:
+            return []
+        size = max(1, batch_size)
+        vectors: list[Vector] = []
+        for start in range(0, len(texts), size):
+            vectors.extend(self._post(texts[start : start + size]))
+        return vectors
+
+    def encode_query_batch(self, texts: list[str]) -> list[Vector]:
+        # Chunked to the endpoint's per-request input cap; each request is
+        # still a server-side batch.
+        if not texts:
+            return []
+        vectors: list[Vector] = []
+        for start in range(0, len(texts), self._max_request_size):
+            vectors.extend(self._post(texts[start : start + self._max_request_size]))
+        return vectors
+
+
 # ── EmbeddingService ─────────────────────────────────────────────────
 
 
@@ -300,6 +397,10 @@ class EmbeddingService:
         vector_store: VectorStoreProtocol | None = None,
         batch_size: int = 32,
         contextual_retrieval: bool = True,
+        remote_url: str | None = None,
+        remote_model: str = "",
+        remote_api_key: str | None = None,
+        remote_timeout: float = 60.0,
     ) -> None:
         self.model = model
         self.dimension = dimension
@@ -307,6 +408,10 @@ class EmbeddingService:
         self.vector_store = vector_store
         self.batch_size = batch_size
         self.contextual_retrieval = contextual_retrieval
+        self._remote_url = remote_url
+        self._remote_model = remote_model
+        self._remote_api_key = remote_api_key
+        self._remote_timeout = remote_timeout
         self._embedder = self._create_embedder(model, dimension)
 
     # ── Public API ──────────────────────────────────────────────────
@@ -488,6 +593,31 @@ class EmbeddingService:
         if model_lookup_key in self._OFFLINE_MODELS:
             logger.debug("Using local TF-IDF embedder for embedding model %s", model_key)
             return _SimpleTFIDFEmbedder(dimension=dimension)
+
+        if model_lookup_key in {"remote", "http", "api"}:
+            if not self._remote_url:
+                raise ValueError(
+                    "embedding.model='remote' requires embedding.remote_url "
+                    "(or MEMPLEX_EMBEDDING_REMOTE_URL) pointing at an "
+                    "OpenAI-compatible /embeddings endpoint."
+                )
+            if not self._remote_model:
+                raise ValueError(
+                    "embedding.model='remote' requires embedding.remote_model "
+                    "(the server-side model name)."
+                )
+            logger.debug(
+                "Using remote embedding service %s (model %s)",
+                self._remote_url,
+                self._remote_model,
+            )
+            return RemoteEmbedder(
+                base_url=self._remote_url,
+                model=self._remote_model,
+                dimension=dimension,
+                api_key=self._remote_api_key,
+                timeout=self._remote_timeout,
+            )
 
         if model_lookup_key.startswith(self._HF_PREFIX):
             model_name = model_key[len(self._HF_PREFIX) :]

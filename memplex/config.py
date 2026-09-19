@@ -210,6 +210,13 @@ class EmbeddingConfig:
     batch_size: int = 32
     contextual_retrieval: bool = True
     hyde_enabled: bool = True
+    # Embedding-as-a-service boundary: model="remote" routes vectors through
+    # an OpenAI-compatible /embeddings endpoint (vLLM / TEI / managed APIs),
+    # freeing seeding throughput from one process's CPU/MPS.
+    remote_url: str | None = None
+    remote_model: str = ""
+    remote_api_key: str | None = None  # falls back to MEMPLEX_EMBEDDING_REMOTE_API_KEY
+    remote_timeout_seconds: float = 60.0
 
 
 @dataclass
@@ -665,6 +672,10 @@ _ENV_TYPE_COERCIONS: dict[str, type] = {
     "storage.inbound_dsn": str,
     # EmbeddingConfig
     "embedding.model": str,
+    "embedding.remote_url": str,
+    "embedding.remote_model": str,
+    "embedding.remote_api_key": str,
+    "embedding.remote_timeout_seconds": float,
     "embedding.dimension": int,
     "embedding.batch_size": int,
     "embedding.contextual_retrieval": bool,

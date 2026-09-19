@@ -338,6 +338,10 @@ class MemplexService:
             storage=self.store,
             batch_size=cfg.embedding.batch_size,
             contextual_retrieval=cfg.embedding.contextual_retrieval,
+            remote_url=cfg.embedding.remote_url,
+            remote_model=cfg.embedding.remote_model,
+            remote_api_key=cfg.embedding.remote_api_key,
+            remote_timeout=cfg.embedding.remote_timeout_seconds,
         )
 
         # ── pgvector embedder injection ─────────────────────────
