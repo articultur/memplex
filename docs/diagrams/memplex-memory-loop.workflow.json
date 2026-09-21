@@ -1,0 +1,303 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Memplex 记忆循环：Recall → 回合 → Capture",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "memplex-memory-loop.html",
+    "views": [
+      {
+        "id": "read-path",
+        "label": "读路径",
+        "focus": [
+          "turn-start",
+          "authz",
+          "multipath",
+          "rerank",
+          "inject",
+          "reply"
+        ],
+        "note": "回合前 recall：全局预算分给 RAG/wiki/graph，六维重排后裁剪注入。"
+      },
+      {
+        "id": "write-path",
+        "label": "写路径与后台",
+        "focus": [
+          "reply",
+          "capture",
+          "extract",
+          "persist",
+          "worker",
+          "observe"
+        ],
+        "note": "回合后 capture：身份绑定先于持久化；后台任务尽力而为。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "host",
+      "label": "宿主会话"
+    },
+    {
+      "id": "read",
+      "label": "读路径 · Recall"
+    },
+    {
+      "id": "write",
+      "label": "写路径 · Capture"
+    },
+    {
+      "id": "bg",
+      "label": "后台与旁路",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "recall-phase",
+      "label": "Recall（回合前）",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "turn-phase",
+      "label": "回复与采集",
+      "fromCol": 3,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "capture-phase",
+      "label": "落库（写事务）",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "write-txn",
+      "label": "写事务",
+      "lane": "write",
+      "fromCol": 3,
+      "toCol": 5
+    },
+    {
+      "id": "best-effort",
+      "label": "尽力而为（不在写事务内）",
+      "lane": "bg",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "turn-start",
+    "authz",
+    "multipath",
+    "rerank",
+    "inject",
+    "reply",
+    "capture",
+    "extract",
+    "persist"
+  ],
+  "nodes": [
+    {
+      "id": "turn-start",
+      "lane": "host",
+      "col": 0,
+      "type": "external",
+      "label": "宿主回合",
+      "sublabel": "用户提问",
+      "width": 118
+    },
+    {
+      "id": "inject",
+      "lane": "host",
+      "col": 2,
+      "type": "frontend",
+      "label": "上下文注入",
+      "sublabel": "token 预算裁剪",
+      "width": 118
+    },
+    {
+      "id": "reply",
+      "lane": "host",
+      "col": 3,
+      "type": "backend",
+      "label": "助手回复",
+      "sublabel": "带记忆执行",
+      "width": 118
+    },
+    {
+      "id": "authz",
+      "lane": "read",
+      "col": 0,
+      "type": "security",
+      "label": "鉴权 + 意图",
+      "sublabel": "范围解析",
+      "width": 118
+    },
+    {
+      "id": "multipath",
+      "lane": "read",
+      "col": 1,
+      "type": "backend",
+      "label": "多路检索",
+      "sublabel": "RAG · wiki · graph",
+      "tag": "共享预算",
+      "width": 118
+    },
+    {
+      "id": "rerank",
+      "lane": "read",
+      "col": 2,
+      "type": "backend",
+      "label": "过滤 + 重排",
+      "sublabel": "六维加权重排",
+      "width": 118
+    },
+    {
+      "id": "capture",
+      "lane": "write",
+      "col": 3,
+      "type": "backend",
+      "label": "capture()",
+      "sublabel": "剥离私有块",
+      "width": 118
+    },
+    {
+      "id": "extract",
+      "lane": "write",
+      "col": 4,
+      "type": "backend",
+      "label": "抽取 + 绑定身份",
+      "sublabel": "三类记忆节点",
+      "width": 118
+    },
+    {
+      "id": "persist",
+      "lane": "write",
+      "col": 5,
+      "type": "database",
+      "label": "落库 + 图合并",
+      "sublabel": "supersede 不删历史",
+      "width": 118
+    },
+    {
+      "id": "observe",
+      "lane": "bg",
+      "col": 4,
+      "type": "security",
+      "label": "Observation 路径",
+      "sublabel": "独立授权写入",
+      "width": 118
+    },
+    {
+      "id": "worker",
+      "lane": "bg",
+      "col": 5,
+      "type": "messagebus",
+      "label": "后台维护",
+      "sublabel": "索引 · 压缩 · 去重",
+      "width": 118
+    }
+  ],
+  "edges": [
+    {
+      "id": "turn-authz",
+      "from": "turn-start",
+      "to": "authz",
+      "label": "recall()",
+      "variant": "emphasis"
+    },
+    {
+      "id": "authz-multipath",
+      "from": "authz",
+      "to": "multipath",
+      "label": "意图 + 范围"
+    },
+    {
+      "id": "multipath-rerank",
+      "from": "multipath",
+      "to": "rerank",
+      "label": "合并去重"
+    },
+    {
+      "id": "rerank-inject",
+      "from": "rerank",
+      "to": "inject",
+      "label": "top_k + token 裁剪"
+    },
+    {
+      "id": "inject-reply",
+      "from": "inject",
+      "to": "reply",
+      "label": "执行回合"
+    },
+    {
+      "id": "reply-capture",
+      "from": "reply",
+      "to": "capture",
+      "label": "capture()",
+      "variant": "emphasis"
+    },
+    {
+      "id": "capture-extract",
+      "from": "capture",
+      "to": "extract",
+      "label": "注入扫描"
+    },
+    {
+      "id": "extract-persist",
+      "from": "extract",
+      "to": "persist",
+      "label": "Fact / Preference 落库"
+    },
+    {
+      "id": "persist-worker",
+      "from": "persist",
+      "to": "worker",
+      "label": "调度 · 尽力而为",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "reply-observe",
+      "from": "reply",
+      "to": "observe",
+      "label": "add_observation()",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "读路径",
+      "items": [
+        "回合前 recall；RAG / wiki / graph 共享全局候选预算",
+        "六维加权：相关度 · 语义 · 时近 · 权威 · 频次 · 置信度"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "写路径",
+      "items": [
+        "抽取 Function / Fact / Preference 三类节点",
+        "身份绑定先于持久化，冲突的伪造声明被拒绝",
+        "矛盾 Fact 走 supersede，保留双时间轴历史"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "边界事实",
+      "items": [
+        "索引 / 压缩 / 去重不在写事务内，尽力而为",
+        "Observation 走独立授权路径 add_observation()"
+      ]
+    }
+  ]
+}

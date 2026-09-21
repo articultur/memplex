@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Memplex 系统架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "memplex-architecture.html",
+    "views": [
+      {
+        "id": "core-path",
+        "label": "主调用链",
+        "focus": [
+          "hosts",
+          "agent-runtime",
+          "service",
+          "authz",
+          "pg-store"
+        ],
+        "note": "宿主经共享运行时进入编排门面，鉴权后落到生产存储。"
+      },
+      {
+        "id": "read-path",
+        "label": "读路径",
+        "focus": [
+          "service",
+          "query-pipeline",
+          "retrieval",
+          "llm"
+        ],
+        "note": "query() 委托六阶段 QueryPipeline，多路检索与 LLM 层协作。"
+      },
+      {
+        "id": "async-side",
+        "label": "维护与同步",
+        "focus": [
+          "service",
+          "maintenance",
+          "sync",
+          "lite-store"
+        ],
+        "note": "写事务之外的尽力而为维护与多节点同步。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "hosts",
+      "type": "external",
+      "label": "Agent 宿主",
+      "sublabel": "Codex · Claude · OpenClaw · Hermes",
+      "pos": [
+        40,
+        330
+      ],
+      "size": [
+        210,
+        72
+      ]
+    },
+    {
+      "id": "transports",
+      "type": "frontend",
+      "label": "传输层",
+      "sublabel": "CLI · HTTP API · MCP",
+      "pos": [
+        284,
+        175
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "agent-runtime",
+      "type": "backend",
+      "label": "宿主运行时",
+      "sublabel": "agent_runtime · 插件",
+      "pos": [
+        284,
+        460
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "service",
+      "type": "backend",
+      "label": "MemplexService",
+      "sublabel": "编排门面 · service.py",
+      "tag": "六边形核心",
+      "pos": [
+        520,
+        300
+      ],
+      "size": [
+        185,
+        90
+      ]
+    },
+    {
+      "id": "authz",
+      "type": "security",
+      "label": "AuthorizationGate",
+      "sublabel": "租户 · 工作区 · 会话 ACL",
+      "pos": [
+        520,
+        105
+      ],
+      "size": [
+        185,
+        64
+      ]
+    },
+    {
+      "id": "query-pipeline",
+      "type": "backend",
+      "label": "QueryPipeline",
+      "sublabel": "六阶段读路径",
+      "pos": [
+        730,
+        105
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "retrieval",
+      "type": "backend",
+      "label": "Retrieval",
+      "sublabel": "RAG / wiki / graph · 重排",
+      "pos": [
+        924,
+        105
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "LLM Layer",
+      "sublabel": "providers · 注入防御",
+      "pos": [
+        730,
+        300
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "sync",
+      "type": "messagebus",
+      "label": "Sync",
+      "sublabel": "协议 · 推拉 · AES-GCM",
+      "pos": [
+        730,
+        500
+      ],
+      "size": [
+        168,
+        64
+      ]
+    },
+    {
+      "id": "maintenance",
+      "type": "backend",
+      "label": "维护机制",
+      "sublabel": "去重 · 压缩 · 空闲维护",
+      "pos": [
+        520,
+        500
+      ],
+      "size": [
+        185,
+        64
+      ]
+    },
+    {
+      "id": "lite-store",
+      "type": "database",
+      "label": "Lite Store",
+      "sublabel": "JSON journal + SQLite FTS5",
+      "tag": "仅开发",
+      "pos": [
+        1132,
+        245
+      ],
+      "size": [
+        172,
+        64
+      ]
+    },
+    {
+      "id": "pg-store",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "pgvector · migrations",
+      "tag": "生产必选",
+      "brand": "postgresql",
+      "pos": [
+        1132,
+        430
+      ],
+      "size": [
+        172,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "adapters/（六边形边界）",
+      "wraps": [
+        "transports",
+        "agent-runtime"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "领域核心（禁止反向 import adapters）",
+      "wraps": [
+        "service",
+        "authz",
+        "query-pipeline",
+        "retrieval",
+        "llm",
+        "sync",
+        "maintenance"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Storage · MemoryStore 双后端",
+      "wraps": [
+        "lite-store",
+        "pg-store"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "hosts-transports",
+      "from": "hosts",
+      "to": "transports",
+      "label": "MCP / HTTP / CLI",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "hosts-runtime",
+      "from": "hosts",
+      "to": "agent-runtime",
+      "label": "宿主插件钩子",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "transports-service",
+      "from": "transports",
+      "to": "service",
+      "label": "recall() / capture()",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "runtime-service",
+      "from": "agent-runtime",
+      "to": "service",
+      "label": "共享运行时调用",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "service-authz",
+      "from": "service",
+      "to": "authz",
+      "label": "请求级 ACL",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": -25
+    },
+    {
+      "id": "service-pipeline",
+      "from": "service",
+      "to": "query-pipeline",
+      "label": "query() 委托",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "pipeline-retrieval",
+      "from": "query-pipeline",
+      "to": "retrieval",
+      "label": "多路检索",
+      "labelAt": [
+        890,
+        215
+      ]
+    },
+    {
+      "id": "retrieval-llm",
+      "from": "retrieval",
+      "to": "llm",
+      "label": "embedding / 语义特征",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "service-maintenance",
+      "from": "service",
+      "to": "maintenance",
+      "label": "去重 · 压缩（尽力而为）",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        612,
+        478
+      ]
+    },
+    {
+      "id": "service-sync",
+      "from": "service",
+      "to": "sync",
+      "label": "多节点推拉",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "service-lite",
+      "from": "service",
+      "to": "lite-store",
+      "label": "MemoryStore（开发）",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          718,
+          345
+        ],
+        [
+          718,
+          375
+        ],
+        [
+          1218,
+          375
+        ]
+      ],
+      "labelSegment": 2
+    },
+    {
+      "id": "service-pg",
+      "from": "service",
+      "to": "pg-store",
+      "label": "MemoryStore（生产）",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "sync-pg",
+      "from": "sync",
+      "to": "pg-store",
+      "label": "SyncRepository",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "接入与宿主",
+      "items": [
+        "四类宿主平台经 G008 合同摘要绑定安装契约",
+        "CLI / HTTP / MCP 三种传输共享 agent_runtime 采集与召回"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "六边形核心",
+      "items": [
+        "MemplexService 只做编排，机制下沉到协作者",
+        "写路径抽取/增强与读路径嵌入统一走 llm/ providers",
+        "import-linter 禁止 domain / storage 反向 import adapters",
+        "fail-closed ACL：无身份即不可见，未授权与不存在不可区分"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "存储与同步",
+      "items": [
+        "Lite 后端仅限开发；生产必须 PostgreSQL + pgvector",
+        "同步双后端遵守 17 方法 lockstep 契约，AES-GCM 加密载荷"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "benchmark": "longmemeval_s_official_j_v12",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts, temperature 0",
+  "judge_model": "glm-5.3 (disclosed deviation)",
+  "generation": "v11 + PAR pseudo-answer retrieval (single PAR sub-query, thinking disabled, union top-8); all other research-rejected levers OFF",
+  "dataset": {"name": "longmemeval_s_cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "56ffe434473b5419e14b368f872c447efd889fcf"},
+  "results": {"J_overall": 0.898, "judged": 500, "total": 500},
+  "ablation": {"v11": 0.894, "v12": 0.898, "probe_to_full_shrinkage": "PAR probes multi 0.8195/temporal 0.9173 -> full 0.797/0.9023 -- multi gain evaporated (within-noise), temporal held +0.7pp"},
+  "rejected_levers_this_campaign": {"time_window_prune": "temporal -0.75pp probe", "recite_prompt": "neutral probe", "counting_full_injection": "neutral probe"},
+  "evidence_level": "E1",
+  "timestamp": "2026-09-21T05:12:56Z"
+}

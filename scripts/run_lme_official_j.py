@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import time
@@ -168,13 +169,36 @@ class Proxy:
                 temperature=0.0,
                 disable_thinking=True,
             )
-        except Exception:  # noqa: BLE001 - decomposition is best-effort
+        except Exception as exc:  # noqa: BLE001 - decomposition is best-effort
+            print(f"decompose failed: {exc}", flush=True)
             return []
         return [
             line.strip()
             for line in text.strip().splitlines()
             if len(line.strip()) > 5
         ][:3]
+
+    def pseudo_answer(self, question: str) -> list[str]:
+        """One hypothetical-answer text for PAR retrieval (best-effort).
+
+        The answer's phrasing bridges the query-evidence wording drift
+        that question-side rewriting cannot. Thinking disabled: a short
+        guess is enough to pivot the retrieval into answer space.
+        """
+        try:
+            text = self.complete(
+                "Write one short (1-2 sentence) plausible answer to this "
+                "question about the user's history. A concrete guess is "
+                f"fine; do not refuse:\n\n{question}",
+                max_tokens=128,
+                temperature=0.0,
+                disable_thinking=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - PAR is best-effort
+            print(f"pseudo-answer failed: {exc}", flush=True)
+            return []
+        answer = text.strip()
+        return [answer] if len(answer) > 10 else []
 
 
 def product_context(svc, question: str) -> str:
@@ -188,7 +212,154 @@ def product_context(svc, question: str) -> str:
     return "\n".join(f"- {r.summary}" for r in result.results[:TOP_K])
 
 
-def collect_context(svc, proxy: Proxy, question: str) -> str:
+
+_MONTHS = {
+    name: f"{i:02d}"
+    for i, name in enumerate(
+        [
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        ],
+        start=1,
+    )
+}
+
+
+def question_time_window(question: str) -> tuple[str, str] | None:
+    """(start, end) as YYYY/MM bounds when the question LITERALLY names
+    explicit months/years.
+
+    Deterministic by design: the official time-aware pruning warns that
+    LLM-inferred ranges hallucinate false-positive windows (appendix E.3);
+    we only prune when the question itself states the boundaries. Two or
+    more mentions define a range (filter); a single mention merely boosts
+    (stable reorder) -- both applied by :func:`apply_time_window`.
+    """
+    text = question.lower()
+    points: list[tuple[int, int]] = []  # (YYYYMM, position)
+    taken_spans: list[tuple[int, int]] = []  # (start, end) of consumed years
+    for month_name, mm in _MONTHS.items():
+        for match in re.finditer(month_name, text):
+            tail = text[match.end(): match.end() + 6]
+            year_match = re.match(r"\s*,?\s*(20\d{2})", tail)
+            year = year_match.group(1) if year_match else None
+            if year is None:
+                # maybe "2023 march" shape
+                head = text[max(0, match.start() - 6): match.start()]
+                pre = re.search(r"(20\d{2})\s*,?\s*$", head)
+                year = pre.group(1) if pre else None
+            if year is not None:
+                points.append((int(f"{year}{mm}"), match.start()))
+                taken_spans.append(
+                    (match.start() - 6, match.end() + 6)
+                )
+    for match in re.finditer(r"\b(20\d{2})\b", text):
+        # bare years only when not already attached to a captured month
+        if any(a <= match.start() <= b for a, b in taken_spans):
+            continue
+        yyyy = int(match.group(1))
+        points.append((yyyy * 100 + 1, match.start()))
+        points.append((yyyy * 100 + 12, match.start()))
+    if not points:
+        return None
+    starts = [p[0] for p in points]
+    lo, hi = min(starts), max(starts)
+
+    def ym_shift(value: int, delta: int) -> int:
+        year, month = divmod(value, 100)
+        total = year * 12 + (month - 1) + delta
+        new_year, new_month = divmod(total, 12)
+        return new_year * 100 + new_month + 1
+
+    lo_m = ym_shift(lo, -1)
+    hi_m = ym_shift(hi, 1)
+    return f"{lo_m // 100:04d}/{lo_m % 100:02d}", f"{hi_m // 100:04d}/{hi_m % 100:02d}"
+
+
+def _item_ym(text: str) -> str | None:
+    """YYYY/MM of the first [YYYY/MM/DD ...] prefix in a context item."""
+    match = re.search(r"\[(\d{4})/(\d{2})/\d{2}", text)
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def apply_time_window(context_items: list[str], window: tuple[str, str] | None) -> list[str]:
+    """Boost in-window items (stable reorder); a stated range (lo != hi)
+    drops out-of-window items entirely. Undated items always survive."""
+    if window is None:
+        return context_items
+    lo, hi = window
+    in_window: list[str] = []
+    out_window: list[str] = []
+    undated: list[str] = []
+    for item in context_items:
+        ym = _item_ym(item)
+        if ym is None:
+            undated.append(item)
+        elif lo <= ym <= hi:
+            in_window.append(item)
+        else:
+            out_window.append(item)
+    if lo != hi:
+        return in_window + undated
+    return in_window + undated + out_window
+
+
+
+def counting_intent(question: str) -> bool:
+    """Detect enumerate/count questions (completeness-critical)."""
+    lowered = question.lower()
+    signals = (
+        "how many", "how much", "how often", "number of",
+        "list all", "list every", "all the", "what are all",
+    )
+    return any(signal in lowered for signal in signals)
+
+
+
+def session_fulltexts_for_hits(svc, sample, hits: list, cap: int = 6) -> list[str]:
+    """Full session-unit texts for the sessions the top hits belong to.
+
+    Counting questions need EVERY mention, so the full session text of
+    each hit's session beats turn snippets (LME-V2 raw-slice ablation:
+    removing the full-text pool collapsed accuracy 0.586 -> 0.423). The
+    flattened-history turn index in each hit id maps back to its session
+    through the sample's sessions metadata.
+    """
+    metadata = sample.metadata or {}
+    sessions = metadata.get("sessions") or []
+    idx2sess: dict[int, int] = {}
+    flat = 0
+    for pos, session in enumerate(sessions):
+        for _ in session:
+            idx2sess[flat] = pos
+            flat += 1
+    needed: set[int] = set()
+    for r in hits[: cap * 2]:
+        parts = r.func_id.rsplit("-s", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            pos = idx2sess.get(int(parts[1]))
+            if pos is not None:
+                needed.add(pos)
+        if len(needed) >= cap:
+            break
+    if not needed:
+        return []
+    get = getattr(svc.store, "get", None)
+    if not callable(get):
+        return []
+    texts: list[str] = []
+    for pos in sorted(needed):
+        try:
+            node = get(f"lme-{sample.id}-sess{pos}")
+        except Exception as exc:  # noqa: BLE001 - completeness is best-effort
+            print(f"session pull failed: {exc}", flush=True)
+            continue
+        if node is not None:
+            texts.append(f"{node.name} {_neighbour_text(node)}".strip())
+    return texts
+
+
+def collect_context(svc, proxy: Proxy, question: str) -> tuple[str, list]:
     """Main retrieval + decomposition union + summary-to-session + adjacency.
 
     Summary units rank well against the question but carry paraphrases;
@@ -208,6 +379,16 @@ def collect_context(svc, proxy: Proxy, question: str) -> str:
             if r.func_id not in seen_ids:
                 seen_ids.add(r.func_id)
                 hits.append(r)
+    # Pseudo-answer rewriting (PAR): retrieve with a hypothetical answer
+    # text as well. Answer phrasing sits closer to evidence phrasing than
+    # question phrasing does (DMQR-RAG: PAR was the largest contributor
+    # among four rewrite variants, P@5 +14.46% overall).
+    if os.environ.get("MEMPLEX_LME_PAR", "1") == "1":
+        for pseudo in proxy.pseudo_answer(question):
+            for r in svc.query(pseudo, top_k=8, explain=False).results[:8]:
+                if r.func_id not in seen_ids:
+                    seen_ids.add(r.func_id)
+                    hits.append(r)
     get = getattr(svc.store, "get", None)
 
     def unit_text(fid: str) -> str | None:
@@ -230,7 +411,10 @@ def collect_context(svc, proxy: Proxy, question: str) -> str:
             swapped.append(session_text if session_text else r.summary)
         else:
             swapped.append(r.summary)
-    context_items = swapped
+    context_items = apply_time_window(
+        swapped,
+        question_time_window(question) if os.environ.get("MEMPLEX_LME_TIME_PRUNE", "1") == "1" else None,
+    )
     # Adjacency expansion: a hit turn's neighbours (index +/-1 in the
     # flattened history, i.e. same or adjacent session) frequently
     # carry the continuation that single-turn retrieval misses --
@@ -249,7 +433,136 @@ def collect_context(svc, proxy: Proxy, question: str) -> str:
                 if text is not None:
                     seen_ids.add(neighbour_id)
                     context_items.append(text)
-    return "\n".join(f"- {item}" for item in context_items)
+    return "\n".join(f"- {item}" for item in context_items), hits
+
+
+class EntityHubs:
+    """Disk-backed cross-session entity indices (structure-over-intelligence lever).
+
+    The controlled graph experiment (arXiv 2601.01280) showed cross-session
+    links at session granularity beat flat memory by +13pp with the SAME
+    answerer; entity-triple graphs failed on granularity mismatch. An
+    entity hub materializes the link as a seeded, searchable record:
+    every entity recurring across sessions gets one hub whose text
+    enumerates the sessions (with dates and short quotes) mentioning it.
+    Counting questions then hit the pre-computed enumeration instead of
+    re-deriving it from raw turns at answer time.
+    """
+
+    def __init__(self, proxy: Proxy, cache_path: pathlib.Path) -> None:
+        self._proxy = proxy
+        self._path = cache_path
+        self._cache: dict[str, list[dict]] = {}
+        if cache_path.exists():
+            try:
+                self._cache = json.loads(cache_path.read_text())
+            except Exception:  # noqa: BLE001 - corrupt cache regenerates
+                self._cache = {}
+        self._dirty = 0
+
+    def hubs(self, key: str, sessions: list[list[dict]]) -> list[dict]:
+        """[{entity, text}] for one sample; LLM-extracted, disk-cached."""
+        if key not in self._cache:
+            numbered = []
+            for position, session in enumerate(sessions):
+                date = str(session[0].get("session_date", "")) if session else ""
+                body = " | ".join(
+                    f"{t.get('role', 'user')}: {str(t.get('content', ''))[:400]}"
+                    for t in session
+                )[:1500]
+                numbered.append(f"Session {position} [{date}]: {body}")
+            corpus = "\n".join(numbered)[:28000]
+            try:
+                text = self._proxy.complete(
+                    "List every recurring cross-session anchor in the "
+                    "sessions below: named entities (person/place/item) AND "
+                    "recurring themes -- activities, obligations, purchases, "
+                    "errands, plans the user tracks across sessions (e.g. "
+                    "'things to pick up', 'trip planning'). Counting and "
+                    "list-everything questions will use these, so include "
+                    "every item even if each appears in only ONE session "
+                    "when they belong to a shared theme. Output one line "
+                    "per anchor in exactly this format:\n"
+                    "ENTITY: <name> || SESSIONS: <comma-separated session "
+                    "numbers> || EVIDENCE: <one short verbatim quote per "
+                    "session>\n"
+                    "No other text.\n\n"
+                    f"{corpus}",
+                    max_tokens=1500,
+                    temperature=0.0,
+                    disable_thinking=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - hubs are best-effort
+                print(f"entity-hub extraction failed: {exc}", flush=True)
+                text = ""
+            parsed: list[dict] = []
+            for line in text.splitlines():
+                if "ENTITY:" not in line or "SESSIONS:" not in line:
+                    continue
+                try:
+                    head, rest = line.split("SESSIONS:", 1)
+                    entity = head.split("ENTITY:", 1)[1].split("||")[0].strip()
+                    session_nums, evidence = rest.split("||", 1)
+                    nums = [
+                        int(n.strip())
+                        for n in session_nums.replace("EVIDENCE:", "").split(",")
+                        if n.strip().isdigit()
+                    ]
+                except (ValueError, IndexError):
+                    continue
+                if entity and nums:
+                    parsed.append(
+                        {"entity": entity[:80], "sessions": nums, "evidence": evidence.strip()[:400]}
+                    )
+            self._cache[key] = parsed[:40]
+            self._dirty += 1
+            if self._dirty % 20 == 0:
+                self._flush()
+        return self._cache[key]
+
+    def _flush(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._cache, ensure_ascii=False))
+
+    def close(self) -> None:
+        self._flush()
+
+
+def entity_hub_observations(ds, sample, hubs: EntityHubs) -> list:
+    """Hub Function observations seeded alongside turns/sessions.
+
+    The hub name leads with the entity so lexical/semantic legs rank it
+    whenever the question names the entity; the body enumerates the
+    cross-session mentions with dates and quotes.
+    """
+    from memplex.models import Observation
+
+    metadata = sample.metadata or {}
+    sessions = metadata.get("sessions") or []
+    records = hubs.hubs(f"{sample.id}-hubs", sessions)
+    observations: list = []
+    for position, record in enumerate(records):
+        date = ""
+        try:
+            first_session = sessions[record["sessions"][0]]
+            date = str(first_session[0].get("session_date", ""))
+        except (IndexError, KeyError, TypeError):
+            pass
+        prefix = f"[{date}] " if date else ""
+        body = (
+            f"{prefix}Cross-session entity '{record['entity']}' appears in "
+            f"sessions {record['sessions']}. {record['evidence']}"
+        )[:1500]
+        observations.append(
+            Observation(
+                id=f"lme-{sample.id}-hub{position}",
+                event="entity_hub",
+                context=body,
+                category="note",
+                observed_at=date or metadata.get("question_date") or None,
+            )
+        )
+    return observations
 
 
 class SessionSummaries:
@@ -404,6 +717,9 @@ def main() -> int:
     session_summaries = SessionSummaries(
         proxy, _PROJECT_ROOT / "benchmarks/results/session-summaries.json"
     )
+    entity_hubs = EntityHubs(
+        proxy, _PROJECT_ROOT / "benchmarks/results/entity-hubs.json"
+    )
     config = load_config()
     config.storage.backend = "lite"
     config.storage.path = str(pathlib.Path(tempfile.mkdtemp(prefix="lme-j-")) / "s.sqlite3")
@@ -469,10 +785,22 @@ def main() -> int:
             runner._seed(svc, build_observations(ds, sample, session_summaries))
         else:
             runner._seed(svc, ds.to_memories(sample))
+        if os.environ.get("MEMPLEX_LME_ENTITY_HUBS", "0") == "1":
+            runner._seed(svc, entity_hub_observations(ds, sample, entity_hubs))
         if args.product_orchestration:
             context = product_context(svc, question)
         else:
-            context = collect_context(svc, proxy, question)
+            context, hits = collect_context(svc, proxy, question)
+            if counting_intent(question) and os.environ.get(
+                "MEMPLEX_LME_COUNT_FULL", "1"
+            ) == "1":
+                full_sessions = session_fulltexts_for_hits(svc, sample, hits)
+                if full_sessions:
+                    # Prepend: the budget truncation keeps the front, and
+                    # completeness carriers must survive it.
+                    context = (
+                        "- " + "\n- ".join(full_sessions) + "\n" + context
+                    )
 
         try:
             answer = generate_answer(
@@ -518,6 +846,7 @@ def main() -> int:
 
     out.close()
     session_summaries.close()
+    entity_hubs.close()
     svc.stop()
 
     # ── aggregate (official scoring: mean label + per-type breakdown) ──
