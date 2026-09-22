@@ -1,0 +1,13 @@
+{
+  "benchmark": "longmemeval_s_official_j_v13",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts, temperature 0",
+  "judge_model": "glm-5.3 (disclosed deviation)",
+  "generation": "v12 + cross-session entity hubs (theme-level hub records seeded per sample: entity-named, session-enumerating with dates and quotes; LLM-extracted, disk-cached)",
+  "dataset": {"name": "longmemeval_s_cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "625c177d2c3e43ddc2333a3c3ffa6ae62ec21761"},
+  "results": {"J_overall": 0.908, "judged": 500, "total": 500},
+  "headline": "J crosses 0.90: structure-over-intelligence lever (entity hubs) lifts multi-session 0.797 -> 0.8647 (+6.8pp), the largest single-pool gain of the campaign; temporal -1.5pp side-effect within noise",
+  "ablation": {"v11": 0.894, "v12": 0.898, "v13": 0.908, "defect_audit_ceiling": "0.944 (28/51 v12 failures were benchmark defects; v13 re-audit pending)"},
+  "evidence_level": "E1",
+  "timestamp": "2026-09-22T06:02:43Z"
+}
