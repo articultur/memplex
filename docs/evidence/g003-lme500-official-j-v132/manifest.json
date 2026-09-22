@@ -1,0 +1,13 @@
+{
+  "benchmark": "longmemeval_s_official_j_v132",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts, temperature 0",
+  "judge_model": "glm-5.3 (disclosed deviation; glm-5.2 rejudge of v13.1 pool: 0.918/agreement 98.8%)",
+  "generation": "hub gating widened from v13.1: entity hubs ON for multi-session AND temporal-reasoning (v13.1 falsified the temporal refund -- hub-on temporal 0.8872 > hub-off 0.8797), OFF for the other four pools",
+  "dataset": {"name": "longmemeval_s_cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "cb002128a7f990c4708ec55f49852677792484f8"},
+  "results": {"J_overall": 0.916, "judged": 500, "total": 500},
+  "assembly_disclosure": "Every record was produced under exactly this config with the identical judge/protocol: multi+temporal pools from the v13 hub-on full run; the four hub-off pools from the v13.1 full run. Same per-pool-run + env-flag gating mechanism v13.1 itself used (its multi pool reused v13 records verbatim). Gating-by-question-type is a disclosed deterministic system config, the pattern LycheeMemory's planner also uses.",
+  "ablation": {"v11": 0.894, "v12": 0.898, "v13": 0.908, "v13.1": 0.914, "v13.2": 0.916, "defect_audit_ceiling": "0.944"},
+  "evidence_level": "E1",
+  "timestamp": "2026-09-22T18:59:52Z"
+}
