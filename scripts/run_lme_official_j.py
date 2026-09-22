@@ -694,6 +694,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Together with --shard-count: run samples[index::count] (pool-internal "
+        "sharding for parallel execution; default single shard keeps all samples).",
+    )
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument(
         "--product-orchestration",
         action="store_true",
         help="Use the PRODUCT orchestrated path (svc.query(orchestrated=True)) "
@@ -750,6 +758,10 @@ def main() -> int:
         ]
     if args.limit:
         samples = samples[: args.limit]
+    if args.shard_count > 1:
+        if not 0 <= args.shard_index < args.shard_count:
+            parser.error("--shard-index must be within [0, --shard-count)")
+        samples = samples[args.shard_index :: args.shard_count]
     runner = LongMemEvalRunner()
 
     done: set[str] = set()

@@ -1,0 +1,14 @@
+{
+  "benchmark": "longmemeval_s_official_j_v131",
+  "protocol": "official LongMemEval evaluate_qa.py yes/no judge prompts, temperature 0",
+  "judge_model": "glm-5.3 (disclosed deviation; glm-5.2 cross-judge = 0.918, agreement 98.8%)",
+  "generation": "v13 with hub gating by question type: multi-session keeps entity hubs (v13 records reused verbatim), all other pools rerun hub-off (PAR + decomposition + adjacency unchanged)",
+  "dataset": {"name": "longmemeval_s_cleaned", "samples": 500, "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"},
+  "source": {"branch": "main", "commit": "148a911a08ecbb2b715818dab0727c62b6d2f5b8e", "note": "runner executed with an uncommitted additive --shard-index/--shard-count flag (pool-internal slicing for parallel execution; default behavior unchanged)"},
+  "results": {"J_overall": 0.914, "judged": 500, "total": 500, "glm52_crossjudge_J": 0.918},
+  "headline": "hub gating refunds v13's cross-pool tax: preference 0.8667->0.9333 (+2q) and knowledge-update 0.9359->0.9487 (+1q) versus v12; temporal refund falsified (0.8797, below v13 hub-on 0.8872 -- the v13 temporal dip was pool variance, not hub tax); net +3 questions over v13",
+  "ablation": {"v11": 0.894, "v12": 0.898, "v13": 0.908, "v13.1": 0.914, "defect_audit_ceiling": "0.944 (calibrated on v12 failures; re-audit pending)"},
+  "execution": "sharded parallel run (5 concurrent runners, CPU/MPS split) with per-question-type env gating; merged by qid keeping the gated records; official aggregation rerun over the merged file",
+  "evidence_level": "E1",
+  "timestamp": "2026-09-22T18:31:03Z"
+}
