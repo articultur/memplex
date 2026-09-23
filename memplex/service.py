@@ -806,6 +806,13 @@ class MemplexService:
             if enhanced is not None:
                 sub_queries = self._orchestration_sub_queries(text, enhanced)
                 detect_scope = self._scope_from_enhanced(enhanced)
+            # PAR leg: retrieve once more with a hypothetical answer.
+            pseudo = self._pseudo_answer_sub_query(text)
+            if pseudo is not None:
+                if sub_queries:
+                    sub_queries = sub_queries[:2] + [pseudo]
+                else:
+                    sub_queries = [pseudo]
         # The pipeline is built per call from the service's current
         # attributes so monkeypatched instance attributes (reranker /
         # retriever / _detect_scope in tests) stay live.
@@ -908,6 +915,38 @@ class MemplexService:
             if isinstance(q, str) and q.strip() and q.strip() != original
         ]
         return subs[:3] or None
+
+    def _pseudo_answer_sub_query(self, text: str) -> str | None:
+        """PAR leg for orchestrated retrieval (fail-closed, opt-out env).
+
+        Retrieves with a plausible ANSWER text in addition to question
+        rewrites: answer phrasing sits closer to evidence phrasing than
+        question phrasing does (validated on LongMemEval: +1.5pp multi /
+        +2.3pp temporal probes, v12 full). One short LLM call, thinking
+        disabled by provider semantics; any failure drops the leg.
+        ``MEMPLEX_ORCHESTRATED_PAR=0`` turns it off.
+        """
+        import os
+
+        if os.environ.get("MEMPLEX_ORCHESTRATED_PAR", "1") != "1":
+            return None
+        llm = getattr(self._llm, "llm", None)
+        if llm is None:
+            return None
+        try:
+            try:
+                asyncio.get_running_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                    answer = _pool.submit(
+                        llm.generate_hypothetical, text
+                    ).result(timeout=5.0)
+            except RuntimeError:
+                answer = asyncio.run(llm.generate_hypothetical(text))
+        except Exception as exc:  # noqa: BLE001 - PAR leg is best-effort
+            logger.debug("orchestrated PAR leg failed, dropping: %s", exc)
+            return None
+        answer = str(answer or "").strip()
+        return answer if len(answer) > 10 else None
 
     @staticmethod
     def _scope_from_enhanced(enhanced: EnhancedQuery) -> Callable[[str], QueryScope]:

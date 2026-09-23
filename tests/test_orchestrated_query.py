@@ -152,3 +152,64 @@ def test_config_default_off_and_env_override(tmp_path, monkeypatch):
     finally:
         svc.stop()
         monkeypatch.delenv("MEMPLEX_RETRIEVAL_ORCHESTRATED")
+
+
+class _ParProvider(_ScriptedProvider):
+    """complete_json for enhancement + generate_hypothetical for PAR."""
+
+    def __init__(self, expanded, hypothetical):
+        super().__init__(expanded)
+        self._hypothetical = hypothetical
+
+    async def generate_hypothetical(self, query: str) -> str:
+        return self._hypothetical
+
+
+def test_orchestrated_par_leg_joins_fanout(tmp_path):
+    provider = _ParProvider(["alice pets", "blue parrot"], "The user keeps a blue parrot named Kiwi.")
+    svc = _service(tmp_path, provider)
+    try:
+        result = svc.query(
+            "What pet does Alice keep?", top_k=5, explain=True, orchestrated=True
+        )
+        fan = (result.explanation or {}).get("retrieval", {}).get("orchestrated_fanout")
+        assert fan is not None
+        # expanded kept to 2 + 1 PAR leg = 3 sub-queries
+        assert fan["sub_queries"] == 3
+    finally:
+        svc.stop()
+
+
+def test_orchestrated_par_leg_fails_closed(tmp_path, monkeypatch):
+    provider = _ParProvider(["alice pets"], "")
+
+    async def boom(query):
+        raise RuntimeError("provider down")
+
+    provider.generate_hypothetical = boom
+    svc = _service(tmp_path, provider)
+    try:
+        result = svc.query(
+            "What pet does Alice keep?", top_k=5, explain=True, orchestrated=True
+        )
+        fan = (result.explanation or {}).get("retrieval", {}).get("orchestrated_fanout")
+        assert fan is not None
+        assert fan["sub_queries"] == 1  # only the expanded leg survives
+        assert result.results
+    finally:
+        svc.stop()
+
+
+def test_orchestrated_par_env_optout(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPLEX_ORCHESTRATED_PAR", "0")
+    provider = _ParProvider(["alice pets", "blue parrot"], "The user keeps a blue parrot named Kiwi.")
+    svc = _service(tmp_path, provider)
+    try:
+        result = svc.query(
+            "What pet does Alice keep?", top_k=5, explain=True, orchestrated=True
+        )
+        fan = (result.explanation or {}).get("retrieval", {}).get("orchestrated_fanout")
+        assert fan is not None
+        assert fan["sub_queries"] == 2  # PAR leg disabled
+    finally:
+        svc.stop()
