@@ -15,7 +15,7 @@ overwrite one another.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from memplex.auth import (
     AuthorizationContext,
@@ -218,14 +218,15 @@ class AuthorizationGate:
 
         if visibility == "user":
             if subject_id == context.principal.subject_id:
-                return True
-            # Cross-agent grant (service.share_with): the owner explicitly
-            # shared this node with the calling agent, overriding the
-            # user-private default within the same tenant.
-            return self._agent_has_grant(node, context)
-        if visibility == "workspace":
-            return workspace_id == context.workspace_id
-        if visibility == "session":
+                allowed = True
+            else:
+                # Cross-agent grant (service.share_with): the owner
+                # explicitly shared this node with the calling agent,
+                # overriding the user-private default within the tenant.
+                allowed = self._agent_has_grant(node, context)
+        elif visibility == "workspace":
+            allowed = workspace_id == context.workspace_id
+        elif visibility == "session":
             provenance = getattr(node, "provenance", {}) or {}
             if not isinstance(provenance, dict):
                 provenance = {}
@@ -234,13 +235,118 @@ class AuthorizationGate:
                 or namespace.get("memplex_source_agent")
                 or namespace.get("memplex_agent")
             )
-            return (
+            allowed = (
                 workspace_id == context.workspace_id
                 and subject_id == context.principal.subject_id
                 and getattr(node, "origin_session", None) == context.session_id
                 and source_agent == context.agent_id
             )
-        return False
+        else:
+            allowed = False
+        # Derived-record lineage gate: every declared source must still
+        # be visible to this caller, whatever the node's own visibility
+        # says (revocation propagates; missing source = revoked).
+        return allowed and self._sources_still_visible(node, context)
+
+    # ── Derived-record ACL lineage (ADR: derived never wider than sources) ──
+
+    # Lower rank = more restrictive. Unknown values rank as most
+    # restrictive so a novel visibility can never silently widen a
+    # derived record (fail-closed).
+    _VISIBILITY_RESTRICTIVENESS: ClassVar[dict[str, int]] = {
+        "user": 0,
+        "session": 1,
+        "workspace": 2,
+    }
+    _SOURCE_REFS_KEY = "memplex_source_refs"
+    _DERIVATION_KEY = "memplex_derivation"
+
+    @classmethod
+    def bind_derivation_lineage(
+        cls,
+        node: Any,
+        source_nodes: list[Any],
+        *,
+        derivation_version: str = "v1",
+    ) -> None:
+        """Stamp a derived node with its source lineage and clamp visibility.
+
+        The derived record's visibility becomes the MOST restrictive among
+        its sources (never wider), and ``memplex_source_refs`` records the
+        dependency so :meth:`is_node_visible` re-checks every source at
+        read time -- revoking or deleting a source hides the derivation
+        (fail-closed: a missing source counts as revoked).
+        """
+        if not source_nodes:
+            raise ValueError("derivation lineage requires at least one source")
+        ids: list[str] = []
+        ranks: list[int] = []
+        for source in source_nodes:
+            source_id = getattr(source, "id", None)
+            if not source_id:
+                raise ValueError("derivation source is missing its id")
+            ids.append(str(source_id))
+            visibility = str(
+                getattr(source, "visibility", None)
+                or (getattr(source, "namespace", {}) or {}).get(
+                    "memplex_visibility"
+                )
+                or ""
+            ).strip().lower()
+            ranks.append(
+                cls._VISIBILITY_RESTRICTIVENESS.get(visibility, -1)
+            )
+        namespace = getattr(node, "namespace", None)
+        if not isinstance(namespace, dict):
+            namespace = {}
+            node.namespace = namespace
+        # Lite durability requires str->str namespace mappings; the
+        # ref list is stored comma-joined (memory ids never contain
+        # commas -- they are system-generated slugs).
+        namespace[cls._SOURCE_REFS_KEY] = ",".join(ids)
+        namespace[cls._DERIVATION_KEY] = derivation_version
+        # Clamp: the derived visibility is the name whose rank equals the
+        # most restrictive source rank; an unknown source visibility
+        # (-1) fails closed to "user".
+        most_restrictive = min(ranks)
+        if most_restrictive < 0:
+            node.visibility = "user"
+        else:
+            for name, rank in cls._VISIBILITY_RESTRICTIVENESS.items():
+                if rank == most_restrictive:
+                    node.visibility = name
+                    break
+
+    def _sources_still_visible(
+        self, node: Any, context: AuthorizationContext
+    ) -> bool:
+        """Lineage gate: every source must still be visible to the caller.
+
+        Only runs for nodes carrying ``memplex_source_refs``; a source
+        that is deleted, revoked, or no longer visible hides the derived
+        record entirely (fail-closed).
+        """
+        namespace = getattr(node, "namespace", {}) or {}
+        if not isinstance(namespace, dict):
+            return True
+        source_refs = namespace.get(self._SOURCE_REFS_KEY)
+        if not source_refs:
+            return True
+        source_ids = [
+            part for part in str(source_refs).split(",") if part
+        ]
+        lookup = self.typed_lookup_for(context)
+        for source_id in source_ids:
+            try:
+                source = lookup.get(str(source_id))
+            except Exception as exc:  # noqa: BLE001 - lineage is fail-closed
+                logger.debug(
+                    "lineage source lookup failed for %s: %s", source_id, exc
+                )
+                return False
+            if source is None or not self.is_node_visible(source, context):
+                return False
+        return True
 
     def visible_node(self, memory_id: str, context: AuthorizationContext) -> Any:
         """Load one node and hide inaccessible identifiers from callers."""
