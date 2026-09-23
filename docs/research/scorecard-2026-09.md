@@ -238,3 +238,11 @@ push 触发，同 SHA 24/24）。距 80 的唯一剩余项：3.3.0 版本发布
   干扰**。快赢批次至此全部裁决完毕（v13.2 +2 题✅ / RRF 自家否决 /
   FTS5 已在 / IRCoT 否决）。剩余 19 题真失分对现有检索杠杆全部
   不响应——下一步进 ⑥Lite SQLite v2 稳定性战役。
+- **⑪ 蒸馏裁决：不立项（2026-09-24，500 题生产级校准）**：bge-reranker-v2-m3
+  与 glm-5.3 teacher 同对对照——Kendall tau 0.41（排序部分一致），但端指标
+  gold-in-top3 本地 CE **195 vs teacher 186（+1.8pp，CE 反超）**。teacher 的
+  排序不带来端指标优势，学生训练的 GPU 投入买不到可测增益。Rank-DistiLLM
+  战役证据化关闭。E1 证据包
+  docs/evidence/g003-reranker-distill-calibration/（500 题 5,570 对
+  teacher 分 + 校验和）。两个工具 bug 如实入档：解析器个位补零
+  （精确可逆、已归一化）、splitlines() Unicode 边界切裂 JSONL（改 split）。

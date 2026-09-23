@@ -200,6 +200,33 @@ class Proxy:
         answer = text.strip()
         return [answer] if len(answer) > 10 else []
 
+    def ircot_followup(self, question: str, context: str) -> str | None:
+        """IRCoT-style round-2 query: conditioned on round-1 evidence gaps.
+
+        Given the question and the round-1 excerpts, produce ONE follow-up
+        search query for missing evidence, or NONE when the evidence is
+        already sufficient. Thinking disabled -- short output, critical path.
+        """
+        try:
+            text = self.complete(
+                "Question: " + question + "\n\nExcerpts found so far "
+                "(truncated):\n" + context[:6000] + "\n\nIf the excerpts "
+                "already contain enough evidence to answer, reply exactly "
+                "NONE. Otherwise reply with ONE short search query (no "
+                "quotes, no explanation) that would find the MISSING "
+                "evidence:",
+                max_tokens=128,
+                temperature=0.0,
+                disable_thinking=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - round-2 is best-effort
+            print(f"ircot followup failed: {exc}", flush=True)
+            return None
+        query = text.strip().strip('"').strip("'")
+        if not query or query.upper().startswith("NONE"):
+            return None
+        return query[:200]
+
 
 def product_context(svc, question: str) -> str:
     """Product-path retrieval: ``svc.query(orchestrated=True)`` only.
@@ -386,6 +413,18 @@ def collect_context(svc, proxy: Proxy, question: str) -> tuple[str, list]:
     if os.environ.get("MEMPLEX_LME_PAR", "1") == "1":
         for pseudo in proxy.pseudo_answer(question):
             for r in svc.query(pseudo, top_k=8, explain=False).results[:8]:
+                if r.func_id not in seen_ids:
+                    seen_ids.add(r.func_id)
+                    hits.append(r)
+    # IRCoT gated round-2: conditioned on the round-1 union, ask the LLM
+    # what evidence is missing and retrieve once more (IRCoT: retrieval
+    # need is sequential-dependent; peak gains up to +21 recall on multi-hop
+    # in the original paper -- here gated by env flag, 2-round hard cap).
+    if os.environ.get("MEMPLEX_LME_IRCOT", "0") == "1":
+        round1 = "\n".join(r.summary for r in hits[:12])
+        followup = proxy.ircot_followup(question, round1)
+        if followup:
+            for r in svc.query(followup, top_k=8, explain=False).results[:8]:
                 if r.func_id not in seen_ids:
                     seen_ids.add(r.func_id)
                     hits.append(r)

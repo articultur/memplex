@@ -40,7 +40,12 @@ from benchmarks.longmemeval import LongMemEvalDataset
 from memplex.config import MemplexConfig
 from memplex.service import MemplexService
 
-DATA = _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval.json"
+DATA = pathlib.Path(
+    os.environ.get(
+        "CALIB_DATA",
+        str(_PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval_s_cleaned.json"),
+    )
+)
 RECORD_PATH = pathlib.Path("benchmarks/results/llm_teacher_ranks.jsonl")
 
 
@@ -166,7 +171,7 @@ def evaluate() -> int:
 
     records = [
         json.loads(line)
-        for line in RECORD_PATH.read_text().splitlines()
+        for line in RECORD_PATH.read_text(encoding="utf-8").split("\n")
         if line.strip()
     ]
     ce = CrossEncoderReranker(enabled=True)
@@ -185,6 +190,13 @@ def evaluate() -> int:
         cands = rec["candidates"]
         if not cands:
             continue
+        # Recording-side parser bug (honest note): single-digit teacher
+        # scores were zero-padded to two digits ("9" -> 90) while "10"
+        # stayed 10. The transform is exactly invertible: values > 10
+        # divide by 10, values <= 10 must be a true 0 or 10.
+        for c in cands:
+            if c["teacher"] > 10:
+                c["teacher"] = c["teacher"] // 10
         # cross-encoder scores
         results = [
             SearchResult(

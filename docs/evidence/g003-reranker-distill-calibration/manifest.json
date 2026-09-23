@@ -1,0 +1,16 @@
+{
+  "benchmark": "llm_teacher_ranking_calibration_500",
+  "data": "longmemeval_s_cleaned 500 questions, real pipeline candidates (top-12 merged), glm-5.3 teacher 0-10 relevance per (query, candidate) pair",
+  "evaluation": "shipped CrossEncoderReranker (BAAI/bge-reranker-v2-m3) vs teacher on identical pairs; Kendall tau over per-query rankings + gold-in-top3 retention",
+  "results": {
+    "queries": 500,
+    "mean_kendall_tau": 0.4105,
+    "teacher_gold_in_top3": 186,
+    "cross_encoder_gold_in_top3": 195,
+    "delta_gold_in_top3_pp": 1.8
+  },
+  "verdict": "NO-GO on student training: the local cross-encoder RETAINS gold in top-3 slightly BETTER than the teacher (195 vs 186, +1.8pp) despite modest rank correlation (tau 0.41). The teacher's ordering does not transfer an end-metric advantage on this benchmark's candidate sets, so Rank-DistiLLM GPU training buys no measurable gain. Distillation campaign CLOSED with evidence.",
+  "known_limitations": "teacher scores are glm-5.3 self-judgments (single teacher, temp 0); gold-in-top3 uses 30-char gold substring; parser zero-pad bug (single-digit scores x10) was exactly invertible and normalized in evaluate; splitlines() unicode-boundary bug fixed to split('\\n').",
+  "evidence_level": "E1",
+  "timestamp": "2026-09-24T00:55:00Z"
+}
