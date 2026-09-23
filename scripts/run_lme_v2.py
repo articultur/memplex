@@ -87,7 +87,8 @@ def trajectory_to_texts(traj: dict) -> list[str]:
         url = state.get("url", "")
         action = state.get("action") or ""
         thought = state.get("thought") or ""
-        a11y = (state.get("accessibility_tree") or "")[:6000]
+        a11y_cap = int(os.environ.get("LME2_A11Y_CAP", "6000"))
+        a11y = (state.get("accessibility_tree") or "")[:a11y_cap]
         texts.append(
             f"[{traj['id']} @ {url}] action={action} thought={thought} obs={a11y}"
         )
