@@ -1,0 +1,9 @@
+{
+ "benchmark": "longmemeval_v2_small",
+ "domain": "web",
+ "n": 240,
+ "accuracy": 0.1583,
+ "latency_p50_s": 74.796,
+ "latency_p95_s": 105.318,
+ "wall_s": 21069.1
+}

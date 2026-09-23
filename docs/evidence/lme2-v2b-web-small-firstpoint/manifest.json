@@ -1,0 +1,10 @@
+{
+  "benchmark": "longmemeval_v2_web_small_first_point",
+  "config": "text-only projection (state-level docs, a11y 6k truncation), orchestrated retrieval, glm-5.3 answerer and judge; NO screenshots (multimodal data reduced to text)",
+  "results": {"accuracy": 0.1583, "n": 240, "latency_p50_s": 74.8, "latency_p95_s": 105.3},
+  "reference_frontier": {"rag_slice_notes": [0.51, 0.2], "agentrunbook_c": [0.749, 108.3]},
+  "honest_reading": "floor point, not competitive: 119/240 answers report evidence-missing — the text-only projection loses answer-bearing visual state; abs-type 0.10 needs abstention semantics; reference RAG uses multimodal state slices. V2 confirmed unsaturated and architecturally different from V1.",
+  "per_type": {"procedure": 0.29, "static-environment": 0.18, "dynamic-environment": 0.12, "errors-gotchas": 0.13, "abs-types": "0.05-0.14"},
+  "evidence_level": "E1",
+  "timestamp": "2026-09-23T19:45:00Z"
+}

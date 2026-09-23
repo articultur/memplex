@@ -43,6 +43,7 @@ from memplex.config import load_config
 from memplex.service import MemplexService
 
 DATA_ROOT = _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval-v2"
+_PROXY: object = None  # set in main(); judges must not run before it
 TOP_K = 12
 
 
@@ -86,7 +87,7 @@ def trajectory_to_texts(traj: dict) -> list[str]:
         url = state.get("url", "")
         action = state.get("action") or ""
         thought = state.get("thought") or ""
-        a11y = (state.get("accessibility_tree") or "")[:2500]
+        a11y = (state.get("accessibility_tree") or "")[:6000]
         texts.append(
             f"[{traj['id']} @ {url}] action={action} thought={thought} obs={a11y}"
         )
@@ -138,6 +139,34 @@ def _normalize(text: str) -> list[str]:
     return [t for t in lowered.split() if t]
 
 
+_JUDGE_PROMPT = (
+    "You are grading a question about a deployed software environment. "
+    "Given the question, the reference answer, and the model's answer, "
+    "reply with exactly YES or NO: does the model's answer match the "
+    "reference's substance (equivalent statements count; the model may "
+    "add detail but must not contradict or miss the key point)?\n\n"
+    "Question: {question}\n\nReference: {gold}\n\nModel answer: "
+    "{answer}\n\nReply YES or NO only:"
+)
+
+
+def llm_judge(question: dict, gold: str, answer: str) -> bool:
+    """glm-5.3 judge for llm_abstention/llm_gotchas checker specs."""
+    try:
+        verdict = _PROXY.complete(
+            _JUDGE_PROMPT.format(
+                question=question["question"][:600],
+                gold=gold[:400],
+                answer=answer[:600],
+            ),
+            max_tokens=256,
+        )
+    except Exception as exc:  # noqa: BLE001 - judge failure scores wrong, never crashes the run
+        print(f"judge failed for {question['id']}: {exc}", flush=True)
+        return False
+    return verdict.strip().upper().startswith("YES")
+
+
 def score_answer(question: dict, answer: str) -> bool:
     spec = question["eval_function"].split("|")[0]
     gold = str(question.get("answer", "")).strip()
@@ -153,10 +182,7 @@ def score_answer(question: dict, answer: str) -> bool:
         m = re.search(r"\b([A-E])\b", ans.upper())
         return bool(m) and m.group(1) == gold.strip().upper()
     if spec.startswith("llm_"):
-        # smoke approximation: substring containment
-        if spec == "llm_abstention_checker" and not gold:
-            return "unknown" in ans.lower() or "not available" in ans.lower()
-        return gold.lower()[:40] in ans.lower()
+        return llm_judge(question, gold, ans)
     # norm_phrase_set_match[_ordered]: gold phrases separated by ; or ,
     separators = ";," if "," in (question["eval_function"]) else ";"
     phrases = [p for p in re.split(f"[{separators}]", gold) if p.strip()]
@@ -182,7 +208,9 @@ def main() -> int:
     haystack = load_haystack()
     print(f"questions: {len(questions)} (domain={args.domain})", flush=True)
 
+    global _PROXY
     proxy = GlmProxy()
+    _PROXY = proxy
     config = load_config()
     config.storage.backend = "lite"
     config.storage.path = str(

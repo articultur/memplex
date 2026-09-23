@@ -1,0 +1,2 @@
+{"benchmark": "lme2_v2b_web_small", "metric": "accuracy", "samples": 240, "timestamp": "2026-09-23T11:41:17.423986+00:00", "value": 0.1583}
+{"benchmark": "lme2_v2b_web_small", "metric": "latency_p50_s", "samples": 240, "timestamp": "2026-09-23T11:41:17.423986+00:00", "value": 74.796}
