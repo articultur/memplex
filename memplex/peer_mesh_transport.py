@@ -176,10 +176,16 @@ class PeerMeshService:
 
 
 class MemoryWire:
-    """In-memory Fetcher + peer registry for tests and local loops."""
+    """In-memory Fetcher + peer registry for tests and local loops.
+
+    Phase 3: fetch_objects with an explicit id list returns only those
+    objects; the wildcard ``["*"]`` remains for back-compat. Callers can
+    inspect ``requested_ids`` to assert the protocol narrows exchanges.
+    """
 
     def __init__(self) -> None:
         self._peers: dict[str, PeerSnapshot] = {}
+        self.requested_ids: list[list[str]] = []
 
     def register(self, peer_url: str, snapshot: PeerSnapshot) -> None:
         self._peers[peer_url] = snapshot
@@ -187,7 +193,19 @@ class MemoryWire:
     def fetch_roots(self, peer_url: str) -> dict[str, Any]:
         return self._peers[peer_url].roots_payload()
 
+    def fetch_ids(self, peer_url: str) -> dict[str, Any]:
+        """Phase-3 id manifest: object ids + leaf hashes for remote tree
+        reconstruction without transferring payloads."""
+        objects = self._peers[peer_url].objects
+        return {
+            "ids": {
+                obj_id: ObjectMerkleTree.leaf_hash(obj).hex()
+                for obj_id, obj in sorted(objects.items())
+            }
+        }
+
     def fetch_objects(self, peer_url: str, ids: list[str]) -> dict[str, Any]:
+        self.requested_ids.append(list(ids))
         objects = self._peers[peer_url].objects
         selected = (
             objects
@@ -197,6 +215,35 @@ class MemoryWire:
         return {
             "objects": [mesh_object_to_wire(o) for o in selected.values()]
         }
+
+
+def divergent_ids_from_manifest(
+    local_objects: dict[str, MeshObject],
+    remote_manifest: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """Phase-3 narrow exchange: compute the fetch/send sets from an id
+    manifest (object id -> remote leaf hash hex) without any payload
+    transfer. Returns ``(fetch_ids, send_ids)``: ids whose leaves differ
+    locally-absent or remote-absent, split by direction. Payloads are
+    fetched only for ``fetch_ids``; ``send_ids`` piggyback on the next
+    push by the remote's own mirrored gossip.
+    """
+    fetch_ids: list[str] = []
+    send_ids: list[str] = []
+    local_hashes = {
+        obj_id: ObjectMerkleTree.leaf_hash(obj).hex()
+        for obj_id, obj in local_objects.items()
+    }
+    for obj_id in sorted(set(local_hashes) | set(remote_manifest)):
+        lo = local_hashes.get(obj_id)
+        ro = remote_manifest.get(obj_id)
+        if lo == ro:
+            continue
+        if ro is None:
+            send_ids.append(obj_id)
+        else:
+            fetch_ids.append(obj_id)
+    return fetch_ids, send_ids
 
 
 def validate_peer_url(url: str) -> bool:

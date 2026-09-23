@@ -14,6 +14,7 @@ from memplex.peer_mesh_transport import (
     MemoryWire,
     PeerMeshService,
     PeerSnapshot,
+    divergent_ids_from_manifest,
     mesh_object_from_wire,
     mesh_object_to_wire,
     validate_peer_url,
@@ -124,3 +125,43 @@ def test_peer_url_validation():
     assert not validate_peer_url("ftp://peer-a")
     assert not validate_peer_url("http://user:pass@peer-a")
     assert not validate_peer_url("http://")
+
+
+# ── Phase 3: narrow exchange from id manifests ──────────────────────
+
+
+def test_manifest_narrows_exchange_to_divergent_only():
+    local = {
+        "m1": _obj("m1", payload=b"same"),
+        "m2": _obj("m2", payload=b"local-newer"),
+        "m3": _obj("m3", payload=b"local-only"),
+    }
+    wire = MemoryWire()
+    peer_objects = {
+        "m1": _obj("m1", payload=b"same"),
+        "m2": _obj("m2", payload=b"remote-newer"),
+        "m4": _obj("m4", payload=b"peer-only"),
+    }
+    wire.register("http://peer-a", PeerSnapshot(objects=peer_objects))
+    manifest = wire.fetch_ids("http://peer-a")["ids"]
+
+    fetch_ids, send_ids = divergent_ids_from_manifest(local, manifest)
+    assert fetch_ids == ["m2", "m4"], "only remote-differing ids fetched"
+    assert send_ids == ["m3"], "only local-differing ids sent"
+
+    # the object fetch must request exactly the divergent set (no wildcard)
+    wire.fetch_objects("http://peer-a", fetch_ids)
+    assert wire.requested_ids[-1] == ["m2", "m4"]
+    fetched = wire.fetch_objects("http://peer-a", fetch_ids)["objects"]
+    assert [rec["id"] for rec in fetched] == ["m2", "m4"], (
+        "payloads transferred for exactly the divergent set"
+    )
+
+
+def test_manifest_equal_states_exchange_nothing():
+    shared = {"m1": _obj("m1", payload=b"x"), "m2": _obj("m2", payload=b"y")}
+    wire = MemoryWire()
+    wire.register("http://peer-a", PeerSnapshot(objects=dict(shared)))
+    manifest = wire.fetch_ids("http://peer-a")["ids"]
+    fetch_ids, send_ids = divergent_ids_from_manifest(dict(shared), manifest)
+    assert fetch_ids == [] and send_ids == []
