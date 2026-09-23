@@ -165,6 +165,7 @@ files = [
     "memplex/adapters/cli.py",
     # Lite store + connection pool: near-fully-annotated storage boundary.
     "memplex/storage/lite/store.py",
+    "memplex/storage/lite/sqlite_v2.py",
     "memplex/storage/pool.py",
     # G008 contract cluster: host-lifecycle files hashed into every host's
     # readiness proof (see host_lifecycle._contract_files()).

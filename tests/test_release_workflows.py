@@ -375,6 +375,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/operations.py",
         "memplex/adapters/cli.py",
         "memplex/storage/lite/store.py",
+        "memplex/storage/lite/sqlite_v2.py",
         "memplex/storage/pool.py",
         "memplex/adapters/agent_installer.py",
         "memplex/adapters/install_transaction.py",

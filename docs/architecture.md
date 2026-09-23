@@ -28,7 +28,7 @@ llm/
   injection_guard.py  InjectionScanCounter + drop_injection_suspected ¹
 storage/
   base.py             MemoryStore interface
-  lite/               Development JSON-pair backend — in-memory model + journaled JSON persistence, with a SQLite FTS5 sidecar for search (store, durability, sync_repository); production must use postgres
+  lite/               Development JSON-pair backend — in-memory model + journaled JSON persistence, with a SQLite FTS5 sidecar for search (store, durability, sync_repository); production must use postgres. sqlite_v2.py adds the ADR-012 Phase A shadow writer (opt-in MEMPLEX_LITE_SQLITE_SHADOW=1): mirrors every durable commit into shadow_v2.sqlite3 next to the pair, log-only failures, gated by scripts/lite_v2_diff.py 100%-equal
   postgres.py         PostgreSQL business store (request-scoped ACL facade)
   postgres_sync.py    PostgreSQL sync repository
   postgres_backup.py  Backup/restore

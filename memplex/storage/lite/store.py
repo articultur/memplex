@@ -2013,12 +2013,45 @@ class LiteMemoryStore:
                     self._publish_pair(self._durability._load_authoritative_locked())
                     raise
                 self._publish_committed_locally(committed)
+                self._shadow_flush_if_enabled()
         except PermissionError as exc:
             raise PermissionError(
                 f"Cannot write to storage path {self._path.parent}. "
                 f"Set MEMPLEX_STORAGE_PATH to a writable directory. "
                 f"Original error: {exc}"
             ) from exc
+
+    def _shadow_flush_if_enabled(self) -> None:
+        """ADR-012 Phase A: mirror the committed state into SQLite.
+
+        Behind ``MEMPLEX_LITE_SQLITE_SHADOW=1`` only; every failure —
+        including collector failures outside the writer's own guard —
+        is logged and swallowed (zero behavior change by contract). The
+        JSON pair remains authoritative until Phase B flips authority.
+        """
+        try:
+            from memplex.storage.lite.sqlite_v2 import (
+                ShadowSqliteWriter,
+                collect_changelog_events,
+                collect_nodes_by_kind,
+                shadow_enabled,
+            )
+
+            if not shadow_enabled():
+                return
+            writer = getattr(self, "_shadow_writer", None)
+            if writer is None:
+                writer = ShadowSqliteWriter(
+                    self._path.parent / "shadow_v2.sqlite3"
+                )
+                self._shadow_writer = writer
+            writer.flush_state(
+                collect_nodes_by_kind(self),
+                collect_changelog_events(self),
+                generation=getattr(self, "_generation", 0),
+            )
+        except Exception as exc:  # noqa: BLE001 - log-only by ADR-012 contract
+            logger.warning("sqlite shadow flush skipped: %s", exc)
 
     def _pair_files_unchanged(self) -> bool:
         """Stat-based check: both pair files unchanged since the last publish."""
