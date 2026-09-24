@@ -31,6 +31,10 @@ class SearchResult:
     vector_cache: Any = None
     token_estimate: int = 0
     graph_context: dict | None = None
+    # ADR-013 provenance tier (4 user_direct .. 1 agent_inferred); the
+    # lite fusion applies a configurable penalty to low-trust tiers so
+    # external content cannot out-rank the user's own history.
+    trust_tier: int = 3
 
 
 @dataclass

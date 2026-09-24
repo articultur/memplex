@@ -606,6 +606,36 @@ class MemplexService:
         """Stamp every extraction product before any store operation begins."""
         AuthorizationGate.bind_extracted_identity(extracted, context, visibility=visibility)
 
+    @staticmethod
+    def _bind_trust_tiers(extracted: ExtractedData, source: SourceDocument) -> None:
+        """ADR-013: attribute every extracted node with a provenance tier.
+
+        user_direct (4) for interaction text the user authored (text /
+        clipboard), external_web (2) for url-sourced content, and
+        session_derived (3) for files and anything untagged - matching
+        the legacy default. Consolidation never raises a tier
+        (merge-takes-min lives in the deduplicator).
+        """
+        from memplex.models.memory import (
+            TRUST_TIER_DEFAULT,
+            TRUST_TIER_EXTERNAL,
+            TRUST_TIER_USER,
+        )
+
+        kind = getattr(source, "type", "text") or "text"
+        if kind == "url":
+            tier = TRUST_TIER_EXTERNAL
+        elif kind == "file":
+            tier = TRUST_TIER_DEFAULT
+        else:  # text | clipboard: user-authored interaction content
+            tier = TRUST_TIER_USER
+        for node in [
+            *extracted.functions,
+            *extracted.facts,
+            *extracted.preferences,
+        ]:
+            node.trust_tier = tier
+
     # ── LLM initialisation ──────────────────────────────────────
 
     def _init_llm(self, cfg: MemplexConfig) -> None:
@@ -1192,6 +1222,7 @@ class MemplexService:
         # facade as persistence instead of consulting the shared base store.
         engine = self._engine if store is self.store else CoreEngine(store=store)
         extracted = engine.extract(source)
+        self._bind_trust_tiers(extracted, source)
 
         # Identity must be bound before any typed-node store write, graph
         # merge, or background work observes an extracted memory.

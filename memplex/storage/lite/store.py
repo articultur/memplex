@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import math
+import os
 import sqlite3
 import tarfile
 import tempfile
@@ -96,6 +97,7 @@ _BASE_NODE_KEYS = {
     "provenance", "version", "created_at", "updated_at", "origin_session",
     "access_count", "last_accessed_at", "source_paragraphs", "needs_review",
     "needs_review_until", "content_hash", "namespace", "knowledge_tier",
+    "trust_tier",
 }
 _FUNCTION_KEYS = _BASE_NODE_KEYS | {
     "name_normalized", "trigger", "condition", "action", "benefit", "attributes",
@@ -1302,11 +1304,13 @@ class LiteMemoryStore:
         """
         self._refresh_for_read()
         results = self._search_with_fallback(text, top_k=top_k)
+        for result in results:
+            result.trust_tier = self._trust_of(result.func_id)
         if not self._vector_index.enabled:
-            return results
+            return self._apply_trust_penalty(results)[:top_k]
         vector_results = self._vector_search_leg(text, top_k=top_k)
         if not vector_results:
-            return results
+            return self._apply_trust_penalty(results)[:top_k]
         fused = self._fuse_search_legs([results, vector_results], top_k)
         # Attach already-cached corpus vectors to the fused hits: the
         # retrieval layer's vector pre-fill (and the Reranker behind it)
@@ -1317,7 +1321,33 @@ class LiteMemoryStore:
                 result.vector_cache = self._vector_index.cached_vector(
                     result.func_id, result.summary
                 )
-        return fused
+        return self._apply_trust_penalty(fused)[:top_k]
+
+    @staticmethod
+    def _apply_trust_penalty(results: list[SearchResult]) -> list[SearchResult]:
+        """ADR-013: low-trust tiers cannot out-rank the user's history.
+
+        Multiplies the relevance of tier<=2 results by a configurable
+        penalty (MEMPLEX_TRUST_PENALTY, default 0.5; 0 disables) and
+        re-sorts; equal scores tie-break by func_id for determinism.
+        Attribution: results carry the tier of the leg that surfaced
+        them; the FTS leg's results inherit via ``_trust_of`` below.
+        """
+        try:
+            penalty = float(os.environ.get("MEMPLEX_TRUST_PENALTY", "0.5"))
+        except ValueError:
+            penalty = 0.5
+        if penalty <= 0.0 or penalty >= 1.0:
+            return results
+        for result in results:
+            if result.trust_tier <= 2:
+                result.relevance_score *= penalty
+        results.sort(key=lambda r: (-r.relevance_score, r.func_id))
+        return results
+
+    def _trust_of(self, func_id: str) -> int:
+        node = self._functions.get(func_id) or self._facts.get(func_id) or self._preferences.get(func_id)
+        return getattr(node, "trust_tier", 3) if node is not None else 3
 
     def set_embedder(self, embedder: Any) -> None:
         """Inject (or replace) the embedder powering the vector search leg.
@@ -1364,6 +1394,7 @@ class LiteMemoryStore:
                         created_at=func.created_at,
                         updated_at=func.updated_at,
                         origin=func.origin_session or "",
+                        trust_tier=getattr(func, "trust_tier", 3),
                     )
                 )
                 continue
@@ -1382,6 +1413,7 @@ class LiteMemoryStore:
                     created_at=node.created_at,
                     updated_at=node.updated_at,
                     origin=node.origin_session or "",
+                    trust_tier=getattr(node, "trust_tier", 3),
                 )
             )
         return results

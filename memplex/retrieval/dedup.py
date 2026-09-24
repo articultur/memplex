@@ -333,6 +333,11 @@ class MemoryDeduplicator:
             return memories[0]
 
         base = copy.deepcopy(max(memories, key=lambda m: str(getattr(m, "updated_at", "") or "")))
+        # ADR-013 merge-takes-min: a merge must never launder a
+        # lower-trust participant into the survivor's authority.
+        base.trust_tier = min(
+            getattr(m, "trust_tier", 3) for m in [base, *memories]
+        )
 
         for m in memories:
             if m.id == base.id:

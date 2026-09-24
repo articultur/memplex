@@ -23,6 +23,19 @@ SYNCABLE_MEMORY_TYPES = ("function", "fact", "preference", "observation")
 # sets (2026-08 review — admin console XSS via sync-ingress payload).
 MEMORY_TYPES = frozenset(SYNCABLE_MEMORY_TYPES)
 KNOWLEDGE_TIERS = frozenset(("personal", "domain", "team"))
+# ADR-013 provenance trust tiers: fail closed to the legacy default on
+# anything that is not an int in range (sync peers may send strings).
+TRUST_TIERS = frozenset((1, 2, 3, 4))
+TRUST_TIER_DEFAULT = 3
+# Named constants for write-path attribution (ADR-013).
+TRUST_TIER_USER = 4
+TRUST_TIER_EXTERNAL = 2
+
+
+def _coerce_trust_tier(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return TRUST_TIER_DEFAULT
+    return value if value in TRUST_TIERS else TRUST_TIER_DEFAULT
 
 
 def sync_node_type_for_memory(memory: "MemoryNode") -> "SyncNodeType":
@@ -73,6 +86,10 @@ class MemoryNode:
     # memory through the review workflow. Tier drives default read scope
     # (team tier ⇒ workspace-visible) and survives sync as ordinary data.
     knowledge_tier: str | None = None
+    # Provenance trust tier (ADR-013): 4 user_direct > 3 session_derived
+    # (default for legacy data) > 2 external_web > 1 agent_inferred.
+    # Authority never amplifies: merges take the min of participants.
+    trust_tier: int = 3
 
     def _base_to_dict(self) -> dict[str, Any]:
         """Serialize the MemoryNode base fields shared by all memory types."""
@@ -105,6 +122,7 @@ class MemoryNode:
             "content_hash": self.content_hash,
             "namespace": dict(self.namespace),
             "knowledge_tier": self.knowledge_tier,
+            "trust_tier": self.trust_tier,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,6 +177,7 @@ class MemoryNode:
             "content_hash": d.get("content_hash"),
             "namespace": dict(d.get("namespace", {})),
             "knowledge_tier": d.get("knowledge_tier"),
+            "trust_tier": _coerce_trust_tier(d.get("trust_tier", 3)),
         }
 
 

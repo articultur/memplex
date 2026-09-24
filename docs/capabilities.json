@@ -49,10 +49,10 @@
       ],
       "mechanism_ref": "docs/capability-mechanisms.md#typed-memory-model",
       "code_refs": [
-        "memplex/models/memory.py:42-73",
-        "memplex/models/memory.py:154-169",
-        "memplex/models/memory.py:255-270",
-        "memplex/models/memory.py:315-410"
+        "memplex/models/memory.py:58-89",
+        "memplex/models/memory.py:170-185",
+        "memplex/models/memory.py:271-288",
+        "memplex/models/memory.py:331-426"
       ],
       "test_refs": [
         "tests/test_models.py:372-407"
@@ -110,7 +110,7 @@
       ],
       "mechanism_ref": "docs/capability-mechanisms.md#temporal-facts",
       "code_refs": [
-        "memplex/models/memory.py:255-270",
+        "memplex/models/memory.py:271-288",
         "memplex/temporal.py:39-98",
         "memplex/service.py:1450-1483",
         "memplex/service.py:1641-1646"
