@@ -39,6 +39,8 @@ def _pair_records(store_dir: Path) -> dict[str, dict]:
         ("facts", "fact"),
         ("preferences", "preference"),
         ("observations", "observation"),
+        # ADR-013 Stage 2 raw-text layer.
+        ("paragraphs", "paragraph"),
     ):
         for node in payload.get(key, []):
             if isinstance(node, dict) and node.get("id"):

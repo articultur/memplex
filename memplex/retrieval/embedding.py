@@ -456,22 +456,24 @@ class EmbeddingService:
     def embed_query_batch(self, texts: list[str], batch_size: int | None = None) -> list[Vector]:
         """Batch transform-only embeddings (see :meth:`embed_query`).
 
-        Stats-carrying backends (TF-IDF) implement the non-mutating
-        ``encode_query_batch``; stateless backends fall back to their
-        regular batch encoding.
+        Caps per-text length and chunk size: very large batches of very
+        long texts wedge the MPS backend with all threads parked and
+        zero CPU (observed on 6k-char corpus backfills), so the
+        transform-only path clamps defensively.
         """
         if not texts:
             return []
+        clamped = [t[:8192] if len(t) > 8192 else t for t in texts]
+        chunk = min(batch_size or self.batch_size, 16) or 16
         with self._model_lock:
             encode_query_batch = getattr(self._embedder, "encode_query_batch", None)
-            if callable(encode_query_batch):
-                return list(encode_query_batch(texts))
-            batch_size = batch_size or self.batch_size
             vectors: list[Vector] = []
-            for start in range(0, len(texts), max(1, batch_size)):
-                vectors.extend(
-                    self._embedder.encode(texts[start : start + max(1, batch_size)])
-                )
+            for start in range(0, len(clamped), chunk):
+                part = clamped[start : start + chunk]
+                if callable(encode_query_batch):
+                    vectors.extend(encode_query_batch(part))
+                else:
+                    vectors.extend(self._embedder.encode(part))
             return vectors
 
     def embed_function(
