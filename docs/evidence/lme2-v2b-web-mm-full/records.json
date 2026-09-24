@@ -1,0 +1,4802 @@
+[
+ {
+  "id": "c5dfa558",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 607.015,
+  "correct": false,
+  "answer": "\\boxed{four}\n\nReasoning from the excerpts: (1) click the forum entry from the forums list (as in `click('43')`), (2) open the \"Sort by\" menu (as in `click('168')`), (3) select the \"Rising\" option (ana"
+ },
+ {
+  "id": "914ab1d4",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 3.411,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only cover Magento **Admin** actions (filling the review filter with \"decent\", clicking Search, navigating the MARKETING → All Reviews menu, switching prod"
+ },
+ {
+  "id": "6feb33d4",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.943,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They cover sorting the DIY forum by \"New,\" a submission form blocked by a rate-limit message, and forum creation — but none include the page shown immediately a"
+ },
+ {
+  "id": "84238c8f",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.486,
+  "correct": true,
+  "answer": "The memory excerpts do not contain this information. They only show the Cart Price Rule being created under Marketing > Promotions (sales_rule/promo_quote), but there is no mention of a `Checkout Disc"
+ },
+ {
+  "id": "6fc8c511",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not in the excerpts: no memory records clicking an item name on an order detail page or the product-information page/tab it opens.}}"
+ },
+ {
+  "id": "3b8210a1",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.681,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts only evidence two clicks: ``Actions'' (opening the Actions menu), and ``Update attributes''. Missing: the final step(s) to actually set the products to Archived (e.g., settin"
+ },
+ {
+  "id": "d47ca5c8",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.626,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not in excerpts. Missing: the storefront (custom shopping website) \"Add to cart\" pop-up confirmation notification text; excerpts only cover Magento Admin pages (orders, shipments, cart pr"
+ },
+ {
+  "id": "66ed4c72",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.641,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only show post-order pages (the checkout success page, order history, and admin panels), none of which display the checkout progress bar or its step "
+ },
+ {
+  "id": "21df0107",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": false,
+  "answer": "\\boxed{\\text{Stock Availability (in the Advanced Inventory tab, set to \"Out of Stock\")} — but the excerpts contain no mention of a backorder setting, so info on enabling backorders is missing.}"
+ },
+ {
+  "id": "0574c69a",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": false,
+  "answer": "Based on the excerpts, `author:{author_name}` appears **unreliable** on this site:\n\n- Searching `author:PatientBuilder499` returned **\"No results\"**, even though the agent had just seen posts by that "
+ },
+ {
+  "id": "577ab4ee",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.373,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts do not contain the answer. Missing: the search results page content (e.g., its accessibility tree/element list) showing any control for \"used offers\" — the excerpts only cove"
+ },
+ {
+  "id": "89a20f48",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.501,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the time-range dropdown options for a Top-sorted forum. They only show the URL parameter `?t=all` (e.g., `/f/movies/top?t=all`) from a prior navigation, but no obser"
+ },
+ {
+  "id": "fd006924",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": true,
+  "answer": "\\boxed{\\text{The excerpts do not mention any prefix in the Title field; they only state the Title field was empty (or later filled with 'Cyberpunk').}}"
+ },
+ {
+  "id": "57817b87",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They show the forum site's navigation (Home, Forums, Wiki, Submit, Notifications) and admin actions (creating forums, editing a biography), but no "
+ },
+ {
+  "id": "bb7ebd5c",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.534,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They cover unrelated tasks (editing a Reddit bio, a Magento admin/product orders, sorting forum posts, editing an existing post), but none of them show t"
+ },
+ {
+  "id": "733699a5",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.456,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only mention a \"Sort by\" menu with options \"Hot\" and \"New\" being selected on a forum page — no excerpt lists the dropdown's full options or shows wh"
+ },
+ {
+  "id": "8da5c407",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.426,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. None of them show the Actions dropdown opened on the product listings page or its menu items — they only cover Catalog menu navigation, product grid sear"
+ },
+ {
+  "id": "25853d7f",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.505,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. The observation logs on the `/submit/funny` \"Create submission\" page are truncated — they only show the navigation bar and the `heading 'Create submission'`, cu"
+ },
+ {
+  "id": "0af83ccc",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.458,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They reference the My Account / My Orders pages (e.g., 6d5f3f24, 89ea183d, 7633c3df) but never show the actual column headers of the \"My Orders\" table or "
+ },
+ {
+  "id": "f2b221fd",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.729,
+  "correct": true,
+  "answer": "\\boxed{I do not know}\n\nThe excerpts only show failed attempts: \"Nutrition Bars & Drinks\" was not exposed in the Grocery & Gourmet Food submenu, not in \"Snacks & Sweets\", and not in the search sidebar'"
+ },
+ {
+  "id": "42d13006",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.396,
+  "correct": false,
+  "answer": "The excerpts do not contain that information. None of them show the storefront landing page or its modules (they only cover Magento Admin pages — orders, dashboard, catalog products, customers — plus "
+ },
+ {
+  "id": "2cc1b9ca",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 3,
+  "latency_s": 1.649,
+  "correct": false,
+  "answer": "\\boxed{Yes — the memory excerpts confirm sorting by price is the right approach: in the wireless-earphone search trajectory, the agent's action was click('391') with the thought \"To determine the pric"
+ },
+ {
+  "id": "4a4aad22",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.555,
+  "correct": false,
+  "answer": "The excerpts don't contain the answer. They show the search result page's sidebar (Shopping Options → Category) and search-box fills, but include no information about the price filter UI (e.g., whethe"
+ },
+ {
+  "id": "77258cda",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.858,
+  "correct": false,
+  "answer": "Based on the excerpts: **Your save did succeed — no refresh or navigation is required.** On this Postmill biography editor, confirmation comes from two things visible right after clicking Save:\n\n1. **"
+ },
+ {
+  "id": "6517165d",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.383,
+  "correct": false,
+  "answer": "The excerpts do not contain the Order View left-column tab list, so the tab between \"Transactions\" and \"Shipments\" cannot be determined from them.\n\n\\boxed{\\text{Missing: Order View sidebar tab order}}"
+ },
+ {
+  "id": "cdc46516",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.512,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts never show the profile page's tab list (only the URL /user/ziostraccette/comments was visited), so the tab to the right of \"Comments\" is not recorded.}}"
+ },
+ {
+  "id": "98e6d369",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.466,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They only cover the Magento Admin Reviews page (filtering reviews for \"Tank\" products and searching for \"decent\") and individual order detail pages"
+ },
+ {
+  "id": "83a77f9d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only mention opening the \"Sort by\" menu to change sorting from Hot to New on the DIY forum, but none show the full list of sorting criteria in the dr"
+ },
+ {
+  "id": "ea361b20",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 0.403,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They cover a checkout/payment page, an admin product grid sorted by quantity, and viewing Order #000000163 — but none describe a `Reorder` link on the order det"
+ },
+ {
+  "id": "07a0145f",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.497,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. Missing: the point values of the first five posts before/after downvoting (and any final computed sum). The closest excerpt (4ae82e48) only shows an agent downv"
+ },
+ {
+  "id": "c216174c",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.488,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only document a flow that"
+ },
+ {
+  "id": "eaba5c44",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.53,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show the Reports menu being opened (mentioning \"Customers → Order Count\") and the Sales Orders grid page — neither shows the Order Count Report page i"
+ },
+ {
+  "id": "0a13e290",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts do not contain this information. They cover forum creation and submission rate-limit/CSRF issues, but say nothing about subscribing to a forum or any change to the bar under "
+ },
+ {
+  "id": "ecca89b2",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.419,
+  "correct": false,
+  "answer": "The excerpts show the first step: on the subreddit page you click the **\"Submit\"** link to open the submission form. However, the excerpts do not contain the name of the second button/link (the option"
+ },
+ {
+  "id": "549c0657",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not found in the excerpts — they contain no action or UI element describing how to follow a user from a comment or post (no username link/“follow” action is shown).}}"
+ },
+ {
+  "id": "a2673690",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.647,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the memory excerpts contain no information about the \"Add to Favorites\" link behavior (whether it navigates to a new page or shows a banner, and the banner content).}}"
+ },
+ {
+  "id": "fc7d35d5",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.444,
+  "correct": false,
+  "answer": "Missing: the excerpts do not contain this information. They only show the \"Submit\" link to open the submission form and a form with an \"image URL\" field, a required \"title\", and a \"body\" note — there "
+ },
+ {
+  "id": "196a68fb",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.494,
+  "correct": false,
+  "answer": "The memory excerpts do not contain any view of another user's profile/home page with its tabs (they only show the forums list, create_forum form, and the edit_biography page), so the name of the fourt"
+ },
+ {
+  "id": "7ebb0b95",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.46,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They show the account menu being opened and the \"Profile\" link clicked, but none of the observations include the actual user profile page layout — specif"
+ },
+ {
+  "id": "97e1d977",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.393,
+  "correct": false,
+  "answer": "\\boxed{\\text{The memory excerpts do not contain information about filtering discounted items from search results. Missing: any details about a discount/promotion filter or shopping-option filter for d"
+ },
+ {
+  "id": "ecd9dda3",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.429,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not determinable from the excerpts: none of them show where the customer service phone number appears on the home page (e.g., header/footer content), so the minimum number of actions cann"
+ },
+ {
+  "id": "358c13ce",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the value of the 'Visual Swatch Preview' dropdown upon initial load of the size attribute edit page is not in the excerpts.}}"
+ },
+ {
+  "id": "0382ed92",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.537,
+  "correct": false,
+  "answer": "The excerpts don't contain the information needed to answer. They only show prior activity filtering orders by `Status = Complete` (with bids like '1065', '845', '7398'), but they do not include:\n\n- T"
+ },
+ {
+  "id": "4b0c5275",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.626,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not found in the excerpts. The cms/page excerpt (3b4ea1fd) shows only the inline edit of the \"About us\" Title cell (textbox bid '1987') but does not mention any Search button; the Search "
+ },
+ {
+  "id": "4121647c",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.585,
+  "correct": false,
+  "answer": "The excerpts do not contain the note text from the admin order-address edit page — they only record navigation/click actions on those pages (e.g., opening the Shipping Address editor for order #301), "
+ },
+ {
+  "id": "6a7f0d24",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.064,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They show a task details dialog with a \"Pending, in queue\" status for the \"Update attributes for 16 selected products\" job, but none show the `View Detail"
+ },
+ {
+  "id": "eec85674",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. What's missing: an observation of the admin order detail page's top toolbar showing the full sequence of action buttons (only a \"Reorder\" link on a custom"
+ },
+ {
+  "id": "f43926d9",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 0.404,
+  "correct": false,
+  "answer": "The excerpts are truncated and do not show the full list of browse tabs on the All forums page (only \"Forums\" and \"Tags\" are visible; the next list item's text is cut off). Missing: the name of the ta"
+ },
+ {
+  "id": "d7c94023",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 1.578,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They only cover: the Magento Admin orders list (clicking \"View\" links, scrolling the Columns panel for an \"Items\" column), the checkout page's **Sh"
+ },
+ {
+  "id": "910135bb",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.496,
+  "correct": false,
+  "answer": "**There is no way to change the shipping address of a past order from the customer account.** Per the excerpts:\n\n- Opening the order's details via **My Account → My Orders → order view** shows the shi"
+ },
+ {
+  "id": "b339209c",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.472,
+  "correct": false,
+  "answer": "The memory excerpts do not contain any information about a customer service phone number or contact information on this form. None of the excerpts indicate that scrolling down would reveal it, nor do "
+ },
+ {
+  "id": "01f6e679",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.465,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They mention the submission form fields only as \"image URL, title, and body,\" and the page observations are truncated before showing the full form layout "
+ },
+ {
+  "id": "fdeddf71",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.415,
+  "correct": false,
+  "answer": "Based on the excerpts, the two errors were:\n\n1. A **500 Internal Server Error** when the post was first submitted (the repost didn't complete).\n2. A **rate limit** (\"You cannot post more. Wait a while"
+ },
+ {
+  "id": "21f3228c",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.401,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show sorting options only for *posts within a forum* (Hot/New) and navigation into specific forums, but no observation of the \"List of forums\" page's sort "
+ },
+ {
+  "id": "aa8d21f5",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.323,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts do not include the Product Views Report page or its info banner, so the currency setting (e.g., base currency) referenced for refreshing lifetime statistics cannot b"
+ },
+ {
+  "id": "1fec75e5",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 2,
+  "latency_s": 1.813,
+  "correct": false,
+  "answer": "\\boxed{3}"
+ },
+ {
+  "id": "f90f2255",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.469,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not in the excerpts}} — the memory contains the profile edit page and account menu, but no observation of a profile page's right-side sections, so the name of the second additional sectio"
+ },
+ {
+  "id": "fc0dbc35",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 0.407,
+  "correct": false,
+  "answer": "The excerpts do not contain the single comment thread page's blue notice bar (the [2e8f6477] entry only shows the URL and click('162') on the full post page, with the observation truncated). Missing: "
+ },
+ {
+  "id": "2408b115",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not covered by the excerpts. They only mention: (1) a left ``Shopping Options'' filter panel on the search results page that must be scrolled down to reveal more filters (e.g., a model/co"
+ },
+ {
+  "id": "1d864942",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.354,
+  "correct": false,
+  "answer": "Missing: The excerpts do not describe a review editor page or the behavior of its `Back` button, so I cannot confirm whether it returns to the pending reviews list. They only show navigating to the re"
+ },
+ {
+  "id": "81180ae9",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.452,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only show that the Address Book page has links to change the default billing and shipping addresses separately, but there is no record of any action "
+ },
+ {
+  "id": "0cd6dc43",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.508,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "0401f0c8",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They show the home page and forum pages only include a \"Search query\" searchbox and navigation links, and the submission form details (e.g., image "
+ },
+ {
+  "id": "b05cf470",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.391,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. Missing: none of the excerpts mention a \"Toolbox\" link, a moderators list, or any moderator tools on a forum page — they only cover general forum navigat"
+ },
+ {
+  "id": "0ace674b",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.65,
+  "correct": false,
+  "answer": "The excerpts do not contain the Search Terms Report grid or its column list — they only cover the Customers grid, Sales/Reports menus, product grid (Brand column), and the sales order \"Items\" column. "
+ },
+ {
+  "id": "a363341d",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.572,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "cdb47c5d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 0.696,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They show the checkout page *before* clicking \"Place Order\" and the Magento Admin orders grid — but no excerpt captures the page displayed *after* placin"
+ },
+ {
+  "id": "2e67d04f",
+  "stratum": "vision-needed",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.464,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt shows a forum page's right-side Toolbox (Bans/Moderation log links) in any view—creator, subscriber, or viewer—so the applicable views cannot be determined.}}"
+ },
+ {
+  "id": "a2a71197",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.42,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show steps for sorting a forum by \"New\" (open the \"Sort by\" menu, then click the option) and for entering a forum from the forums list, but they lack any i"
+ },
+ {
+  "id": "9ed5a14d",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.491,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show only Orders-grid filtering (Status = Complete) and clicking into an order, but nothing about a fraud-suspect flag/attribute or the order-detail page l"
+ },
+ {
+  "id": "7376c10d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They only mention the \"Stock Availability\" field/checkbox in the Advanced Inventory tab (e.g., its \"Change\" checkbox and being set to \"Out of Stock"
+ },
+ {
+  "id": "edc22f24",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": false,
+  "answer": "The excerpts do not contain this. They only show selecting products, opening the Actions menu, choosing \"Update attributes\", and clicking \"Save\" — there is no mention of a `Pricing` tab or an `On Sale"
+ },
+ {
+  "id": "eff00409",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. None of the excerpts show the top toolbar buttons on the Edit Review page, so the action name between \"Previous\" and \"Reset\" is missing from the pr"
+ },
+ {
+  "id": "922a0c56",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 3,
+  "latency_s": 1.367,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt shows an admin customer detail page's top toolbar, so the action between \"Reset\" and \"Create Order\" cannot be determined.}}"
+ },
+ {
+  "id": "ee75b921",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.446,
+  "correct": false,
+  "answer": "\\boxed{The excerpts do not contain this: the success-page observation showing the links around \"Print receipt\" is truncated, so the print-related link directly below it is missing.}"
+ },
+ {
+  "id": "4266cb67",
+  "stratum": "vision-needed",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": true,
+  "answer": "The excerpts do not contain the answer. None of the memory excerpts show a forum's main page with its right sidebar for any of the three views (forum creator, subscriber, or viewer), so there is no ev"
+ },
+ {
+  "id": "1e77eb4b",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.398,
+  "correct": false,
+  "answer": "**Path (based on the excerpts):**\n\n1. Go to **Sales > Orders** in the Magento Admin and open the order.\n2. On the order view page, create a **shipment** (the Ship action) — the tracking inputs only ap"
+ },
+ {
+  "id": "866a0f2e",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "\\boxed{\\text{Check the “Notify Customer by Email” checkbox (in the order's comment/notification section, after writing the comment e.g. “Thanks, your order is ready to be shipped”).}}"
+ },
+ {
+  "id": "25dc1d7d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.476,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show that the theme edit/detail page (Design / Content / Magento Admin, `system_design_theme/edit/id/1/`) was opened — no page content or tab list (e."
+ },
+ {
+  "id": "1a89c3ac",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.426,
+  "correct": false,
+  "answer": "The excerpts don't contain this information. They only describe the biography edit page (Biography textbox bid=124, Preview bid=128, Save button bid=258), but no upper-right corner block or its two bu"
+ },
+ {
+  "id": "f078f429",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.466,
+  "correct": false,
+  "answer": "\\boxed{six}\n\nReasoning from the excerpts: one click to enter the target forum from the forums list (as seen with `click('43')` on the forums page), one click to open the \"Sort by\" menu (as seen with `"
+ },
+ {
+  "id": "7195f494",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts never show the order detail page's left-column tab list, so the tab three above the active tab (likely \"My Orders\") cannot be determined from memory.}}"
+ },
+ {
+  "id": "86f00073",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.386,
+  "correct": true,
+  "answer": "The memory excerpts do not contain a customer service phone number. They only cover actions on the Customers page, a Contact Us submission (about order #000000196), and a successful reorder (order #00"
+ },
+ {
+  "id": "51764e11",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not found in the excerpts — no date-picker button label (e.g., a \"next month\" jump button) is mentioned; only element-ID clicks (click('720'), click('2043'), etc.) and year/month selectio"
+ },
+ {
+  "id": "5d6ecdeb",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.415,
+  "correct": false,
+  "answer": "\\boxed{Forums, Create forum}"
+ },
+ {
+  "id": "4cb090a9",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "text",
+  "n_images": 3,
+  "latency_s": 1.644,
+  "correct": false,
+  "answer": "Missing: the excerpts don't include the product list page's observation (no min/max price textbox element IDs/bids shown), so the exact bid can't be determined from memory. Based on the task pattern ("
+ },
+ {
+  "id": "8a8f6aac",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.512,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They cover an admin orders page (Columns panel scrolling), a dashboard session about canceled orders, a contact-us submission about a delivery address, a"
+ },
+ {
+  "id": "10003186",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only show the account menu, forum creation pages, and the user's own biography edit page (/user/MarvelsGrantMan136/edit_biography) — no excerpt shows"
+ },
+ {
+  "id": "5387d23d",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts do not answer this. They never show the \"Forum\" bar/dropdown details on the Create submission page (the accessibility-tree snapshots are truncated before that section), nor a"
+ },
+ {
+  "id": "77db204d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.409,
+  "correct": true,
+  "answer": "\\boxed{\\text{Print receipt}}"
+ },
+ {
+  "id": "674a6972",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.635,
+  "correct": true,
+  "answer": "\\boxed{C}\n\nThe excerpts show that with “Items 1 to 10 of 37 total” (10 per page), the earliest orders are on the last page — page 4 — and the recorded action was clicking the Page 4 link (bid '1614') "
+ },
+ {
+  "id": "19c641bd",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.851,
+  "correct": false,
+  "answer": "\\boxed{scroll}"
+ },
+ {
+  "id": "d3300354",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.468,
+  "correct": false,
+  "answer": "The memory excerpts do not contain any information about user-settings rows or forum subscriptions. They cover forum creation, submission forms, profile bio changes, and admin order-column panels — no"
+ },
+ {
+  "id": "07ab3723",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.554,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "f23807ed",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.507,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "e71f7c92",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.598,
+  "correct": false,
+  "answer": "\\boxed{MarvelsGrantMan136}\n\nBased on the memory excerpt [2d00b63d] (the biography editing page for MarvelsGrantMan136), the upper-right area contains the button `[71] button 'MarvelsGrantMan136', visi"
+ },
+ {
+  "id": "3c0c1b19",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.616,
+  "correct": false,
+  "answer": "The excerpts don't contain the information needed to compute this. What's missing: any view of the customer's order-history page (e.g., the \"My Account → My Orders\" grid), including how many orders ar"
+ },
+ {
+  "id": "a62de1f1",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.562,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts only cover Admin-side review filtering/searching; they contain no information about the storefront search results page or whether a review can be added to a product "
+ },
+ {
+  "id": "f93031d2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.38,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They mention filtering orders by \"Canceled\" status, order 000000136 being Canceled, and navigating to order views, but none of them describe the text dis"
+ },
+ {
+  "id": "a12b7094",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.479,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only show the account button (`[68] button 'MarvelsGrantMan136', hasPopup='menu', expanded=False`) in its collapsed state — the menu was never expan"
+ },
+ {
+  "id": "4ca9f7d7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. None of them show a user's Comments tab or the action links below comment cards — the excerpts only cover the forums index, forum creation, an admin sale"
+ },
+ {
+  "id": "ff8f3a22",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.433,
+  "correct": true,
+  "answer": "\\boxed{false}\n\nThe excerpts show the \"My Account\" summary only has a generic \"Recent Orders\" table (e.g., one order #000000180 with status \"Complete\"), and the dedicated My Orders page (sales/order/hi"
+ },
+ {
+  "id": "65fbcbdf",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 2,
+  "latency_s": 1.51,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts do not show any \"Add to Wish List\" click or its result, so I cannot determine whether it opens a new page or shows a same-page banner.}}"
+ },
+ {
+  "id": "40758d8b",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.65,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only cover Magento Admin review-search/filter actions (counts of reviews mentioning \"satisfied\", \"disappointed\", \"not useful\", \"decent\") and a produ"
+ },
+ {
+  "id": "2c45ecbb",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.459,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only reference visiting an admin sales order page (order_id/65) to scroll a Columns panel, but include no details about the order detail page toolbar"
+ },
+ {
+  "id": "5c826b28",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": true,
+  "answer": "The memory excerpts do not contain the answer. While one excerpt ([1e58cea9]) shows being at the \"Review & Payments\" step of checkout, none of the excerpts describe the Order Summary's contents, the \""
+ },
+ {
+  "id": "0fe2c676",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.5,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "762d34b8",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "The excerpts do not contain enough to answer. Missing information:\n- **Orders grid**: only a thought mentions sorting by \"Purchase Date\" — no full column list showing the timestamp column name(s) is c"
+ },
+ {
+  "id": "7bfbd5f1",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.333,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show that a \"Columns\" panel exists on the Orders grid and mention an \"Items\" column checkbox, but no list of available columns (and no mention of \"Bra"
+ },
+ {
+  "id": "e3a1d7f3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.423,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They mention viewing orders with an \"Items Ordered\" section (e.g., Order #000000025, Order #000000169), but none of them show the actual table headers/columns o"
+ },
+ {
+  "id": "e532c01e",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment-abs",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.398,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts do not cover how to hide submissions/comments on a subreddit page — no hide-related steps or UI instructions are present.}}"
+ },
+ {
+  "id": "4329b535",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": true,
+  "answer": "The memory excerpts do not contain this information. They mention the \"Current Variations\" list after generating XXS variants (Blue/Purple) and that Step 3 of the wizard covers \"Bulk Images, Price and"
+ },
+ {
+  "id": "b2595523",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.401,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts never identify a field as mandatory in the Advanced Inventory tab; they only mention \"Stock Availability\" being disabled with a \"Change\" checkbox.}}"
+ },
+ {
+  "id": "0c6b0c60",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the list of time-range options in the \"Top\" sort dropdown. The only related evidence is a URL `http://localhost:9080/f/movies/top?t=all`, which shows that at least o"
+ },
+ {
+  "id": "8cb3280c",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. Missing: the contents of the Actions dropdown on the product listings page — specifically the list of batch action links and which ones have submenus."
+ },
+ {
+  "id": "99fa7c96",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 0.526,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "41bb40df",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.542,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. The Search Terms page excerpt ([ac3ecf96]) is truncated before showing the grid columns, so the two metric columns to the right of \"Store\" (the Search Terms Rep"
+ },
+ {
+  "id": "d886b018",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.485,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "31f146ba",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.591,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "8955b988",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.549,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only show that the \"Update attributes for 16 selected products\" task details dialog was opened with the job status \"Pending, in queue\" — the names o"
+ },
+ {
+  "id": "597645be",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.7,
+  "correct": false,
+  "answer": "\\boxed{G}\n\nThe excerpts show this workflow: clicking \"My Account\" (bid 227), then \"View All\" (bid 1565) to reach My Orders (sales/order/history), paginating to older orders (e.g., \"Page 4\" for 2022 or"
+ },
+ {
+  "id": "626e401e",
+  "stratum": "text-recoverable",
+  "question_type": "errors-gotchas",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.454,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They show navigation actions on the forums index, forum creation, a pittsburgh submission form, and DIY forum sorting, but no data about submission"
+ },
+ {
+  "id": "0a4a47e6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.395,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts contain no option for sorting the list of forums by comment/thread count. The only sorting info is post-level (Hot/New within a forum), not forum-list sorting.}}"
+ },
+ {
+  "id": "6a2e74de",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.399,
+  "correct": false,
+  "answer": "The excerpts don't answer this. They mention a \"Recent Orders\" table on the My Account page and a \"Recently Ordered\" section, but no excerpt shows the table's columns, so whether a \"Ship To\" person co"
+ },
+ {
+  "id": "0c0fdcd7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.563,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. The homepage observations (78f5c752, e43e60e4) only show the header area (My Account, cart, search, navigation menu \"Beauty & Personal Care\") and are truncated "
+ },
+ {
+  "id": "c39f6edf",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.866,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "7c8efee5",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.413,
+  "correct": true,
+  "answer": "The excerpts don't contain the answer. They mention the Products grid (e.g., a limit changed to 100 per page) but include no information about the **Pages grid table** or either grid's **default per-p"
+ },
+ {
+  "id": "2ee130d2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.743,
+  "correct": false,
+  "answer": "\\boxed{\\text{Partly supported: the excerpts show clicking Save produced a success alert \"The biography was updated\" (so it is saved), but they do not show the page state after saving—whether the previ"
+ },
+ {
+  "id": "e77d1287",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.489,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. The only step on a post thread page ([2e8f6477 @ .../f/AskReddit/10224/...]) shows just the thought (\"We're on the post's comment thread\") and an action —"
+ },
+ {
+  "id": "6a23675f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.567,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. None of the memory excerpts describe the page reached after clicking \"Reorder\" or list any buttons appearing below an item's thumbnail on that page (e.g.,"
+ },
+ {
+  "id": "3269a3c5",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.436,
+  "correct": false,
+  "answer": "\\boxed{Submit, Submit}\n\nReasoning from excerpts: on the subreddit page (f/pittsburgh), the recorded step was clicking the \"Submit\" link to open the submission form; the second step is clicking the \"Su"
+ },
+ {
+  "id": "6d975a08",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": true,
+  "answer": "The excerpts only show two of the tabs above the forum list on the All forums page: `Forums` ([110]) and `Tags` ([112]). Both relevant excerpts are truncated right at the third tab, so the third tab's"
+ },
+ {
+  "id": "1b43f7df",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.445,
+  "correct": false,
+  "answer": "The excerpts do not contain information about the product configuration creation pipeline or its stage names."
+ },
+ {
+  "id": "a59d50f7",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.406,
+  "correct": false,
+  "answer": "The excerpts only document the final step: clicking **\"Place Order\"** at the checkout \"Review & Payments\" step (excerpt [1e58cea9]).\n\n**Missing:** The excerpts do not show the shopping cart page itsel"
+ },
+ {
+  "id": "401566e6",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 2,
+  "latency_s": 1.629,
+  "correct": false,
+  "answer": "\\boxed{two}"
+ },
+ {
+  "id": "07b49858",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.535,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "92642fe7",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 0,
+  "latency_s": 0.048,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no memory excerpts were provided, so the correct click sequence cannot be determined}}"
+ },
+ {
+  "id": "631667c9",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.388,
+  "correct": false,
+  "answer": "The memory excerpts do not contain any information about a moderated forum page's Toolbox links (nothing mentioning \"Delete forum,\" \"Moderation log,\" or a Toolbox section). Missing: the list of Toolbo"
+ },
+ {
+  "id": "70e79657",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.331,
+  "correct": false,
+  "answer": "Based on the memory excerpts, the sidebar navigation shows two modules:\n\n\\boxed{Forums \\text{ and } Wiki}"
+ },
+ {
+  "id": "eab07e81",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt shows the user settings edit page layout (fields `Time zone` / `Front page` and their sections/rows), so this cannot be determined.}}"
+ },
+ {
+  "id": "abadf765",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.469,
+  "correct": false,
+  "answer": "\\boxed{\\text{Cannot determine from the excerpts. Missing: any observation of the order detail page's \"Items Ordered\" section showing whether item names are clickable links and whether clicking one ope"
+ },
+ {
+  "id": "b8d56b89",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 0.453,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show the Product Views Report page's navigation menu and a step to fill the \"From\" date field — the text of the info banner about refreshing lifetime "
+ },
+ {
+  "id": "6a5bbcdb",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.362,
+  "correct": false,
+  "answer": "The excerpts do not contain the needed observations. The only storefront excerpt (e43e60e4) shows the One Stop Market homepage top menu, truncated before any product-list page, and the rest are Magent"
+ },
+ {
+  "id": "597ca614",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.468,
+  "correct": true,
+  "answer": "The memory excerpts do not contain the default rows-per-page settings for the Orders, Products, or Pages grid tables. While some excerpts mention grid pagination (e.g., 100 records per page on the pro"
+ },
+ {
+  "id": "fe18a443",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.579,
+  "correct": false,
+  "answer": "The memory excerpts do not contain information about Content > Elements > Pages or the behavior when clicking a table grid cell. The excerpts only cover the Orders module (sales/order) and the product"
+ },
+ {
+  "id": "deb008ed",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.439,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. None of them show a category item-list page state where a category filter was selected in the left column, nor any observation revealing the two li"
+ },
+ {
+  "id": "5d6b993a",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show admin order *grid* pages (e.g., /admin/sales/order/index/...) and a frontend customer order view, but none includes the admin order **detail** page's "
+ },
+ {
+  "id": "c56e69ca",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only note that the Address Book page \"shows links to change the default billing and shipping addresses\" (excerpt 17c38707), but they provide no info"
+ },
+ {
+  "id": "609acb91",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.54,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. None of the observations show the category page state after a price range filter is applied in the left \"Shop By\" column, so the names of the two links th"
+ },
+ {
+  "id": "2b1a8fc6",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.47,
+  "correct": true,
+  "answer": "\\boxed{Marketing, Cart Price Rules}\n\n(The excerpts show a $10 checkout discount was created as a Cart Price Rule by first opening the Marketing section from the admin top menu, leading to the sales_ru"
+ },
+ {
+  "id": "2ca2d443",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.736,
+  "correct": true,
+  "answer": "\\boxed{B}\n\nFrom the excerpts: on the `My Account` page (/customer/account), opening the latest order takes **1 action** (click('227') opens the most recent order's details). Opening the saved-address "
+ },
+ {
+  "id": "c6124506",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.431,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "4252cc1c",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.413,
+  "correct": true,
+  "answer": "\\boxed{False}\n\nThe only excerpt showing the cart (checkout success page) displays the \"My Cart\" link as just the icon glyph and the text \"My Cart\" — no overlapping count number appears. Note: no excer"
+ },
+ {
+  "id": "23aecb38",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.482,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts never show the date picker's button labels (observations are truncated after the nav menu), so no label like \"Today\" or \"Go Today\" is visible.}}"
+ },
+ {
+  "id": "edb69441",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show the Bulk Actions Log page was opened (at /admin/bulk/index/) but only note that it \"shows no records\"; none of the excerpts include the table's column"
+ },
+ {
+  "id": "73297783",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "06e965cf",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.454,
+  "correct": true,
+  "answer": "\\boxed{B}\n\nThe excerpts show the expanded sort menu on /f/movies displaying \"Hot/New/Active/Top/etc.\", which matches option B (Hot, New, Active, Top, Controversial, Most Commented)."
+ },
+ {
+  "id": "b4dcf650",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.453,
+  "correct": true,
+  "answer": "Based on the excerpts, the only named element after opening the bulk \"Update attributes\" dialog is the **Save** button (one excerpt: \"I clicked Save to apply the bulk update\").\n\nThe excerpts do **not*"
+ },
+ {
+  "id": "6cb662d7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": false,
+  "answer": "The memory excerpts do not contain information about \"Toolbox\" links or a comparison of forum views from the creator, subscriber, and viewer perspectives. Missing: any page observations showing the To"
+ },
+ {
+  "id": "98b62f3d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not in excerpts — the mandatory field names for the create submission form are not explicitly listed; the excerpts only mention the fields filled (URL, title, body)}}"
+ },
+ {
+  "id": "f61a096f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.666,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They only cover the storefront (order history, wish list, cart) and admin sales/orders/reports pages — there is no excerpt showing a **customer det"
+ },
+ {
+  "id": "a7da9ab3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.463,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. While they show navigation bars, account menus (with 'Profile' and 'User settings' links), the edit biography page, forum lists, and search results, none"
+ },
+ {
+  "id": "436c58d5",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.389,
+  "correct": false,
+  "answer": "\\boxed{The excerpts do not include the note text from the admin order-address edit page, so the amount besides shipping and tax that will not be recalculated is not provided.}"
+ },
+ {
+  "id": "6f9cb5fc",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.427,
+  "correct": true,
+  "answer": "The excerpts show navigation to Content → Themes and the themes list (with the \"Magento Blank\" row), but none of them capture the theme detail page that opens after clicking \"View.\" The number of tabs"
+ },
+ {
+  "id": "1defc293",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.708,
+  "correct": true,
+  "answer": "The excerpts only partially answer this. They show the Size attribute is edited via a **swatch textbox** filled with \"XXS\" (action=fill('1551','XXS'), fill('1553','XXS') on the attribute edit page), w"
+ },
+ {
+  "id": "6a73e32b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": false,
+  "answer": "\\boxed{empty}\n\nThe memory excerpts show the Name field (element 116) being filled with \"Cyberpunk\" — the requested forum name itself — with no mention of any prefix being prepopulated in that field."
+ },
+ {
+  "id": "8f70bc0e",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": false,
+  "answer": "The excerpts do not include the edit review page’s top toolbar buttons, so the action located between “Previous” and “Delete Review” is missing."
+ },
+ {
+  "id": "8c55d6bc",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.29,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the info banner text from the Product Views Report page. They only show the page's navigation/menu structure and a date-range fill action (setting From = 07/05/2021,"
+ },
+ {
+  "id": "4d7dda89",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.434,
+  "correct": true,
+  "answer": "\\boxed{Submit, image URL, title, body}"
+ },
+ {
+  "id": "1e011eb5",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.473,
+  "correct": false,
+  "answer": "\\boxed{A}"
+ },
+ {
+  "id": "90dc7e66",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.445,
+  "correct": true,
+  "answer": "The memory excerpts do not contain the answer. They show that a \"Current Variations\" table exists on the product edit page (id/1732) with Size/Color configurations, but none of the excerpts include th"
+ },
+ {
+  "id": "e83245c5",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.531,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not in excerpts: none show a thread page's right sidebar, so the collapsible label above the \"Toolbox\" section is missing.}}"
+ },
+ {
+  "id": "5cb7289b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.501,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "499488a6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.428,
+  "correct": false,
+  "answer": "The excerpts do not contain any information about a \"Hide this forum\" feature or the sidebar contents of the forum creator view, subscriber-only forum view, or viewer-only forum view. The excerpts onl"
+ },
+ {
+  "id": "5db4899c",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show the homepage, forums list, account menus, a search page, and the biography editing page — no profile page's `Toolbox` section (neither the user's"
+ },
+ {
+  "id": "d6da3938",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.482,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show the Orders grid, dashboard, Customers index page (with a Columns popover), and storefront order history — but none show a customer detail/edit page's "
+ },
+ {
+  "id": "ffa4e57e",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.533,
+  "correct": true,
+  "answer": "The excerpts do not contain this information. They record actions taken on the product listing page (selecting products, opening the Actions menu, clicking \"Update Attributes\", clicking Save) and the "
+ },
+ {
+  "id": "b5a25676",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.447,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They cover a forum creation form (name/title \"Cyberpunk\", description \"Welcome to the future\" on localhost:9080), a Magento customer account page (localho"
+ },
+ {
+  "id": "00aa905a",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": true,
+  "answer": "\\boxed{False}\n\nThe memory excerpts show that posting is done through a separate submission form (e.g., `/submit/funny`, `/submit/pittsburgh`) accessed by clicking the \"Submit\" link — not via a textbox"
+ },
+ {
+  "id": "dea446d0",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.729,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only cover Magento **admin-side** review searches (e.g., counts of reviews mentioning 'not useful', 'decent', 'disappointed', 'satisfied') and admin naviga"
+ },
+ {
+  "id": "3f366e15",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.45,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They only show the \"All forums\" listing page, the \"Create submission\" page, and forum creation form steps — none of them includes an observation of a foru"
+ },
+ {
+  "id": "6652c337",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 0.421,
+  "correct": false,
+  "answer": "\\boxed{Print\\ receipt}"
+ },
+ {
+  "id": "97d5309a",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.419,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "f13eb38d",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.617,
+  "correct": false,
+  "answer": "**Four** actions are needed at minimum:\n\n1. `fill` the search combobox [386] with a query\n2. Submit the search (press Enter via `keyboard_press`, or `click` the Search button [391], which is disabled "
+ },
+ {
+  "id": "4f92aa38",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 1.717,
+  "correct": false,
+  "answer": "**What's missing:** None of the excerpts show the category product-list page's filtering UI — there is no price filter (e.g., a price input box, slider, or its bid) in any observation. The excerpts on"
+ },
+ {
+  "id": "e9bb843a",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt shows the size attribute editor page or the selected value of its 'Catalog Input Type for Store Owner' dropdown.}}"
+ },
+ {
+  "id": "ee68431d",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only show that the forum (localhost:9080/f/DIY) has a \"Sort by\" menu (mentioned as changing from Hot to New), but no excerpt lists the dropdown's options, "
+ },
+ {
+  "id": "820d56e2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They cover creating a forum (the \"Create forum\" link, the create_forum form with Name/Title/Description/Sidebar fields) and a submission rate-limit"
+ },
+ {
+  "id": "5a85ca0f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.67,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only cover: navigating to page 2 of a product list, clicking \"My Account\" to find purchase dates, navigating to Health & Household for toothpaste, and scro"
+ },
+ {
+  "id": "c843c4ec",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.441,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show steps for creating a forum (the \"List of forums\" page, the \"Create forum\" form, and filling in fields), but none include the resulting empty forum pag"
+ },
+ {
+  "id": "07fff330",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.829,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "36fe48ef",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": false,
+  "answer": "The memory excerpts do not show the answer. None of the observations include a forum page (one that the user moderates) displaying a \"Toolbox\" section in the sidebar/right side, so the number of links"
+ },
+ {
+  "id": "96497069",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.51,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. What's missing: no excerpt shows the post-display page after submitting a new post, nor the upvote/downvote counts on that newly submitted post (the submissions"
+ },
+ {
+  "id": "ba047686",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.467,
+  "correct": true,
+  "answer": "The memory excerpts do not contain the answer. They show the \"Create submission\" page (e.g., RootWebArea 'Create submission') and mention form fields like an image URL, title, and body, but none of th"
+ },
+ {
+  "id": "c738b934",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.761,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. The excerpts show search actions and page states (homepage, search results for \"iphone 12 phone case\", category navigation), but none display the l"
+ },
+ {
+  "id": "d5b9fda4",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.586,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts do not include the Order Count Report page content or the granularity control's label.}}"
+ },
+ {
+  "id": "18f9d965",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.447,
+  "correct": true,
+  "answer": "\\boxed{Submit}"
+ },
+ {
+  "id": "15e5efa6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.537,
+  "correct": true,
+  "answer": "The memory excerpts do not contain any information about an `Export` button in the Orders, Products, or Pages grid tables (nor is the Pages grid mentioned at all). Missing: observations of the Export "
+ },
+ {
+  "id": "fec652a9",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": true,
+  "answer": "\\boxed{Forums, Create forum}"
+ },
+ {
+  "id": "48ab5c3d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "99ae54d1",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.407,
+  "correct": false,
+  "answer": "\\boxed{User settings}"
+ },
+ {
+  "id": "a42071db",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.594,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. Missing: full page observations of the profile sidebars — neither MarvelsGrantMan136's own profile page nor another user's profile page (e.g., ziostraccette) is"
+ },
+ {
+  "id": "b828a6b2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 5,
+  "latency_s": 1.698,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They only cover: a search/autocomplete action on the One Stop Market homepage, clicking \"My Account\" to find order history, and filling a cart price rule form i"
+ },
+ {
+  "id": "63a1b94b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts do not describe any right-side \"Toolbox\" section on either the user settings edit page or the biography edit page, so the change cannot be determined.}}"
+ },
+ {
+  "id": "86fa86eb",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They show the Postmill (localhost:9080) username menu for \"MarvelsGrantMan136\" expanded, but the excerpt is truncated after \"Profile\" and only partially "
+ },
+ {
+  "id": "17d63ad8",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.335,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not in excerpts — none of the memory excerpts show the page-builder editor's top-right toolbar buttons (the excerpts only show the click that opened the Description editor, not its result"
+ },
+ {
+  "id": "e4d36b58",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.487,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They reference order detail pages (e.g., Orders #25, #180, #196, #301) and clicks on various elements, but none describe the left-column \"Order View\" tab"
+ },
+ {
+  "id": "bdf0e84b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.432,
+  "correct": true,
+  "answer": "\\boxed{Missing}\n\nThe excerpts don't contain the top-toolbar action names for either order-detail page. What's missing:\n- The list of toolbar buttons (e.g., Back / Send Email / Hold / Invoice / Ship / "
+ },
+ {
+  "id": "05cce9b3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.409,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They mention visiting Jane Smith's customer edit page (`/admin/customer/index/edit/id/10/`) but include no accessibility-tree/state details of that page's"
+ },
+ {
+  "id": "c7e367e2",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.803,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show search execution and price **sorting** on the search results page and navigation to a category, but none show the left sidebar / layered navigation (\""
+ },
+ {
+  "id": "11dac74b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.394,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They show the actions of opening the reply form, filling \"don't panic\", and submitting the reply on the AskReddit post, but the observation after submissi"
+ },
+ {
+  "id": "99b6e22f",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.527,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "eef545a0",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.416,
+  "correct": true,
+  "answer": "\\boxed{the comment's \"Reply\" button (bid '343'), the reply form's save/submit button after filling the \"Comment\" textbox (bid '1081')}\n\n(Note: the excerpts show clicking '343' to open the nested reply"
+ },
+ {
+  "id": "f9f9cd61",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.399,
+  "correct": false,
+  "answer": "\\boxed{STORES}\n\nThe excerpts show the top navigation row (rightmost items): ... REPORTS, STORES, SYSTEM — making STORES the second tab from the right."
+ },
+ {
+  "id": "9cae869c",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 1.77,
+  "correct": false,
+  "answer": "\\boxed{B}"
+ },
+ {
+  "id": "896017e0",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.488,
+  "correct": false,
+  "answer": "The memory excerpts do not contain this information. They only describe navigation actions (Catalog, Sales menus), editing product descriptions, adding attribute options, and viewing reviews/dashboard"
+ },
+ {
+  "id": "8957a127",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.434,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "edea0219",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.428,
+  "correct": false,
+  "answer": "The excerpts do not show the inside of a thread page or the comment-view tabs."
+ },
+ {
+  "id": "10466872",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 4,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They only show the forums index page (\"List of forums\") — there is no observation of a single comment thread view or the blue notice bar linking back to "
+ },
+ {
+  "id": "691cd1da",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": true,
+  "answer": "\\boxed{\\text{Advanced Inventory tab}}"
+ },
+ {
+  "id": "07d86be1",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.482,
+  "correct": false,
+  "answer": "The excerpts do not contain the order detail page (order view) accessibility tree, so the left-column tab list, the active tab's index, and the tab names above it cannot be determined from the provide"
+ },
+ {
+  "id": "91d0775e",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.606,
+  "correct": false,
+  "answer": "The excerpts do not contain this answer. Missing: any information about dashboard tab placement (e.g., \"Most Viewed Products,\" \"New Customers,\" \"Bestsellers\") and any list of Orders-grid columns (to c"
+ },
+ {
+  "id": "60f2b293",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.474,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show the account menu (Profile / User settings links) and a home page, but neither the top-tab list of your own profile page nor of another user's profile "
+ },
+ {
+  "id": "238c3621",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": false,
+  "answer": "The excerpts only document one of the two controls: the **\"Comment\"** textbox used to enter the reply text (e.g., `fill('1081', \"don't panic\")` with \"the 'Comment' textbox ready/already filled\"). \n\n**"
+ },
+ {
+  "id": "60c7ca22",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": true,
+  "answer": "The memory excerpts do not contain any information about the profile page or its tab names (e.g., submissions/comments tabs), so the answer cannot be determined from the provided excerpts. \\boxed{Info"
+ },
+ {
+  "id": "44c05e59",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. They show navigation to the profile page (via the account menu → Profile link) for user MarvelsGrantMan136, but none of the excerpts include the actual p"
+ },
+ {
+  "id": "dae9f7e9",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.919,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. Missing information: nothing describes a theme detail page or its tabs (General/Files/Content), and nothing shows the order-view left column tab ordering (Trans"
+ },
+ {
+  "id": "521b124f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.424,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They show thoughts about opening the Reports menu (e.g., for the \"Low Stock\" report) and the top-level admin menu bar (DASHBOARD, SALES, CATALOG, CUSTOMER"
+ },
+ {
+  "id": "a92dff92",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.464,
+  "correct": false,
+  "answer": "The memory excerpts do not contain the answer. None of the excerpts mention a \"Toolbox\" link, banned/blocked users list, or any moderation page for reviewing banned accounts — they only cover creating"
+ },
+ {
+  "id": "744dbdad",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.506,
+  "correct": false,
+  "answer": "\\boxed{Status}\n\nThe excerpt shows the \"Update attributes for 16 selected products\" task details dialog displaying the job as \"Pending, in queue\" — this is the **Status** field, which changes (e.g., to"
+ },
+ {
+  "id": "d16a18fe",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": true,
+  "answer": "\\boxed{Name, Title, Description, Sidebar}"
+ },
+ {
+  "id": "0738c1ac",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.403,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They describe the Low Stock Report page and its 0-records results, but no excerpt shows the Low Stock Report table's column headers (missing: the visible table "
+ },
+ {
+  "id": "be541aa6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.429,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts contain no information about moderation pages (Bans/Mods) on a subreddit page, so A–D cannot be determined.}}"
+ },
+ {
+  "id": "06a5a25f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.426,
+  "correct": false,
+  "answer": "\\boxed{\"Update attributes for 16 selected products\"}"
+ },
+ {
+  "id": "26a038ce",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 0,
+  "latency_s": 0.031,
+  "correct": false,
+  "answer": "\\boxed{\\text{The excerpts are empty — no information about the profile page tabs is provided.}}"
+ },
+ {
+  "id": "289aea4a",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 2.182,
+  "correct": false,
+  "answer": "The excerpts do not contain the answer. They show the Edit Address page (already reached, at /customer/address/edit/id/26/) and pages' navigation links (My Account, My Wish List, Sign Out), but they d"
+ },
+ {
+  "id": "c36b0d68",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.902,
+  "correct": false,
+  "answer": "\\boxed{Stock\\ Availability}"
+ },
+ {
+  "id": "30fab98c",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": false,
+  "answer": "\\boxed{F}\n\nAccording to the workflow in the excerpts, once the pending order's detail page is opened, the agent edits the comment field (entering the message, e.g., \"Thanks, your order is ready to be "
+ },
+ {
+  "id": "d1d8cf9f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 1.656,
+  "correct": true,
+  "answer": "The excerpts do not contain the answer. They show the Orders grid (only a Columns button is mentioned), the Products grid (Quantity/Brand columns), and a dashboard/Low Stock report — but none of them "
+ },
+ {
+  "id": "f928c075",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "text",
+  "n_images": 6,
+  "latency_s": 0.526,
+  "correct": false,
+  "answer": "The excerpts do not contain this information. They show navigation to the Profile link and the edit_biography page (with the biography textbox, preview, and profile summary), but no observation of the"
+ },
+ {
+  "id": "c5dfa558",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 607.015,
+  "correct": true,
+  "answer": "**Missing information:** The screenshots show the forum's sort dropdown contains only Hot, New, Active, Top, Controversial, and Most commented — there is **no \"Rising\" sort option** available, so the "
+ },
+ {
+  "id": "914ab1d4",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 3.411,
+  "correct": false,
+  "answer": "\\boxed{hover} — the screenshots show only the Magento Admin reviews grid (and a 404/Marketing menu), not the storefront star-rating widget, so the exact star element (bid) is missing; however, since s"
+ },
+ {
+  "id": "6feb33d4",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.943,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt or screenshot shows the post-display page after submitting a post, so the separate downvote count next to the new post cannot be determined.}}"
+ },
+ {
+  "id": "84238c8f",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.486,
+  "correct": false,
+  "answer": "No `Checkout Discounts` child module exists anywhere in the shown admin navigation (Marketing shows only Promotions, Communications, SEO & Search, User Content). The module actually used for checkout/"
+ },
+ {
+  "id": "6fc8c511",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not determinable from the provided excerpts/screenshots: the item names in the order detail pages (Orders \\#000000180, \\#000000162) appear as plain text, not links, and no memory excerpt "
+ },
+ {
+  "id": "3b8210a1",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.681,
+  "correct": false,
+  "answer": "\\boxed{\\text{three — Actions, Change status, Archived}}"
+ },
+ {
+  "id": "d47ca5c8",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.626,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not found in the provided memory/screenshots.}} The excerpts only show Magento **admin-side** pages (order grid filtering by purchase date, creating a shipment with tracking number, cart "
+ },
+ {
+  "id": "66ed4c72",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.641,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not found in the provided excerpts/screenshots. They show the admin Orders grid, checkout success page (\"Thank you for your purchase!\"), and My Orders history — none show the checkout pag"
+ },
+ {
+  "id": "21df0107",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": true,
+  "answer": "\\boxed{\\text{Missing: no single dropdown for both. The excerpts only show the Stock Availability dropdown (under Advanced Inventory) set to \"Out of Stock\"; no backorders option is shown, and the scree"
+ },
+ {
+  "id": "0574c69a",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": false,
+  "answer": "**Not in this case — the evidence shows it fails here.**\n\nBased on the excerpts/screenshots:\n- Searching `author:PatientBuilder499 subreddit:videos` returned \"No results,\" and even plain `author:Patie"
+ },
+ {
+  "id": "577ab4ee",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.373,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts/screenshots never show the search results page (only the homepage and admin panels), so no control for searching a product's used offers can be identified.}}"
+ },
+ {
+  "id": "89a20f48",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.501,
+  "correct": false,
+  "answer": "The provided screenshots never expand the \"All time\" time-range dropdown (only the sort dropdown showing Hot/New/Active/Top/Controversial/Most commented is opened), so the option listed below \"All tim"
+ },
+ {
+  "id": "fd006924",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": true,
+  "answer": "\\boxed{\\text{None — the Title field is empty; the \"/f/\" prefix is prepopulated in the Name field}}"
+ },
+ {
+  "id": "57817b87",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The memory excerpts and screenshots do not contain a moderated forum page showing the Toolbox menu (only Magento admin pages and the \"All forums\" list are shown), so the link below \"Trash\" cannot be d"
+ },
+ {
+  "id": "bb7ebd5c",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.534,
+  "correct": false,
+  "answer": "The excerpts and screenshots do not contain the answer. They only show the biography-editing page, whose sidebar \"Toolbox\" contains only \"Hidden forums\" and \"Trash\" — no profile tabs for viewing post "
+ },
+ {
+  "id": "733699a5",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.456,
+  "correct": true,
+  "answer": "\\boxed{\\text{Nothing — \"Most commented\" is the last option in the dropdown (order shown: Hot, New, Active, Top, Controversial, Most commented).}}"
+ },
+ {
+  "id": "8da5c407",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.426,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not show the Actions dropdown on the Products listing page — they only show the Dashboard, the Catalog menu (Products/Categories), and the Update Attributes pa"
+ },
+ {
+  "id": "25853d7f",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.505,
+  "correct": true,
+  "answer": "\\boxed{\\text{None — only “URL” and “Image” tabs are shown, with nothing between them}}"
+ },
+ {
+  "id": "0af83ccc",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.458,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing information: none of the excerpts or screenshots show the } My Orders \\text{ table's column headers (no } Tracking Number \\text{ column is visible anywhere — screenshots only show"
+ },
+ {
+  "id": "f2b221fd",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.729,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "42d13006",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.396,
+  "correct": false,
+  "answer": "Based on the provided screenshots, this is the **Magento Admin panel** (Dashboard / Order view), not a storefront landing page, and **no dedicated \"items on sale\" module or functionality is shown** on"
+ },
+ {
+  "id": "2cc1b9ca",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 3,
+  "latency_s": 1.649,
+  "correct": false,
+  "answer": "Based on the excerpts, sorting by price is exactly what the recorded trajectory did for this same goal (\"What is the price range of wireless earphone in the One Stop Market\"): it clicked the Sort By c"
+ },
+ {
+  "id": "4a4aad22",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.555,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "77258cda",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.858,
+  "correct": false,
+  "answer": "**Your save worked — no refresh or navigation needed.** Two confirmations are visible on the page itself:\n\n1. **Success alert**: After clicking Save, an alert banner appears saying **\"The biography wa"
+ },
+ {
+  "id": "6517165d",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.383,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the admin order detail page's left \"Order View\" tab list. The screenshots show only the storefront order page (Order #000000196) and the admin Orde"
+ },
+ {
+  "id": "cdc46516",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.512,
+  "correct": false,
+  "answer": "\\boxed{Featured}"
+ },
+ {
+  "id": "98e6d369",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.466,
+  "correct": false,
+  "answer": "The provided materials do not contain the answer. The screenshots show only the Magento **Admin Reviews grid** (columns: ID, Created, Status, Title, Nickname, Review, Visibility, Type, Product, SKU) a"
+ },
+ {
+  "id": "83a77f9d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": true,
+  "answer": "\\boxed{\\text{Nothing — “Most commented” is the last option in the dropdown (the list ends there: Hot, New, Active, Top, Controversial, Most commented).}}"
+ },
+ {
+  "id": "ea361b20",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 0.403,
+  "correct": false,
+  "answer": "**No — not \"only\" those items.** The screenshots show your cart already contains **3 items** (cart badge on the Order #000000163 page), while that order has just 1 item (Alfafia Everyday Shea Conditio"
+ },
+ {
+  "id": "07a0145f",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.497,
+  "correct": true,
+  "answer": "\\boxed{-5}\n\nReasoning from the evidence: in the /f/movies screenshots, each downvoted post's score displays as **-1** (posts at 9933, 7720, 5268, 4249 all show \"-1\" after downvoting, while the non-dow"
+ },
+ {
+  "id": "c216174c",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.488,
+  "correct": false,
+  "answer": "Based on the excerpts, there is **no way to add a tracking number directly from the orders grid** — the recorded flow for order #306 required opening the order detail first. What's missing is any scre"
+ },
+ {
+  "id": "eaba5c44",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.53,
+  "correct": false,
+  "answer": "Missing: No excerpt or screenshot shows the actual **Order Count Report page** (only the Reports menu, Customers grid, Orders grid, and a storefront order view are shown). The controls next to \"Show B"
+ },
+ {
+  "id": "0a13e290",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts/screenshots do not show the Create submission page's \"Forum\" bar or any subscribing-related change to it. The /submit/funny observations are truncated before the For"
+ },
+ {
+  "id": "ecca89b2",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.419,
+  "correct": false,
+  "answer": "\\boxed{Submit} — this is the only button I can confirm from the evidence: on a subreddit page the way to start posting is the “+ Submit” link in the top navigation (also confirmed in the memory: “I'll"
+ },
+ {
+  "id": "549c0657",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts/screenshots only show forum lists and post listings (usernames appear as clickable profile links, e.g., \"Sorkil\" or \"Eliedawg\" next to \"Submitted by\"), but no user p"
+ },
+ {
+  "id": "a2673690",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.647,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: none of the excerpts/screenshots show a product detail page with an \"Add to Favorites\" link or its result. The provided content only covers the storefront homepage, search, Magen"
+ },
+ {
+  "id": "fc7d35d5",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.444,
+  "correct": false,
+  "answer": "\\boxed{Image, Title, Body, Forum}\n\nClick the **Image** tab on the \"Create submission\" form (instead of URL), then fill in **Title** (required), **Body** (optional), and **Forum** (preselected with the"
+ },
+ {
+  "id": "196a68fb",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.494,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not found in provided materials}} — no excerpt or screenshot shows another user's home page (profile) with gray tabs. Only the logged-in front page (tabs: Submissions, Comments) is shown,"
+ },
+ {
+  "id": "7ebb0b95",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.46,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt/screenshot shows your profile page's toolbar. The available pages are the Magento Orders admin, Postmill homepage, All forums list, and the account dropdown (Profile /"
+ },
+ {
+  "id": "97e1d977",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.393,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not covered: the excerpts/screenshots show search filters (keyword, shopping options, price sort) and admin grid filters (Status, Quantity), but no option for filtering discounted/special"
+ },
+ {
+  "id": "ecd9dda3",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.429,
+  "correct": false,
+  "answer": "\\boxed{\\text{Cannot be determined}} — The excerpts/screenshots show the home page header, nav menu, and product showcases, but never a footer, \"Contact Us\" link, or any customer service phone number. "
+ },
+ {
+  "id": "358c13ce",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not determinable — no “Visual Swatch Preview” dropdown appears in the provided screenshots; only “Catalog Input Type for Store Owner” (Text Swatch) is visible.}}"
+ },
+ {
+  "id": "0382ed92",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.537,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "4b0c5275",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.626,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: none of the excerpts/screenshots show the button labels that appear after a Pages-grid cell enters inline edit mode (the [3b4ea1fd] excerpt only shows the Title cell as textbox b"
+ },
+ {
+  "id": "4121647c",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.585,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "6a7f0d24",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.064,
+  "correct": false,
+  "answer": "\\boxed{Summary} — the details dialog shows fields \"Description of Operation\", \"Summary\", and \"Start Time\"; the \"Summary\" field (e.g., \"1 items selected for mass update, 1 successfully updated\") is wha"
+ },
+ {
+  "id": "eec85674",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": false,
+  "answer": "Not in the provided material. The excerpts and screenshots only show the admin Orders **grid**, the admin dashboard, and storefront pages — none capture an **admin order detail page toolbar** (e.g., `"
+ },
+ {
+  "id": "f43926d9",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 0.404,
+  "correct": true,
+  "answer": "Looking at the \"All forums\" page screenshots, the tab row above the forum list reads: **Forums | Tags | Alphabetical**. There is no tab between `Tags` and `Alphabetical` — they are directly adjacent ("
+ },
+ {
+  "id": "d7c94023",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 1.578,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. The only checkout screenshot shows the Shipping step with the Order Summary collapsed (\"1 Item in Cart\"); no screenshot or excerpt show"
+ },
+ {
+  "id": "910135bb",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.496,
+  "correct": true,
+  "answer": "**There is no way to change the shipping address of a past order from your storefront account.**\n\nBased on the memory excerpts:\n- Opening the order via **My Orders** shows the shipping address only as"
+ },
+ {
+  "id": "b339209c",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.472,
+  "correct": true,
+  "answer": "**There is no customer service number on this page — scrolling down is hopeless.**\n\nThe page shown is the Magento Admin **Customers grid** (`/admin/customer/index/`). It contains only customer records"
+ },
+ {
+  "id": "01f6e679",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.465,
+  "correct": true,
+  "answer": "\\boxed{\\text{Markdown allowed. Formatting help } \\uparrow} — in the \"Create submission\" form, the element shown between \"Body\" and \"Forum *\" is the note \"Markdown allowed. Formatting help ↑\"; there is"
+ },
+ {
+  "id": "fdeddf71",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.415,
+  "correct": false,
+  "answer": "**What the screenshot shows:** a server-side rate-limit error — \"You cannot post more. Wait a while before trying again.\" — meaning the 500 error didn't stop the server from counting your submission a"
+ },
+ {
+  "id": "21f3228c",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.401,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not in the provided excerpts/screenshots. They only show submission sorting options (Hot, New, Active, Top, Controversial, Most commented) within a single forum (/f/DIY, /f/books) — no so"
+ },
+ {
+  "id": "aa8d21f5",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.323,
+  "correct": false,
+  "answer": "**Missing information.** The provided screenshots/excerpts do not include the Product Views Report page. The only info banner shown is on the Bestsellers Report, which says to refresh lifetime statist"
+ },
+ {
+  "id": "1fec75e5",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 2,
+  "latency_s": 1.813,
+  "correct": false,
+  "answer": "\\boxed{3}\n\nReasoning from the excerpts/screenshots: (1) `fill` the search combobox with a query, (2) submit via `keyboard_press` (Enter) or `click` the Search button, and (3) `select_option` on the re"
+ },
+ {
+  "id": "f90f2255",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.469,
+  "correct": false,
+  "answer": "The provided memory excerpts and screenshots do not show any profile pages (neither your own nor another user's) — they only show the \"All forums\" page and the homepage with the account menu open. The"
+ },
+ {
+  "id": "fc0dbc35",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 0.407,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not contained in the excerpts/screenshots — missing: the single comment thread view showing the blue notice bar above “View all comments”}}"
+ },
+ {
+  "id": "2408b115",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": false,
+  "answer": "\\boxed{\\text{On the storefront search-results page, open/scroll the left “Shopping Options” (layered navigation) panel and use its Price filter to select a range; results can also be sorted by price ("
+ },
+ {
+  "id": "1d864942",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.354,
+  "correct": false,
+  "answer": "**No — not per the evidence available.** The `Back` button shown belongs to the **product editor** page (Olivia 1/4 Zip Light Jacket), and none of the excerpts/screenshots confirm it leads to the revi"
+ },
+ {
+  "id": "81180ae9",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.452,
+  "correct": false,
+  "answer": "**No answer available in the excerpts.** The memory and screenshots only show that the Address Book page has **separate, independent links** — \"Change Billing Address\" and \"Change Shipping Address\" (b"
+ },
+ {
+  "id": "0cd6dc43",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.508,
+  "correct": false,
+  "answer": "\\boxed{System\\ Messages} — the top banner reads “Task \"Update attributes for 16 selected products\": 1 item(s) have been scheduled for update.” and contains two links: `View Details` and `System Messag"
+ },
+ {
+  "id": "0401f0c8",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": true,
+  "answer": "\\boxed{\\text{Not shown in the provided excerpts/screenshots}} — the forum home page (screenshot 1) contains no visible textbox for directly entering a new post (only a search box, whose placeholder is"
+ },
+ {
+  "id": "b05cf470",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.391,
+  "correct": true,
+  "answer": "\\boxed{\\text{Missing: no excerpt/screenshot shows a moderated forum page or a Toolbox link with a moderators list — only the forums index/list pages and Magento admin pages are shown.}}"
+ },
+ {
+  "id": "0ace674b",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.65,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not answerable from the provided evidence — the Search Terms Report grid is never shown.}}\n\nThe excerpts/screenshots only show: the Customers grid, the Reports menu (which reveals the \"Se"
+ },
+ {
+  "id": "a363341d",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.572,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "cdb47c5d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 0.696,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt/screenshot shows the page after clicking \"Place Order,\" so the gray button's name cannot be determined.}}"
+ },
+ {
+  "id": "2e67d04f",
+  "stratum": "vision-needed",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.464,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "a2a71197",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.42,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "9ed5a14d",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.491,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "7376c10d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "edc22f24",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": false,
+  "answer": "\\boxed{\\text{Pricing tab, Change checkbox (next to On Sale), On Sale toggle (set to Yes), Save button}}"
+ },
+ {
+  "id": "eff00409",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "The provided screenshots and memory excerpts do not show the edit review page's top toolbar. The screenshots only show the product edit page, Update Attributes page, and Dashboard (toolbars containing"
+ },
+ {
+  "id": "922a0c56",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 3,
+  "latency_s": 1.367,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not show a customer detail (edit) page in the admin — they only cover the Orders grid, frontend \"My Account\" page, Dashboard, and the Sales menu. What's missin"
+ },
+ {
+  "id": "ee75b921",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.446,
+  "correct": true,
+  "answer": "\\boxed{\\text{Missing: the screenshots show only ``Print receipt'' on the success page; no other print-related link appears below it.}}"
+ },
+ {
+  "id": "4266cb67",
+  "stratum": "vision-needed",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": true,
+  "answer": "Missing: None of the memory excerpts or screenshots show the actual forum pages (creator view, subscriber-only view, or viewer-only view) with their right-side sidebar. The only forum sidebar visible "
+ },
+ {
+  "id": "1e77eb4b",
+  "stratum": "vision-needed",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.398,
+  "correct": false,
+  "answer": "**Go to: Sales > Orders → open the order → click \"Ship\" → on the New Shipment page, use \"Add Tracking Number\"** (select Carrier, enter Title and Number), then submit the shipment.\n\nPer the memory exce"
+ },
+ {
+  "id": "866a0f2e",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no ``Customer Notification'' field appears in the excerpts/screenshots. Only the top of order \\#000000136 (Canceled) is shown; the Comments History section (where the notificatio"
+ },
+ {
+  "id": "25dc1d7d",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.476,
+  "correct": false,
+  "answer": "The screenshots and excerpts do not contain the answer. They show the Dashboard, the Content menu, and the Themes list (with \"View\" links), plus a step landing on the theme page (`system_design_theme/"
+ },
+ {
+  "id": "1a89c3ac",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.426,
+  "correct": false,
+  "answer": "\\boxed{\\text{Edit biography}}"
+ },
+ {
+  "id": "f078f429",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.466,
+  "correct": false,
+  "answer": "**Eight.**\n\nReasoning from the UI shown in the screenshots:\n1. **1 click** – click the forum link on the \"List of forums\" page to open the forum (currently sorted \"Hot\").\n2. **2 clicks** – open the so"
+ },
+ {
+  "id": "7195f494",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "86f00073",
+  "stratum": "vision-needed",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.386,
+  "correct": true,
+  "answer": "The provided excerpts and screenshots do not contain a customer service phone number. The Contact Us page shows only a web form (Name, Email, Phone Number, message) and no published support phone numb"
+ },
+ {
+  "id": "51764e11",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": true,
+  "answer": "\\boxed{\\text{None — the date picker only offers “Go Today” (jumps to today's date) and “Close”; no button jumps to the first day of next month.}}"
+ },
+ {
+  "id": "5d6ecdeb",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.415,
+  "correct": false,
+  "answer": "\\boxed{Forums, Create forum}"
+ },
+ {
+  "id": "4cb090a9",
+  "stratum": "vision-needed",
+  "question_type": "procedure-abs",
+  "arm": "mm",
+  "n_images": 3,
+  "latency_s": 1.644,
+  "correct": false,
+  "answer": "The excerpts/screenshots only show the homepage (top of page) and the admin attributes grid — the product list page with the min/max price text boxes is not visible, so no bid for those boxes is avail"
+ },
+ {
+  "id": "8a8f6aac",
+  "stratum": "vision-needed",
+  "question_type": "dynamic-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.512,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt or screenshot shows the page after clicking \"Reorder\" (the cart page with the item thumbnail and its \"Edit\"/\"Remove item\" buttons), so the button name between them can"
+ },
+ {
+  "id": "10003186",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": false,
+  "answer": "The excerpts and screenshots do not show another user's profile page or its Toolbox. The available memories only cover the All forums page, the account dropdown menu, forum creation, the forum list, a"
+ },
+ {
+  "id": "5387d23d",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": false,
+  "answer": "\\boxed{\\text{Not answerable from the provided excerpts/screenshots. They show the \"Create submission\" page only in truncated form (e.g., /submit/funny cut off right after the \"Create submission\" headi"
+ },
+ {
+  "id": "77db204d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.409,
+  "correct": true,
+  "answer": "\\boxed{\\text{Print receipt}}"
+ },
+ {
+  "id": "674a6972",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.635,
+  "correct": true,
+  "answer": "\\boxed{C}\n\nWith 10 orders per page and 37 total, the oldest orders are on page 4. The memory excerpt confirms this exact page (\"Items 1 to 10 of 37 total\") required clicking the \"Page 4\" link (bid '16"
+ },
+ {
+  "id": "19c641bd",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.851,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "d3300354",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.468,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: no excerpt or screenshot shows the Postmill user-settings page, so the affected settings row cannot be determined from the provided materials.}}"
+ },
+ {
+  "id": "07ab3723",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.554,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "f23807ed",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.507,
+  "correct": true,
+  "answer": "\\boxed{five}"
+ },
+ {
+  "id": "e71f7c92",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.598,
+  "correct": true,
+  "answer": "\\boxed{\\text{Edit biography}}"
+ },
+ {
+  "id": "3c0c1b19",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.616,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "a62de1f1",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.562,
+  "correct": false,
+  "answer": "\\boxed{True}\n\nThe screenshots show the admin Reviews search results page: each row only offers an \"Edit\" link in the Action column, and adding a review requires clicking the \"New Review\" button and th"
+ },
+ {
+  "id": "f93031d2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.38,
+  "correct": false,
+  "answer": "\\boxed{Canceled}\n\nSupporting evidence: The excerpts show order 000000136 was opened after cancellation, with the note \"The open order (000000136) is Canceled\" [2305e825 @ /admin/sales/order/view/order"
+ },
+ {
+  "id": "a12b7094",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.479,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. They only show the account button 'MarvelsGrantMan136' with hasPopup='menu', expanded=False — the menu is never opened, so the number a"
+ },
+ {
+  "id": "4ca9f7d7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.402,
+  "correct": false,
+  "answer": "The excerpts and screenshots do not contain a user's Comments tab — none show a comment card with action links below it. Missing: a screenshot/excerpt of a user profile page's Comments view (e.g., loc"
+ },
+ {
+  "id": "ff8f3a22",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.433,
+  "correct": true,
+  "answer": "\\boxed{false}\n\nThe account summary page's \"Recent Orders\" table lists orders by date regardless of status (e.g., the newest row, #000000170 from 5/17/23, is \"Canceled,\" while the most recent \"Complete"
+ },
+ {
+  "id": "65fbcbdf",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 2,
+  "latency_s": 1.51,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts and screenshots only show the homepage/search-results header, not any \"Add to Wish List\" link or its click behavior — so there is no evidence of whether it navigates"
+ },
+ {
+  "id": "40758d8b",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.65,
+  "correct": true,
+  "answer": "\\boxed{A,B,F}\n\nBased on the review data shown (Title, Nickname = reviewer name, Review = content, Created = date, plus star rating), the included fields are C, D, E, G, H. The fields not present in a "
+ },
+ {
+  "id": "2c45ecbb",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.459,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not show an order detail page (only the Orders grid, Customers grid, storefront account, and Contact Us pages), so the toolbar between \"Back\" and \"Send Email\" "
+ },
+ {
+  "id": "5c826b28",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": true,
+  "answer": "Missing information. The screenshots only show the **second stage (Review & Payments)** Order Summary — containing Cart Subtotal ($53.29), Shipping/Flat Rate – Fixed ($5.00), Order Total ($58.29), and"
+ },
+ {
+  "id": "0fe2c676",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.5,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "762d34b8",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.41,
+  "correct": false,
+  "answer": "\\boxed{Purchase Date, Last Updated At}\n\nNote: The Orders grid shows the timestamp column \"Purchase Date\" and the Products grid shows \"Last Updated At\" in the screenshots. However, no screenshot or mem"
+ },
+ {
+  "id": "7bfbd5f1",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.333,
+  "correct": true,
+  "answer": "\\boxed{true} — The screenshots show the Orders grid includes a \"Braintree Transaction Source\" column (visible alongside ID, Purchase Point, Purchase Date, Bill-to Name, Ship-to Name, Grand Totals, Sta"
+ },
+ {
+  "id": "e3a1d7f3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.423,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the provided screenshots only show the Orders grid and the top of Order \\#00000025 (Order \\& Account Information); the \"Items Ordered\" table with its column headers (and any colu"
+ },
+ {
+  "id": "e532c01e",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment-abs",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.398,
+  "correct": true,
+  "answer": "\\boxed{\\text{Missing: the excerpts/screenshots don't show how to hide submissions and comments on a subreddit page — they only show a “Hide this forum” sidebar option (used to hide the whole forum), p"
+ },
+ {
+  "id": "4329b535",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": true,
+  "answer": "\\boxed{Image, Price, Quantity, Weight}"
+ },
+ {
+  "id": "b2595523",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.401,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "0c6b0c60",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": false,
+  "answer": "Missing information. The provided screenshots only show the sort dropdown itself (Hot, New, Active, Top, Controversial, Most commented) — none of them show the \"Top\" sort selected with its time-range "
+ },
+ {
+  "id": "8cb3280c",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The Actions dropdown is never opened in any of the provided screenshots or memory excerpts — the Products page screenshots only show the collapsed \"Actions\" control, and no excerpt records its menu it"
+ },
+ {
+  "id": "99fa7c96",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 0.526,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "41bb40df",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.542,
+  "correct": false,
+  "answer": "Missing: Neither the memory excerpts nor the screenshots show the Search Terms grid's column headers. The Search Terms excerpt is truncated right after the page heading, and all screenshots show the P"
+ },
+ {
+  "id": "d886b018",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.485,
+  "correct": false,
+  "answer": "\\boxed{six}\n\nReasoning from the evidence:\n1. Click the forum name on the \"List of forums\" page to enter it (e.g., /f/DIY) — one click.\n2. Click the sort dropdown (currently \"Hot\") — one click (screens"
+ },
+ {
+  "id": "31f146ba",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.591,
+  "correct": true,
+  "answer": "\\boxed{three}\n\nReasoning from the excerpts/screenshots: \n1. **fill** the search combobox (bid 386) with the item name and enable the autocomplete menu (as shown: `fill('386', 'Nintendo Switch game car"
+ },
+ {
+  "id": "8955b988",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.549,
+  "correct": true,
+  "answer": "\\boxed{Description of Operation, Start Time}\n\nThese two fields appear in the task details dialog (second screenshot) and remain constant, while the \"Summary\" field reflects the update status (\"1 items"
+ },
+ {
+  "id": "597645be",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.7,
+  "correct": false,
+  "answer": "\\boxed{G}\n\nThe excerpts show this exact workflow: navigating to My Account → My Orders, paging through the order list by date (e.g., \"Page 4\" for 2022 orders), then opening individual orders (e.g., or"
+ },
+ {
+  "id": "626e401e",
+  "stratum": "text-recoverable",
+  "question_type": "errors-gotchas",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.454,
+  "correct": true,
+  "answer": "\\boxed{relationship\\_advice}\n\nThe List of forums page is sorted by Submissions: AskReddit (10,041) is first, and relationship_advice (5,718 submissions) is second."
+ },
+ {
+  "id": "0a4a47e6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.395,
+  "correct": true,
+  "answer": "\\boxed{\\text{The ``Submissions'' sort option (the dropdown next to the Forums/Tags/Alphabetical tabs on the ``List of forums'' page) sorts forums by number of threads/submissions. The excerpts do not "
+ },
+ {
+  "id": "6a2e74de",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.399,
+  "correct": false,
+  "answer": "\\boxed{true}\n\nThe Recent Orders table on the My Account page includes a \"Ship To\" column showing the ship-to person (e.g., \"Emma Lopez\") for each order, alongside Order #, Date, Order Total, Status, a"
+ },
+ {
+  "id": "0c0fdcd7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.563,
+  "correct": false,
+  "answer": "\\boxed{Product\\ Showcases}"
+ },
+ {
+  "id": "c39f6edf",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.866,
+  "correct": true,
+  "answer": "\\boxed{A}\n\nThe My Account page's \"Recent Orders\" table includes a \"Ship To\" column (Order #, Date, Ship To, Order Total, Status, Action), while the My Orders page table shows only Order #, Date, Order"
+ },
+ {
+  "id": "7c8efee5",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.413,
+  "correct": true,
+  "answer": "**Missing information:** None of the screenshots or memory excerpts show the **Pages grid** (CMS Pages), so its `per page` value cannot be determined. The screenshots only show the **Products grid** a"
+ },
+ {
+  "id": "2ee130d2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.743,
+  "correct": false,
+  "answer": "\\boxed{True} — Excerpt 2d00b63d shows that after clicking Save, a success alert \"The biography was updated\" appeared (so the biography is formally saved), and the view returned to the profile page (pr"
+ },
+ {
+  "id": "e77d1287",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.489,
+  "correct": false,
+  "answer": "The provided screenshots and excerpts do not include a post thread page (they only show the forum list, \"Create new forum\" form, All forums alphabetical list, and a Magento admin orders page). Therefo"
+ },
+ {
+  "id": "6a23675f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.567,
+  "correct": false,
+  "answer": "Missing: None of the memory excerpts or screenshots show the page reached after clicking \"Reorder\" (e.g., the cart page with the item thumbnail). They only cover the My Orders list, an order detail pa"
+ },
+ {
+  "id": "3269a3c5",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.436,
+  "correct": false,
+  "answer": "\\boxed{Submit, Submit}\n\nFrom the memory excerpts: on the subreddit page (e.g., /f/pittsburgh), the first click is the **\"Submit\"** link in the top navigation bar (excerpt: \"I'll open the submission fo"
+ },
+ {
+  "id": "6d975a08",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": true,
+  "answer": "\\boxed{Forums, Tags, Alphabetical}"
+ },
+ {
+  "id": "1b43f7df",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.445,
+  "correct": false,
+  "answer": "The memory excerpts and screenshots do not contain information about the create product configurations pipeline or its stages. They only show: a bulk attribute update task for 16 products (\"Pending, i"
+ },
+ {
+  "id": "a59d50f7",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.406,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "401566e6",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 2,
+  "latency_s": 1.629,
+  "correct": false,
+  "answer": "\\boxed{three}\n\nReasoning from the excerpts/screenshots: you must (1) `fill` the search combobox (bid 386/273) with a query, (2) `keyboard_press` Enter (or click the Search button) to load results, and"
+ },
+ {
+  "id": "07b49858",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.535,
+  "correct": true,
+  "answer": "\\boxed{three — Actions, Change status, Disabled}\n\nReasoning: With items already selected, the fastest way to remove them from display is the mass \"Change status\" action: open the **Actions** dropdown "
+ },
+ {
+  "id": "92642fe7",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 0,
+  "latency_s": 0.048,
+  "correct": false,
+  "answer": "The memory excerpts are empty and no screenshots were provided, so the successful workflow cannot be determined from them.\n\n**Missing:** Any excerpt or screenshot showing the admin panel navigation (e"
+ },
+ {
+  "id": "631667c9",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.388,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain this information. They only show the Magento admin dashboard/menus and Postmill's \"All forums\"/\"List of forums\" listing pages — no individual moder"
+ },
+ {
+  "id": "70e79657",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.331,
+  "correct": true,
+  "answer": "\\boxed{\\text{Hidden forums and Trash}}"
+ },
+ {
+  "id": "eab07e81",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "Missing: none of the excerpts or screenshots show the user settings edit page with the `Time zone` and `Front page` fields, so their layout (same section / adjacent rows) cannot be verified from the p"
+ },
+ {
+  "id": "abadf765",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.469,
+  "correct": true,
+  "answer": "\\boxed{\\text{False}} — In the storefront order detail page (e.g., Order #000000180), the item name (\"IDweel iPhone SE 2020 Case...\") appears as plain text, not a clickable link, so clicking it does no"
+ },
+ {
+  "id": "b8d56b89",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 0.453,
+  "correct": true,
+  "answer": "\\boxed{\\text{the time zone}}"
+ },
+ {
+  "id": "6a5bbcdb",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.362,
+  "correct": false,
+  "answer": "Missing: no excerpt or screenshot shows a category product-list page with layered navigation — neither the state after clicking a left-column subcategory nor after clicking a left-column price range, "
+ },
+ {
+  "id": "597ca614",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.468,
+  "correct": true,
+  "answer": "\\boxed{Orders}\n\nEvidence: The Orders grid screenshot shows \"200 per page\" (308 records found, 2 pages). No screenshot or excerpt shows the default per-page value for the Products grid (the Products/In"
+ },
+ {
+  "id": "fe18a443",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.579,
+  "correct": false,
+  "answer": "The memory excerpts and screenshots only cover the Orders grid (Sales) and Products grid (Catalog). There is no excerpt or screenshot showing Content > Elements > Pages or any observation of clicking "
+ },
+ {
+  "id": "deb008ed",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.439,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots only show the One Stop Market home page and top-navigation hover menus (e.g., Sports & Outdoors, Clothing, Shoes & Jewelry submenus). None of them show the catego"
+ },
+ {
+  "id": "5d6b993a",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": false,
+  "answer": "Missing: None of the excerpts or screenshots show an admin order detail page's top toolbar. The images only show the Orders **grid** page, a storefront checkout success page, and the Contact Us page; "
+ },
+ {
+  "id": "c56e69ca",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": false,
+  "answer": "\\boxed{D}\n\nThe Address Book page shows two separate default entries (Default Billing Address and Default Shipping Address are distinct addresses, e.g., Seattle vs. Cambridge in My Account), and each l"
+ },
+ {
+  "id": "609acb91",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.54,
+  "correct": false,
+  "answer": "**Missing information.** None of the memory excerpts or screenshots show the storefront category item-list page with a price range selected in the left (layered navigation) column — the screenshots on"
+ },
+ {
+  "id": "2b1a8fc6",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.47,
+  "correct": true,
+  "answer": "\\boxed{Marketing, Cart Price Rules}\n\nBased on the screenshots and excerpts: for a checkout (cart) discount, use the **Marketing** menu → **Promotions** → **Cart Price Rules**, which opens the \"New Car"
+ },
+ {
+  "id": "2ca2d443",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.736,
+  "correct": false,
+  "answer": "\\boxed{C}\n\nReasoning from the excerpts/screenshots: From the My Account dashboard, the saved-address update form requires 2 clicks (sidebar **Address Book** → **Change Shipping/Billing Address** link,"
+ },
+ {
+  "id": "c6124506",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.431,
+  "correct": false,
+  "answer": "\\boxed{Marketing, Reviews}"
+ },
+ {
+  "id": "4252cc1c",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.413,
+  "correct": false,
+  "answer": "\\boxed{True}\n\nThe screenshots of the storefront (My Account page) show an orange counter badge displaying \"3\" overlapping the cart icon at the top right. (Note: this badge reflects the cart count — th"
+ },
+ {
+  "id": "23aecb38",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.482,
+  "correct": true,
+  "answer": "\\boxed{C}"
+ },
+ {
+  "id": "edb69441",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": true,
+  "answer": "\\boxed{ID, Start Time, Description of Operation, Status, Action}"
+ },
+ {
+  "id": "73297783",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.448,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "06e965cf",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.454,
+  "correct": true,
+  "answer": "\\boxed{B}"
+ },
+ {
+  "id": "b4dcf650",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.453,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "6cb662d7",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.421,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. They only show the \"All forums\" list, \"List of forums\" page, homepage feeds, and the \"Create new forum\" form. Missing: screenshots of a"
+ },
+ {
+  "id": "98b62f3d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": true,
+  "answer": "\\boxed{Title, Forum} — the Create submission form marks only Title* and Forum* with a required asterisk (URL/URL-or-image and Body show no asterisk)."
+ },
+ {
+  "id": "f61a096f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.666,
+  "correct": false,
+  "answer": "Missing: none of the memory excerpts or screenshots show a Magento admin **customer detail/edit page** or its top toolbar — the screenshots only cover the storefront homepage and the admin Dashboard/R"
+ },
+ {
+  "id": "a7da9ab3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.463,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. Missing information:\n\n- No screenshot or excerpt shows another user's profile page with its `Toolbox` section.\n- No screenshot or excer"
+ },
+ {
+  "id": "436c58d5",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.389,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "6f9cb5fc",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.427,
+  "correct": false,
+  "answer": "The excerpts show navigating to Content → Themes and seeing the Magento Blank row, but **no screenshot or memory excerpt shows the theme detail page** (the page that opens after clicking \"View\" for a "
+ },
+ {
+  "id": "1defc293",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.708,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "6a73e32b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.418,
+  "correct": true,
+  "answer": "\\boxed{\\text{Yes, the Name field shows a prefix \"/f/\" (displayed as placeholder text), e.g., \"/f/Cyberpunk\"}}"
+ },
+ {
+  "id": "8f70bc0e",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.404,
+  "correct": true,
+  "answer": "\\boxed{Reset}"
+ },
+ {
+  "id": "8c55d6bc",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.29,
+  "correct": true,
+  "answer": "\\boxed{\\text{The report displays the top 5 most viewed products for each interval.}}"
+ },
+ {
+  "id": "4d7dda89",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.434,
+  "correct": true,
+  "answer": "\\boxed{Submit, Image, Title, Body, Forum, Create submission}\n\n- On the subreddit page, click the **Submit** button in the top navigation.\n- On the \"Create submission\" page, select the **Image** tab (i"
+ },
+ {
+  "id": "1e011eb5",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.473,
+  "correct": true,
+  "answer": "\\boxed{B}"
+ },
+ {
+  "id": "90dc7e66",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.445,
+  "correct": true,
+  "answer": "\\boxed{Image, Name, SKU, Price, Quantity, Weight, Status, Attributes, Actions}"
+ },
+ {
+  "id": "e83245c5",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.531,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. They only show the Magento Admin pages (Dashboard, Orders, Reviews) and the Postmill \"All forums\" list page — no thread page with a rig"
+ },
+ {
+  "id": "5cb7289b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.501,
+  "correct": false,
+  "answer": "The top banner reads \"One or more indexers are invalid. Make sure your Magento cron job is running.\" It contains two embedded links: \"indexers\" and \"Magento cron job\".\n\n\\boxed{\\text{Magento cron job ("
+ },
+ {
+  "id": "499488a6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.428,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "5db4899c",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.408,
+  "correct": false,
+  "answer": "**Missing information.** The memory excerpts and screenshots never show a profile page containing a `Toolbox` section. The screenshots only show the One Stop Market store pages, the \"All forums\" list,"
+ },
+ {
+  "id": "d6da3938",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.482,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "ffa4e57e",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.533,
+  "correct": true,
+  "answer": "The screenshots and excerpts do not contain the answer. They show the Products grid and the Actions dropdown with \"Update attributes\" selected, but none show the Update Attributes page itself, so the "
+ },
+ {
+  "id": "b5a25676",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.447,
+  "correct": false,
+  "answer": "Missing. The memory excerpts only cover a forum *creation* page (localhost:9080/create_forum) and Magento store/admin pages; no excerpt or screenshot shows another user's home page on the reddit-based"
+ },
+ {
+  "id": "00aa905a",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": true,
+  "answer": "\\boxed{False} — the forum home page only shows a submissions list (with a search box at top); to create a post you must go to a separate \"Submit\" / \"Create submission\" page."
+ },
+ {
+  "id": "dea446d0",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.729,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. They only show the **Magento Admin backend** Reviews grid (e.g., \"0 records found\" → \"We couldn't find any records.\" after filtering), "
+ },
+ {
+  "id": "3f366e15",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.45,
+  "correct": true,
+  "answer": "\\boxed{\\text{Subscribe via RSS}}"
+ },
+ {
+  "id": "6652c337",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 0.421,
+  "correct": true,
+  "answer": "\\boxed{Continue Shopping}"
+ },
+ {
+  "id": "97d5309a",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.419,
+  "correct": true,
+  "answer": "**Answer:** From the forums list page, the sequence is:\n1. Click the forum link (e.g., /f/DIY) to open it — 1 click\n2. Click the \"Hot\" sort dropdown (posts are sorted by Hot by default, not by time) —"
+ },
+ {
+  "id": "f13eb38d",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.617,
+  "correct": false,
+  "answer": "\\boxed{four}\n\nReasoning from the evidence:\n1. **fill** the search combobox with a query (the Search button stays disabled until text is entered — excerpt 78f5c752).\n2. **keyboard_press** (Enter) or **"
+ },
+ {
+  "id": "4f92aa38",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 1.717,
+  "correct": false,
+  "answer": "\\boxed{scroll}\n\nThe excerpts/screenshots do not show the category product list page's price filter (no \"Shop By\"/price filter sidebar or price input fields appear), so the next step would be to scroll"
+ },
+ {
+  "id": "e9bb843a",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: none of the excerpts/screenshots show the `size` attribute edit page or its \"Catalog Input Type for Store Owner\" dropdown, so the pre-selected value cannot be determined.}}"
+ },
+ {
+  "id": "ee68431d",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": true,
+  "answer": "\\boxed{six, Controversial}"
+ },
+ {
+  "id": "820d56e2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.414,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots only show the \"List of forums\" page and the \"Create new forum\" form (before/after filling). None of them show the empty forum page with the Toolbox section in the"
+ },
+ {
+  "id": "5a85ca0f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.67,
+  "correct": true,
+  "answer": "The provided excerpts and screenshots do not contain the answer. What's missing:\n\n- No excerpt or screenshot shows the moment an **Add to Cart** action is triggered or its resulting success message (e"
+ },
+ {
+  "id": "c843c4ec",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.441,
+  "correct": false,
+  "answer": "The provided screenshots and memory excerpts do not show the empty forum page with the Toolbox section. The screenshots only cover the homepage post feed, the \"List of forums\" page, and the \"Create ne"
+ },
+ {
+  "id": "07fff330",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.829,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: the excerpts/screenshots only show admin pages (Search Terms, Orders, Products) and one already-sorted storefront results page; they do not show the storefront home page or its s"
+ },
+ {
+  "id": "36fe48ef",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.405,
+  "correct": false,
+  "answer": "\\boxed{two}"
+ },
+ {
+  "id": "96497069",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.51,
+  "correct": false,
+  "answer": "**Missing.** The memory excerpts and screenshots do not show the post page displayed after submission — there is no observation of the newly created post or its upvote/downvote counts. (Excerpts only "
+ },
+ {
+  "id": "ba047686",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.467,
+  "correct": true,
+  "answer": "\\boxed{URL, Image}"
+ },
+ {
+  "id": "c738b934",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.761,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. Missing: a category product-list page and a rendered search-results page showing their left sidebar filters (the search-results observa"
+ },
+ {
+  "id": "d5b9fda4",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.586,
+  "correct": false,
+  "answer": "\\boxed{Period}\n\n(The Order Count Report page itself isn't captured, but the identical Reports filter layout shown on the Bestsellers Report screens has a \"Period\" dropdown set to Day/Month/Year that c"
+ },
+ {
+  "id": "18f9d965",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.447,
+  "correct": true,
+  "answer": "\\boxed{\\text{+ Submit}} — the \"Submit\" link in the top navigation bar (it opens the generic \"Create submission\" composer directly, without first entering a specific forum)."
+ },
+ {
+  "id": "15e5efa6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.537,
+  "correct": true,
+  "answer": "From the provided screenshots, the **Products** grid shows only Filters, Default View, and Columns controls — no Export button (unlike the Customers grid, which has one).\n\nMissing: no screenshot or me"
+ },
+ {
+  "id": "fec652a9",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.461,
+  "correct": true,
+  "answer": "\\boxed{Forums, Create forum}"
+ },
+ {
+  "id": "48ab5c3d",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": true,
+  "answer": "\\boxed{False}\n\nThe \"My Account\" summary page only shows a small \"Recent Orders\" table (e.g., excerpts show it displaying just one recent order), not 10 orders. Seeing 10 order numbers requires going t"
+ },
+ {
+  "id": "99ae54d1",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.407,
+  "correct": true,
+  "answer": "\\boxed{\\text{Edit biography}}"
+ },
+ {
+  "id": "a42071db",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.594,
+  "correct": false,
+  "answer": "Missing: the screenshots only show the \"All forums\" list and the front page — neither my own profile page (/user/MarvelsGrantMan136) nor another user's profile page (e.g., /user/ziostraccette) is show"
+ },
+ {
+  "id": "b828a6b2",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 5,
+  "latency_s": 1.698,
+  "correct": false,
+  "answer": "The provided memory excerpts and screenshots do not contain any \"Add to cart\" action or its confirmation pop-up notification. They only show the storefront homepage/search, a \"My Account\" click, and a"
+ },
+ {
+  "id": "63a1b94b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "\\boxed{\\text{Cannot determine — all screenshots/excerpts show only the biography edit page (Toolbox: \"Hidden forums\", \"Trash\"); no capture of the user settings edit page's Toolbox is provided to compa"
+ },
+ {
+  "id": "86fa86eb",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": true,
+  "answer": "\\boxed{\\text{Block list}}"
+ },
+ {
+  "id": "17d63ad8",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.335,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not show the page-builder editor's toolbar. The excerpts only mention opening the product Description editor (\"I'll open the product Description editor…\", clic"
+ },
+ {
+  "id": "e4d36b58",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.487,
+  "correct": true,
+  "answer": "\\boxed{five}"
+ },
+ {
+  "id": "bdf0e84b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.432,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not contain the answer. They show the Dashboard, the Sales menu, and the Orders **grid** pages (filtered by Complete and Canceled status), but no **order-detai"
+ },
+ {
+  "id": "05cce9b3",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.409,
+  "correct": true,
+  "answer": "\\boxed{\\text{Login as Customer}}"
+ },
+ {
+  "id": "c7e367e2",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.803,
+  "correct": false,
+  "answer": "The excerpts and screenshots do not contain the answer. The search-results observation is truncated right at the left navigation (\"[285] navigation '' [286] menu '', cli…\"), so no price-range filter ("
+ },
+ {
+  "id": "11dac74b",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.394,
+  "correct": false,
+  "answer": "The provided excerpts and screenshots do not show the blue banner — all screenshots only show the comment form before submitting the reply, and the excerpts only note that the reply \"don't panic\" was "
+ },
+ {
+  "id": "99b6e22f",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.527,
+  "correct": true,
+  "answer": "\\boxed{B}\n\nReasoning from the evidence:\n- Shipping-address edit form: from the Orders grid, open the order row (1 click), then click the \"Edit\" link next to the Shipping Address on the order view (1 c"
+ },
+ {
+  "id": "eef545a0",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.416,
+  "correct": false,
+  "answer": "\\boxed{the comment's \"Reply\" link/button under the target comment (opens the nested reply form with its Comment textbox), the \"Save comment\" submit button (publishes the filled reply)}"
+ },
+ {
+  "id": "f9f9cd61",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.399,
+  "correct": true,
+  "answer": "\\boxed{New Customers}"
+ },
+ {
+  "id": "9cae869c",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 1.77,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "896017e0",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.488,
+  "correct": true,
+  "answer": "\\boxed{\\text{Add Attribute}}"
+ },
+ {
+  "id": "8957a127",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.434,
+  "correct": true,
+  "answer": "\\boxed{View (the target order's link), Ship, Add Tracking Number}\n\nBased on the excerpts: from the Sales > Orders grid you open the target order (order view page), then click **Ship** to create a ship"
+ },
+ {
+  "id": "edea0219",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.428,
+  "correct": false,
+  "answer": "\\boxed{Missing: none of the excerpts or screenshots show an opened thread page. They only show the forums list and the /f/AskReddit submission listing (with forum-level \"Submissions, Comments\" tabs), "
+ },
+ {
+  "id": "10466872",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 4,
+  "latency_s": 0.417,
+  "correct": false,
+  "answer": "The provided memory excerpts and screenshots only show the \"List of forums\" page. They do not contain a single comment thread view or any blue notice bar, so the link text needed to answer this is mis"
+ },
+ {
+  "id": "691cd1da",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.397,
+  "correct": true,
+  "answer": "\\boxed{\\text{Advanced Inventory tab}} — check the \"Change\" checkbox for Stock Availability and set it to \"Out of Stock\" (per memory excerpt: \"The 'Change' checkbox for Stock Availability is checked an"
+ },
+ {
+  "id": "07d86be1",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.482,
+  "correct": true,
+  "answer": "\\boxed{two, My Orders, My Account}"
+ },
+ {
+  "id": "91d0775e",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.606,
+  "correct": false,
+  "answer": ""
+ },
+ {
+  "id": "60f2b293",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.474,
+  "correct": false,
+  "answer": "The memory excerpts and screenshots do not contain the answer. What's missing: screenshots of both profile pages being compared — specifically, the user's own profile page and another user's profile p"
+ },
+ {
+  "id": "238c3621",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.412,
+  "correct": true,
+  "answer": "The excerpts only partially answer this. They show a reply form with a **\"Comment\"** textbox (\"The reply form ... is visible, with its 'Comment' textbox ready\", and fill('1081', ...)), but **the label"
+ },
+ {
+  "id": "60c7ca22",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.417,
+  "correct": true,
+  "answer": "The provided excerpts and screenshots do not contain the profile page — they only show the \"List of forums\" page and a Magento admin page. Missing: the profile page's tab list (e.g., whether a \"Submis"
+ },
+ {
+  "id": "44c05e59",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.472,
+  "correct": false,
+  "answer": "Missing: neither my own profile page nor another user's profile page appears in the excerpts or screenshots (only the forums list, home page, and account menu are shown), so the profile top tabs canno"
+ },
+ {
+  "id": "dae9f7e9",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.919,
+  "correct": false,
+  "answer": "The excerpts and screenshots do not contain the answer. What's missing:\n\n- No **theme detail page** screenshot (Content → Design → Themes) — so I cannot verify whether a second tab (\"Files\"/\"Content\")"
+ },
+ {
+  "id": "521b124f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.424,
+  "correct": true,
+  "answer": "\\boxed{Advanced Reporting, BI Essentials}"
+ },
+ {
+  "id": "a92dff92",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.464,
+  "correct": false,
+  "answer": "\\boxed{\\text{Missing: none of the excerpts/screenshots show a moderated forum page with a “Toolbox” link or a banned-users list, so the exact Toolbox link cannot be determined.}}"
+ },
+ {
+  "id": "744dbdad",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.506,
+  "correct": true,
+  "answer": "\\boxed{Summary}\n\nThe \"View Details\" dialog shows the fields \"Description of Operation\", \"Summary\", and \"Start Time\" — the **Summary** field (e.g., \"1 items selected for mass update, 1 successfully upd"
+ },
+ {
+  "id": "d16a18fe",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.394,
+  "correct": true,
+  "answer": "\\boxed{Name, Title, Description, Sidebar}"
+ },
+ {
+  "id": "0738c1ac",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.403,
+  "correct": false,
+  "answer": "\\boxed{Source\\ Code}"
+ },
+ {
+  "id": "be541aa6",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.429,
+  "correct": true,
+  "answer": "\\boxed{D}\n\nThe /f/funny forum page screenshot shows a \"Toolbox\" sidebar containing \"Bans\" and \"Moderation log\" links — so Bans is directly accessible from the subreddit page, but no \"Mods\" link appear"
+ },
+ {
+  "id": "06a5a25f",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.426,
+  "correct": true,
+  "answer": "\\boxed{\\text{Message is added to queue}}"
+ },
+ {
+  "id": "26a038ce",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 0,
+  "latency_s": 0.031,
+  "correct": false,
+  "answer": "The memory excerpts are empty and no screenshots were provided, so the tab names next to \"Overview\" cannot be determined from the given materials."
+ },
+ {
+  "id": "289aea4a",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 2.182,
+  "correct": false,
+  "answer": "\\boxed{three: My Account, Address Book, Edit}"
+ },
+ {
+  "id": "c36b0d68",
+  "stratum": "text-recoverable",
+  "question_type": "dynamic-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.902,
+  "correct": true,
+  "answer": "Based on the memory excerpts, in the Advanced Inventory tab, the \"Stock Availability\" field has a \"Change\" checkbox (not \"Use Config Settings\" like the others), and it is noted as disabled until the c"
+ },
+ {
+  "id": "30fab98c",
+  "stratum": "text-recoverable",
+  "question_type": "procedure",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.451,
+  "correct": false,
+  "answer": "\\boxed{F}\n\nAccording to the memory excerpts, the usual workflow is to fill the **Comment** field (e.g., \"Thanks, your order is ready to be shipped!\") on the order detail page and check \"Notify Custome"
+ },
+ {
+  "id": "d1d8cf9f",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 1.656,
+  "correct": true,
+  "answer": "\\boxed{none}\n\nNote: The Products grid screenshots clearly show only Filters, Default View, Columns, and Add Product controls — no Export/Import buttons. The Orders excerpt is truncated before the grid"
+ },
+ {
+  "id": "f928c075",
+  "stratum": "text-recoverable",
+  "question_type": "static-environment",
+  "arm": "mm",
+  "n_images": 6,
+  "latency_s": 0.526,
+  "correct": false,
+  "answer": "The provided memory excerpts and screenshots do not show a profile page (yours or another user's) — they only show the All forums page, the homepage, and the account dropdown menu. Missing: an observa"
+ }
+]

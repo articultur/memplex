@@ -63,9 +63,13 @@ class GlmProxy:
         settings = json.loads(
             pathlib.Path(os.path.expanduser("~/.claude/settings.json")).read_text()
         )["env"]
+        # trust_env=False: a dead local system proxy (QuickQ-style env
+        # vars) otherwise hijacks httpx into connection-refused even
+        # though the endpoint is directly reachable.
         self._client = httpx.Client(
             base_url=settings["ANTHROPIC_BASE_URL"],
             timeout=180,
+            trust_env=False,
             headers={
                 "x-api-key": settings["ANTHROPIC_AUTH_TOKEN"],
                 "anthropic-version": "2023-06-01",

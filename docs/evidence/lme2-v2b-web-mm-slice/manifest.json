@@ -14,6 +14,7 @@
   "Systematic confound: 32/40 vision-needed samples are -abs types whose gold is 'not mentioned'; the text arm scores by abstaining (29/40 abstention-shaped answers) while screenshots push the model to substantive answers that the phrase-set grader marks wrong. Abs semantics in the grader remain the known V2-b weakness.",
   "glm-5.3-flash vision capability confirmed: correctly reads UI screenshots; red-square probe returned accurate description; mm-correct answers average the full 6-image budget."
  ],
+ "superseded": "the full-population run (docs/evidence/lme2-v2b-web-mm-full, 240 questions) supersedes this slice stratum-level conclusion: VN gains +13.8pp at n=87; the slice n=40 VN signal was sampling variance",
  "honest_reading": "unlocks +15pp on the stratum where the answer page is retrievable; does NOT unlock the 66-87-question vision-needed pool - that needs visual retrieval (or full-corpus screenshot scan), not a better answerer. Score-impact ceiling on web-small if TR-like gains held corpus-wide: roughly +7-8pp overall.",
  "evidence_level": "E1",
  "timestamp": "2026-09-24T13:40:00Z",

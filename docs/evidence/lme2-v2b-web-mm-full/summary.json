@@ -1,0 +1,34 @@
+{
+ "benchmark": "longmemeval_v2_web_small_multimodal_slice",
+ "answerer": "glm-5.3-flash",
+ "judge": "glm-5.3",
+ "design": "paired A/B, screenshot injection, stratified (vision-needed vs text-recoverable)",
+ "probe": false,
+ "text_arm": {
+  "n": 240,
+  "accuracy": 0.1583
+ },
+ "mm_arm": {
+  "n": 240,
+  "accuracy": 0.35
+ },
+ "text_arm_vn": {
+  "n": 87,
+  "accuracy": 0.092
+ },
+ "mm_arm_vn": {
+  "n": 87,
+  "accuracy": 0.2299
+ },
+ "text_arm_tr": {
+  "n": 153,
+  "accuracy": 0.1961
+ },
+ "mm_arm_tr": {
+  "n": 153,
+  "accuracy": 0.4183
+ },
+ "flips_up": 57,
+ "flips_down": 11,
+ "wall_s": 1076.0
+}

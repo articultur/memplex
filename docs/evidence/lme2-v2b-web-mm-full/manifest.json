@@ -1,0 +1,24 @@
+{
+ "benchmark": "longmemeval_v2_web_small_multimodal_full",
+ "question": "does screenshot injection hold at full web-small scale (240 questions, all strata)?",
+ "design": "full-population paired A/B (no sampling): all 87 vision-needed + all 153 text-recoverable web questions, both arms on glm-5.3-flash with glm-5.3 judge, up to 6 anchored screenshots per question, plain hybrid retrieval shared between arms. Same protocol as the 80-question slice.",
+ "results": {
+  "text_arm": 0.1583,
+  "mm_arm": 0.35,
+  "delta": "+19.2pp (2.2x)",
+  "flips": "57 up / 11 down",
+  "vn_stratum": {"text": 0.092, "mm": 0.2299},
+  "tr_stratum": {"text": 0.196, "mm": 0.4183}
+ },
+ "findings": [
+  "The text arm reproduces the archived firstpoint baseline exactly (0.1583), validating the pipeline.",
+  "Screenshot injection lifts the full web-small tier by +19.2pp overall; BOTH strata gain - text-recoverable +22.2pp and vision-needed +13.8pp.",
+  "CORRECTION to the 80-question slice: its vision-needed stratum showed -2.5pp, but the full 87-question population shows +13.8pp - the slice's n=40 VN signal was sampling variance (same lesson as the v13.1 ku-pool mid-run projection). Full-population numbers supersede the slice's stratum-level conclusion.",
+  "Vision-needed here is an upper-bound proxy (answer absent from haystack TEXT); a share of those answers still live on retrievable pages, which is exactly where screenshots help."
+ ],
+ "honest_reading": "recall-marker-free full protocol with answerer+judge; the retrieval bottleneck conclusion narrows to the residual: questions whose answer page is never ranked into top-12 still cannot benefit. plain (non-orchestrated) retrieval, shared by both arms, so the A/B delta is attributable to the screenshots alone.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-24T23:55:00Z",
+ "artifacts": ["summary.json", "records.json", "paired.json"],
+ "runner": "scripts/run_lme_v2_mm.py"
+}
