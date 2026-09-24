@@ -269,3 +269,26 @@ def test_backfill_uses_service_level_batch_naming(tmp_path):
     assert embedder.batch_sizes and max(embedder.batch_sizes) >= 3, (
         "corpus backfill must take the batch path for service-level naming"
     )
+
+
+def test_fused_hits_carry_cached_vectors_without_reembedding(tmp_path):
+    """Regression: vector_search must attach the corpus-backfill vectors
+    to its fused results. The retrieval layer's pre-fill otherwise
+    re-embeds the same projections on every query (observed as the
+    dominant per-query cost on a 12k-document bge-m3 corpus)."""
+    store = _make_store(tmp_path)
+    _seed_corpus(store)
+    embedder = _TopicEmbedder()
+    store.set_embedder(embedder)
+
+    first = store.vector_search("cat", top_k=3)
+    assert first, "vector leg must surface the feline document"
+    assert all(r.vector_cache is not None for r in first), (
+        "fused hits must carry their cached vectors"
+    )
+
+    embedder.embedded_texts.clear()
+    second = store.vector_search("dog", top_k=3)
+    # Query embed only: no hit re-embedding on the second query.
+    assert embedder.embedded_texts == ["dog"]
+    assert all(r.vector_cache is not None for r in second)

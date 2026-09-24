@@ -1307,7 +1307,17 @@ class LiteMemoryStore:
         vector_results = self._vector_search_leg(text, top_k=top_k)
         if not vector_results:
             return results
-        return self._fuse_search_legs([results, vector_results], top_k)
+        fused = self._fuse_search_legs([results, vector_results], top_k)
+        # Attach already-cached corpus vectors to the fused hits: the
+        # retrieval layer's vector pre-fill (and the Reranker behind it)
+        # otherwise re-embeds these same projections per query, which
+        # was the dominant query-time cost on aggregate-task corpora.
+        for result in fused:
+            if result.vector_cache is None:
+                result.vector_cache = self._vector_index.cached_vector(
+                    result.func_id, result.summary
+                )
+        return fused
 
     def set_embedder(self, embedder: Any) -> None:
         """Inject (or replace) the embedder powering the vector search leg.

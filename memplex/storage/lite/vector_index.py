@@ -109,6 +109,24 @@ class VectorSearchIndex:
         self._embedder = embedder
         self._cache = {}
 
+    def cached_vector(self, doc_id: str, text: str) -> Vector | None:
+        """Return the cached vector for *doc_id* when *text* still hashes
+        to the digest it was cached under.
+
+        Read-only probe so callers that already hold the corpus
+        projection text (the store's search legs) can attach existing
+        vectors to results instead of re-embedding identical texts;
+        a digest mismatch returns None and the caller's own fallback
+        (re-embedding) stays authoritative.
+        """
+        cached = self._cache.get(doc_id)
+        if cached is None:
+            return None
+        digest, vector = cached
+        if digest != sha1(text.encode("utf-8")).hexdigest():
+            return None
+        return vector
+
     def search(
         self,
         documents: list[tuple[str, str]],
