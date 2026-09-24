@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Optional
@@ -413,12 +414,20 @@ class EmbeddingService:
         self._remote_api_key = remote_api_key
         self._remote_timeout = remote_timeout
         self._embedder = self._create_embedder(model, dimension)
+        # Model backends are not thread-safe under concurrent callers
+        # (observed: the query-pipeline thread pool and the background
+        # worker hitting the same MPS-backed model wedged both threads
+        # with zero CPU). Serialize every backend call at this boundary;
+        # RLock because batch helpers delegate to single-text paths on
+        # the same object.
+        self._model_lock = threading.RLock()
 
     # ── Public API ──────────────────────────────────────────────────
 
     def embed(self, text: str) -> Vector:
         """Generate an embedding vector for a single text."""
-        return self._embedder.encode(text)
+        with self._model_lock:
+            return self._embedder.encode(text)
 
     def embed_query(self, text: str) -> Vector:
         """Embed a query-time text without mutating corpus statistics.
@@ -427,10 +436,11 @@ class EmbeddingService:
         so that document vectors do not drift with query history; other
         backends fall back to the regular ``encode``.
         """
-        encode_query = getattr(self._embedder, "encode_query", None)
-        if callable(encode_query):
-            return encode_query(text)
-        return self._embedder.encode(text)
+        with self._model_lock:
+            encode_query = getattr(self._embedder, "encode_query", None)
+            if callable(encode_query):
+                return encode_query(text)
+            return self._embedder.encode(text)
 
     def embed_batch(self, texts: list[str], batch_size: int | None = None) -> list[Vector]:
         """Batch generate embedding vectors.
@@ -440,7 +450,8 @@ class EmbeddingService:
         """
         if batch_size is None:
             batch_size = self.batch_size
-        return self._embedder.encode_batch(texts, batch_size=batch_size)
+        with self._model_lock:
+            return self._embedder.encode_batch(texts, batch_size=batch_size)
 
     def embed_query_batch(self, texts: list[str], batch_size: int | None = None) -> list[Vector]:
         """Batch transform-only embeddings (see :meth:`embed_query`).
@@ -451,14 +462,17 @@ class EmbeddingService:
         """
         if not texts:
             return []
-        encode_query_batch = getattr(self._embedder, "encode_query_batch", None)
-        if callable(encode_query_batch):
-            return list(encode_query_batch(texts))
-        batch_size = batch_size or self.batch_size
-        vectors: list[Vector] = []
-        for start in range(0, len(texts), max(1, batch_size)):
-            vectors.extend(self._embedder.encode(texts[start : start + max(1, batch_size)]))
-        return vectors
+        with self._model_lock:
+            encode_query_batch = getattr(self._embedder, "encode_query_batch", None)
+            if callable(encode_query_batch):
+                return list(encode_query_batch(texts))
+            batch_size = batch_size or self.batch_size
+            vectors: list[Vector] = []
+            for start in range(0, len(texts), max(1, batch_size)):
+                vectors.extend(
+                    self._embedder.encode(texts[start : start + max(1, batch_size)])
+                )
+            return vectors
 
     def embed_function(
         self,

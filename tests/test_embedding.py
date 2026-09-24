@@ -251,3 +251,60 @@ def test_embedding_service_embed_query_falls_back_to_encode(monkeypatch):
     service._embedder = stub
     assert service.embed_query("q") == [1.0]
     assert stub.encoded == ["q"]
+
+
+def test_concurrent_embeds_serialize_backend_calls():
+    """Regression: model backends are not thread-safe under concurrent
+    callers (MPS-backed models wedged the query-pipeline pool and the
+    background worker with zero CPU). Every public entry must serialize
+    at the service boundary, and concurrent stress must not deadlock."""
+    import threading
+    import time
+
+    class _SlowBackend:
+        def __init__(self) -> None:
+            self.in_flight = 0
+            self.max_in_flight = 0
+            self._guard = threading.Lock()
+
+        def _enter(self):
+            with self._guard:
+                self.in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+
+        def _exit(self):
+            with self._guard:
+                self.in_flight -= 1
+
+        def encode(self, text):
+            self._enter()
+            time.sleep(0.01)
+            self._exit()
+            return [1.0]
+
+        def encode_batch(self, texts, batch_size=32):
+            return [self.encode(t) for t in texts]
+
+    service = EmbeddingService(model="tfidf", dimension=1)
+    backend = _SlowBackend()
+    service._embedder = backend
+
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            service.embed(f"doc {i}")
+            service.embed_query(f"query {i}")
+            service.embed_batch([f"a{i}", f"b{i}"])
+            service.embed_query_batch([f"q1-{i}", f"q2-{i}"])
+        except Exception as exc:  # noqa: BLE001 - surfaced by assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "concurrent embeds deadlocked"
+    assert not errors
+    assert backend.max_in_flight == 1, "backend calls must be serialized"
