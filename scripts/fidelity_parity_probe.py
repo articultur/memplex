@@ -78,6 +78,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=20)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--arm",
+        choices=("both", "base", "raw"),
+        default="both",
+        help="run one arm only; existing arm files are kept",
+    )
     parser.add_argument("--out", default="benchmarks/results/fidelity-parity-probe")
     args = parser.parse_args()
 
@@ -93,7 +99,8 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     results = {}
-    for arm, toggle in (("base", "0"), ("raw", "1")):
+    arms = (("base", "0"), ("raw", "1")) if args.arm == "both" else ((args.arm, "0" if args.arm == "base" else "1"),)
+    for arm, toggle in arms:
         os.environ["MEMPLEX_RAW_PARAGRAPH_LAYER"] = toggle
         print(f"=== arm {arm} (MEMPLEX_RAW_PARAGRAPH_LAYER={toggle}) ===", flush=True)
         rows = run_arm(questions, arm)
@@ -101,13 +108,17 @@ def main() -> int:
         results[arm] = sum(r["hit"] for r in rows) / max(len(rows), 1)
     os.environ.pop("MEMPLEX_RAW_PARAGRAPH_LAYER", None)
 
+    existing = out / "summary.json"
+    prior = json.loads(existing.read_text()) if existing.exists() else {}
+    base_val = results.get("base", prior.get("base_recall8"))
+    raw_val = results.get("raw", prior.get("raw_recall8"))
     summary = {
         "benchmark": "fidelity_parity_probe",
         "design": "product write_text -> orchestrated query, 20 questions seed 17; base = extraction nodes only, raw = verbatim paragraph layer joins retrieval; metric session-level gold recall@8",
         "n": args.n,
-        "base_recall8": round(results["base"], 4),
-        "raw_recall8": round(results["raw"], 4),
-        "delta": round(results["raw"] - results["base"], 4),
+        "base_recall8": round(base_val, 4) if base_val is not None else None,
+        "raw_recall8": round(raw_val, 4) if raw_val is not None else None,
+        "delta": round(raw_val - base_val, 4) if (raw_val is not None and base_val is not None) else None,
     }
     print(json.dumps(summary, indent=1), flush=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=1))

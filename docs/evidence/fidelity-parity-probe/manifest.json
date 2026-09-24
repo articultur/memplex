@@ -1,21 +1,23 @@
 {
  "benchmark": "fidelity_parity_probe",
- "question": "does the raw-paragraph layer lift product-path retrieval toward the harness's answer-bearing-unit recall (the retrieval precondition of the 0.797 -> >=0.8045 parity target)?",
- "design": "product write_text -> orchestrated query, 20 questions seed 17 (same selection as the C2 probe); base arm = MEMPLEX_RAW_PARAGRAPH_LAYER=0, raw arm = layer on; metric session-level gold recall@8.",
+ "question": "does the raw-paragraph layer lift product-path retrieval (the retrieval precondition of the 0.797 -> >=0.8045 parity target)?",
+ "design": "product write_text -> orchestrated query, 20 questions seed 17 (same selection as the C2 probe); base arm = MEMPLEX_RAW_PARAGRAPH_LAYER=0, raw arm = layer on (completed in full under the MPS chunk clamp); metric session-level gold recall@8.",
  "results": {
   "base_recall8": 0.85,
-  "base_cross_check": "identical to the C2 probe's base arm on the same questions",
-  "raw_partial": "5/5 hit on the first five raw-arm questions before the run was halted",
-  "raw_completion": "incomplete - see honest_reading"
+  "raw_recall8": 0.70,
+  "delta": -0.15,
+  "flips": "0 up / 3 down",
+  "base_cross_check": "identical to the C2 probe's base arm on the same questions"
  },
  "findings": [
-  "Base arm (20/20 complete): recall@8 0.85, exactly reproducing the C2 probe's base arm on the same seeded questions - two independent runs agreeing.",
-  "Raw arm: 5/5 hits on the questions completed before the halt (directionally clean but n=5 is anecdote, not evidence).",
-  "The run was halted by a real defect the probe surfaced: a very large corpus backfill (hundreds of long texts through one MPS batch path) wedges the backend with 26 threads parked at zero CPU - the same v13.1-era failure signature. Fixed after the halt by clamping embed_query_batch (16-chunk, 8192-char cap); the full 20-question raw arm should re-run under the clamp."
+  "NEGATIVE at top-8: joining verbatim paragraphs into the same ranked pool as extraction nodes DILUTES recall (0.85 -> 0.70). The mirror of the v13 slot lesson - in a mixed pool the raw unit does not always outrank the extraction node, and 8 slots amplify the crowding.",
+  "The harness (0.8045) seeded ONLY raw session units - no mixed-pool competition; the product path mixes both, which is the structural difference this probe exposes.",
+  "Metric-scope caveat: the probe scores top-8; the product/harness answer pipeline consumes top-24, where crowding pressure is lower - the answer-level parity run is the decisive instrument (in flight).",
+  "Likely fixes if parity confirms harm: paragraph fallback/quota in fusion (join only when extraction hits are weak, or reserve slots), or paragraph-only retrieval with extraction as a secondary leg."
  ],
- "honest_reading": "The J-level 0.797 -> >=0.8045 acceptance is NOT yet discharged: the raw arm did not complete, and even at n=20 the recall CI (~+/-16pp) cannot resolve sub-pp J-level deltas. This probe measures the retrieval precondition only; the J-level parity run (product orchestrated query + answerer + judge, multi pool) remains the acceptance instrument and is now unblocked by the MPS clamp. Evidence level: E1 for the base arm and the defect; the raw-arm claim is directional.",
+ "honest_reading": "n=20, CI roughly +/-14pp; the -15pp direction is consistent across 3 down / 0 up flips. MPS chunk clamp (16-chunk / 8192-char) carried the raw arm through the previously-fatal question 6, but the backend still wedged under 3-way sharding and once single-process the next morning - the parity run therefore executes on the CPU device (numerically near-identical vectors, disclosed).",
  "evidence_level": "E1",
- "timestamp": "2026-09-25T04:45:00Z",
- "artifacts": ["base.json", "summary-partial.txt"],
+ "timestamp": "2026-09-25T08:05:00Z",
+ "artifacts": ["base.json", "raw.json", "summary.json"],
  "runner": "scripts/fidelity_parity_probe.py"
 }
