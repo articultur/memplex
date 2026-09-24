@@ -230,3 +230,42 @@ def test_replacing_embedder_drops_cached_vectors(tmp_path):
     assert hits[0].func_id == "feline"
     # The second embedder re-embedded the corpus from scratch.
     assert len(second.embedded_texts) >= 3
+
+
+def test_backfill_uses_service_level_batch_naming(tmp_path):
+    """Regression: the injected service wrapper names its batch helper
+    ``embed_query_batch`` while raw embedder backends name it
+    ``encode_query_batch``. The backfill must accept both spellings --
+    with only the service-level name present, a cold store silently
+    re-embedded the corpus one document at a time (observed as a
+    multi-minute first query on a 12k-document corpus with bge-m3)."""
+
+    class _ServiceNamedEmbedder(_TopicEmbedder):
+        def __init__(self):
+            super().__init__()
+            self.batch_sizes: list[int] = []
+
+        def embed_query_batch(self, texts, batch_size=None):
+            self.batch_sizes.append(len(texts))
+            vectors = []
+            for text in texts:
+                vector = [0.0, 0.0, 0.0]
+                for keyword, axis in self.AXES.items():
+                    if keyword in text.lower():
+                        vector[axis] = 1.0
+                if vector[0] == 0.0 and vector[1] == 0.0:
+                    vector[2] = 1.0
+                vectors.append(vector)
+            return vectors
+
+    store = _make_store(tmp_path)
+    _seed_corpus(store)
+    embedder = _ServiceNamedEmbedder()
+    store.set_embedder(embedder)
+
+    hits = store.vector_search("cat", top_k=3)
+
+    assert hits and hits[0].func_id == "feline"
+    assert embedder.batch_sizes and max(embedder.batch_sizes) >= 3, (
+        "corpus backfill must take the batch path for service-level naming"
+    )

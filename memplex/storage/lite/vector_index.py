@@ -187,9 +187,18 @@ class VectorSearchIndex:
             # Query-time backfill must be transform-only on stats-carrying
             # backends (TF-IDF); encode_batch there would drift corpus
             # statistics with every newly seeded document.
-            embed_query_batch = getattr(self._embedder, "encode_query_batch", None)
+            # Duck-typed batch resolution: the service-level wrapper names
+            # it ``embed_query_batch`` while raw embedder backends name it
+            # ``encode_query_batch``. Both honor the transform-only
+            # contract (stats-carrying backends never mutate corpus
+            # statistics); when neither exists the per-document fallback
+            # below stays correct, merely slower.
+            embed_query_batch = getattr(self._embedder, "encode_query_batch", None) or getattr(
+                self._embedder, "embed_query_batch", None
+            )
             if callable(embed_query_batch):
                 texts = [text for _, text in misses]
+                logger.info("vector backfill: embedding %d documents", len(misses))
                 embedded = embed_query_batch(texts)
             else:
                 embedded = [self._embed_transform_only(text) for _, text in misses]
