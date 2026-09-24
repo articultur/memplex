@@ -1,0 +1,12 @@
+{
+ "benchmark": "stale_memory_implicit_invalidation",
+ "protocol": "seed fact -> later session implicit-invalidation observation -> neutral probe; outcomes by marker presence in top-8 recall",
+ "n": 25,
+ "counts": {
+  "both": 25
+ },
+ "stale_reuse_rate": 0.0,
+ "resolved_rate": 0.0,
+ "both_rate": 1.0,
+ "new_before_old_rate": 0.04
+}

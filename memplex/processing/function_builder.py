@@ -17,7 +17,7 @@ import hashlib
 import re
 
 from memplex.models import FieldValue, Function, SourceDocument
-from memplex.models.paragraph import ParagraphCollection
+from memplex.models.paragraph import ParagraphCollection, persisted_paragraph_id
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -135,7 +135,9 @@ def build_functions_from_paragraphs(
             condition=conditions,
             action=actions,
             benefit=benefits,
-            source_paragraphs=[para.id],
+            source_paragraphs=[
+                persisted_paragraph_id(source_id, para.id, para.raw_text)
+            ],
             source_type=source.source_type,
             content_hash=hashlib.sha256(para.raw_text.encode()).hexdigest(),
         )

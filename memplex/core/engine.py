@@ -42,7 +42,11 @@ from memplex.models import (
     Preference,
     SourceDocument,
 )
-from memplex.models.paragraph import Paragraph, ParagraphCollection
+from memplex.models.paragraph import (
+    Paragraph,
+    ParagraphCollection,
+    persisted_paragraph_id,
+)
 from memplex.processing.function_builder import (
     build_functions_from_paragraphs as _build_functions_from_paragraphs,
 )
@@ -208,6 +212,7 @@ class CoreEngine:
                 functions=[],
                 graph=GraphData(nodes=[], edges=[]),
                 delta=False,
+                paragraphs=paragraphs.paragraphs,
             )
 
         # Step 5: DomainClassifier
@@ -247,6 +252,7 @@ class CoreEngine:
             delta=False,
             facts=facts,
             preferences=preferences,
+            paragraphs=paragraphs.paragraphs,
         )
 
     def extract_batch(self, sources: list[SourceDocument]) -> ExtractedData:
@@ -430,7 +436,9 @@ class CoreEngine:
             subject=subject or name,
             predicate=predicate,
             object_=obj,
-            source_paragraphs=[para.id],
+            source_paragraphs=[
+                persisted_paragraph_id(source.type, para.id, para.raw_text or "")
+            ],
             source_type=source.source_type,
             content_hash=content_hash,
             created_at=now,
@@ -449,7 +457,9 @@ class CoreEngine:
             name=name,
             aspect=name,
             preference=raw,
-            source_paragraphs=[para.id],
+            source_paragraphs=[
+                persisted_paragraph_id(source.type, para.id, para.raw_text or "")
+            ],
             source_type=source.source_type,
             content_hash=content_hash,
             created_at=now,

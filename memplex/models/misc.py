@@ -102,6 +102,10 @@ class ExtractedData:
     # existing constructors stay source-compatible.
     facts: list = field(default_factory=list)  # List[Fact]
     preferences: list = field(default_factory=list)  # List[Preference]
+    # ADR-013 Stage 2: the raw L1 paragraphs (verbatim text) ride along
+    # so the write path can persist the authoritative raw layer. Empty
+    # for legacy callers that opt out.
+    paragraphs: list = field(default_factory=list)  # List[Paragraph]
 
 
 @dataclass

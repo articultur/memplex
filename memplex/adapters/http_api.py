@@ -610,6 +610,10 @@ def _require_maintenance_access(request: Request) -> AuthorizationContext:
 def _safe_extracted_response(service: MemplexService, extracted: object) -> dict:
     """Serialize an extraction without echoing model-unsafe node content."""
     payload = _dataclass_to_dict(extracted)
+    # Raw paragraphs are the verbatim authoritative layer, never part of
+    # a write response: echoing them would leak injection-suspected
+    # content the node filters below exist to withhold.
+    payload.pop("paragraphs", None)
     unsafe_ids: set[str] = set()
     for field in ("functions", "facts", "preferences"):
         nodes = list(getattr(extracted, field, []) or [])

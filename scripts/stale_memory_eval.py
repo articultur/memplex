@@ -75,9 +75,18 @@ def run_scenario(idx: int, question: str, seed_fact: str, later_obs: str, old_ma
         svc.write_text(seed_fact, source_type="text")
         svc.write_text(later_obs, source_type="text")
         result = svc.query(question, top_k=8, orchestrated=True, explain=False)
-        recall = "\n".join(r.summary for r in result.results[:8]).lower()
+        summaries = [r.summary for r in result.results[:8]]
+        recall = "\n".join(summaries).lower()
         old_in = old_marker.lower() in recall
         new_in = new_marker.lower() in recall
+        old_rank = next(
+            (i for i, s in enumerate(summaries) if old_marker.lower() in s.lower()),
+            None,
+        )
+        new_rank = next(
+            (i for i, s in enumerate(summaries) if new_marker.lower() in s.lower()),
+            None,
+        )
         if old_in and not new_in:
             outcome = "stale_reuse"
         elif new_in and not old_in:
@@ -86,7 +95,18 @@ def run_scenario(idx: int, question: str, seed_fact: str, later_obs: str, old_ma
             outcome = "both"
         else:
             outcome = "neither"
-        return {"index": idx, "question": question, "outcome": outcome}
+        # Rank-sensitive view: the newer evidence ranking above the stale
+        # one is the premise-resistance win condition when the pool is
+        # too small to evict anything from top-k.
+        new_before_old = (
+            new_rank is not None and old_rank is not None and new_rank < old_rank
+        )
+        return {
+            "index": idx,
+            "question": question,
+            "outcome": outcome,
+            "new_before_old": new_before_old,
+        }
     finally:
         svc.stop()
 
@@ -109,6 +129,9 @@ def main() -> int:
         "stale_reuse_rate": round(counts.get("stale_reuse", 0) / n, 3),
         "resolved_rate": round(counts.get("resolved", 0) / n, 3),
         "both_rate": round(counts.get("both", 0) / n, 3),
+        "new_before_old_rate": round(
+            sum(r["new_before_old"] for r in rows) / n, 3
+        ),
     }
     print(json.dumps(summary, indent=1), flush=True)
 

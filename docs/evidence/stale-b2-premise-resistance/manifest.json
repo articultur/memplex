@@ -1,0 +1,20 @@
+{
+ "benchmark": "stale_b2_premise_resistance",
+ "question": "does a retrieval-layer premise-resistance rule (topic-group, newer-evidence-first demotion) move the implicit-invalidation baseline?",
+ "design": "B2 rule in lite fusion: group top-k hits by lexical overlap (Jaccard >= 0.2) OR cached-vector cosine (>= 0.75), halve the older member's score within each group. Re-ran the 25-scenario STALE baseline twice: default offline profile (tfidf vectors) and bge-m3 semantic vectors.",
+ "results": {
+  "baseline": {"resolved": 0.0, "both": 0.52, "stale_reuse": 0.44},
+  "tfidf_rule": {"resolved": 0.0, "both": 0.52, "new_before_old": 0.12},
+  "bge_rule": {"resolved": 0.0, "both": 1.0, "new_before_old": 0.04}
+ },
+ "findings": [
+  "NEGATIVE: the ranking rule does not resolve implicit invalidation. With tfidf the outcome distribution is unchanged; with bge-m3 both values surface in 100% of probes yet the newer one ranks first in only 1/25.",
+  "The failure reproduces the STALE-paper diagnosis at our layer: retrieval surfaces the fresh evidence fine - the gap is inference-level state resolution (recognizing that the later observation supersedes the earlier one), which lexical or embedding similarity cannot do for paraphrased invalidation pairs.",
+  "The rule stays in the codebase behind MEMPLEX_PREMISE_RESOLUTION=1 (default off) as an inert primitive; the productive B2 direction is an orchestration-leg or maintenance-time LLM pass (premise-resistance prompting), which remains open."
+ ],
+ "honest_reading": "25 scenarios, rank-sensitive metric added for this study; both-rule runs executed with the rule enabled via env before the default was flipped to off.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-25T00:40:00Z",
+ "artifacts": ["tfidf_rule.json", "bge_rule.json"],
+ "runner": "scripts/stale_memory_eval.py (+ _premise_resolution in lite store)"
+}

@@ -49,9 +49,12 @@ _MEMORY_V2_KEYS = {
     "observations",
     "facts",
     "preferences",
+    # ADR-013 Stage 2 raw-text layer; optional in serialized pairs the
+    # same way facts/preferences are for older files.
+    "paragraphs",
     "sync",
 }
-_MEMORY_OPTIONAL_COLLECTION_KEYS = {"observations", "facts", "preferences"}
+_MEMORY_OPTIONAL_COLLECTION_KEYS = {"observations", "facts", "preferences", "paragraphs"}
 _MEMORY_V1_REQUIRED_KEYS = {"schema_version", "functions", "edges"}
 _MEMORY_V1_ALLOWED_KEYS = _MEMORY_V1_REQUIRED_KEYS | _MEMORY_OPTIONAL_COLLECTION_KEYS
 _SYNC_STATE_KEYS = {
@@ -575,7 +578,13 @@ def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool =
     else:
         schema_version = memory["schema_version"]
         if type(schema_version) is int and schema_version == 2:
-            _require_exact_keys(memory, _MEMORY_V2_KEYS, label="memory payload")
+            # v2 tolerates optional collections absent from older pairs
+            # (facts/preferences were mid-series additions; paragraphs
+            # is the ADR-013 Stage 2 raw layer): required keys must all
+            # be present and no unknown key may appear.
+            required = _MEMORY_V2_KEYS - _MEMORY_OPTIONAL_COLLECTION_KEYS
+            if not required <= keys or not keys <= _MEMORY_V2_KEYS:
+                raise LiteStorageIntegrityError("invalid Lite memory payload schema")
             _validate_sync_state(memory["sync"], label="memory")
         elif type(schema_version) is int and schema_version == 1:
             if not _MEMORY_V1_REQUIRED_KEYS <= keys or not keys <= _MEMORY_V1_ALLOWED_KEYS:
@@ -583,7 +592,7 @@ def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool =
         else:
             raise LiteStorageIntegrityError("unsupported or invalid Lite memory payload schema")
     collection_names = (
-        _MEMORY_V2_KEYS - {"schema_version", "sync"}
+        keys & _MEMORY_V2_KEYS - {"schema_version", "sync"}
         if memory.get("schema_version") == 2
         else {"functions", "edges"} | (keys & _MEMORY_OPTIONAL_COLLECTION_KEYS)
     )

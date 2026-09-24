@@ -41,6 +41,8 @@ _RAW_MEMORY_KEY_KIND = (
     ("facts", "fact"),
     ("preferences", "preference"),
     ("observations", "observation"),
+    # ADR-013 Stage 2 raw-text layer: dict rows already carry an "id".
+    ("paragraphs", "paragraph"),
 )
 
 

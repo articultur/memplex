@@ -607,14 +607,15 @@ class MemplexService:
         AuthorizationGate.bind_extracted_identity(extracted, context, visibility=visibility)
 
     @staticmethod
-    def _bind_trust_tiers(extracted: ExtractedData, source: SourceDocument) -> None:
+    def _bind_trust_tiers(extracted: ExtractedData, source: SourceDocument) -> int:
         """ADR-013: attribute every extracted node with a provenance tier.
 
         user_direct (4) for interaction text the user authored (text /
         clipboard), external_web (2) for url-sourced content, and
         session_derived (3) for files and anything untagged - matching
         the legacy default. Consolidation never raises a tier
-        (merge-takes-min lives in the deduplicator).
+        (merge-takes-min lives in the deduplicator). Returns the tier so
+        the raw-paragraph persistence stamps the same value.
         """
         from memplex.models.memory import (
             TRUST_TIER_DEFAULT,
@@ -635,6 +636,7 @@ class MemplexService:
             *extracted.preferences,
         ]:
             node.trust_tier = tier
+        return tier
 
     # ── LLM initialisation ──────────────────────────────────────
 
@@ -1222,7 +1224,7 @@ class MemplexService:
         # facade as persistence instead of consulting the shared base store.
         engine = self._engine if store is self.store else CoreEngine(store=store)
         extracted = engine.extract(source)
-        self._bind_trust_tiers(extracted, source)
+        tier = self._bind_trust_tiers(extracted, source)
 
         # Identity must be bound before any typed-node store write, graph
         # merge, or background work observes an extracted memory.
@@ -1257,6 +1259,22 @@ class MemplexService:
         #     making them unrecallable. Duck-typed: backends without the
         #     optional typed APIs skip with a debug trace.
         self._persist_typed_nodes(extracted, store=store)
+
+        # 1c2. ADR-013 Stage 2: persist the verbatim raw-text layer so
+        #      source_paragraphs references resolve and retrieval has the
+        #      answer-bearing unit. Duck-typed: backends without the raw
+        #      layer skip it (PG lands with the Phase-B migration window).
+        #      MEMPLEX_RAW_PARAGRAPH_LAYER=0 disables it (A/B probes).
+        if extracted.paragraphs and os.environ.get(
+            "MEMPLEX_RAW_PARAGRAPH_LAYER", "1"
+        ) not in {"0", "false", "False"}:
+            persist_paragraphs = getattr(store, "persist_paragraphs", None)
+            if callable(persist_paragraphs):
+                persist_paragraphs(
+                    extracted.paragraphs,
+                    trust_tier=tier,
+                    source_hint=getattr(source, "type", "text") or "text",
+                )
 
         # 2. Persist Functions and graph edges after the unified typed scan.
         #    Functions retain the historical marker; other node types are

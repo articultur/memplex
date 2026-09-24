@@ -44,8 +44,17 @@ red-team baseline [redteam-poison-baseline](../evidence/redteam-poison-baseline/
 
 ## Stages
 
-- Stage 1 (this change): tier field + write-path attribution +
-  merge-takes-min + retrieval penalty; red-team re-run.
-- Stage 2: paragraph authoritative layer + shadow/PG schema + fidelity
-  parity run.
+- Stage 1 (landed): tier field + write-path attribution + merge-takes-min
+  + retrieval penalty; red-team re-run 0.52 -> 0.20 under a competitive
+  haystack.
+- Stage 2 (landed, lite): raw-paragraph layer - verbatim text persists
+  in the pair's "paragraphs" section (content-addressed ids resolving
+  source_paragraphs), joins vector + BM25 legs, survives restart,
+  carries tiers; shadow diff covers it; MEMPLEX_RAW_PARAGRAPH_LAYER=0
+  disables for A/B probes. **PG paragraphs table deferred to the
+  ADR-012 Phase-B migration window** (single schema cutover instead of
+  two); acceptance = the fidelity parity probe plus the Phase-B gates.
+- Stage 2B premise resistance: rule-based demotion measured INEFFECTIVE
+  (see stale-b2-premise-resistance evidence); kept disabled by default.
+  The productive direction is inference-level resolution (open).
 - Stage 3: peer-mesh contract extension + hub/derived min propagation.

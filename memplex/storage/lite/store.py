@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import tarfile
 import tempfile
@@ -28,7 +29,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from memplex.backup import (
     BackupArtifactWriter,
@@ -109,6 +110,9 @@ _PREFERENCE_KEYS = _BASE_NODE_KEYS | {"aspect", "preference", "subject_id"}
 _OBSERVATION_KEYS = _BASE_NODE_KEYS | {"event", "context", "observed_at", "actor", "category"}
 _FIELD_VALUE_KEYS = {"desc", "sources", "source_method", "weight", "observation", "created_at", "status"}
 _EDGE_KEYS = {"source", "target", "edge_type", "weight", "evidence", "created_at"}
+# ADR-013 Stage 2 raw-paragraph rows: JSON-safe dicts, validated as a
+# fixed key set with exact types.
+_PARAGRAPH_KEYS = {"id", "raw_text", "trust_tier", "created_at", "source"}
 # Every Nth commit pays the full double pre-durable decode audit even while
 # batching is not active, so a serializer regression cannot outlive an audit
 # window undetected (loads stay fail-closed full decodes regardless).
@@ -368,6 +372,25 @@ def _validate_raw_keys(raw: dict, allowed: set[str], *, legacy: bool, label: str
         raise ValueError(f"incomplete Lite {label} schema")
 
 
+def _validate_raw_paragraph(row: Any) -> dict:
+    """Validate one raw-paragraph row and return it (ADR-013 Stage 2).
+
+    Rows are plain dicts with a fixed key set; ids must be non-empty
+    strings and missing tiers default to the legacy session_derived.
+    """
+    if type(row) is not dict:
+        raise ValueError("invalid Lite paragraph row")
+    _validate_raw_keys(row, _PARAGRAPH_KEYS, legacy=True, label="paragraph")
+    if type(row.get("id")) is not str or not row.get("id"):
+        raise ValueError("invalid Lite paragraph id")
+    if type(row.get("raw_text")) is not str:
+        raise ValueError("invalid Lite paragraph raw_text")
+    row.setdefault("trust_tier", 3)
+    row.setdefault("created_at", None)
+    row.setdefault("source", "")
+    return row
+
+
 def _is_recognized_g002_enveloped_v1(memory: Any) -> bool:
     """Identify the sole supported pre-G002 mixed-node collection shape."""
     if type(memory) is not dict or type(memory.get("schema_version")) is not int or memory["schema_version"] != 1:
@@ -602,6 +625,12 @@ class LiteMemoryStore:
         self._observations: list[Observation] = []
         self._facts: dict[str, Fact] = {}
         self._preferences: dict[str, Preference] = {}
+        # ADR-013 Stage 2 raw-text authoritative layer: verbatim
+        # paragraphs as JSON-safe dicts (id -> row), persisted in the
+        # pair's "paragraphs" section and joined into both retrieval
+        # legs. Kept dict-native on purpose: it is outside the typed
+        # sync contract until Stage 3 promotes it.
+        self._paragraphs: dict[str, dict] = {}
         # (mtime_ns, size) fingerprint of both pair files, set after each
         # successful publish so unchanged reads skip the O(N) reload.
         self._pair_fingerprint: tuple | None = None
@@ -1079,6 +1108,39 @@ class LiteMemoryStore:
     # ── Fact / Preference (optional MemoryStore extensions) ─────────
 
     @_with_writer_lock
+    def persist_paragraphs(
+        self, paragraphs: list, *, trust_tier: int, source_hint: str
+    ) -> None:
+        """Persist verbatim paragraphs into the raw layer (ADR-013 S2).
+
+        Upsert by the deterministic content-addressed id (namespaced by
+        the same *source_hint* the node builders use, so
+        ``source_paragraphs`` references resolve); identical text written
+        twice maps to one row. Rows never participate in prune; the write
+        commits through the normal pair machinery (deferred batching
+        included).
+        """
+        self._reload_for_mutation()
+        now = datetime.now(UTC).isoformat()
+        for para in paragraphs:
+            raw_text = (getattr(para, "raw_text", "") or "").strip()
+            if not raw_text:
+                continue
+            from memplex.models.paragraph import persisted_paragraph_id
+
+            row_id = persisted_paragraph_id(source_hint, getattr(para, "id", ""), raw_text)
+            existing = self._paragraphs.get(row_id)
+            if existing is not None and existing.get("raw_text") == raw_text:
+                continue
+            self._paragraphs[row_id] = {
+                "id": row_id,
+                "raw_text": raw_text,
+                "trust_tier": int(trust_tier),
+                "created_at": now,
+                "source": (getattr(para, "source", "") or "")[:200],
+            }
+        self._commit_current_state()
+
     def add_fact(self, fact: Fact) -> None:
         """Persist a Fact (upsert by id); records a changelog entry.
 
@@ -1307,10 +1369,10 @@ class LiteMemoryStore:
         for result in results:
             result.trust_tier = self._trust_of(result.func_id)
         if not self._vector_index.enabled:
-            return self._apply_trust_penalty(results)[:top_k]
+            return self._premise_resolution(self._apply_trust_penalty(results))[:top_k]
         vector_results = self._vector_search_leg(text, top_k=top_k)
         if not vector_results:
-            return self._apply_trust_penalty(results)[:top_k]
+            return self._premise_resolution(self._apply_trust_penalty(results))[:top_k]
         fused = self._fuse_search_legs([results, vector_results], top_k)
         # Attach already-cached corpus vectors to the fused hits: the
         # retrieval layer's vector pre-fill (and the Reranker behind it)
@@ -1321,7 +1383,70 @@ class LiteMemoryStore:
                 result.vector_cache = self._vector_index.cached_vector(
                     result.func_id, result.summary
                 )
-        return self._apply_trust_penalty(fused)[:top_k]
+        resolved = self._premise_resolution(self._apply_trust_penalty(fused))
+        return resolved[:top_k]
+
+    @staticmethod
+    def _premise_resolution(results: list[SearchResult]) -> list[SearchResult]:
+        """B2 premise resistance: later evidence outranks earlier within
+        a near-duplicate topic group.
+
+        The STALE baseline (resolved 0/25) showed the memory layer never
+        resolves implicit invalidation - both the stale and the fresh
+        value reach recall and correctness is outsourced to the model.
+        This step groups lexically-similar hits (token-set overlap or
+        cached-vector cosine) and halves the score of the older member,
+        so the newer observation ranks first. Off by default
+        (MEMPLEX_PREMISE_RESOLUTION=1 enables): measured ineffective on
+        the STALE-style baseline (new-before-old 0.04-0.12 across
+        tfidf/bge-m3 profiles) - implicit invalidation needs
+        inference-level resolution, not ranking rules.
+        """
+        enabled = os.environ.get("MEMPLEX_PREMISE_RESOLUTION", "0")
+        if enabled in {"0", "false", "False"} or len(results) < 2:
+            return results
+
+        def _tokens(text: str) -> set[str]:
+            return {
+                t for t in re.split(r"[^\w]+", (text or "").lower()) if len(t) > 2
+            }
+
+        def _ts(result: SearchResult) -> str:
+            return str(result.updated_at or result.created_at or "")
+
+        token_sets = [_tokens(r.summary) for r in results]
+        vectors = [getattr(r, "vector_cache", None) for r in results]
+
+        def _same_topic(i: int, j: int) -> bool:
+            # Lexical overlap or cached-vector cosine: implicit
+            # invalidation pairs are semantically close but lexically
+            # distant ("I live in Berlin" vs "moving boxes arrived in
+            # Vienna"), so the semantic signal does the grouping work.
+            a, b = token_sets[i], token_sets[j]
+            if a and b:
+                union = a | b
+                if len(a & b) / len(union) >= 0.2:
+                    return True
+            va, vb = vectors[i], vectors[j]
+            if va and vb and len(va) == len(vb):
+                dot = sum(x * y for x, y in zip(va, vb))
+                na = sum(x * x for x in va) ** 0.5
+                nb = sum(x * x for x in vb) ** 0.5
+                if na > 0 and nb > 0 and dot / (na * nb) >= 0.75:
+                    return True
+            return False
+
+        for i in range(len(results)):
+            for j in range(i + 1, len(results)):
+                if not _same_topic(i, j):
+                    continue
+                ti, tj = _ts(results[i]), _ts(results[j])
+                if tj > ti:
+                    results[i].relevance_score *= 0.5
+                elif ti > tj:
+                    results[j].relevance_score *= 0.5
+        results.sort(key=lambda r: (-r.relevance_score, r.func_id))
+        return results
 
     @staticmethod
     def _apply_trust_penalty(results: list[SearchResult]) -> list[SearchResult]:
@@ -1346,8 +1471,15 @@ class LiteMemoryStore:
         return results
 
     def _trust_of(self, func_id: str) -> int:
-        node = self._functions.get(func_id) or self._facts.get(func_id) or self._preferences.get(func_id)
-        return getattr(node, "trust_tier", 3) if node is not None else 3
+        node = (
+            self._functions.get(func_id)
+            or self._facts.get(func_id)
+            or self._preferences.get(func_id)
+        )
+        if node is not None:
+            return getattr(node, "trust_tier", 3)
+        para = self._paragraphs.get(func_id)
+        return int(para.get("trust_tier", 3)) if para is not None else 3
 
     def set_embedder(self, embedder: Any) -> None:
         """Inject (or replace) the embedder powering the vector search leg.
@@ -1375,6 +1507,11 @@ class LiteMemoryStore:
         nodes: dict[str, Any] = {**self._facts, **self._preferences}
         for node in nodes.values():
             documents.append((node.id, self._fact_pref_to_search_text(node)))
+        # ADR-013 Stage 2: verbatim paragraphs join the semantic leg with
+        # their raw text - the answer-bearing unit the product path was
+        # missing (benchmark harness always retrieved raw sessions).
+        for row in self._paragraphs.values():
+            documents.append((row["id"], row["raw_text"]))
         if not documents:
             return []
 
@@ -1399,23 +1536,39 @@ class LiteMemoryStore:
                 )
                 continue
             node = nodes.get(node_id)
-            if node is None:
-                continue
-            node_text = self._fact_pref_to_search_text(node)
-            results.append(
-                SearchResult(
-                    func_id=node.id,
-                    name=node.name or node_text[:50],
-                    domain=node.domain or "",
-                    relevance_score=similarity,
-                    summary=node_text,
-                    source_type=node.source_type,
-                    created_at=node.created_at,
-                    updated_at=node.updated_at,
-                    origin=node.origin_session or "",
-                    trust_tier=getattr(node, "trust_tier", 3),
+            if node is not None:
+                node_text = self._fact_pref_to_search_text(node)
+                results.append(
+                    SearchResult(
+                        func_id=node.id,
+                        name=node.name or node_text[:50],
+                        domain=node.domain or "",
+                        relevance_score=similarity,
+                        summary=node_text,
+                        source_type=node.source_type,
+                        created_at=node.created_at,
+                        updated_at=node.updated_at,
+                        origin=node.origin_session or "",
+                        trust_tier=getattr(node, "trust_tier", 3),
+                    )
                 )
-            )
+                continue
+            para = self._paragraphs.get(node_id)
+            if para is not None:
+                results.append(
+                    SearchResult(
+                        func_id=para["id"],
+                        name=para["raw_text"][:50],
+                        domain="",
+                        relevance_score=similarity,
+                        summary=para["raw_text"],
+                        source_type=SourceType.WIKI,
+                        created_at=para.get("created_at"),
+                        updated_at=para.get("created_at"),
+                        origin="",
+                        trust_tier=int(para.get("trust_tier", 3)),
+                    )
+                )
         return results
 
     @staticmethod
@@ -1953,11 +2106,50 @@ class LiteMemoryStore:
             # readers tolerate their absence (older files) via .get(..., []).
             "facts": [f.to_dict() for f in self._facts.values()],
             "preferences": [p.to_dict() for p in self._preferences.values()],
+            # ADR-013 Stage 2 raw-text authoritative layer; same absence
+            # tolerance as facts/preferences for older pairs.
+            "paragraphs": [dict(row) for row in self._paragraphs.values()],
             "sync": copy.deepcopy(self._sync_state),
         }
 
     def _raw_changelog(self) -> list[dict[str, Any]]:
         return [self._changelog._serialize_event(event) for event in self._changelog.snapshot()]
+
+    def _fold_missing_from_base(self, base_memory: dict[str, Any]) -> None:
+        """Fold peer nodes absent from the resident collections (by id).
+
+        Only called on the commit path's stale-base branch: the resident
+        is the local truth (it carries the in-flight mutation), and the
+        base contributes anything the pre-mutation reload missed.
+        Additive by id, local wins; edges dedupe on
+        (source, target, edge_type).
+        """
+        for row in base_memory.get("functions", []):
+            node = Function.from_dict(row)
+            if node.id not in self._functions and node.id not in self._name_index:
+                self._functions[node.id] = node
+                self._name_index.setdefault(node.name_normalized, node.id)
+        for row in base_memory.get("facts", []):
+            fact = Fact.from_dict(row)
+            self._facts.setdefault(fact.id, fact)
+        for row in base_memory.get("preferences", []):
+            pref = Preference.from_dict(row)
+            self._preferences.setdefault(pref.id, pref)
+        for row in base_memory.get("observations", []):
+            observation = Observation.from_dict(row)
+            if all(existing.id != observation.id for existing in self._observations):
+                self._observations.append(observation)
+        for row in base_memory.get("paragraphs", []):
+            validated = _validate_raw_paragraph(row)
+            self._paragraphs.setdefault(validated["id"], validated)
+        existing_edges = {
+            (e.source, e.target, e.edge_type) for e in self._edges
+        }
+        for edge in (_deserialize_edge(e) for e in base_memory.get("edges", [])):
+            key = (edge.source, edge.target, edge.edge_type)
+            if key not in existing_edges:
+                existing_edges.add(key)
+                self._edges.append(edge)
 
     def _commit_current_state(self) -> None:
         """Commit one complete pair.
@@ -1983,6 +2175,13 @@ class LiteMemoryStore:
                 if base is None or not base_verified:
                     base = self._durability._load_authoritative_locked()
                     base_verified = False
+                    # TOCTOU guard: the pre-mutation reload short-circuited
+                    # while the files were unchanged, and a peer committed
+                    # in between. The reloaded base now holds nodes this
+                    # resident never saw; fold them in by id (local
+                    # mutations win) or this commit would silently drop
+                    # the peer's writes.
+                    self._fold_missing_from_base(base.memory)
                 target = LitePair(
                     memory=self._raw_memory(),
                     changelog=self._raw_changelog(),
@@ -2422,6 +2621,12 @@ class LiteMemoryStore:
         self._observations = loaded_observations
         self._facts = loaded_facts
         self._preferences = loaded_preferences
+        # ADR-013 Stage 2: raw paragraphs ride the same publish boundary;
+        # dict-native rows validated independently of the typed tuple.
+        self._paragraphs = {
+            row["id"]: row
+            for row in (_validate_raw_paragraph(r) for r in pair.memory.get("paragraphs", []))
+        }
         self._edges = loaded_edges
         self._rebuild_edge_index()
         self._changelog.replace(loaded_changelog)
@@ -2572,11 +2777,48 @@ class LiteMemoryStore:
             results = self._local_search(text, top_k=top_k)
 
         extra = self._search_facts_preferences(text, top_k=top_k)
-        if not extra:
+        para_extra = self._search_paragraphs(text, top_k=top_k)
+        merged = results + extra + para_extra
+        if not merged:
             return results
-        merged = results + extra
         merged.sort(key=lambda r: r.relevance_score, reverse=True)
         return merged[:top_k]
+
+    def _search_paragraphs(self, text: str, top_k: int) -> list[SearchResult]:
+        """Pure-Python BM25 over the raw-paragraph layer (ADR-013 S2).
+
+        Same ``score / (score + 1)`` normalization as the fact/preference
+        leg so hits merge cleanly with Function results.
+        """
+        if not self._paragraphs:
+            return []
+        # local_bm25_search is duck-typed over (id -> text-source) maps;
+        # raw rows participate through the same call as typed nodes.
+        ranked = local_bm25_search(
+            text=text,
+            functions=cast(dict[str, Function], self._paragraphs),
+            text_factory=lambda row: cast(dict, row)["raw_text"],
+            top_k=top_k,
+        )
+        results: list[SearchResult] = []
+        for row, _para_text, score in ranked:
+            para = cast(dict, row)
+            relevance = score / (score + 1.0)
+            results.append(
+                SearchResult(
+                    func_id=para["id"],
+                    name=para["raw_text"][:50],
+                    domain="",
+                    relevance_score=relevance,
+                    summary=para["raw_text"],
+                    source_type=SourceType.WIKI,
+                    created_at=para.get("created_at"),
+                    updated_at=para.get("created_at"),
+                    origin="",
+                    trust_tier=int(para.get("trust_tier", 3)),
+                )
+            )
+        return results
 
     def _search_facts_preferences(self, text: str, top_k: int) -> list[SearchResult]:
         """Pure-Python BM25 over Fact/Preference content (no sidecar index).
