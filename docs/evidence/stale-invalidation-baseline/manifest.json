@@ -1,0 +1,23 @@
+{
+ "benchmark": "stale_memory_implicit_invalidation",
+ "question": "when a later observation implicitly invalidates an earlier memory (no explicit negation), does the memory layer resolve it, or does stale content still reach recall?",
+ "protocol": "25 scenarios on fresh service+store: seed one personal fact -> a later-session observation that supersedes it implicitly (moving/changing without saying 'no longer') -> neutral probe question; outcome by marker presence in top-8 orchestrated recall.",
+ "results": {
+  "n": 25,
+  "resolved_rate": 0.0,
+  "stale_reuse_rate": 0.44,
+  "both_rate": 0.52,
+  "neither": 1
+ },
+ "findings": [
+  "The memory layer never resolves implicit invalidation: zero scenarios surfaced only the new value.",
+  "52% of probes feed BOTH the stale and the fresh value into recall - correctness is outsourced to model-side arbitration, matching the STALE-paper failure mode (frontier models judge stored-memory validity at ~55%).",
+  "44% of probes surface only the stale value: pure invalid reuse.",
+  "This is the baseline for the premise-resistance orchestration leg (B2) and for AGM-style belief-revision acceptance criteria on improve.py: target = resolved up, stale_reuse+both down."
+ ],
+ "honest_reading": "recall-marker protocol, no answerer in the loop; temporal.py's explicit supersede path is not exercised because the scenarios deliberately contain no explicit contradiction signal. Default offline profile (tfidf embedder, rule-based extractor).",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-24T16:55:00Z",
+ "artifacts": ["records.json", "summary.json"],
+ "runner": "scripts/stale_memory_eval.py"
+}

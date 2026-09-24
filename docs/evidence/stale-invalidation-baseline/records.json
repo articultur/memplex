@@ -1,0 +1,127 @@
+[
+ {
+  "index": 0,
+  "question": "Where do I live?",
+  "outcome": "both"
+ },
+ {
+  "index": 1,
+  "question": "Which company do I work for?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 2,
+  "question": "What phone do I use?",
+  "outcome": "both"
+ },
+ {
+  "index": 3,
+  "question": "Who is my manager?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 4,
+  "question": "What language am I learning?",
+  "outcome": "both"
+ },
+ {
+  "index": 5,
+  "question": "Where is my home office?",
+  "outcome": "both"
+ },
+ {
+  "index": 6,
+  "question": "Which gym do I go to?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 7,
+  "question": "What car do I drive?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 8,
+  "question": "What is my main project?",
+  "outcome": "both"
+ },
+ {
+  "index": 9,
+  "question": "Which bank do I use?",
+  "outcome": "both"
+ },
+ {
+  "index": 10,
+  "question": "What coffee machine do I have?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 11,
+  "question": "Where do I volunteer?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 12,
+  "question": "What is my commute?",
+  "outcome": "both"
+ },
+ {
+  "index": 13,
+  "question": "Which editor do I use?",
+  "outcome": "both"
+ },
+ {
+  "index": 14,
+  "question": "What insurance do I have?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 15,
+  "question": "Where do I keep my notes?",
+  "outcome": "both"
+ },
+ {
+  "index": 16,
+  "question": "What band do I follow?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 17,
+  "question": "What's my diet?",
+  "outcome": "neither"
+ },
+ {
+  "index": 18,
+  "question": "Which podcast do I listen to?",
+  "outcome": "both"
+ },
+ {
+  "index": 19,
+  "question": "Where do I get my hair cut?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 20,
+  "question": "What timezone do I work in?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 21,
+  "question": "Which Linux distro do I run?",
+  "outcome": "stale_reuse"
+ },
+ {
+  "index": 22,
+  "question": "What's my running goal?",
+  "outcome": "both"
+ },
+ {
+  "index": 23,
+  "question": "Where do I buy coffee beans?",
+  "outcome": "both"
+ },
+ {
+  "index": 24,
+  "question": "Who is my dentist?",
+  "outcome": "both"
+ }
+]
