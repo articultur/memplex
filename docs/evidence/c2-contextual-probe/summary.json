@@ -1,0 +1,10 @@
+{
+ "benchmark": "contextual_prefix_probe",
+ "design": "paired 20-question retrieval probe; ctx arm prepends a ~50-100 token glm-5.3-flash situating prefix to each seeded session unit before embedding",
+ "n": 20,
+ "base_recall8": 0.85,
+ "ctx_recall8": 0.85,
+ "delta": 0.0,
+ "flips_up": 1,
+ "flips_down": 1
+}

@@ -1,0 +1,102 @@
+{
+ "6e984301": {
+  "base": true,
+  "ctx": true,
+  "qtype": "temporal-reasoning"
+ },
+ "157a136e": {
+  "base": true,
+  "ctx": true,
+  "qtype": "multi-session"
+ },
+ "affe2881": {
+  "base": true,
+  "ctx": true,
+  "qtype": "knowledge-update"
+ },
+ "b6025781": {
+  "base": true,
+  "ctx": true,
+  "qtype": "single-session-preference"
+ },
+ "28bcfaac": {
+  "base": true,
+  "ctx": true,
+  "qtype": "single-session-assistant"
+ },
+ "3fdac837": {
+  "base": true,
+  "ctx": true,
+  "qtype": "multi-session"
+ },
+ "57f827a0": {
+  "base": true,
+  "ctx": true,
+  "qtype": "single-session-preference"
+ },
+ "88432d0a": {
+  "base": true,
+  "ctx": true,
+  "qtype": "multi-session"
+ },
+ "72e3ee87": {
+  "base": true,
+  "ctx": true,
+  "qtype": "knowledge-update"
+ },
+ "gpt4_93159ced_abs": {
+  "base": true,
+  "ctx": true,
+  "qtype": "temporal-reasoning"
+ },
+ "gpt4_70e84552_abs": {
+  "base": true,
+  "ctx": true,
+  "qtype": "temporal-reasoning"
+ },
+ "gpt4_af6db32f": {
+  "base": true,
+  "ctx": true,
+  "qtype": "temporal-reasoning"
+ },
+ "gpt4_d9af6064": {
+  "base": false,
+  "ctx": false,
+  "qtype": "temporal-reasoning"
+ },
+ "06f04340": {
+  "base": false,
+  "ctx": false,
+  "qtype": "single-session-preference"
+ },
+ "29f2956b": {
+  "base": false,
+  "ctx": true,
+  "qtype": "single-session-user"
+ },
+ "3249768e": {
+  "base": true,
+  "ctx": true,
+  "qtype": "single-session-assistant"
+ },
+ "3b6f954b": {
+  "base": true,
+  "ctx": false,
+  "qtype": "single-session-user"
+ },
+ "80ec1f4f_abs": {
+  "base": true,
+  "ctx": true,
+  "qtype": "multi-session"
+ },
+ "3fe836c9": {
+  "base": true,
+  "ctx": true,
+  "qtype": "multi-session"
+ },
+ "f685340e": {
+  "base": true,
+  "ctx": true,
+  "qtype": "knowledge-update"
+ }
+}

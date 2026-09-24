@@ -1,0 +1,21 @@
+{
+ "benchmark": "contextual_prefix_probe",
+ "question": "does prepending a ~50-100 token LLM situating prefix to each seeded session unit (Anthropic contextual retrieval, write-time) lift retrieval on our stack?",
+ "design": "paired 20-question probe (LongMemEval-S, seed 17); both arms seed session-unit documents (v4+ granularity, date-threaded); the ctx arm's units are prefixed by glm-5.3-flash situating summaries generated at write time (846 sessions, ~5 rejected by the provider's content filter and degraded to no-prefix). Metric: session-level gold-evidence recall@8, plain orchestrated-off retrieval, no answerer.",
+ "results": {
+  "base_recall8": 0.85,
+  "ctx_recall8": 0.85,
+  "delta": 0.0,
+  "flips": "1 up / 1 down"
+ },
+ "findings": [
+  "No detectable gain on this stack: the strong existing baseline (hybrid lexical+semantic retrieval over session units with date threading) already sits at 0.85 recall@8, and the prefix moves nothing net.",
+  "Consistent with the independent ECIR replication of contextual retrieval (+0.005-0.012 nDCG under strong embedders) rather than the vendor's -49% failure-rate claim; our baseline is precisely the strong-embedder regime where the effect fades.",
+  "Probe verdict: write-time contextual prefixes do NOT enter the product - the per-write LLM cost buys no recall here."
+ ],
+ "honest_reading": "n=20 gives roughly +/-16pp CI, so the precise claim is 'no gain detected', not 'provably zero'; the unrecovered 15% are hard vocabulary-gap questions where a situating prefix plausibly cannot help. Provider content-filter rejections (~5/846) and injection-guard false positives during seeding affected both arms identically (same seeded texts).",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-24T20:10:00Z",
+ "artifacts": ["summary.json", "paired.json"],
+ "runner": "scripts/contextual_prefix_probe.py"
+}
