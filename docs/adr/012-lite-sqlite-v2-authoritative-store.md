@@ -2,7 +2,15 @@
 
 ## Status
 
-Proposed（设计定稿待用户确认后开工）
+Phase A 落地（d24aea3, 2026-09-24）：`MEMPLEX_LITE_SQLITE_SHADOW=1` 双写开关、
+`storage/lite/sqlite_v2.py`（schema 静态资产 + 全参数化 DML + log-only 失败契约）、
+`scripts/lite_v2_diff.py`（信封感知 100% equal 门禁）。CI 持续验证 =
+`tests/test_lite_sqlite_v2_shadow.py::test_end_to_end_shadow_matches_pair`
+（真实双写 + diff EQUAL 断言，每次 lite 套件必跑）。
+**Phase B 前置条件：影子暴露期**——在真实使用/长跑负载下累计 shadow 运行
+（本地开发 `export MEMPLEX_LITE_SQLITE_SHADOW=1` 即参与），期间任何
+`sqlite shadow flush skipped` 告警或 diff 差异都是 Phase B 的阻塞项。
+暴露期无固定时长，退出门槛 = 暴露期日志零告警 + 验收门槛（§5）全绿。
 
 ## Context（全部为实测事实）
 
