@@ -1,0 +1,26 @@
+{
+ "benchmark": "longmemeval_v2_web_small_multimodal_slice",
+ "question": "does injecting state screenshots into the answerer lift V2 web accuracy, now that a vision SKU (glm-5.3-flash) is available?",
+ "design": "paired A/B on 80 stratified web questions (40 vision-needed: answer absent from haystack text; 40 text-recoverable: answer phrases present). Both arms share one retrieval run per question (plain hybrid, top-12, a11y 6k projection); the mm arm appends up to 6 anchored screenshots (JPEG, max edge 1024) resolved from retrieval-hit summaries via [traj @ url] anchors. Answerer glm-5.3-flash both arms; judge glm-5.3 (archived firstpoint protocol).",
+ "results": {
+  "overall": {"text": 0.2, "mm": 0.2625},
+  "vision_needed": {"text": 0.2, "mm": 0.175},
+  "text_recoverable": {"text": 0.2, "mm": 0.35},
+  "flips": {"up": 13, "down": 8}
+ },
+ "findings": [
+  "Screenshot injection is a real lever where retrieval can surface the answer-bearing page: text-recoverable stratum +15pp (8 up / 2 down), driven by static-environment (+4/19) and dynamic-environment (+2/14) - flash extracts answer detail from screenshots that the a11y text projection lost.",
+  "On vision-needed questions (answer absent from all haystack text) injection is flat-to-negative (-2.5pp): retrieval's text legs cannot rank the answer page into top-12, so the injected screenshots are the wrong pages. The vision-needed stratum is bottlenecked by retrieval, not by the answerer's vision.",
+  "Systematic confound: 32/40 vision-needed samples are -abs types whose gold is 'not mentioned'; the text arm scores by abstaining (29/40 abstention-shaped answers) while screenshots push the model to substantive answers that the phrase-set grader marks wrong. Abs semantics in the grader remain the known V2-b weakness.",
+  "glm-5.3-flash vision capability confirmed: correctly reads UI screenshots; red-square probe returned accurate description; mm-correct answers average the full 6-image budget."
+ ],
+ "honest_reading": "unlocks +15pp on the stratum where the answer page is retrievable; does NOT unlock the 66-87-question vision-needed pool - that needs visual retrieval (or full-corpus screenshot scan), not a better answerer. Score-impact ceiling on web-small if TR-like gains held corpus-wide: roughly +7-8pp overall.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-24T13:40:00Z",
+ "artifacts": ["records.json", "paired.json", "summary.json", "recoverability_scan.json"],
+ "known_limitations": [
+  "question-provided images (15 web questions) not included: question_screenshots assets not shipped in the local dataset",
+  "plain retrieval (not orchestrated): orchestrated query deadlocks on a reused large store (separate bug, fixed batch backfill reduces its cost); both arms share the same retrieval so the A/B delta is unaffected",
+  "n=40 per stratum; stratum-level CIs are roughly +/-12-15pp at 95%"
+ ]
+}

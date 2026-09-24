@@ -1,0 +1,402 @@
+{
+ "c5dfa558": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "914ab1d4": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "6feb33d4": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "84238c8f": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "6fc8c511": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "3b8210a1": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "d47ca5c8": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "66ed4c72": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "21df0107": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": true
+ },
+ "0574c69a": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "577ab4ee": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "89a20f48": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "fd006924": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": true
+ },
+ "57817b87": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "bb7ebd5c": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "733699a5": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": true
+ },
+ "8da5c407": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "25853d7f": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": true
+ },
+ "0af83ccc": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "f2b221fd": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "42d13006": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "2cc1b9ca": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "4a4aad22": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "77258cda": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "6517165d": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "cdc46516": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "98e6d369": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "83a77f9d": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": true
+ },
+ "ea361b20": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "07a0145f": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "c216174c": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": true
+ },
+ "eaba5c44": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "0a13e290": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "ecca89b2": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "549c0657": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "a2673690": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "fc7d35d5": {
+  "stratum": "vision-needed",
+  "text": true,
+  "mm": false
+ },
+ "196a68fb": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "7ebb0b95": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": false
+ },
+ "97e1d977": {
+  "stratum": "vision-needed",
+  "text": false,
+  "mm": true
+ },
+ "dea446d0": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "896017e0": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "0738c1ac": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "b828a6b2": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "98b62f3d": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "f928c075": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "10003186": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "90dc7e66": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "0fe2c676": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "d16a18fe": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "f9f9cd61": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "05cce9b3": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "a62de1f1": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "626e401e": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "2ca2d443": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": false
+ },
+ "5c826b28": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "63a1b94b": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "e71f7c92": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "92642fe7": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "10466872": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "6a23675f": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "15e5efa6": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "6a5bbcdb": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "521b124f": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "3269a3c5": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "65fbcbdf": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "8955b988": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "41bb40df": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "c56e69ca": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "48ab5c3d": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "4252cc1c": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "1defc293": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": false
+ },
+ "436c58d5": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "f23807ed": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "c39f6edf": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": true
+ },
+ "6d975a08": {
+  "stratum": "text-recoverable",
+  "text": true,
+  "mm": true
+ },
+ "6f9cb5fc": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "a12b7094": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "36fe48ef": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ },
+ "c7e367e2": {
+  "stratum": "text-recoverable",
+  "text": false,
+  "mm": false
+ }
+}
