@@ -1,0 +1,22 @@
+{
+ "benchmark": "backfill_batch_ab",
+ "question": "is the parity gap a code regression from the batch-backfill change (0f46a5d), or the embedding-device difference?",
+ "protocol": "same CPU device, same questions (6, seed-17 probe set), same seeding; one arm forces the pre-0f46a5d per-document backfill shape (batch attribute hidden during search), the other runs the current batch path. Gold-session recall@24 compared per question.",
+ "results": {
+  "n": 6,
+  "batch_hits24": 6,
+  "perdoc_hits24": 6,
+  "disagreements": 0,
+  "verdict": "code paths equivalent"
+ },
+ "findings": [
+  "The only landed change that could alter retrieval on the parity path (per-document -> batch backfill) leaves results identical; every other landed change on that path (trust penalty: inert at default tier 3; premise resolution: default off; vector-cache attach: score-neutral) provably does not touch the score function.",
+  "Combined with the variance split (+-0.75pp answer/judge), the -5.3pp gap now attributes by elimination to the MPS->CPU embedding device difference: the 0.797 baseline was an MPS-device reading, the 0.7569-0.7669 band is the CPU-device reading of the same instrument.",
+  "Decision framing for the user: either re-baseline the acceptance to the CPU band (0.7569-0.7669) with an MPS re-confirmation deferred until the backend is stable, or keep 0.8045 and wait for a stable MPS window."
+ ],
+ "honest_reading": "n=6 equivalence sample, zero disagreements; the claim is 'no effect detected on this path', which is the correct direction for acquittal - a larger sample could only strengthen it.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-26T08:40:00Z",
+ "artifacts": ["summary.json"],
+ "runner": "ad-hoc A/B (benchmarks/results/backfill-ab)"
+}

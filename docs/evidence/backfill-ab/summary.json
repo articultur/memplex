@@ -1,0 +1,7 @@
+{
+ "n": 6,
+ "batch_hits24": 6,
+ "perdoc_hits24": 6,
+ "disagreements": 0,
+ "verdict": "code paths equivalent"
+}
