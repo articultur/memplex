@@ -41,6 +41,24 @@
 
 ### B3. PG paragraphs 表 + 同窗迁移
 
+> **2026-09-26 勘探记录**（一轮完整实现后回退，PG 套件保持全绿）：全新库
+> 路径已走通（apply OK + CRUD 测试 3/3），剩余 6 个采纳基线测试
+> （runtime_v1→v7 升级链终态分类）未解。**下轮一次做对的完整注册清单**：
+> (1) `_CORE_TABLES`/`_APPLICATION_ACL`/`_KNOWN_MEMPLEX_RELATION_KINDS`
+> （tenant_idx+pkey 展开）；(2) `catalogue_checks._required_core_indexes`
+> /`_post_core_columns` 组/`_primary_key` 组/**`_INDEX_SIGNATURES`**
+> （KeyError 的来源）；(3) `runner.capture_tables`；(4) 0007 SQL 的
+> `source_agent/source_session` 必须 **NOT NULL**（colshape 契约）、RLS
+> policy 照抄 facts（digest 共享）、tenant_idx；(5) **分类可选性**：
+> `_matches_post_core` 对 paragraphs 做 optional（缺席可分类、在场必须
+> 全匹配）——否则 v6 历史态不可分类打断采纳链；(6) 测试 pin 平移
+> （pending 版本列表 ×4 文件、ledger (7,"executed") ×7、GRANT fixture
+> 表清单）；(7) **未解**：runtime_v1 采纳基线 apply 后终态仍 unknown
+> ——嫌疑在 adoption 的 `_allowed_adoption_baselines` 指纹变体集合需
+> 含新 digest，或 runtime_v1 fixture 升级链中 paragraphs 出现时机；
+> 从 `_LedgerEntry` 终态 + `schema_fingerprint` digest 对比全新库
+> digest 入手。
+
 - `storage/migrations/_constants.py` 常量先行（AGENTS 规矩），新增
   `paragraphs` 表迁移；`postgres.py` 持久化接入 service.write 的
   duck-typed 挂点（现 no-op 点）。
