@@ -103,7 +103,13 @@ class Proxy:
                     for b in resp.json().get("content", [])
                     if b.get("type") == "text"
                 ).strip()
-            except Exception:
+            except httpx.HTTPStatusError as exc:
+                # Content-safety rejections (code 1301) are deterministic
+                # per text: degrade to empty answer instead of killing the
+                # run; the judge scores it wrong, which is the honest cost
+                # of an unanswerable-by-filter question.
+                if exc.response.status_code == 400 and "1301" in exc.response.text[:300]:
+                    return ""
                 if attempt == 4:
                     raise
                 time.sleep(min(60, 5 * 2**attempt))

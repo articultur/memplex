@@ -1,0 +1,24 @@
+{
+ "benchmark": "product_parity_multi",
+ "question": "does the product path (write_text -> orchestrated query, raw layer on) with harness answerer + official judge reach the 0.8045 harness level on the multi pool (vs the 0.797 P0-era product probe)?",
+ "status": "INCONCLUSIVE - halted after 13/133 with the acceptance target explicitly still open",
+ "results_partial": {
+  "n": 13,
+  "accuracy": 0.3846,
+  "halt_cause": "answerer killed by a deterministic content-safety 400 (bigmodel 1301) on question 14; degradation-to-empty now patched in the runner"
+ },
+ "why_inconclusive": [
+  "The 0.385 partial sits 41pp under the 0.797 baseline - too large for retrieval-face dilution to explain; it indicates instrument misalignment, not necessarily product regression. Confounded variables vs the 0.797/0.8045 runs: (1) injection-guard withholdings remove retrieval surface in the product path while the harness probed raw sessions directly; (2) the parity context is SearchResult summaries (extractor digests), not the harness's verbatim passages; (3) single temperature-0 answer path, no SC/decomposition; (4) CPU vs MPS embedding device (near-identical vectors, minor).",
+  "Until the probe instrument is aligned variable-by-variable with the archived 0.797 run (its exact seeding/context/answer config recovered from repo history), any parity number would be comparing apples to oranges in both directions."
+ ],
+ "next_steps": [
+  "Recover the P0 probe's exact configuration from git history and re-align this runner (guard interplay, context form, answer path).",
+  "Decide the paragraph-layer fusion strategy (fallback/quota vs mixed pool) using the top-8 dilution evidence, then re-run parity under the aligned instrument.",
+  "1301-filtered questions degrade to empty answers (scored wrong) - disclosed cost."
+ ],
+ "honest_reading": "n=13 partial archived for transparency; no acceptance claim is made in either direction.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-25T18:20:00Z",
+ "artifacts": ["partial13.jsonl"],
+ "runner": "scripts/product_parity_multi.py"
+}
