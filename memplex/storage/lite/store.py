@@ -1384,7 +1384,15 @@ class LiteMemoryStore:
                     result.func_id, result.summary
                 )
         resolved = self._premise_resolution(self._apply_trust_penalty(fused))
-        return resolved[:top_k]
+        resolved = resolved[:top_k]
+        if self._paragraph_fusion_mode() == "fallback" and len(resolved) < top_k:
+            # Fill leftover slots from the raw layer only: extraction
+            # nodes keep their ranks, paragraphs backstop thin pools.
+            fills = self._search_paragraphs(text, top_k - len(resolved))
+            resolved.extend(
+                f for f in fills if f.func_id not in {r.func_id for r in resolved}
+            )
+        return resolved
 
     @staticmethod
     def _premise_resolution(results: list[SearchResult]) -> list[SearchResult]:
@@ -1507,11 +1515,12 @@ class LiteMemoryStore:
         nodes: dict[str, Any] = {**self._facts, **self._preferences}
         for node in nodes.values():
             documents.append((node.id, self._fact_pref_to_search_text(node)))
-        # ADR-013 Stage 2: verbatim paragraphs join the semantic leg with
-        # their raw text - the answer-bearing unit the product path was
-        # missing (benchmark harness always retrieved raw sessions).
-        for row in self._paragraphs.values():
-            documents.append((row["id"], row["raw_text"]))
+        # ADR-013 Stage 2: verbatim paragraphs join the semantic leg only
+        # under mixed fusion; the default fallback keeps them out of the
+        # ranked pool (top-8 dilution evidence) and fills slots later.
+        if self._paragraph_fusion_mode() == "mixed":
+            for row in self._paragraphs.values():
+                documents.append((row["id"], row["raw_text"]))
         if not documents:
             return []
 
@@ -2777,12 +2786,21 @@ class LiteMemoryStore:
             results = self._local_search(text, top_k=top_k)
 
         extra = self._search_facts_preferences(text, top_k=top_k)
-        para_extra = self._search_paragraphs(text, top_k=top_k)
-        merged = results + extra + para_extra
+        merged = results + extra
+        if self._paragraph_fusion_mode() == "mixed":
+            merged = merged + self._search_paragraphs(text, top_k=top_k)
         if not merged:
             return results
         merged.sort(key=lambda r: r.relevance_score, reverse=True)
         return merged[:top_k]
+
+    @staticmethod
+    def _paragraph_fusion_mode() -> str:
+        """ADR-013 S2 fusion policy: fallback (default - paragraphs fill
+        leftover top-k slots only, after the top-8 dilution evidence),
+        mixed (same-pool competition, -15pp at top-8), or off."""
+        mode = os.environ.get("MEMPLEX_PARAGRAPH_FUSION", "fallback")
+        return mode if mode in {"fallback", "mixed", "off"} else "fallback"
 
     def _search_paragraphs(self, text: str, top_k: int) -> list[SearchResult]:
         """Pure-Python BM25 over the raw-paragraph layer (ADR-013 S2).

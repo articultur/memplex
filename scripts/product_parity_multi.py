@@ -85,18 +85,20 @@ class Proxy:
             },
         )
 
-    def complete(self, prompt: str, *, max_tokens: int, temperature: float = 0.0) -> str:
+    def complete(
+        self, prompt: str, *, max_tokens: int, temperature: float = 0.0, disable_thinking: bool = False
+    ) -> str:
+        payload = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
         for attempt in range(5):
             try:
-                resp = self._client.post(
-                    "/v1/messages",
-                    json={
-                        "model": self._model,
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
+                resp = self._client.post("/v1/messages", json=payload)
                 resp.raise_for_status()
                 return "".join(
                     b.get("text", "")

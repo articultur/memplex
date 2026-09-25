@@ -1,0 +1,24 @@
+{
+ "benchmark": "parity_variance_split",
+ "question": "how much of the 0.7669 single-shot parity reading is answer/judge run-variance?",
+ "protocol": "answer (SC path, temperature 0.7 votes) + judge re-run x3 over the STORED retrieval contexts of the aligned parity run - zero seeding/embedding machine time. The embedding-device component (MPS->CPU) is NOT covered: the host MPS backend is unstable and cannot carry the aligned re-run.",
+ "results": {
+  "n": 133,
+  "trial_accuracies": [0.7519, 0.7594, 0.7594],
+  "mean": 0.7569,
+  "spread": 0.0075,
+  "stable_questions": 124,
+  "flipping_questions": 9,
+  "single_shot_reading": 0.7669
+ },
+ "findings": [
+  "Answer/judge variance is only +-0.75pp (one question): the single-shot 0.7669 was the optimistic end of a 0.7569-mean band.",
+  "The -4pp gap to the 0.797 baseline (now -5.3pp on the mean) is therefore NOT explained by SC/judge randomness. Remaining attribution: the MPS->CPU embedding device difference (rank shifts in retrieval) or a real code-state regression on this path (vector-cache reuse is the only landed change touching it); these two cannot be separated on this host until MPS is stable again.",
+  "Either way the acceptance verdict stands: target not met, and the mean-based reading (0.7569) makes it slightly firmer."
+ ],
+ "honest_reading": "device component explicitly not covered; 9 flipping questions concentrate in ambiguous/judge-borderline answers as usual.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-26T02:10:00Z",
+ "artifacts": ["summary.json"],
+ "runner": "scripts/parity_variance_split.py"
+}

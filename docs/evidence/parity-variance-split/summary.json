@@ -1,0 +1,15 @@
+{
+ "benchmark": "parity_variance_split",
+ "protocol": "answer(SC)+judge re-run x3 over stored contexts; embedding/device variance NOT covered",
+ "n": 133,
+ "trial_accuracies": [
+  0.7519,
+  0.7594,
+  0.7594
+ ],
+ "mean": 0.7569,
+ "spread": 0.0075,
+ "stable_questions": 124,
+ "flipping_questions": 9,
+ "single_shot_reading": 0.7669
+}

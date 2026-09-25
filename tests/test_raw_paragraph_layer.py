@@ -80,6 +80,30 @@ def test_retrieval_surfaces_raw_text(tmp_path):
         svc.stop()
 
 
+def test_fallback_fusion_keeps_extraction_ranks(tmp_path, monkeypatch):
+    """Fallback mode: paragraphs must not displace extraction nodes.
+
+    The mixed pool cost -15pp recall@8 (fidelity probe); the default
+    fusion fills only leftover slots, so a pool with enough extraction
+    hits shows no paragraphs inside the window.
+    """
+    monkeypatch.delenv("MEMPLEX_PARAGRAPH_FUSION", raising=False)
+    svc = _service(tmp_path)
+    try:
+        for i in range(10):
+            svc.write_text(f"Note {i}: routine household record number {i}.", source_type="text")
+        paras = svc.store._paragraphs
+        assert paras
+        hits = svc.store.vector_search("routine household record", top_k=6)
+        pool_hit_ids = {h.func_id for h in hits}
+        assert len(hits) == 6, "extraction pool alone must fill the window"
+        assert not (pool_hit_ids & set(paras)), (
+            "fallback fusion must not let paragraphs crowd out extraction hits"
+        )
+    finally:
+        svc.stop()
+
+
 def test_raw_layer_survives_restart(tmp_path):
     svc = _service(tmp_path)
     svc.write_text("Carol adopted a grey cat named Misty last spring.", source_type="text")
