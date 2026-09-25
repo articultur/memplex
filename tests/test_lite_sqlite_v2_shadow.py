@@ -305,3 +305,124 @@ def test_authority_read_reconstructs_pair(tmp_path, monkeypatch):
     assert "fact_sqliteonly" not in json_after["nodes"], (
         "json authority must not see the SQLite-only row"
     )
+
+
+def test_rw_authority_incremental_and_snapshot(tmp_path, monkeypatch):
+    """Phase-B B2: under rw authority every commit lands incrementally in
+    SQLite; the JSON pair exports only every Nth generation; a reload
+    under read authority reproduces the resident exactly."""
+    from memplex.config import MemplexConfig
+    from memplex.service import MemplexService
+
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "rw")
+    store_dir = tmp_path / "s.sqlite3"
+    config = MemplexConfig()
+    config.storage.backend = "lite"
+    config.storage.path = str(store_dir)
+    config.llm.query_enhancement = False
+    svc = MemplexService(config=config)
+    svc.start()
+    for i in range(10):
+        svc.write_text(f"Record number {i}: the lighthouse logs entry {i}.", source_type="text")
+    # Preference-intent text appends changelog events (the function/
+    # paragraph paths do not), exercising the incremental log append.
+    svc.write_text("Alice prefers storm-gray tea in the evenings.", source_type="text")
+    sqlite_gen = svc.store._generation
+    svc.stop()
+    assert sqlite_gen >= 10
+
+    import sqlite3 as sq
+
+    conn = sq.connect(str(store_dir / "shadow_v2.sqlite3"))
+    meta = dict(conn.execute("SELECT key, value FROM meta"))
+    rows = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    events = conn.execute("SELECT COUNT(*) FROM change_log").fetchone()[0]
+    conn.close()
+    assert int(meta["generation"]) == sqlite_gen, "SQLite must carry the latest generation"
+    assert rows > 0 and events > 0
+
+    # Reload under read authority must reproduce the same resident.
+    os.environ["MEMPLEX_LITE_SQLITE_AUTHORITY"] = "read"
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(store_dir)
+    cfg.llm.query_enhancement = False
+    svc = MemplexService(config=cfg)
+    svc.start()
+    try:
+        assert svc.store._generation == sqlite_gen
+        assert any(
+            "lighthouse logs entry 9" in r["raw_text"]
+            for r in svc.store._paragraphs.values()
+        ), "the last write must survive via the SQLite authority"
+    finally:
+        svc.stop()
+        os.environ.pop("MEMPLEX_LITE_SQLITE_AUTHORITY", None)
+
+
+def test_rw_authority_crash_rolls_back(tmp_path, monkeypatch):
+    """Phase-B B2 crash injection: a writer failure mid-transaction must
+    leave SQLite untouched (atomic rollback) and the reopen consistent."""
+    from memplex.config import MemplexConfig
+    from memplex.service import MemplexService
+    from memplex.storage.lite import sqlite_v2
+
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "rw")
+    store_dir = tmp_path / "s.sqlite3"
+    config = MemplexConfig()
+    config.storage.backend = "lite"
+    config.storage.path = str(store_dir)
+    config.llm.query_enhancement = False
+    svc = MemplexService(config=config)
+    svc.start()
+    svc.write_text("Durable record before the crash window.", source_type="text")
+    svc.stop()
+
+    # Corrupt the writer so the next commit raises mid-transaction.
+    original_commit = sqlite_v2.AuthoritativeWriter.commit
+
+    def exploding_commit(self, *args, **kwargs):
+        raise RuntimeError("injected mid-transaction failure")
+
+    sqlite_v2.AuthoritativeWriter.commit = exploding_commit
+    os.environ["MEMPLEX_LITE_SQLITE_AUTHORITY"] = "rw"
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(store_dir)
+    cfg.llm.query_enhancement = False
+    svc = MemplexService(config=cfg)
+    svc.start()
+    try:
+        try:
+            svc.write_text("This write must not survive.", source_type="text")
+        except Exception as exc:  # noqa: BLE001 - the integrity error is the contract
+            assert "authoritative commit failed" in str(exc)
+        # The failed write must not be resident nor durable.
+        assert not any(
+            "must not survive" in (r.get("raw_text") or "")
+            for r in svc.store._paragraphs.values()
+        )
+    finally:
+        svc.stop()
+        sqlite_v2.AuthoritativeWriter.commit = original_commit
+        os.environ.pop("MEMPLEX_LITE_SQLITE_AUTHORITY", None)
+
+    os.environ["MEMPLEX_LITE_SQLITE_AUTHORITY"] = "read"
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(store_dir)
+    cfg.llm.query_enhancement = False
+    svc = MemplexService(config=cfg)
+    svc.start()
+    try:
+        assert any(
+            "Durable record before the crash window" in r["raw_text"]
+            for r in svc.store._paragraphs.values()
+        ), "pre-crash write must survive"
+        assert not any(
+            "must not survive" in r["raw_text"]
+            for r in svc.store._paragraphs.values()
+        ), "crashed write must not be durable"
+    finally:
+        svc.stop()
+        os.environ.pop("MEMPLEX_LITE_SQLITE_AUTHORITY", None)

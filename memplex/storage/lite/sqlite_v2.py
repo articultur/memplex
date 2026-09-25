@@ -282,3 +282,153 @@ def collect_changelog_events(store: Any) -> list[dict[str, Any]]:
         to_dict = getattr(event, "to_dict", None)
         rows.append(to_dict() if callable(to_dict) else dict(event))
     return rows
+
+
+_NODE_KINDS = (
+    ("functions", "function"),
+    ("facts", "fact"),
+    ("preferences", "preference"),
+    ("observations", "observation"),
+    ("paragraphs", "paragraph"),
+)
+
+
+class AuthoritativeWriter:
+    """B2 write authority: incremental SQLite commits.
+
+    Each commit diffs the base pair against the target pair and applies
+    row upserts/deletes plus a changelog append inside one immediate
+    transaction with synchronous=FULL. The JSON pair degrades to an
+    N-generation snapshot export handled by the caller.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self._path = db_path
+        self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
+
+    def _connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            conn = sqlite3.connect(str(self._path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.isolation_level = None  # explicit BEGIN IMMEDIATE
+            conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+            self._conn = conn
+        return self._conn
+
+    def commit(
+        self,
+        base_memory: dict[str, Any],
+        base_events: list[dict[str, Any]],
+        target_memory: dict[str, Any],
+        target_events: list[dict[str, Any]],
+        generation: int,
+    ) -> bool:
+        """Apply base -> target as an incremental transaction."""
+        with self._lock:
+            conn = self._connection()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for key, kind in _NODE_KINDS:
+                    base_rows = {
+                        str(row.get("id", "")): row
+                        for row in base_memory.get(key, [])
+                    }
+                    target_rows = {
+                        str(row.get("id", "")): row
+                        for row in target_memory.get(key, [])
+                    }
+                    for row_id, row in target_rows.items():
+                        base_row = base_rows.get(row_id)
+                        if base_row == row:
+                            continue
+                        payload = json.dumps(row, default=str, sort_keys=True)
+                        conn.execute(
+                            "INSERT INTO memories (id, kind, payload_json, content_hash, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, payload_json=excluded.payload_json, content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+                            (
+                                row_id,
+                                kind,
+                                payload,
+                                _content_hash(payload),
+                                str(row.get("updated_at", "") or ""),
+                            ),
+                        )
+                    for row_id in base_rows:
+                        if row_id not in target_rows:
+                            conn.execute(
+                                "DELETE FROM memories WHERE id = ?", (row_id,)
+                            )
+                base_edges = {
+                    (e.get("source", ""), e.get("target", ""), e.get("edge_type", "")): e
+                    for e in base_memory.get("edges", [])
+                }
+                target_edges = {
+                    (e.get("source", ""), e.get("target", ""), e.get("edge_type", "")): e
+                    for e in target_memory.get("edges", [])
+                }
+                for edge_key, edge in target_edges.items():
+                    if base_edges.get(edge_key) == edge:
+                        continue
+                    payload = json.dumps(edge, default=str, sort_keys=True)
+                    conn.execute(
+                        "INSERT INTO graph_edges (source, target, edge_type, payload_json, content_hash) VALUES (?, ?, ?, ?, ?) ON CONFLICT(source, target, edge_type) DO UPDATE SET payload_json=excluded.payload_json, content_hash=excluded.content_hash",
+                        (edge_key[0], edge_key[1], edge_key[2], payload, _content_hash(payload)),
+                    )
+                for edge_key in base_edges:
+                    if edge_key not in target_edges:
+                        conn.execute(
+                            "DELETE FROM graph_edges WHERE source = ? AND target = ? AND edge_type = ?",
+                            edge_key,
+                        )
+                if len(target_events) > len(base_events):
+                    conn.executemany(
+                        "INSERT INTO change_log (event_json) VALUES (?)",
+                        [
+                            (json.dumps(event, default=str, sort_keys=True),)
+                            for event in target_events[len(base_events) :]
+                        ],
+                    )
+                elif len(target_events) < len(base_events):
+                    # Changelog compaction/reset: replace-all the log.
+                    conn.execute("DELETE FROM change_log WHERE seq >= ?", (0,))
+                    conn.executemany(
+                        "INSERT INTO change_log (event_json) VALUES (?)",
+                        [
+                            (json.dumps(event, default=str, sort_keys=True),)
+                            for event in target_events
+                        ],
+                    )
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("generation", str(generation)),
+                )
+                if "sync" in target_memory:
+                    conn.execute(
+                        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (
+                            "sync_state",
+                            json.dumps(target_memory["sync"], default=str, sort_keys=True),
+                        ),
+                    )
+                conn.execute("COMMIT")
+                return True
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+
+def authority_write_enabled() -> bool:
+    """B2 flag: SQLite is the write authority, JSON becomes a snapshot."""
+    import os
+
+    return os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") == "rw"

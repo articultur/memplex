@@ -117,6 +117,16 @@ _PARAGRAPH_KEYS = {"id", "raw_text", "trust_tier", "created_at", "source"}
 # batching is not active, so a serializer regression cannot outlive an audit
 # window undetected (loads stay fail-closed full decodes regardless).
 _FULL_DECODE_AUDIT_INTERVAL = 32
+# B2 (SQLite write authority): the JSON pair degrades to an N-generation
+# snapshot export; every other commit is an SQLite-only transaction.
+_SQLITE_SNAPSHOT_EVERY = 8
+
+
+def _sqlite_write_authority() -> bool:
+    """B2 flag: MEMPLEX_LITE_SQLITE_AUTHORITY=rw makes SQLite durable."""
+    return os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") == "rw"
+
+
 # Sentinel fingerprint for a fresh store where neither pair file exists yet;
 # a normal fingerprint is always a 4-tuple, so equality can never confuse them.
 _PAIR_FILES_ABSENT: Final[tuple[str]] = ("__pair_files_absent__",)
@@ -2246,6 +2256,29 @@ class LiteMemoryStore:
                     # Canonical-byte validation (NaN/Infinity rejection)
                     # happens inside commit_locked via the digest encodes,
                     # still strictly before any journal can be published.
+                    if _sqlite_write_authority():
+                        # B2: SQLite is the write authority - one immediate
+                        # transaction carries the delta; the JSON pair
+                        # degrades to an N-generation snapshot below.
+                        self._sqlite_authoritative_commit(base, target)
+                        if target.generation % _SQLITE_SNAPSHOT_EVERY == 0:
+                            # Snapshot export: under rw authority the
+                            # in-memory base IS the durable base (just
+                            # proven by the SQLite commit under this
+                            # lock), so the reload defense is trusted
+                            # rather than re-derived from the lagging
+                            # JSON pair.
+                            committed = self._durability.commit_locked(
+                                base,
+                                target,
+                                base_verified=True,
+                                base_record=None,
+                                target_validated=full_decode_audit,
+                            )
+                        else:
+                            committed = target
+                        self._publish_committed_locally(committed)
+                        return
                     committed = self._durability.commit_locked(
                         base,
                         target,
@@ -2270,6 +2303,34 @@ class LiteMemoryStore:
                 f"Set MEMPLEX_STORAGE_PATH to a writable directory. "
                 f"Original error: {exc}"
             ) from exc
+
+    def _sqlite_authoritative_commit(self, base: LitePair, target: LitePair) -> None:
+        """B2: apply base -> target into SQLite as the durable decision."""
+        from memplex.storage.lite.sqlite_v2 import AuthoritativeWriter
+
+        writer = getattr(self, "_authority_writer", None)
+        if writer is None:
+            writer = AuthoritativeWriter(
+                self._path.parent / "shadow_v2.sqlite3"
+            )
+            self._authority_writer = writer
+        try:
+            ok = writer.commit(
+                base.memory,
+                base.changelog,
+                target.memory,
+                target.changelog,
+                target.generation,
+            )
+        except Exception as exc:
+            # A failed SQLite decision must never leave a speculative
+            # resident state: republish the last durable pair and raise.
+            self._publish_pair(self._durability._load_authoritative_locked())
+            raise LiteStorageIntegrityError(
+                "sqlite authoritative commit failed"
+            ) from exc
+        if not ok:
+            raise LiteStorageIntegrityError("sqlite authoritative commit returned False")
 
     def _shadow_flush_if_enabled(self) -> None:
         """ADR-012 Phase A: mirror the committed state into SQLite.
