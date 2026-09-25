@@ -82,12 +82,16 @@ class ShadowSqliteWriter:
         nodes_by_kind: dict[str, list[dict[str, Any]]],
         changelog_events: list[dict[str, Any]],
         generation: int,
+        edges: list[dict[str, Any]] | None = None,
+        sync_state: dict[str, Any] | None = None,
     ) -> bool:
         """Replace-all shadow flush; returns True when it committed.
 
         Replace-all keeps the diff tool trivially correct (no replay
         logic to diverge) and stays cheap enough at Phase A scale; Phase
         B's authoritative writer switches to incremental row mutations.
+        Edges and the sync snapshot ride along (B0) so an authoritative
+        reader can reconstruct the complete pair from SQLite alone.
         """
         try:
             with self._lock:
@@ -117,10 +121,31 @@ class ShadowSqliteWriter:
                         "INSERT INTO change_log (event_json) VALUES (?)",
                         [(json.dumps(event, default=str, sort_keys=True),) for event in changelog_events],
                     )
+                    # B0: edges under the same replace-all contract.
+                    conn.execute("DELETE FROM graph_edges WHERE source != ?", ("",))
+                    if edges:
+                        conn.executemany(
+                            "INSERT INTO graph_edges (source, target, edge_type, payload_json, content_hash) VALUES (?, ?, ?, ?, ?)",
+                            [
+                                (
+                                    str(edge.get("source", "")),
+                                    str(edge.get("target", "")),
+                                    str(edge.get("edge_type", "")),
+                                    payload_e := json.dumps(edge, default=str, sort_keys=True),
+                                    _content_hash(payload_e),
+                                )
+                                for edge in edges
+                            ],
+                        )
                     conn.execute(
                         "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         ("generation", str(generation)),
                     )
+                    if sync_state is not None:
+                        conn.execute(
+                            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            ("sync_state", json.dumps(sync_state, default=str, sort_keys=True)),
+                        )
                     conn.commit()
                     return True
                 except Exception:
@@ -141,6 +166,69 @@ def shadow_enabled() -> bool:
     import os
 
     return os.environ.get("MEMPLEX_LITE_SQLITE_SHADOW", "") == "1"
+
+
+_KIND_TO_MEMORY_KEY = {
+    "function": "functions",
+    "fact": "facts",
+    "preference": "preferences",
+    "observation": "observations",
+    "paragraph": "paragraphs",
+}
+
+
+def read_authoritative_pair(db_path: Path) -> Any:
+    """Reconstruct a LitePair-shaped memory payload from the SQLite store.
+
+    B1 of the Phase-B blueprint: the read-authority experiment. Returns
+    a dict shaped like ``_raw_memory()`` output plus the changelog list
+    and generation, or None when the store is missing/empty/unreadable
+    (the caller then falls back to the JSON pair unchanged). Row-level
+    integrity is the caller's existing pair validation, which runs on
+    the reconstructed payload exactly as on a JSON load.
+    """
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            memory: dict[str, Any] = {
+                "schema_version": 2,
+                "functions": [],
+                "edges": [],
+                "observations": [],
+                "facts": [],
+                "preferences": [],
+                "paragraphs": [],
+                "sync": {},
+            }
+            for kind, payload_json, _hash in conn.execute(
+                "SELECT kind, payload_json, content_hash FROM memories"
+            ):
+                key = _KIND_TO_MEMORY_KEY.get(kind)
+                if key is None:
+                    return None  # unknown kind: refuse rather than drop rows
+                memory[key].append(json.loads(payload_json))
+            for payload_json, _hash in conn.execute(
+                "SELECT payload_json, content_hash FROM graph_edges"
+            ):
+                memory["edges"].append(json.loads(payload_json))
+            events = [
+                json.loads(row[0])
+                for row in conn.execute("SELECT event_json FROM change_log ORDER BY seq")
+            ]
+            meta = dict(conn.execute("SELECT key, value FROM meta"))
+            generation = int(meta.get("generation", "0") or 0)
+            if "sync_state" in meta:
+                memory["sync"] = json.loads(meta["sync_state"])
+            if not any(memory[k] for k in _KIND_TO_MEMORY_KEY.values()):
+                return None  # empty store: not authoritative over any JSON pair
+            return {"memory": memory, "changelog": events, "generation": generation}
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - unreadable store falls back to JSON
+        logger.warning("sqlite authority read failed, falling back to JSON: %s", exc)
+        return None
 
 
 def collect_nodes_by_kind(store: Any) -> dict[str, list[dict[str, Any]]]:

@@ -180,3 +180,128 @@ def test_end_to_end_shadow_matches_pair(tmp_path, monkeypatch, capsys):
     spec.loader.exec_module(diff)
     monkeypatch.setattr("sys.argv", ["lite_v2_diff.py", str(store_dir)])
     assert diff.main() == 0, f"diff gate failed:\n{capsys.readouterr().out}"
+
+
+def test_authority_read_reconstructs_pair(tmp_path, monkeypatch):
+    """Phase-B B1: with the shadow db populated, loading under
+    MEMPLEX_LITE_SQLITE_AUTHORITY=read must yield the same resident
+    state as the JSON-authority load (nodes, edges, events, generation)."""
+    from memplex.config import MemplexConfig
+    from memplex.service import MemplexService
+
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_SHADOW", "1")
+    store_dir = tmp_path / "s.sqlite3"
+    config = MemplexConfig()
+    config.storage.backend = "lite"
+    config.storage.path = str(store_dir)
+    config.llm.query_enhancement = False
+    svc = MemplexService(config=config)
+    svc.start()
+    svc.write_text("Alice keeps a blue parrot named Kiwi.", source_type="text")
+    svc.write_text("Bob prefers decaf coffee in the evenings.", source_type="text")
+    svc.stop()
+    assert (store_dir / "shadow_v2.sqlite3").exists()
+
+    def resident_snapshot(authority: str) -> dict:
+        os.environ["MEMPLEX_LITE_SQLITE_AUTHORITY"] = authority
+        cfg = MemplexConfig()
+        cfg.storage.backend = "lite"
+        cfg.storage.path = str(store_dir)
+        cfg.llm.query_enhancement = False
+        svc = MemplexService(config=cfg)
+        svc.start()
+        try:
+            store = svc.store
+            return {
+                "nodes": sorted(
+                    n.id
+                    for grp in (store._functions, store._facts, store._preferences)
+                    for n in grp.values()
+                ),
+                "paras": sorted(store._paragraphs),
+                "edges": len(store._edges),
+                "events": len(store._changelog.snapshot()),
+                "gen": store._generation,
+            }
+        finally:
+            svc.stop()
+            os.environ.pop("MEMPLEX_LITE_SQLITE_AUTHORITY", None)
+
+    read_state = resident_snapshot("read")
+    json_state = resident_snapshot("json")
+    assert read_state["nodes"], "authority read must yield a non-empty resident"
+    assert read_state == json_state, (
+        f"authority modes diverge: read={read_state} json={json_state}"
+    )
+
+    import sqlite3 as sq
+
+    conn = sq.connect(str(store_dir / "shadow_v2.sqlite3"))
+    meta_gen = int(dict(conn.execute("SELECT key, value FROM meta"))["generation"])
+    conn.close()
+    assert read_state["gen"] == meta_gen, (
+        "authority read must carry the SQLite generation"
+    )
+
+    # Discriminating check: a row that exists ONLY in SQLite must be
+    # visible under read authority and invisible under JSON authority -
+    # otherwise the flag silently no-ops on synchronized stores.
+    import hashlib
+    import json as _json
+
+    only_sqlite = {
+        "id": "fact_sqliteonly",
+        "memory_type": "fact",
+        "name": "sqlite-only row",
+        "domain": None,
+        "confidence": 1.0,
+        "source_type": "wiki",
+        "owner": None,
+        "tenant_id": None,
+        "owner_subject_id": None,
+        "workspace_id": None,
+        "visibility": None,
+        "provenance": {},
+        "version": 1,
+        "created_at": "2026-09-26T00:00:00+00:00",
+        "updated_at": "2026-09-26T00:00:00+00:00",
+        "origin_session": None,
+        "access_count": 0,
+        "last_accessed_at": None,
+        "source_paragraphs": [],
+        "needs_review": False,
+        "needs_review_until": None,
+        "content_hash": None,
+        "namespace": {},
+        "knowledge_tier": None,
+        "trust_tier": 3,
+        "subject": "probe",
+        "predicate": "proves",
+        "object": "authority",
+        "valid_until": None,
+        "valid_from": None,
+        "invalid_at": None,
+    }
+    payload = _json.dumps(only_sqlite, default=str, sort_keys=True)
+    conn = sq.connect(str(store_dir / "shadow_v2.sqlite3"))
+    conn.execute(
+        "INSERT INTO memories (id, kind, payload_json, content_hash, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            "fact_sqliteonly",
+            "fact",
+            payload,
+            hashlib.sha256(payload.encode()).hexdigest(),
+            "2026-09-26T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    read_extra = resident_snapshot("read")
+    json_after = resident_snapshot("json")
+    assert "fact_sqliteonly" in read_extra["nodes"], (
+        "read authority must see the SQLite-only row"
+    )
+    assert "fact_sqliteonly" not in json_after["nodes"], (
+        "json authority must not see the SQLite-only row"
+    )

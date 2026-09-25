@@ -895,6 +895,31 @@ class LiteDurability:
         _fsync_dir(self._memory_path.parent)
 
     def _load_authoritative_locked(self) -> LitePair:
+        # Phase-B B1 read-authority experiment: when the flag is set and
+        # the SQLite store can reconstruct a complete pair, it wins; any
+        # miss (absent/empty/unreadable store) falls back to the JSON
+        # pair path unchanged. The reconstructed payload runs through
+        # the identical validation below.
+        if os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") == "read":
+            from memplex.storage.lite.sqlite_v2 import read_authoritative_pair
+
+            candidate = read_authoritative_pair(
+                self._memory_path.parent / "shadow_v2.sqlite3"
+            )
+            if candidate is not None:
+                # Reader payload is the raw (non-envelope) shape; the
+                # legacy branch validates it and yields generation 0,
+                # which the SQLite meta generation then overrides.
+                pair = self._decode_pair(candidate["memory"], candidate["changelog"])
+                if pair.generation != candidate["generation"]:
+                    pair = LitePair(
+                        pair.memory,
+                        pair.changelog,
+                        candidate["generation"],
+                        "sqlite-authority",
+                    )
+                self._validate_semantics(pair)
+                return pair
         self._recover_locked()
         memory_exists, changelog_exists = self._memory_path.exists(), self._changelog_path.exists()
         if not memory_exists and not changelog_exists:

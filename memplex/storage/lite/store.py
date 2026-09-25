@@ -2299,6 +2299,8 @@ class LiteMemoryStore:
                 collect_nodes_by_kind(self),
                 collect_changelog_events(self),
                 generation=getattr(self, "_generation", 0),
+                edges=[_serialize_edge(edge) for edge in self._edges],
+                sync_state=copy.deepcopy(self._sync_state),
             )
         except Exception as exc:  # noqa: BLE001 - log-only by ADR-012 contract
             logger.warning("sqlite shadow flush skipped: %s", exc)
