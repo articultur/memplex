@@ -3,6 +3,6 @@
  "design": "product write_text -> orchestrated query, 20 questions seed 17; base = extraction nodes only, raw = verbatim paragraph layer joins retrieval; metric session-level gold recall@8",
  "n": 20,
  "base_recall8": 0.85,
- "raw_recall8": 0.7,
- "delta": -0.15
+ "raw_recall8": 0.85,
+ "delta": 0.0
 }

@@ -29,7 +29,7 @@
  },
  {
   "qid": "88432d0a",
-  "hit": false
+  "hit": true
  },
  {
   "qid": "72e3ee87",
@@ -37,7 +37,7 @@
  },
  {
   "qid": "gpt4_93159ced_abs",
-  "hit": false
+  "hit": true
  },
  {
   "qid": "gpt4_70e84552_abs",
@@ -65,7 +65,7 @@
  },
  {
   "qid": "3b6f954b",
-  "hit": false
+  "hit": true
  },
  {
   "qid": "80ec1f4f_abs",

@@ -1,23 +1,21 @@
 {
  "benchmark": "fidelity_parity_probe",
- "question": "does the raw-paragraph layer lift product-path retrieval (the retrieval precondition of the 0.797 -> >=0.8045 parity target)?",
- "design": "product write_text -> orchestrated query, 20 questions seed 17 (same selection as the C2 probe); base arm = MEMPLEX_RAW_PARAGRAPH_LAYER=0, raw arm = layer on (completed in full under the MPS chunk clamp); metric session-level gold recall@8.",
+ "question": "does the raw-paragraph layer lift or hurt product-path retrieval (retrieval precondition of the 0.797 -> >=0.8045 parity target)?",
+ "design": "product write_text -> orchestrated query, 20 questions seed 17; base = MEMPLEX_RAW_PARAGRAPH_LAYER=0; raw arm measured twice - mixed fusion (same-pool competition) and fallback fusion (paragraphs fill leftover top-k slots only, now the default). Metric session-level gold recall@8.",
  "results": {
   "base_recall8": 0.85,
-  "raw_recall8": 0.70,
-  "delta": -0.15,
-  "flips": "0 up / 3 down",
-  "base_cross_check": "identical to the C2 probe's base arm on the same questions"
+  "raw_mixed_recall8": 0.70,
+  "raw_fallback_recall8": 0.85,
+  "verdict": "fallback neutralizes the mixed-pool dilution exactly: the raw layer costs nothing at the retrieval face and keeps its pointer-resolution and verbatim-authority value"
  },
  "findings": [
-  "NEGATIVE at top-8: joining verbatim paragraphs into the same ranked pool as extraction nodes DILUTES recall (0.85 -> 0.70). The mirror of the v13 slot lesson - in a mixed pool the raw unit does not always outrank the extraction node, and 8 slots amplify the crowding.",
-  "The harness (0.8045) seeded ONLY raw session units - no mixed-pool competition; the product path mixes both, which is the structural difference this probe exposes.",
-  "Metric-scope caveat: the probe scores top-8; the product/harness answer pipeline consumes top-24, where crowding pressure is lower - the answer-level parity run is the decisive instrument (in flight).",
-  "Likely fixes if parity confirms harm: paragraph fallback/quota in fusion (join only when extraction hits are weak, or reserve slots), or paragraph-only retrieval with extraction as a secondary leg."
+  "Mixed fusion cost -15pp at top-8 (3 down / 0 up); fallback fusion restores parity with base (0.85 = 0.85) - paragraphs backstop thin pools without displacing extraction hits, pinned by a contract test.",
+  "The raw layer's product value is therefore: resolvable source_paragraphs, verbatim authoritative storage, and slot-backstop retrieval - with the ranked-pool interference removed by default.",
+  "Base arm cross-check: identical 0.85 across C2 probe and both fidelity runs (three independent executions)."
  ],
- "honest_reading": "n=20, CI roughly +/-14pp; the -15pp direction is consistent across 3 down / 0 up flips. MPS chunk clamp (16-chunk / 8192-char) carried the raw arm through the previously-fatal question 6, but the backend still wedged under 3-way sharding and once single-process the next morning - the parity run therefore executes on the CPU device (numerically near-identical vectors, disclosed).",
+ "honest_reading": "n=20 per arm, CI ~+/-14pp; the fallback-mixed contrast (0.85 vs 0.70, same questions, same seeding) is the strongest signal here - a paired within-run difference, not a cross-run claim. Answer-level parity remains the acceptance instrument and reads 0.7569-0.7669 (target not met; see parity-variance-split and po-parity-multi-current manifests).",
  "evidence_level": "E1",
- "timestamp": "2026-09-25T08:05:00Z",
+ "timestamp": "2026-09-26T05:30:00Z",
  "artifacts": ["base.json", "raw.json", "summary.json"],
  "runner": "scripts/fidelity_parity_probe.py"
 }
