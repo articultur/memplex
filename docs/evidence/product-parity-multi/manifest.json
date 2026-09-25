@@ -12,8 +12,8 @@
   "Until the probe instrument is aligned variable-by-variable with the archived 0.797 run (its exact seeding/context/answer config recovered from repo history), any parity number would be comparing apples to oranges in both directions."
  ],
  "next_steps": [
-  "Recover the P0 probe's exact configuration from git history and re-align this runner (guard interplay, context form, answer path).",
-  "Decide the paragraph-layer fusion strategy (fallback/quota vs mixed pool) using the top-8 dilution evidence, then re-run parity under the aligned instrument.",
+  "RESOLVED by archaeology: the 0.797 probe IS the official runner's --product-orchestration mode - seeding bypasses write_text entirely (pre-built Function nodes via store.add, summary ~ verbatim text, no extractor/guard/paragraph layer), with the SC answer path and official judge. The 41pp gap traced to seeding-path divergence, not product regression.",
+  "The aligned re-run therefore executes run_lme_official_j.py --only-type multi-session --product-orchestration (the original instrument, current code state) on the CPU device; product_parity_multi.py is superseded for this acceptance.",
   "1301-filtered questions degrade to empty answers (scored wrong) - disclosed cost."
  ],
  "honest_reading": "n=13 partial archived for transparency; no acceptance claim is made in either direction.",
