@@ -1,0 +1,16 @@
+{
+  "benchmark": "longmemeval_s_official_j",
+  "dataset": "longmemeval_s_cleaned (500)",
+  "judge_model": "glm-5.3",
+  "judge_protocol": "official evaluate_qa.py yes/no prompts, temperature 0",
+  "generation": "bge-m3 retrieval top-24 + glm-5.3 generation (40000-char context budget, abstention-aware prompt)",
+  "samples_judged": 133,
+  "samples_total": 133,
+  "J": 0.7669,
+  "by_type": {
+    "multi-session": {
+      "J": 0.7669,
+      "n": 133
+    }
+  }
+}

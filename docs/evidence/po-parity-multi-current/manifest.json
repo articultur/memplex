@@ -1,0 +1,25 @@
+{
+ "benchmark": "product_orchestration_parity_multi_current",
+ "question": "does the P0-era product parity level (0.797 vs harness 0.8045) hold on the current code state (trust tiers, raw layer, TOCTOU fold, vector-cache reuse) under the original instrument?",
+ "instrument": "run_lme_official_j.py --only-type multi-session --product-orchestration - the exact 0.797 probe recovered by archaeology (1eb5970/5fd8070): seeding bypasses write_text (store.add pre-built Function nodes), context = product orchestrated query top-24 summaries, SC answer path, official judge. CPU embedding device (MPS unstable on this host); the raw-paragraph layer is NOT in this path because the probe seeds via store.add.",
+ "results": {
+  "n": 133,
+  "J": 0.7669,
+  "p0_baseline": 0.797,
+  "target": 0.8045,
+  "gap_to_baseline": "-4 questions",
+  "gap_to_target": "-5 questions"
+ },
+ "verdict": "TARGET NOT MET. The current-state re-run lands 4 questions under the P0 baseline and 5 under the 0.8045 target. The -4 is within plausible run variance (intra-pool +-2-5 questions was routine in the v13-era campaigns, and this run additionally differs by embedding device MPS->CPU and SC temperature-0.7 randomness), but nothing here supports claiming the 0.8045 band either.",
+ "attribution_candidates": [
+  "Embedding device: P0 ran on MPS, this run on CPU - near-identical vectors but not identical rankings",
+  "SC path randomness (temperature 0.7 votes) between runs",
+  "Code-state deltas that DO touch this path: vector-cache reuse on fused hits, trust-tier penalty wiring (inert here - seeded nodes default to tier 3), premise-resolution default-off",
+  "Run-to-run judge variance"
+ ],
+ "honest_reading": "The fidelity acceptance target (0.797 -> >=0.8045) is NOT discharged: the aligned instrument on the current state reads 0.7669. Closing the remaining 5 questions requires either a device-aligned re-run (MPS restored) or N-run averaging to separate variance from regression, plus the paragraph-layer fusion decision (its top-8 dilution evidence is negative) before the product write-path variant of parity is meaningful at all.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-25T23:30:00Z",
+ "artifacts": ["summary.json", "hypotheses.jsonl"],
+ "runner": "scripts/run_lme_official_j.py --product-orchestration"
+}
