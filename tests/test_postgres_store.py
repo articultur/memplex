@@ -160,7 +160,7 @@ class _MockCursor:
                 return (params[-1],)
             return (params[0],)
         if "has_schema_privilege" in sql:
-            return (True,) * 8
+            return (True,) * 9
         if "attribute.atttypid" in sql and "embedding" in sql:
             return (1, 4, "public", "vector")
         if "has_sequence_privilege" in sql or "has_type_privilege" in sql:

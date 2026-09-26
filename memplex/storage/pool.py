@@ -1371,12 +1371,15 @@ class PostgresPoolManager:
             "memplex_observations",
             "memplex_facts",
             "memplex_preferences",
+            "memplex_paragraphs",
             "memplex_changelog",
             "feedback",
         )
         cursor.execute(
             """
             SELECT has_schema_privilege(current_user, %s, 'USAGE'),
+                   has_table_privilege(current_user, format('%%I.%%I', %s, %s),
+                                       'SELECT,INSERT,UPDATE,DELETE'),
                    has_table_privilege(current_user, format('%%I.%%I', %s, %s),
                                        'SELECT,INSERT,UPDATE,DELETE'),
                    has_table_privilege(current_user, format('%%I.%%I', %s, %s),
@@ -1395,7 +1398,7 @@ class PostgresPoolManager:
             (schema, *sum(((schema, table) for table in tables), ())),
         )
         row = cursor.fetchone()
-        if row is None or len(row) != 8 or not all(row):
+        if row is None or len(row) != 9 or not all(row):
             raise PermissionError("required schema or table privilege is absent")
         cursor.execute(
             """

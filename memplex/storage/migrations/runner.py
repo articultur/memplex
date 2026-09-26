@@ -679,6 +679,7 @@ def schema_fingerprint(
             "memplex_observations",
             "memplex_facts",
             "memplex_preferences",
+            "memplex_paragraphs",
         }
         core_tables = {
             name: ({**table, "triggers": ()} if name in capture_tables else table)

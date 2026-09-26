@@ -352,6 +352,7 @@ def _grant_application_acl_contract(pg_dsn: str, role: str) -> None:
                 "memplex_observations",
                 "memplex_facts",
                 "memplex_preferences",
+                "memplex_paragraphs",
                 "memplex_sync_deliveries",
                 "memplex_sync_cursors",
                 "memplex_sync_snapshots",

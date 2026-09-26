@@ -177,6 +177,12 @@ _INDEX_SIGNATURES: Final[dict[str, tuple[bool, str, bool, tuple[str, ...], tuple
         keys=("tenant_id",),
         definition="CREATE INDEX memplex_preferences_tenant_idx ON memplex_preferences USING btree (tenant_id)",
     ),
+    "memplex_paragraphs_tenant_idx": _index_signature(
+        unique=False,
+        method="btree",
+        keys=("tenant_id",),
+        definition="CREATE INDEX memplex_paragraphs_tenant_idx ON memplex_paragraphs USING btree (tenant_id)",
+    ),
     "memplex_changelog_tenant_idx": _index_signature(
         unique=False,
         method="btree",
@@ -354,7 +360,7 @@ def _legacy_base_columns(table_name: str, *, changelog_bigint: bool) -> tuple[tu
             ("data", "jsonb", True, ""),
             ("created_at", "timestamp with time zone", False, ""),
         )
-    if table_name in {"memplex_facts", "memplex_preferences"}:
+    if table_name in {"memplex_facts", "memplex_preferences", "memplex_paragraphs"}:
         return (
             ("id", "text", True, ""),
             ("data", "jsonb", True, ""),
@@ -378,7 +384,13 @@ def _primary_key(table_name: str) -> tuple[str, ...]:
         return ("id",)
     if table_name == "memplex_edges":
         return ("source", "target", "edge_type")
-    if table_name in {"memplex_observations", "memplex_facts", "memplex_preferences", "memplex_changelog"}:
+    if table_name in {
+        "memplex_observations",
+        "memplex_facts",
+        "memplex_preferences",
+        "memplex_paragraphs",
+        "memplex_changelog",
+    }:
         return ("id",)
     raise AssertionError(f"unhandled core table: {table_name}")
 
@@ -404,6 +416,7 @@ def _required_core_indexes(
         "memplex_observations": {"memplex_observations_tenant_idx"},
         "memplex_facts": {"memplex_facts_tenant_idx"},
         "memplex_preferences": {"memplex_preferences_tenant_idx"},
+        "memplex_paragraphs": {"memplex_paragraphs_tenant_idx"},
         "memplex_changelog": {"memplex_changelog_tenant_idx"},
     }
     if include_integrity_indexes:
@@ -671,8 +684,17 @@ def _has_expected_core_constraints(
 def _matches_post_core(
     tables: dict[str, Any], snapshot: dict[str, Any]
 ) -> tuple[str, bool, int | None, bool] | None:
-    if not set(_CORE_TABLES).issubset(tables):
+    # memplex_paragraphs (0007) is optional during classification: a
+    # fully-migrated v6 schema (adoption-test intermediate states, and
+    # any pre-0007 deployment snapshot) must stay recognisable, while a
+    # schema that DOES carry the table validates it through the same
+    # exact checks below.
+    required = set(_CORE_TABLES) - {"memplex_paragraphs"}
+    if not required.issubset(tables):
         return None
+    validating = tuple(
+        name for name in _CORE_TABLES if name != "memplex_paragraphs" or name in tables
+    )
     function_columns = {column[0]: column for column in tables["memplex_functions"]["columns"]}
     embedding = function_columns.get("embedding")
     vector_dim: int | None = None
@@ -706,7 +728,16 @@ def _matches_post_core(
                         and _post_column_shape(tables[table_name])
                         == _post_core_columns(
                             table_name,
-                            layout=layout,
+                            # memplex_paragraphs is created by 0007 with the
+                            # migration_v2 column order regardless of which
+                            # historical layout the surrounding schema was
+                            # adopted from, so it always validates against
+                            # the migration_v2 shape.
+                            layout=(
+                                "migration_v2"
+                                if table_name == "memplex_paragraphs"
+                                else layout
+                            ),
                             has_embedding=embedding is not None
                             and table_name == "memplex_functions",
                             changelog_bigint=changelog_bigint,
@@ -722,11 +753,15 @@ def _matches_post_core(
                             table_name,
                             table,
                             snapshot,
-                            layout=layout,
+                            layout=(
+                                "migration_v2"
+                                if table_name == "memplex_paragraphs"
+                                else layout
+                            ),
                             changelog_bigint=changelog_bigint,
                         )
                         and (table_name != "memplex_functions" or _search_tsv_matches(table))
-                        for table_name in _CORE_TABLES
+                        for table_name in validating
                         for table in (tables[table_name],)
                     ):
                         candidate_layout = (

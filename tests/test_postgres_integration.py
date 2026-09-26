@@ -223,6 +223,7 @@ def _provision_application_role(pg_dsn: str, role: str) -> None:
                 "memplex_observations",
                 "memplex_facts",
                 "memplex_preferences",
+                "memplex_paragraphs",
             ):
                 cur.execute(
                     pg_sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON {} TO {}").format(
@@ -1507,6 +1508,9 @@ _V5_SYNC_TABLES = (
     "memplex_sync_cursors", "memplex_sync_stream_state", "memplex_sync_local_identity", "memplex_sync_ingress_principals", "memplex_sync_snapshots",
     "memplex_sync_snapshot_items",
     "memplex_background_tasks",
+    # 0007 creates this table during adoption while the handed-off role
+    # owns the schema, so the restore path must re-own it too.
+    "memplex_paragraphs",
 )
 
 
@@ -1780,7 +1784,7 @@ def test_migration_plan_and_dry_run_on_empty_schema_are_read_only(migration_dsn)
     plan = runner.plan()
     dry_run = runner.apply(dry_run=True)
 
-    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5, 6]
+    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5, 6, 7]
     assert dry_run == plan
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
@@ -1827,6 +1831,7 @@ def test_recognised_pre_g002_catalogue_upgrades_atomically(migration_dsn):
         (4, "executed"),
         (5, "executed"),
         (6, "executed"),
+        (7, "executed"),
     ]
     conn = psycopg2.connect(migration_dsn)
     try:
@@ -1855,7 +1860,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7]
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
     result = runner.apply()
@@ -1868,6 +1873,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
         (4, "executed"),
         (5, "executed"),
         (6, "executed"),
+        (7, "executed"),
     ]
     assert _migration_table_exists(migration_dsn, "feedback")
 
@@ -1893,9 +1899,9 @@ def test_v3_catalogue_upgrades_to_v4_with_function_and_virtual_edge_targets(migr
 
     plan = PostgresMigrationRunner(migration_dsn).plan()
     assert plan.current_version == 3
-    assert [migration.version for migration in plan.pending] == [4, 5, 6]
+    assert [migration.version for migration in plan.pending] == [4, 5, 6, 7]
     assert PostgresMigrationRunner(migration_dsn).apply().state == "ready"
-    assert _ledger_rows(migration_dsn)[-1] == (6, "executed")
+    assert _ledger_rows(migration_dsn)[-1] == (7, "executed")
     assert _admin_query(
         migration_dsn,
         "SELECT edge_type, target_function FROM memplex_edges ORDER BY edge_type",
@@ -1913,6 +1919,7 @@ def test_v4_upgrades_atomically_to_reliable_sync_v5(migration_dsn):
         (4, "executed"),
         (5, "executed"),
         (6, "executed"),
+        (7, "executed"),
     ]
     assert _admin_query(
         migration_dsn,
@@ -4407,7 +4414,7 @@ def test_0004_runner_reads_hidden_typed_domains_with_python_runtime_semantics(mi
             ("memplex_edges", True),
             ("memplex_functions", True),
         ]
-        assert _ledger_rows(migration_dsn)[-1] == (6, "executed")
+        assert _ledger_rows(migration_dsn)[-1] == (7, "executed")
     finally:
         _restore_v3_catalogue_owner_and_drop_role(migration_dsn, role, original_owner)
 
@@ -4768,6 +4775,7 @@ def test_two_runners_converge_to_one_contiguous_ledger(migration_dsn):
         (4, "executed"),
         (5, "executed"),
         (6, "executed"),
+        (7, "executed"),
     ]
 
 
@@ -4788,6 +4796,7 @@ def test_second_apply_preserves_catalogue_ledger_modes_and_applied_at(migration_
         (4, "executed"),
         (5, "executed"),
         (6, "executed"),
+        (7, "executed"),
     ]
 
 
@@ -4980,7 +4989,7 @@ def test_exact_runtime_v1_catalogue_is_a_known_upgrade_baseline(migration_dsn, w
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7]
     assert runner.status() == plan
     assert runner.apply(dry_run=True) == plan
     assert runner.apply().state == "ready"
@@ -5109,7 +5118,7 @@ def test_runner_confines_a_quoted_target_schema_before_reading_ledger(pg_dsn):
         runner = PostgresMigrationRunner(pg_dsn, connection_factory=target_then_source_factory)
         plan = runner.plan()
         assert plan.current_version == 2
-        assert [migration.version for migration in plan.pending] == [3, 4, 5, 6]
+        assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7]
         assert runner.apply().state == "ready"
         assert _migration_ledger_digest(pg_dsn, source_factory) == source_before
         assert PostgresMigrationRunner(pg_dsn, connection_factory=source_factory).status().state == "ready"

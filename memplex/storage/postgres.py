@@ -1243,6 +1243,73 @@ class PostgresMemoryStore:
                 None, node=fact,
             )
 
+    def persist_paragraphs(
+        self, paragraphs: list, *, trust_tier: int, source_hint: str
+    ) -> None:
+        """ADR-013 Stage 2 raw layer on PostgreSQL (B3): upsert verbatim
+        paragraphs into ``memplex_paragraphs``.
+
+        Ids are the same content-addressed values the lite pair stores,
+        so source_paragraphs references resolve on both backends. Rows
+        ride the typed upsert without the sync context - carrying
+        paragraphs over the wire is Stage 3 (SyncNodeType extension).
+        """
+        import json as _json
+
+        from memplex.models.paragraph import persisted_paragraph_id
+
+        context = self._authorization_context()
+        now = datetime.now(UTC)
+        with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
+            for para in paragraphs:
+                raw_text = (getattr(para, "raw_text", "") or "").strip()
+                if not raw_text:
+                    continue
+                row_id = persisted_paragraph_id(
+                    source_hint, getattr(para, "id", ""), raw_text
+                )
+                identity = self._row_identity_values(context)
+                cur.execute(
+                    """
+                    INSERT INTO memplex_paragraphs
+                        (id, data, updated_at, tenant_id, owner_subject,
+                         workspace, visibility, source_agent, source_session)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id, id) DO UPDATE SET
+                        data = EXCLUDED.data,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        row_id,
+                        _json.dumps(
+                            {
+                                "raw_text": raw_text,
+                                "trust_tier": int(trust_tier),
+                                "source": (getattr(para, "source", "") or "")[:200],
+                            }
+                        ),
+                        now,
+                        *identity,
+                    ),
+                )
+
+    def get_paragraph(self, para_id: str) -> dict | None:
+        """Read one raw-paragraph row by its content-addressed id."""
+        import json as _json
+
+        context = self._authorization_context()
+        scope_sql = _acl_scope_sql("memplex_paragraphs")
+        with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
+            cur.execute(
+                "SELECT data FROM memplex_paragraphs WHERE id = %s AND " + scope_sql,
+                (para_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        payload = row[0] if not isinstance(row[0], str) else _json.loads(row[0])
+        return dict(payload)
+
     def add_preference(self, preference: Preference) -> None:
         """Persist a Preference (upsert by id) into ``memplex_preferences``."""
         self._stamp_node(preference)

@@ -22,6 +22,9 @@ _CORE_TABLES: Final[tuple[str, ...]] = (
     "memplex_observations",
     "memplex_facts",
     "memplex_preferences",
+    # ADR-013 Stage 2 raw layer (0007): same typed-node shape; sync
+    # carriage arrives with Stage 3's SyncNodeType extension.
+    "memplex_paragraphs",
     "memplex_changelog",
 )
 _SYNC_TABLES: Final[tuple[str, ...]] = (
@@ -65,6 +68,7 @@ _APPLICATION_ACL: Final[dict[str, frozenset[str]]] = {
     "memplex_observations": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     "memplex_facts": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     "memplex_preferences": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
+    "memplex_paragraphs": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     "memplex_changelog": frozenset({"SELECT", "INSERT", "DELETE"}),
     "feedback": frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     "memplex_sync_outbox": frozenset({"SELECT", "INSERT", "DELETE"}),
@@ -132,6 +136,7 @@ _KNOWN_MEMPLEX_RELATION_KINDS: Final[dict[str, str]] = {
     "memplex_observations_tenant_idx": "i",
     "memplex_facts_tenant_idx": "i",
     "memplex_preferences_tenant_idx": "i",
+    "memplex_paragraphs_tenant_idx": "i",
     "memplex_changelog_tenant_idx": "i",
     "memplex_functions_workspace_normalized_name_key": "i",
     "memplex_functions_user_normalized_name_key": "i",
