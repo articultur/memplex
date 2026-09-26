@@ -1,0 +1,23 @@
+{
+ "benchmark": "product_parity_fulltier_multi",
+ "question": "does the product path reach the 0.8045 harness level when the full orchestration answer tier (SC three-vote + selector) is enabled?",
+ "instrument": "same as the aligned parity probe (write_text seeding, product orchestrated retrieval top-24, harness generation prompt verbatim, official judge) but the answer path now runs the harness's own generate_answer: SC three votes (temperature 0.7) + context-grounded selector on multi-session.",
+ "results": {
+  "n": 133,
+  "accuracy": 0.3759,
+  "single_shot_prior": 0.3611,
+  "p0_baseline": 0.797,
+  "target": 0.8045,
+  "empty_answers": 1
+ },
+ "findings": [
+  "VERDICT: the 0.8045 fidelity target is NOT reachable on the current product write path, at any answer tier. Full orchestration moved the needle only 0.361 -> 0.376 (+1.5pp) against a -42pp gap.",
+  "The bottleneck is upstream of the answerer: on this seeding path (write_text extraction), retrieval summaries do not carry the answer-bearing text the harness's verbatim sessions carry. SC voting cannot vote up information that is not in the context.",
+  "This closes the fidelity acceptance with a definitive negative on the write_text product path, independent of answer tier. The harness 0.8045/0.894 numbers remain reproducible on the harness's own seeding (store.add verbatim), which is a different storage contract - exactly the gap ADR-013 Stage 2's raw layer exists to close, and the PG/store side now has it; the write_text path's extractor-rewrite step is the remaining loss point."
+ ],
+ "honest_reading": "n=133 full pool, no sampling; one empty answer (1301 content filter, scored wrong). The comparison 0.376 vs 0.797 is same-pool same-judge same-answer-tier - the cleanest apples-to-apples reading this campaign has produced, and it is negative by a wide margin.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-26T14:30:00Z",
+ "artifacts": ["shard0.jsonl", "summary0.json"],
+ "runner": "scripts/product_parity_multi.py (full orchestration tier)"
+}

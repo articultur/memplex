@@ -39,6 +39,10 @@ import httpx
 from memplex.config import load_config
 from memplex.service import MemplexService
 
+sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+from run_lme_official_j import generate_answer as _harness_generate_answer
+from run_lme_official_j import Proxy as _HarnessProxy
+
 DATA = _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval_s_cleaned.json"
 TOP_K = 24
 CONTEXT_CHAR_BUDGET = 40000
@@ -77,7 +81,7 @@ class Proxy:
         self._model = model
         self._client = httpx.Client(
             base_url=settings["ANTHROPIC_BASE_URL"],
-            timeout=180,
+            timeout=600,
             trust_env=False,
             headers={
                 "x-api-key": settings["ANTHROPIC_AUTH_TOKEN"],
@@ -143,12 +147,26 @@ def run_question(q: dict, answerer: Proxy, judge: Proxy) -> dict:
     finally:
         svc.stop()
 
-    prompt = GENERATION_PROMPT.format(
-        question_date=q["question_date"],
-        context=context[:CONTEXT_CHAR_BUDGET],
-        question=q["question"],
-    )
-    answer = answerer.complete(prompt, max_tokens=2048).strip()
+    # Full orchestration tier: the harness's own answer path (SC three
+    # votes + context-grounded selector on multi-session), fed by the
+    # harness Proxy so thinking/temperature handling matches exactly.
+    harness_proxy = _HarnessProxy()
+    _harness_patched = False
+    try:
+        answer = _harness_generate_answer(
+            harness_proxy, "multi-session", q["question"],
+            context[:CONTEXT_CHAR_BUDGET], q["question_date"],
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade to direct answer
+        if not _harness_patched:
+            _harness_patched = True
+        print(f"  harness answer failed ({exc}); direct fallback", flush=True)
+        prompt = GENERATION_PROMPT.format(
+            question_date=q["question_date"],
+            context=context[:CONTEXT_CHAR_BUDGET],
+            question=q["question"],
+        )
+        answer = answerer.complete(prompt, max_tokens=2048).strip()
     verdict = judge.complete(
         JUDGE_TEMPLATE.format(q["question"], q["answer"], answer[:2000]),
         max_tokens=512,
