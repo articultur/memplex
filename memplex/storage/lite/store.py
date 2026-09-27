@@ -163,7 +163,8 @@ def _validate_g002_historical_node_keys(raw: dict, memory_type: str) -> None:
 
 def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep reload, COW mutation, and journal decision in one flock scope."""
-    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+
+    def _locked_call(self: Any, args: tuple, kwargs: dict) -> Any:
         with self._durability.writer_lock():
             try:
                 return method(self, *args, **kwargs)
@@ -182,6 +183,31 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
                     self._committed_pair = None
                     self._committed_record = None
                 raise
+
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        from memplex.storage.lite.single_writer import single_writer_enabled
+
+        if single_writer_enabled():
+            # B4: mutations execute on the single writer thread; the
+            # caller blocks for the result. Embedding/extraction already
+            # ran on the caller thread - only the durable mutation queues.
+            # The queue hangs off the durability object (shared by scoped
+            # facades' inner store); a facade without one falls back to
+            # the direct locked call.
+            try:
+                owner = getattr(self, "_durability", None)
+            except Exception:  # noqa: BLE001 - facade without durability probe
+                owner = None
+            if owner is None:
+                return _locked_call(self, args, kwargs)
+            writer = getattr(owner, "_single_writer", None)
+            if writer is None:
+                from memplex.storage.lite.single_writer import SingleWriterQueue
+
+                writer = SingleWriterQueue()
+                owner._single_writer = writer
+            return writer.submit(lambda: _locked_call(self, args, kwargs))
+        return _locked_call(self, args, kwargs)
 
     wrapped.__name__ = method.__name__
     wrapped.__doc__ = method.__doc__

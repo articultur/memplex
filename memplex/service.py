@@ -2368,6 +2368,21 @@ class MemplexService:
             worker_result = self._worker.stop(
                 timeout=self._config.worker.drain_timeout_seconds
             )
+            # B4 single-writer queue: drain queued mutations after the
+            # worker stopped. The queue itself stays restartable: the CLI
+            # command pattern reuses one service across stop() cycles
+            # (make service -> command -> stop -> next command), so a
+            # hard close here would break the next mutation. The writer
+            # thread is a daemon; process exit reclaims it. Scoped
+            # facades (HTTP ACL wrappers) may reject the attribute probe
+            # entirely - they own no queue, nothing to drain.
+            try:
+                _durability = getattr(self.store, "_durability", None)
+                _single_writer = getattr(_durability, "_single_writer", None)
+                if _single_writer is not None:
+                    _single_writer.drain()
+            except Exception as exc:  # noqa: BLE001 - probe-only, no queue to drain
+                logger.debug("single-writer drain probe skipped: %s", exc)
         except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             primary_error = exc
         try:
