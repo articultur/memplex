@@ -1401,6 +1401,32 @@ class LiteMemoryStore:
         is exactly the FTS path.
         """
         self._refresh_for_read()
+        if self._paragraph_fusion_mode() == "primary":
+            # Harness-composition mode: session-verbatim units rank in
+            # their own pool (exactly how the benchmark harness's session
+            # units rank among themselves), extraction nodes backfill
+            # the leftover slots. This is the retrieval composition the
+            # 0.8045-tier harness numbers were built on.
+            para_hits = self._search_paragraphs(text, top_k)
+            para_ids = {r.func_id for r in para_hits}
+            vector_para = [
+                r for r in self._vector_search_leg(text, top_k=top_k)
+                if r.func_id in self._paragraphs
+            ]
+            merged = self._fuse_search_legs([para_hits, vector_para], top_k)
+            if len(merged) < top_k:
+                results = self._search_with_fallback(text, top_k=top_k)
+                for result in results:
+                    result.trust_tier = self._trust_of(result.func_id)
+                merged.extend(
+                    r for r in results if r.func_id not in para_ids
+                )
+            for result in merged:
+                if result.vector_cache is None:
+                    result.vector_cache = self._vector_index.cached_vector(
+                        result.func_id, result.summary
+                    )
+            return self._premise_resolution(self._apply_trust_penalty(merged))[:top_k]
         results = self._search_with_fallback(text, top_k=top_k)
         for result in results:
             result.trust_tier = self._trust_of(result.func_id)
@@ -2887,9 +2913,11 @@ class LiteMemoryStore:
     def _paragraph_fusion_mode() -> str:
         """ADR-013 S2 fusion policy: fallback (default - paragraphs fill
         leftover top-k slots only, after the top-8 dilution evidence),
-        mixed (same-pool competition, -15pp at top-8), or off."""
+        mixed (same-pool competition, -15pp at top-8), primary (paragraphs
+        rank in their own pool with extraction backfill - the harness
+        composition), or off."""
         mode = os.environ.get("MEMPLEX_PARAGRAPH_FUSION", "fallback")
-        return mode if mode in {"fallback", "mixed", "off"} else "fallback"
+        return mode if mode in {"fallback", "mixed", "primary", "off"} else "fallback"
 
     def _search_paragraphs(self, text: str, top_k: int) -> list[SearchResult]:
         """Pure-Python BM25 over the raw-paragraph layer (ADR-013 S2).

@@ -1,0 +1,8 @@
+{
+ "benchmark": "product_parity_multi",
+ "pool": "multi-session",
+ "n": 133,
+ "accuracy": 0.7669,
+ "baseline_product_p0": 0.797,
+ "target_harness_v4": 0.8045
+}

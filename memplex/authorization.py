@@ -61,10 +61,44 @@ class _TypedNodeLookup:
                 node = None
             if node is not None:
                 return node
+        # ADR-013 Stage 2 raw layer: paragraph rows are dict-native, not
+        # MemoryNode instances; resolve them from the raw store so the
+        # ACL filter keeps raw-layer retrieval hits instead of silently
+        # dropping them as unresolvable ids.
+        paragraphs = getattr(self._store, "_paragraphs", None)
+        if isinstance(paragraphs, dict):
+            row = paragraphs.get(node_id)
+            if row is not None:
+                return _RawParagraphView(row)
         return None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
+
+
+class _RawParagraphView:
+    """ACL-visible facade over one raw-paragraph row (dict-native).
+
+    Carries the identity/visibility fields ``is_node_visible`` reads.
+    The persisted row trusts the writing identity (bind-time stamping
+    happens in the write path), so the view projects the same
+    tenant/workspace/user fields the extraction nodes carry.
+    """
+
+    __slots__ = (
+        "id", "namespace", "owner_subject", "raw_text",
+        "tenant_id", "trust_tier", "visibility", "workspace_id",
+    )
+
+    def __init__(self, row: dict) -> None:
+        self.id = row.get("id", "")
+        self.tenant_id = row.get("tenant_id")
+        self.workspace_id = row.get("workspace_id")
+        self.owner_subject = row.get("owner_subject")
+        self.visibility = row.get("visibility") or "workspace"
+        self.namespace = dict(row.get("namespace") or {})
+        self.trust_tier = int(row.get("trust_tier", 3))
+        self.raw_text = row.get("raw_text", "")
 
 
 class AuthorizationGate:
