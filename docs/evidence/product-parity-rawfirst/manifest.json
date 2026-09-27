@@ -1,0 +1,24 @@
+{
+ "benchmark": "product_parity_rawfirst_multi",
+ "question": "does swapping the parity context to verbatim paragraphs (raw-first) close the gap to the 0.797 baseline?",
+ "instrument": "identical to the full-tier parity run (write_text seeding, product orchestrated retrieval top-24, harness SC answer tier, official glm-5.3 judge) except the context assembly substitutes each retrieval hit's verbatim paragraph text when the hit is a raw-layer row.",
+ "results": {
+  "n": 133,
+  "accuracy": 0.3534,
+  "fulltier_digest_context": 0.3759,
+  "single_shot_prior": 0.3611,
+  "p0_baseline_mps": 0.797,
+  "target": 0.8045,
+  "empty_answers": 1
+ },
+ "findings": [
+  "Raw-first context does NOT close the gap: 0.3534 vs 0.3759 with digest summaries - verbatim paragraph text in the context is slightly WORSE than extraction digests at this context budget (40k chars over top-24).",
+  "This refutes the simple 'verbatim text in context' hypothesis for the parity gap. The remaining explanation is structural: the product retrieval ranking (what lands in the top-24 slots) differs from the harness's session-unit ranking, and the harness's 0.8045 came from session-level units whose context construction (60k budget, session-header format, turn windowing) differs in ways beyond a context-text swap.",
+  "Three-shot campaign total: digest context 0.376, raw context 0.353, both far under 0.797. The parity gap is the compound product of seeding shape, ranking composition, and context budget/format - a systems gap, not a single-switch fix."
+ ],
+ "honest_reading": "n=133 full pool; one 1301-filtered empty answer. The raw-first penalty (-2.3pp vs digests) is within noise (CI ~+/-8pp at n=133) but the direction is consistent with slot crowding: verbatim units are longer, so fewer distinct sessions fit the 40k budget.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-27T02:50:00Z",
+ "artifacts": ["shard0.jsonl", "summary0.json"],
+ "runner": "scripts/product_parity_multi.py (raw-first context)"
+}

@@ -143,7 +143,15 @@ def run_question(q: dict, answerer: Proxy, judge: Proxy) -> dict:
                 except ValueError:
                     continue  # duplicate extraction id: memory already stored
         result = svc.query(q["question"], top_k=TOP_K, orchestrated=True, explain=False)
-        context = "\n\n".join(r.summary for r in result.results[:TOP_K])
+        # Raw-first context: paragraphs are the verbatim authoritative
+        # layer; when the retrieval surface carries them they win the
+        # context slots, extraction digests backfill the remainder.
+        paragraphs = getattr(svc.store, "_paragraphs", {})
+        context_parts = []
+        for r in result.results[:TOP_K]:
+            para = paragraphs.get(r.func_id)
+            context_parts.append(para["raw_text"] if para else r.summary)
+        context = "\n\n".join(context_parts)
     finally:
         svc.stop()
 
