@@ -1,0 +1,32 @@
+{
+ "benchmark": "longmemeval_v2_enterprise_small_full",
+ "question": "first enterprise-domain full-population point on the V2 small tier (211 questions, all types)",
+ "design": "all 211 enterprise questions, text-projection haystack (100 shared trajectories, 3,358 state documents), orchestrated retrieval (top-12), glm-5.3 answerer, deterministic evaluator specs (phrase-set/mc) with glm-5.3 llm judges for llm_* types; same runner protocol as the web-small text arm (0.1583)",
+ "results": {
+  "accuracy": 0.1896,
+  "n": 211,
+  "latency_p50_s": 3.331,
+  "latency_p95_s": 4.306,
+  "wall_s_excluding_seeding_and_backfill": 7471.0,
+  "by_type": {
+   "static-environment": {"acc": 0.270, "n": 74},
+   "static-environment-abs": {"acc": 0.333, "n": 24},
+   "procedure": {"acc": 0.156, "n": 32},
+   "procedure-abs": {"acc": 0.333, "n": 12},
+   "dynamic-environment": {"acc": 0.0, "n": 35},
+   "dynamic-environment-abs": {"acc": 0.1, "n": 20},
+   "errors-gotchas": {"acc": 0.071, "n": 14}
+  }
+ },
+ "findings": [
+  "Enterprise lands at 0.190 vs the web text arm's 0.158 under the same protocol - same difficulty class; both sit far below the official reference frontier (RAG 51.0% .. Runbook-C 74.9%), consistent with V2 being built against agentic replay systems rather than plain retrieval.",
+  "The cost profile is the story for the LAFS framing: after the one-time corpus vector backfill (~88 min on CPU for 3,358 6k-char a11y documents), per-question p50 is 3.3s with the full orchestrated stack - two orders of magnitude left of the 26.9-177s reference band.",
+  "dynamic-environment (0.000, n=35) is the structural gap: those answers live in state transitions across observations, not in any single state's a11y text - the same class of gap the web domain's vision-needed stratum showed.",
+  "Abstention variants outperform their non-abstention siblings (0.333/0.333 vs 0.270/0.156): recognizing absence is easier than tracking state."
+ ],
+ "honest_reading": "text-projection ceiling run, not a tuned system: plain orchestrated retrieval with no screenshots (enterprise has none in this tier's harness usage), no hub derivation, no PAR. 11/211 answers are empty generation degradations (recorded as wrong; 5.2%). Scoring mixes deterministic phrase-set matching with glm-5.3 llm judges for llm_* types; judge and answerer share the model family. CPU embedding device (the web arm ran MPS); ranking-shift-scale device differences apply per the 0.797/0.7669 precedent. First-question latency (5,303s) is the one-time corpus backfill and is excluded from the p50/p95 above.",
+ "evidence_level": "E1",
+ "runner": "scripts/run_lme_v2.py --domain enterprise --limit 211",
+ "artifacts": ["records.jsonl", "summary.json"],
+ "timestamp": "2026-09-29T04:00:00Z"
+}
