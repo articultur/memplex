@@ -45,6 +45,22 @@ one-off noise row:
   in the orchestrated top-8, noise row evicted
 - second-pass idempotency covered by contract tests
 
+## v2 (this batch): semantic clustering + typed classification
+
+- **Embedder clustering**: `consolidate(..., embedder=...)` upgrades the
+  cluster gate from lexical Jaccard to cosine >= 0.85 against running
+  cluster means (`MEMPLEX_CONSOLIDATION_EMBED_THRESHOLD`), grouping
+  rephrases that share no surface form; embedder failure degrades to the
+  lexical fallback. Contract test includes the negative control: rows
+  that lexical clustering cannot group promote only with the embedder.
+- **Preference classification**: clusters matching a first-person
+  preference pattern ("I prefer/like/love/need…") graduate as Preference
+  nodes instead of "stated" Facts — zero extra cost, keeps the honest
+  fallback for everything else.
+- Still open from v1: verbatim-repeat counting needs a write-path
+  observation counter (content-addressed dedup collapses exact repeats to
+  one row at write time).
+
 ## Honest scope
 
 - This is a **local mechanism demonstration**, not a reproduction of

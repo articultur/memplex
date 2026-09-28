@@ -1154,7 +1154,9 @@ class LiteMemoryStore:
         ``source_paragraphs`` references resolve); identical text written
         twice maps to one row. Rows never participate in prune; the write
         commits through the normal pair machinery (deferred batching
-        included).
+        included). F2b write-side: when MEMPLEX_TRUST_TIER2_CAP is set,
+        unconsolidated tier<=2 rows are bounded (see
+        :meth:`_enforce_tier2_paragraph_cap`).
         """
         self._reload_for_mutation()
         now = datetime.now(UTC).isoformat()
@@ -1175,7 +1177,36 @@ class LiteMemoryStore:
                 "created_at": now,
                 "source": (getattr(para, "source", "") or "")[:200],
             }
+        self._enforce_tier2_paragraph_cap()
         self._commit_current_state()
+
+    def _enforce_tier2_paragraph_cap(self) -> None:
+        """ADR-013 F2b write-side: bound low-trust occupancy of the store.
+
+        MEMPLEX_TRUST_TIER2_CAP limits how many unconsolidated tier<=2
+        paragraph rows the store may hold; rows past the cap are evicted
+        oldest-first inside the same commit, so a flood cannot grow the
+        episodic layer without bound. Rows stamped ``consolidated_into``
+        by the F3 pass are sustained and exempt. 0/unset/parse-failure =
+        no cap. Lite-only, matching the read-side quota's documented
+        scope (the postgres backend has no trust-weight mechanism).
+        """
+        try:
+            cap = int(os.environ.get("MEMPLEX_TRUST_TIER2_CAP", "0"))
+        except ValueError:
+            cap = 0
+        if cap <= 0:
+            return
+        tier2 = [
+            row
+            for row in self._paragraphs.values()
+            if int(row.get("trust_tier", 3)) <= 2 and not row.get("consolidated_into")
+        ]
+        if len(tier2) <= cap:
+            return
+        tier2.sort(key=lambda r: str(r.get("created_at") or ""))
+        for row in tier2[: len(tier2) - cap]:
+            self._paragraphs.pop(row["id"], None)
 
     def add_fact(self, fact: Fact) -> None:
         """Persist a Fact (upsert by id); records a changelog entry.

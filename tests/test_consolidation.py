@@ -143,3 +143,81 @@ def test_no_paragraph_layer_degrades(tmp_path, monkeypatch):
     assert report.enabled
     assert "no paragraph layer" in report.note
     assert report.promoted == [] and report.evicted == []
+
+
+def test_preference_promotion_classifies_preferences(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    store._paragraphs["p1"] = _row(
+        "p1", "I prefer rooibos tea in the afternoon.", base
+    )
+    store._paragraphs["p2"] = _row(
+        "p2", "I prefer rooibos tea after lunch.", base + timedelta(days=1)
+    )
+    store._paragraphs["p3"] = _row(
+        "p3", "I prefer rooibos tea with honey now.", base + timedelta(days=2)
+    )
+    report = consolidate(store, now=base + timedelta(days=3))
+    assert report.promoted
+    node_id = report.promoted[0]
+    assert node_id in store._preferences, "preference phrasing graduates as Preference"
+    assert "rooibos" in store._preferences[node_id].preference
+    assert node_id not in store._facts
+
+
+class _FakeEmbedder:
+    """Deterministic embedder: mapped texts share vectors, unmapped get
+    distinct-ish fallback vectors so unrelated rows never cluster."""
+
+    def __init__(self, mapping: dict[str, list[float]]) -> None:
+        self.mapping = mapping
+        self._fallback = 0
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        out = []
+        for text in texts:
+            if text in self.mapping:
+                out.append(list(self.mapping[text]))
+            else:
+                self._fallback += 1
+                out.append([1.0 + self._fallback, 0.5, 0.0, 0.0])
+        return out
+
+
+def test_embedder_clustering_promotes_lexically_distant_rephrases(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    # Lexically disjoint rephrases of one statement (no shared content
+    # words across rows) plus one unrelated row.
+    store._paragraphs["p1"] = _row("p1", "The aloe gets hydrated midweek.", base)
+    store._paragraphs["p2"] = _row(
+        "p2", "Wednesday is plant care day for the succulent.", base + timedelta(days=1)
+    )
+    store._paragraphs["p3"] = _row(
+        "p3", "Midweek is when the aloe drinks water.", base + timedelta(days=2)
+    )
+    store._paragraphs["p4"] = _row(
+        "p4", "We visited the aquarium in July.", base + timedelta(days=1)
+    )
+    embedder = _FakeEmbedder(
+        {
+            store._paragraphs["p1"]["raw_text"]: [1.0, 0.0, 0.0, 0.0],
+            store._paragraphs["p2"]["raw_text"]: [0.98, 0.1, 0.0, 0.0],
+            store._paragraphs["p3"]["raw_text"]: [0.95, 0.05, 0.0, 0.0],
+        }
+    )
+    # Negative control: lexical clustering alone cannot group these rows.
+    lexical = consolidate(store, now=base + timedelta(days=3))
+    assert lexical.promoted == []
+
+    report = consolidate(
+        store, now=base + timedelta(days=3), embedder=embedder
+    )
+    assert report.promoted, "embedder clustering must group semantic rephrases"
+    node_id = report.promoted[0]
+    assert node_id in store._facts
+    assert "aloe" in store._facts[node_id].object_

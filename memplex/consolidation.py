@@ -11,15 +11,18 @@ architecture: same promotion/forgetting shape, no training, no LLM.
 Mechanism (all offline - the query path is never touched):
 
 * Promotion: raw paragraphs (the episodic layer) that rephrase the same
-  statement across sessions graduate to a typed Fact node. Clustering is
-  lexical (content-word Jaccard >= 0.4 plus a shared-token anchor), the
-  gate is repetition: >= MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS rows in a
-  cluster spanning >= MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS days. The node
-  carries trust_tier = min of the cluster (merge-takes-min), namespace
-  stamps {"consolidated": ts, "observations": n}, and the source
-  paragraph ids. Cluster rows get a ``consolidated_into`` stamp, which
-  makes promotion idempotent and marks them sustained (they then survive
-  paragraph eviction).
+  statement across sessions graduate to a typed node. Clustering is
+  lexical (content-word Jaccard >= 0.4 plus a shared-token anchor) by
+  default and semantic (cosine >= 0.85 on running cluster means) when an
+  embedder is supplied. The gate is repetition: >=
+  MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS rows in a cluster spanning >=
+  MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS days. Preference-looking clusters
+  graduate as Preference nodes; everything else as a "stated" Fact. The
+  node carries trust_tier = min of the cluster (merge-takes-min),
+  namespace stamps {"consolidated": ts, "observations": n}, and the
+  source paragraph ids. Cluster rows get a ``consolidated_into`` stamp,
+  which makes promotion idempotent and marks them sustained (they then
+  survive paragraph eviction).
 * Forgetting: paragraphs older than
   MEMPLEX_CONSOLIDATION_PARAGRAPH_TTL_DAYS that were never consolidated
   are evicted from the episodic layer - algorithmic forgetting of
@@ -31,19 +34,21 @@ Mechanism (all offline - the query path is never touched):
 Disabled by default (MEMPLEX_CONSOLIDATION=1 enables). The pass never
 raises into the host; every failure degrades to a report entry.
 
-Known v1 limits, deliberately: verbatim repeats collapse to one
-paragraph row at write time (content-addressed dedup), so the promotion
-signal is rephrased repetition - counting exact repeats needs a
-write-path observation counter (future work, keeps this pass offline).
-Promotion does not guess fact vs preference: everything graduates as a
-"stated" Fact rather than a lossily-classified Preference.
+Known limits, deliberately: verbatim repeats collapse to one paragraph
+row at write time (content-addressed dedup), so the promotion signal is
+rephrased repetition - counting exact repeats needs a write-path
+observation counter (future work, keeps this pass offline). Word-form
+drift ("wednesday" vs "wednesdays") can split lexical clusters; the
+embedder path covers it at the cost of a batch embedding pass.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -54,10 +59,18 @@ _ENABLED_KEY = "MEMPLEX_CONSOLIDATION"
 _MIN_OBSERVATIONS_KEY = "MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS"
 _MIN_SPAN_DAYS_KEY = "MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS"
 _PARAGRAPH_TTL_DAYS_KEY = "MEMPLEX_CONSOLIDATION_PARAGRAPH_TTL_DAYS"
+_EMBED_THRESHOLD_KEY = "MEMPLEX_CONSOLIDATION_EMBED_THRESHOLD"
 
 _CONSOLIDATED_KEY = "consolidated_into"
 _JACCARD_THRESHOLD = 0.4
 _MIN_SHARED_TOKENS = 3
+
+_PREFERENCE_RE = re.compile(
+    r"^(?:i|we|the user|my)\s+"
+    r"(?:prefer|prefers|like|likes|love|loves|hate|hates|enjoy|enjoys|"
+    r"want|wants|need|needs|use|uses|drink|drinks|eat|eats|wear|wears)\b",
+    re.IGNORECASE,
+)
 
 _STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "have", "has",
@@ -135,6 +148,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, str(default)))
+    except ValueError:
+        return default
+
+
 def _parse_ts(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
@@ -148,8 +168,22 @@ def _parse_ts(value: Any) -> datetime | None:
 
 def _cluster(
     parseable: dict[str, dict[str, Any]],
+    embedder: Any = None,
+    threshold: float = 0.85,
 ) -> list[list[tuple[str, dict[str, Any]]]]:
-    """Greedy near-duplicate clustering of not-yet-consolidated rows."""
+    """Cluster not-yet-consolidated rows.
+
+    Lexical (content-word Jaccard) by default; with an *embedder* (any
+    object exposing ``embed_batch(texts) -> vectors``, e.g. the
+    EmbeddingService) rows cluster by cosine similarity to the running
+    cluster mean at >= *threshold* - this catches rephrases that share no
+    surface form. Embedder failure falls back to lexical clustering.
+    """
+    if embedder is not None:
+        try:
+            return _cluster_embedded(parseable, embedder, threshold)
+        except Exception as exc:  # noqa: BLE001 - degrade, never raise
+            logger.debug("embedder clustering failed, lexical fallback: %s", exc)
     clusters: list[list[tuple[str, dict[str, Any]]]] = []
     cluster_texts: list[list[str]] = []
     for row_id, row in parseable.items():
@@ -171,6 +205,48 @@ def _cluster(
     return clusters
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _cluster_embedded(
+    parseable: dict[str, dict[str, Any]],
+    embedder: Any,
+    threshold: float,
+) -> list[list[tuple[str, dict[str, Any]]]]:
+    rows = [
+        (row_id, row, str(row.get("raw_text") or "").strip())
+        for row_id, row in parseable.items()
+        if not row.get(_CONSOLIDATED_KEY)
+        and str(row.get("raw_text") or "").strip()
+    ]
+    if not rows:
+        return []
+    vectors = embedder.embed_batch([text for _, _, text in rows])
+    clusters: list[list[tuple[str, dict[str, Any]]]] = []
+    means: list[list[float]] = []
+    for (row_id, row, _text), vector in zip(rows, vectors):
+        placed = False
+        for i, mean in enumerate(means):
+            if _cosine(vector, mean) >= threshold:
+                clusters[i].append((row_id, row))
+                n = len(clusters[i])
+                means[i] = [
+                    ((n - 1) * m + v) / n for m, v in zip(mean, vector)
+                ]
+                placed = True
+                break
+        if not placed:
+            clusters.append([(row_id, row)])
+            means.append(list(vector))
+    return clusters
+
+
 def _canonical_text(rows: list[tuple[str, dict[str, Any]]]) -> str:
     """Most frequent row text; ties resolve to the earliest."""
     counts: dict[str, int] = {}
@@ -182,14 +258,22 @@ def _canonical_text(rows: list[tuple[str, dict[str, Any]]]) -> str:
     return max(counts, key=lambda t: (counts[t], -order[t]))
 
 
-def consolidate(store: Any, *, now: datetime | None = None) -> ConsolidationReport:
+def consolidate(
+    store: Any,
+    *,
+    now: datetime | None = None,
+    embedder: Any = None,
+) -> ConsolidationReport:
     """Run one offline consolidation pass over *store*; returns the report.
 
     *store* is any store exposing a ``_paragraphs`` dict of rows
     ({"id", "raw_text", "trust_tier", "created_at", ...}), an
-    ``add_fact`` upsert and a ``deferred_commit`` context manager -
-    i.e. the lite store or a facade over it. Facades that hide the
-    paragraph layer make the pass a no-op (reported, not raised).
+    ``add_fact``/``add_preference`` upsert and a ``deferred_commit``
+    context manager - i.e. the lite store or a facade over it. Facades
+    that hide the paragraph layer make the pass a no-op (reported, not
+    raised). *embedder* (optional, ``embed_batch`` API) upgrades
+    clustering from lexical to semantic at
+    MEMPLEX_CONSOLIDATION_EMBED_THRESHOLD (default 0.85).
     """
     if os.environ.get(_ENABLED_KEY) != "1":
         return ConsolidationReport(
@@ -202,6 +286,7 @@ def consolidate(store: Any, *, now: datetime | None = None) -> ConsolidationRepo
     min_observations = _env_int(_MIN_OBSERVATIONS_KEY, 3)
     min_span_days = _env_int(_MIN_SPAN_DAYS_KEY, 1)
     ttl_days = _env_int(_PARAGRAPH_TTL_DAYS_KEY, 90)
+    embed_threshold = _env_float(_EMBED_THRESHOLD_KEY, 0.85)
     report = ConsolidationReport(enabled=True)
 
     current = now or datetime.now(UTC)
@@ -214,12 +299,12 @@ def consolidate(store: Any, *, now: datetime | None = None) -> ConsolidationRepo
             continue
         parseable[row_id] = row
 
-    clusters = _cluster(parseable)
+    clusters = _cluster(parseable, embedder=embedder, threshold=embed_threshold)
     report.clusters = len(clusters)
 
-    from memplex.models import Fact, SourceType
+    from memplex.models import Fact, Preference, SourceType
 
-    promoted_facts: list[Fact] = []
+    promoted_nodes: list[tuple[str, Any]] = []
     for rows in clusters:
         timestamps = [_parse_ts(r.get("created_at")) for _, r in rows]
         valid = [t for t in timestamps if t is not None]
@@ -234,22 +319,37 @@ def consolidate(store: Any, *, now: datetime | None = None) -> ConsolidationRepo
         node_id = "consol-" + hashlib.sha256(canonical.encode()).hexdigest()[:12]
         earliest = min(valid).isoformat()
         latest = max(valid).isoformat()
-        fact = Fact(
-            id=node_id,
-            subject="user",
-            predicate="stated",
-            object_=canonical,
-            source_type=SourceType.WIKI,
-            trust_tier=min(tiers),
-            created_at=earliest,
-            updated_at=latest,
-            source_paragraphs=[row_id for row_id, _ in rows],
-        )
-        fact.namespace = {
+        stamps = {
             "consolidated": current.isoformat(),
             "observations": str(len(rows)),
         }
-        promoted_facts.append(fact)
+        if _PREFERENCE_RE.match(canonical):
+            node = Preference(
+                id=node_id,
+                aspect="",
+                preference=canonical,
+                source_type=SourceType.WIKI,
+                trust_tier=min(tiers),
+                created_at=earliest,
+                updated_at=latest,
+                source_paragraphs=[row_id for row_id, _ in rows],
+            )
+            node.namespace = stamps
+            promoted_nodes.append(("preference", node))
+        else:
+            fact = Fact(
+                id=node_id,
+                subject="user",
+                predicate="stated",
+                object_=canonical,
+                source_type=SourceType.WIKI,
+                trust_tier=min(tiers),
+                created_at=earliest,
+                updated_at=latest,
+                source_paragraphs=[row_id for row_id, _ in rows],
+            )
+            fact.namespace = stamps
+            promoted_nodes.append(("fact", fact))
 
     # Forgetting: episodic rows past the TTL that never consolidated.
     evict: list[str] = []
@@ -262,28 +362,31 @@ def consolidate(store: Any, *, now: datetime | None = None) -> ConsolidationRepo
         if (current - created).total_seconds() > ttl_days * 86400.0:
             evict.append(row_id)
 
-    if not promoted_facts and not evict:
+    if not promoted_nodes and not evict:
         return report
 
     try:
         with store.deferred_commit():
-            for fact in promoted_facts:
-                store.add_fact(fact)
+            for kind, node in promoted_nodes:
+                if kind == "preference":
+                    store.add_preference(node)
+                else:
+                    store.add_fact(node)
             for row_id in evict:
                 paragraphs.pop(row_id, None)
             # Stamps ride the same atomic commit as the promotion, so a
             # crash cannot split the pair (re-promotion stays harmless
-            # anyway: the node id is deterministic and add_fact merges).
-            for fact in promoted_facts:
-                for row_id in fact.source_paragraphs:
+            # anyway: the node id is deterministic and add_* merges).
+            for _, node in promoted_nodes:
+                for row_id in node.source_paragraphs:
                     row = paragraphs.get(row_id)
                     if row is not None:
-                        row[_CONSOLIDATED_KEY] = fact.id
+                        row[_CONSOLIDATED_KEY] = node.id
     except Exception as exc:  # noqa: BLE001 - degradation, not a crash
         logger.debug("consolidation commit failed: %s", exc)
         report.note = f"commit failed: {exc}"
         return report
 
-    report.promoted = [fact.id for fact in promoted_facts]
+    report.promoted = [node.id for _, node in promoted_nodes]
     report.evicted = evict
     return report

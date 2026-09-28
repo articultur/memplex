@@ -261,3 +261,60 @@ def test_trust_quota_default_off_and_bad_value(monkeypatch):
     assert LiteMemoryStore._enforce_trust_quota(results, top_k=1) == results, (
         "an unparsable quota must fail closed to no cap"
     )
+
+
+def _write_paragraph(store: LiteMemoryStore, text: str, tier: int) -> None:
+    from types import SimpleNamespace
+
+    store.persist_paragraphs(
+        [SimpleNamespace(raw_text=text, id="p", source="url")],
+        trust_tier=tier,
+        source_hint="url",
+    )
+
+
+def test_write_cap_bounds_tier2_paragraph_rows(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_TRUST_PENALTY", raising=False)
+    monkeypatch.setenv("MEMPLEX_TRUST_TIER2_CAP", "2")
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    _write_paragraph(store, "external claim one about the product", 2)
+    _write_paragraph(store, "external claim two about the pricing", 2)
+    _write_paragraph(store, "external claim three about the roadmap", 2)
+    _write_paragraph(store, "the user's own note stays untouched", 4)
+    tier2 = [r for r in store._paragraphs.values() if r["trust_tier"] <= 2]
+    assert len(tier2) == 2, "cap must evict oldest-first past the bound"
+    assert not any("claim one" in r["raw_text"] for r in tier2)
+    assert any("the user's own note" in r["raw_text"] for r in store._paragraphs.values())
+
+
+def test_write_cap_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_TRUST_TIER2_CAP", raising=False)
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    for i in range(5):
+        _write_paragraph(store, f"external note number {i}", 2)
+    tier2 = [r for r in store._paragraphs.values() if r["trust_tier"] <= 2]
+    assert len(tier2) == 5, "unset cap must not evict"
+
+
+def test_write_cap_spares_consolidated_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPLEX_TRUST_TIER2_CAP", "1")
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    _write_paragraph(store, "consolidated external fact", 2)
+    for row in store._paragraphs.values():
+        if row["raw_text"] == "consolidated external fact":
+            row["consolidated_into"] = "consol-abc"
+    _write_paragraph(store, "noise external row one", 2)
+    _write_paragraph(store, "noise external row two", 2)
+    texts = {r["raw_text"] for r in store._paragraphs.values()}
+    assert "consolidated external fact" in texts, "sustained rows are exempt"
+    assert "noise external row two" in texts, "newest unconsolidated row survives"
+    assert "noise external row one" not in texts
+
+
+def test_write_cap_parse_failure_no_op(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMPLEX_TRUST_TIER2_CAP", "not-an-int")
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    for i in range(3):
+        _write_paragraph(store, f"external row {i}", 2)
+    tier2 = [r for r in store._paragraphs.values() if r["trust_tier"] <= 2]
+    assert len(tier2) == 3, "an unparsable cap must fail closed to no cap"

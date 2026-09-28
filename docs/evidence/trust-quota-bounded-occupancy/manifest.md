@@ -55,14 +55,17 @@ Read-side quota (shipped here): the enforcement point is the retrieval
 tail, independent of the write path; it composes with single-writer
 serialization because it reads only immutable tiers at query time.
 
-Write-side capacity (evaluated, not implemented): a per-tier store
-occupancy cap (e.g. tier<=2 bounded to X% of memory count, evicting oldest
-low-tier rows past the cap) is a natural fit for the single-writer queue —
-the check is a serialized post-commit count inside the same critical
-section, no races, no new indexes. It is defense against persistent
-flooding rather than per-query crowding. Recommendation: read-side quota
-first (done, opt-in), write-side capacity as a follow-up ADR if the flood
-model appears in production telemetry.
+Write-side capacity (shipped as `MEMPLEX_TRUST_TIER2_CAP`, default off):
+`_enforce_tier2_paragraph_cap` bounds the *store's* low-trust occupancy —
+after each paragraph write, unconsolidated tier<=2 rows past the cap are
+evicted oldest-first inside the same commit. Rows stamped
+`consolidated_into` by the F3 pass are sustained and exempt, so promotion
+is not undone by the cap. Enforced inside the single-writer lock with no
+new indexes; the counter check is O(rows) per write, acceptable for an
+opt-in knob. Contract tests cover: oldest-first eviction past the cap,
+tier-4 exemption, consolidated-row exemption, default-off identity, and
+parse-failure fail-closed (tests/test_trust_tier.py, 4 new cases).
+Lite-only, matching the read-side quota's documented scope.
 
 ## Limitations (honest)
 
