@@ -1426,16 +1426,26 @@ class LiteMemoryStore:
                     result.vector_cache = self._vector_index.cached_vector(
                         result.func_id, result.summary
                     )
-            return self._premise_resolution(self._apply_trust_penalty(merged))[:top_k]
-        results = self._search_with_fallback(text, top_k=top_k)
+            return self._enforce_trust_quota(
+                self._premise_resolution(self._apply_trust_penalty(merged)), top_k
+            )[:top_k]
+        # F2b: a quota only has teeth on a competitive pool, so the
+        # lexical leg over-fetches when a cap is active (BM25 is cheap;
+        # the default path is byte-identical when the quota is off).
+        fetch_k = top_k * 2 if self._trust_quota() >= 0 else top_k
+        results = self._search_with_fallback(text, top_k=fetch_k)
         for result in results:
             result.trust_tier = self._trust_of(result.func_id)
         if not self._vector_index.enabled:
-            return self._premise_resolution(self._apply_trust_penalty(results))[:top_k]
+            return self._enforce_trust_quota(
+                self._premise_resolution(self._apply_trust_penalty(results)), top_k
+            )[:top_k]
         vector_results = self._vector_search_leg(text, top_k=top_k)
         if not vector_results:
-            return self._premise_resolution(self._apply_trust_penalty(results))[:top_k]
-        fused = self._fuse_search_legs([results, vector_results], top_k)
+            return self._enforce_trust_quota(
+                self._premise_resolution(self._apply_trust_penalty(results)), top_k
+            )[:top_k]
+        fused = self._fuse_search_legs([results, vector_results], fetch_k)
         # Attach already-cached corpus vectors to the fused hits: the
         # retrieval layer's vector pre-fill (and the Reranker behind it)
         # otherwise re-embeds these same projections per query, which
@@ -1445,8 +1455,9 @@ class LiteMemoryStore:
                 result.vector_cache = self._vector_index.cached_vector(
                     result.func_id, result.summary
                 )
-        resolved = self._premise_resolution(self._apply_trust_penalty(fused))
-        resolved = resolved[:top_k]
+        resolved = self._enforce_trust_quota(
+            self._premise_resolution(self._apply_trust_penalty(fused)), top_k
+        )
         if self._paragraph_fusion_mode() == "fallback" and len(resolved) < top_k:
             # Fill leftover slots from the raw layer only: extraction
             # nodes keep their ranks, paragraphs backstop thin pools.
@@ -1454,6 +1465,9 @@ class LiteMemoryStore:
             resolved.extend(
                 f for f in fills if f.func_id not in {r.func_id for r in resolved}
             )
+            # Fills can carry tier-2 paragraphs; re-apply the cap so the
+            # quota contract holds after backstopping.
+            resolved = self._enforce_trust_quota(resolved, top_k)
         return resolved
 
     @staticmethod
@@ -1539,6 +1553,49 @@ class LiteMemoryStore:
                 result.relevance_score *= penalty
         results.sort(key=lambda r: (-r.relevance_score, r.func_id))
         return results
+
+    @staticmethod
+    def _trust_quota() -> int:
+        """ADR-013 F2b: the active low-trust window cap, or -1 when off.
+
+        MEMPLEX_TRUST_QUOTA=0..n bounds tier<=2 occupancy of the top-k
+        window; unset, negative, or an unparsable value = no cap.
+        """
+        try:
+            return int(os.environ.get("MEMPLEX_TRUST_QUOTA", "-1"))
+        except ValueError:
+            return -1
+
+    @staticmethod
+    def _enforce_trust_quota(results: list[SearchResult], top_k: int) -> list[SearchResult]:
+        """ADR-013 F2b: bound low-trust occupancy of the top-k window.
+
+        MEMPLEX_TRUST_QUOTA caps how many tier<=2 results may hold a slot
+        in the top-k window. Excess low-tier hits leave the window even
+        when that shortens the result set below top_k - containment is
+        bought with recall, which is the point: a flood cannot crowd the
+        window, while a store with few low-tier items is unaffected.
+        Unset, negative, or a parse failure = no cap (identity), so the
+        shipped default path is byte-identical. The quota bounds attacker
+        occupancy (flooding); it does not separate a laundered item from
+        a legitimate one, which stays with premise resolution and the
+        penalty. Paragraph fills that backstop a thin window in fallback
+        mode are re-enforced by their caller.
+        """
+        quota = LiteMemoryStore._trust_quota()
+        if quota < 0:
+            return results
+        window: list[SearchResult] = []
+        low_in_window = 0
+        for result in results:
+            if len(window) >= top_k:
+                break
+            if result.trust_tier <= 2 and low_in_window >= quota:
+                continue
+            window.append(result)
+            if result.trust_tier <= 2:
+                low_in_window += 1
+        return window
 
     @staticmethod
     def _premise_superseded(node: Any) -> bool:

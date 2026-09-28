@@ -147,3 +147,117 @@ def test_retrieval_penalty_opt_out(tmp_path, monkeypatch):
     )
     hits = store.vector_search("rooibos tea preferences rooibos tea", top_k=2)
     assert hits, "search must still return results with the penalty off"
+
+
+def test_retrieval_quota_bounds_low_trust_window(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_TRUST_PENALTY", raising=False)
+    monkeypatch.setenv("MEMPLEX_TRUST_QUOTA", "1")
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    from memplex.models import Fact, SourceType
+
+    store.add_fact(
+        Fact(
+            id="user_fact",
+            subject="user",
+            predicate="prefers",
+            object_="rooibos tea",
+            source_type=SourceType.WIKI,
+            trust_tier=4,
+        )
+    )
+    for i in range(3):
+        store.add_fact(
+            Fact(
+                id=f"ext_fact_{i}",
+                subject=f"note {i}",
+                predicate="mentions",
+                object_="rooibos tea rooibos",
+                source_type=SourceType.WIKI,
+                trust_tier=2,
+            )
+        )
+    hits = store.vector_search("rooibos tea", top_k=3)
+    assert hits, "search must still surface results with a quota set"
+    low = [h for h in hits if h.trust_tier <= 2]
+    assert len(low) <= 1, "quota must bound low-trust slots in the top-k window"
+
+
+def test_retrieval_quota_zero_excludes_low_trust(tmp_path, monkeypatch):
+    monkeypatch.delenv("MEMPLEX_TRUST_PENALTY", raising=False)
+    monkeypatch.setenv("MEMPLEX_TRUST_QUOTA", "0")
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    from memplex.models import Fact, SourceType
+
+    store.add_fact(
+        Fact(
+            id="user_fact",
+            subject="user",
+            predicate="prefers",
+            object_="rooibos tea",
+            source_type=SourceType.WIKI,
+            trust_tier=4,
+        )
+    )
+    for i in range(3):
+        store.add_fact(
+            Fact(
+                id=f"ext_fact_{i}",
+                subject=f"note {i}",
+                predicate="mentions",
+                object_="rooibos tea rooibos",
+                source_type=SourceType.WIKI,
+                trust_tier=2,
+            )
+        )
+    hits = store.vector_search("rooibos tea", top_k=3)
+    assert hits and all(h.trust_tier > 2 for h in hits), (
+        "quota 0 must keep low-trust tiers out of the window entirely"
+    )
+
+
+def test_trust_quota_shrinks_window_instead_of_admitting_excess(monkeypatch):
+    monkeypatch.setenv("MEMPLEX_TRUST_QUOTA", "1")
+    from memplex.models.search import SearchResult
+
+    results = [
+        SearchResult(func_id="h1", name="h", domain="x", relevance_score=0.9,
+                     summary="s", trust_tier=4),
+        SearchResult(func_id="l1", name="l", domain="x", relevance_score=0.8,
+                     summary="s", trust_tier=2),
+        SearchResult(func_id="l2", name="l", domain="x", relevance_score=0.7,
+                     summary="s", trust_tier=2),
+        SearchResult(func_id="h2", name="h", domain="x", relevance_score=0.6,
+                     summary="s", trust_tier=4),
+        SearchResult(func_id="l3", name="l", domain="x", relevance_score=0.5,
+                     summary="s", trust_tier=2),
+    ]
+    ranked = LiteMemoryStore._enforce_trust_quota(results, top_k=3)
+    assert [r.func_id for r in ranked] == ["h1", "l1", "h2"], (
+        "the freed slot must go to the next high-tier hit, not the demoted one"
+    )
+    assert len(ranked) < len(results), (
+        "excess low-tier hits leave the result set entirely (containment over recall)"
+    )
+
+    monkeypatch.setenv("MEMPLEX_TRUST_QUOTA", "0")
+    ranked = LiteMemoryStore._enforce_trust_quota(results, top_k=3)
+    assert [r.func_id for r in ranked] == ["h1", "h2"], (
+        "quota 0 admits no low-tier item even when the window shrinks"
+    )
+
+
+def test_trust_quota_default_off_and_bad_value(monkeypatch):
+    from memplex.models.search import SearchResult
+
+    results = [
+        SearchResult(func_id="l1", name="l", domain="x", relevance_score=0.8,
+                     summary="s", trust_tier=2),
+        SearchResult(func_id="l2", name="l", domain="x", relevance_score=0.7,
+                     summary="s", trust_tier=2),
+    ]
+    monkeypatch.delenv("MEMPLEX_TRUST_QUOTA", raising=False)
+    assert LiteMemoryStore._enforce_trust_quota(results, top_k=1) == results
+    monkeypatch.setenv("MEMPLEX_TRUST_QUOTA", "not-an-int")
+    assert LiteMemoryStore._enforce_trust_quota(results, top_k=1) == results, (
+        "an unparsable quota must fail closed to no cap"
+    )
