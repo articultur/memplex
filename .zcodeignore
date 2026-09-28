@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Memplex data
+.memplex/
+.memplex-data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# OMC / Serena
+.omc/
+.omx/
+.serena/
+.superpowers/
+.claude/
+.codex/
+.agents/
+.gitnexus/
+.zcode/
+
+# Virtual envs
+venv/
+.venv/
+.venv-pgcheck/
+env/
+
+# Temp (one-off scratch outputs; benchmark bundles worth keeping go to docs/evidence)
+/output/
+/tmp/
+/_g008_dyn/
+/_tmp_mem/
+/_tmp_rate
+/_tmp_home/
+/artifacts/
+benchmarks/results/
+
+# Internal planning and local review artifacts
+/docs/superpowers/
+.mimosa/
+
+# Local tool state (merged from .git/info/exclude)
+.impeccable/hook.cache.json
+.impeccable/hook.pending.json
+.impeccable/config.local.json
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+coverage/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）
