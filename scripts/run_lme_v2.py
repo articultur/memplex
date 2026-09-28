@@ -222,6 +222,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--domain", default="web")
     parser.add_argument("--out", default="benchmarks/results/lme2-smoke")
+    parser.add_argument(
+        "--store-dir",
+        default=None,
+        help="persistent store directory (default: fresh mkdtemp); a long "
+        "run resumes with its corpus already seeded and backfilled",
+    )
     args = parser.parse_args()
 
     questions = load_questions(args.domain)[: args.limit]
@@ -232,21 +238,28 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     records_path = out / "records.jsonl"
     done: set[str] = set()
+    done_domains: set[str] = set()
     if records_path.exists():
         for line in records_path.read_text().splitlines():
             if line.strip():
-                done.add(json.loads(line)["id"])
+                row = json.loads(line)
+                done.add(row["id"])
+                done_domains.add(row.get("domain", ""))
         print(f"resume: {len(done)} questions already recorded", flush=True)
     questions = [q for q in questions if q["id"] not in done]
 
+    resumed = bool(done)
     global _PROXY
     proxy = GlmProxy()
     _PROXY = proxy
     config = load_config()
     config.storage.backend = "lite"
-    config.storage.path = str(
-        pathlib.Path(tempfile.mkdtemp(prefix="lme2-")) / "s.sqlite3"
-    )
+    if args.store_dir:
+        store_root = pathlib.Path(args.store_dir)
+        store_root.mkdir(parents=True, exist_ok=True)
+    else:
+        store_root = pathlib.Path(tempfile.mkdtemp(prefix="lme2-"))
+    config.storage.path = str(store_root / "s.sqlite3")
     config.llm.query_enhancement = False
     svc = MemplexService(config=config)
     svc.start()
@@ -261,6 +274,17 @@ def main() -> int:
         # only on domain change.
         if question["domain"] != current_domain:
             current_domain = question["domain"]
+            store_has_corpus = bool(svc.store._functions or svc.store._facts)
+            if resumed and args.store_dir and store_has_corpus and (
+                question["domain"] in done_domains
+            ):
+                # Persistent-store resume: the corpus is already seeded
+                # and vector-backfilled; re-seeding would discard it.
+                print(
+                    f"resume: reusing seeded corpus for domain {current_domain}",
+                    flush=True,
+                )
+                continue
             from benchmarks.longmemeval import _clear_store
 
             _clear_store(svc)
