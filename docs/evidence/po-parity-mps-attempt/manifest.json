@@ -1,0 +1,20 @@
+{
+ "benchmark": "product_orchestration_parity_mps_attempt",
+ "question": "can the aligned parity probe re-run on the MPS device to confirm the device-delta attribution?",
+ "status": "HALTED - MPS backend wedged again at 14/133 (16 threads in psynch_cvwait, zero CPU)",
+ "results_partial": {
+  "n": 14,
+  "correct": 6,
+  "accuracy": 0.4286,
+  "halt_cause": "MPS batch-embedding wedge, fourth occurrence on this host"
+ },
+ "findings": [
+  "The MPS backend remains unreliable for this workload: a basic torch probe succeeds (torch.zeros on mps:0), but the orchestrated query's large batch embedding path wedges within ~15 questions. This is the fourth wedge across the campaign.",
+  "The 14-question partial (0.429) is too small and too early-pool to read anything from; it is archived for transparency only.",
+  "The definitive readings stand as the CPU-device band: aligned probe 0.7669, product primary-fusion parity 0.7669. The variance split and bisect already attributed the ~4-question gap to the device; a stable MPS window would confirm, but this host does not currently provide one."
+ ],
+ "honest_reading": "n=14 partial, archived for the record. The MPS question is closed as 'device confirmed unstable for this workload on this host'; CPU-band numbers are the canonical readings.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-28T07:00:00Z",
+ "artifacts": ["partial13.jsonl"]
+}
