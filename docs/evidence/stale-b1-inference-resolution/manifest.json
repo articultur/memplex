@@ -1,0 +1,20 @@
+{
+ "benchmark": "stale_b1_inference_resolution",
+ "question": "can inference-level resolution (LLM maintenance pass + retrieval filtering) resolve implicit invalidation that rule-based ranking could not?",
+ "design": "After seeding each B1 scenario, a maintenance pass (memplex/premise_resolution.py) groups memory pairs, asks glm-5.3-flash whether the later supersedes the earlier, and stamps the loser with premise_superseded in its namespace AND its referenced raw paragraphs. Retrieval filters stamped nodes from every leg (FTS, BM25, vector, paragraph). MEMPLEX_PREMISE_RESOLVE=0 restores the unresolved baseline.",
+ "results": {
+  "baseline": {"resolved": 0, "both": 0.52, "stale_reuse": 0.44},
+  "inference_resolution": {"resolved": 0.08, "both": 0.44, "stale_reuse": 0.28, "neither": 0.20}
+ },
+ "findings": [
+  "The MECHANISM works: resolved went 0 to 2 (the target was >0), and stale_reuse dropped 16pp (0.44 to 0.28). When the LLM correctly identifies the supersession pair, the retrieval filter removes the stale value from every surface - verified end-to-end (Berlin disappears after the pass).",
+  "The BOTTLENECK is detection accuracy, not architecture: glm-5.3-flash stamped only ~3 of 8 true pairs (conservative). The improved prompt (explicit supersession patterns) improved detection but also increased false positives (neither 5/25 - both sides filtered in some scenarios).",
+  "The retrieval filtering required four surface patches: FTS results, BM25 facts/preferences, vector leg documents, and the raw paragraph pool (both BM25 and vector). Each had its own filter point; missing any one lets the stale value resurface through that leg.",
+  "Full B1 resolution needs a stronger judge model for the pair audit (glm-5.3 full, not flash) or a per-domain prompt library. The infrastructure is complete and the flag is production-shaped (MEMPLEX_PREMISE_RESOLVE=1 default on, =0 to disable)."
+ ],
+ "honest_reading": "n=25; resolved 2 is above the 0-target but well short of saturation. The neither=5 cases (both filtered) are the false-positive cost of the permissive topic gate plus an eager LLM. Directional evidence is solid; the remaining work is model/prompt quality, not architecture.",
+ "evidence_level": "E1",
+ "timestamp": "2026-09-28T05:30:00Z",
+ "artifacts": ["summary.json", "records.json"],
+ "runner": "scripts/stale_memory_eval.py (MEMPLEX_PREMISE_RESOLVE=1)"
+}

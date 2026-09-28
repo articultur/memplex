@@ -1540,6 +1540,23 @@ class LiteMemoryStore:
         results.sort(key=lambda r: (-r.relevance_score, r.func_id))
         return results
 
+    @staticmethod
+    def _premise_superseded(node: Any) -> bool:
+        """B1 inference-level resolution: nodes stamped premise_superseded
+        by the maintenance pass leave the retrieval surface."""
+        namespace = getattr(node, "namespace", None)
+        return isinstance(namespace, dict) and bool(namespace.get("premise_superseded"))
+
+    def _premise_superseded_node_id(self, node_id: str) -> bool:
+        """Resolve the id against every typed collection for the lexical
+        legs, which return ids rather than node objects."""
+        node = (
+            self._functions.get(node_id)
+            or self._facts.get(node_id)
+            or self._preferences.get(node_id)
+        )
+        return node is not None and self._premise_superseded(node)
+
     def _trust_of(self, func_id: str) -> int:
         node = (
             self._functions.get(func_id)
@@ -1573,16 +1590,20 @@ class LiteMemoryStore:
         documents: list[tuple] = [
             (func.id, self._function_to_search_text(func))
             for func in self._functions.values()
+            if not self._premise_superseded(func)
         ]
         nodes: dict[str, Any] = {**self._facts, **self._preferences}
         for node in nodes.values():
+            if self._premise_superseded(node):
+                continue
             documents.append((node.id, self._fact_pref_to_search_text(node)))
         # ADR-013 Stage 2: verbatim paragraphs join the semantic leg only
         # under mixed fusion; the default fallback keeps them out of the
         # ranked pool (top-8 dilution evidence) and fills slots later.
         if self._paragraph_fusion_mode() == "mixed":
             for row in self._paragraphs.values():
-                documents.append((row["id"], row["raw_text"]))
+                if not row.get("premise_superseded"):
+                    documents.append((row["id"], row["raw_text"]))
         if not documents:
             return []
 
@@ -2900,6 +2921,10 @@ class LiteMemoryStore:
         if not results:
             results = self._local_search(text, top_k=top_k)
 
+        # B1 inference-level resolution: drop premise-superseded hits from
+        # every lexical leg before merging (the FTS sidecar cannot filter
+        # by namespace at index time).
+        results = [r for r in results if not self._premise_superseded_node_id(r.func_id)]
         extra = self._search_facts_preferences(text, top_k=top_k)
         merged = results + extra
         if self._paragraph_fusion_mode() == "mixed":
@@ -2923,15 +2948,22 @@ class LiteMemoryStore:
         """Pure-Python BM25 over the raw-paragraph layer (ADR-013 S2).
 
         Same ``score / (score + 1)`` normalization as the fact/preference
-        leg so hits merge cleanly with Function results.
+        leg so hits merge cleanly with Function results. Superseded
+        paragraphs (stamped by the premise-resolution maintenance pass)
+        are excluded from the pool.
         """
-        if not self._paragraphs:
+        pool = {
+            pid: row
+            for pid, row in self._paragraphs.items()
+            if not row.get("premise_superseded")
+        }
+        if not pool:
             return []
         # local_bm25_search is duck-typed over (id -> text-source) maps;
         # raw rows participate through the same call as typed nodes.
         ranked = local_bm25_search(
             text=text,
-            functions=cast(dict[str, Function], self._paragraphs),
+            functions=cast(dict[str, Function], pool),
             text_factory=lambda row: cast(dict, row)["raw_text"],
             top_k=top_k,
         )

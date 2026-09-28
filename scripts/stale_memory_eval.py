@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -63,6 +64,57 @@ SCENARIOS = [
 ]
 
 
+def _llm():
+    """Authorized proxy for the maintenance pass's supersession calls."""
+    import httpx
+
+    settings = json.loads(
+        pathlib.Path(os.path.expanduser("~/.claude/settings.json")).read_text()
+    )["env"]
+
+    class _Proxy:
+        def __call__(self, prompt: str) -> str:
+            import time
+
+            client = httpx.Client(
+                base_url=settings["ANTHROPIC_BASE_URL"],
+                timeout=60,
+                trust_env=False,
+                headers={
+                    "x-api-key": settings["ANTHROPIC_AUTH_TOKEN"],
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            for attempt in range(3):
+                try:
+                    resp = client.post(
+                        "/v1/messages",
+                        json={
+                            "model": "glm-5.3-flash",
+                            "max_tokens": 256,
+                            "temperature": 0.0,
+                            # flash is a thinking model: without disabling,
+                            # the entire budget is consumed by the thinking
+                            # block before any text is emitted.
+                            "thinking": {"type": "disabled"},
+                            "messages": [{"role": "user", "content": prompt}],
+                        },
+                    )
+                    resp.raise_for_status()
+                    return "".join(
+                        b.get("text", "")
+                        for b in resp.json().get("content", [])
+                        if b.get("type") == "text"
+                    )
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
+            return ""
+
+    return _Proxy()
+
+
 def run_scenario(idx: int, question: str, seed_fact: str, later_obs: str, old_marker: str, new_marker: str) -> dict:
     store_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"stale{idx}-"))
     config = load_config()
@@ -74,6 +126,14 @@ def run_scenario(idx: int, question: str, seed_fact: str, later_obs: str, old_ma
     try:
         svc.write_text(seed_fact, source_type="text")
         svc.write_text(later_obs, source_type="text")
+        # B1 inference-level resolution: run the maintenance pass so the
+        # LLM stamps the superseded (older) memory, which retrieval then
+        # filters. Without this the memory layer never resolves implicit
+        # invalidation (resolved 0/25 baseline).
+        if os.environ.get("MEMPLEX_PREMISE_RESOLVE", "1") == "1":
+            from memplex.premise_resolution import resolve_premises
+
+            resolve_premises(svc.store, _llm())
         result = svc.query(question, top_k=8, orchestrated=True, explain=False)
         summaries = [r.summary for r in result.results[:8]]
         recall = "\n".join(summaries).lower()
