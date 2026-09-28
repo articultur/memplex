@@ -21,6 +21,8 @@ authorization.py     AuthorizationGate: tenant/workspace/user/session ACL ¹
 serialization.py     Layer-neutral dataclass→JSON serializer (leaf) ¹
 temporal.py          Bi-temporal fact validity (supersede/as_of) ⁴
 improve.py           Proactive fact maintenance (dedupe/expire/reindex) ⁴
+premise_resolution.py B1 maintenance pass: LLM inference-level stale-supersession stamps ⁴
+consolidation.py     F3 offline consolidation: episodic→sustained promotion + TTL forgetting ⁴
 sleep_time.py        Idle-time maintenance + inference precompute daemon ⁴
 working_memory.py    TTL hot-context tier (per-tenant scoped) ⁴
 sync_crypto.py       Shared-key AES-GCM sync payload encryption ⁴
@@ -84,6 +86,8 @@ release.py            Fail-closed release metadata + artifact contracts
 retrieval/            Search and ranking (embedding, multi-path, reranker, dedup)
 serialization.py      Layer-neutral dataclass→JSON serializer (leaf) ¹
 service.py            MemplexService orchestration facade
+premise_resolution.py B1 maintenance pass: LLM inference-level stale-supersession stamps ⁴
+consolidation.py      F3 offline consolidation: episodic→sustained promotion + TTL forgetting ⁴
 sleep_time.py         Idle-time maintenance + inference precompute daemon ⁴
 storage/              MemoryStore interface + lite/postgres backends + migrations (map above)
 sync.py               Local-cache + remote push/pull multi-node sharing
