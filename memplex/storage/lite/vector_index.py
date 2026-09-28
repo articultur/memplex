@@ -93,6 +93,8 @@ class VectorSearchIndex:
         self._embedder: Any | None = None
         # func_id -> (text sha1, vector)
         self._cache: dict[str, tuple[str, Vector]] = {}
+        # func_id -> (text sha1, sparse weights) for the bge-m3 sparse leg
+        self._sparse_cache: dict[str, tuple[str, dict[str, float]]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -108,6 +110,7 @@ class VectorSearchIndex:
         """
         self._embedder = embedder
         self._cache = {}
+        self._sparse_cache = {}
 
     def cached_vector(self, doc_id: str, text: str) -> Vector | None:
         """Return the cached vector for *doc_id* when *text* still hashes
@@ -154,6 +157,62 @@ class VectorSearchIndex:
         # the hundred-thousand-document class. numpy keeps the exact
         # _cosine semantics (clip to [0, 1], zero vectors score 0).
         scored = _batch_cosine(query_vector, vectors)
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        return scored[:top_k]
+
+    def sparse_search(
+        self,
+        documents: list[tuple[str, str]],
+        query_text: str,
+        top_k: int,
+    ) -> list[tuple[str, float]]:
+        """Sparse leg: bge-m3 lexical-weight dot products for *query_text*.
+
+        Returns [] whenever the sparse backend is unavailable (wrong
+        model, FlagEmbedding missing, encode failure) - the caller's
+        other legs stand, so the leg can never fail a query. Scores are
+        raw shared-token weight sums, normalized per query for fusion
+        comparability with the other legs.
+        """
+        if self._embedder is None or top_k <= 0 or not documents:
+            return []
+        embed_sparse = getattr(self._embedder, "embed_sparse_batch", None)
+        if not callable(embed_sparse):
+            return []
+        missing = [
+            (doc_id, text)
+            for doc_id, text in documents
+            if doc_id not in self._sparse_cache
+        ]
+        if missing:
+            batch = embed_sparse([text for _, text in missing])
+            if batch is None or len(batch) != len(missing):
+                return []
+            for (doc_id, text), weights in zip(missing, batch):
+                digest = sha1(text.encode("utf-8")).hexdigest()
+                self._sparse_cache[doc_id] = (digest, weights)
+        query_batch = embed_sparse([query_text])
+        if not query_batch:
+            return []
+        query_weights = query_batch[0]
+        if not query_weights:
+            return []
+        scored: list[tuple[str, float]] = []
+        for doc_id, text in documents:
+            digest = sha1(text.encode("utf-8")).hexdigest()
+            cached = self._sparse_cache.get(doc_id)
+            if cached is None or cached[0] != digest:
+                continue
+            score = sum(
+                w * cached[1].get(token, 0.0)
+                for token, w in query_weights.items()
+            )
+            if score > 0.0:
+                scored.append((doc_id, score))
+        if not scored:
+            return []
+        top = max(s for _, s in scored)
+        scored = [(doc_id, score / top) for doc_id, score in scored]
         scored.sort(key=lambda item: (-item[1], item[0]))
         return scored[:top_k]
 

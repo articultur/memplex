@@ -10,7 +10,13 @@ with glm-5.3, and score with the deterministic evaluator specs
 substring for the smoke). Reports accuracy + query latency (p50/p95).
 
 Usage:
-    .venv/bin/python scripts/run_lme_v2.py [--limit N] [--domain web]
+    .venv/bin/python scripts/run_lme_v2.py [--limit N] [--domain web|enterprise]
+        [--out DIR]
+
+Resume: appends one JSON line per question to <out>/records.jsonl and
+skips ids already present, so an interrupted run continues where it
+stopped. Quota exhaustion (bigmodel 1310) aborts with exit code 2 -
+resumable - instead of silently scoring a wall of empty answers wrong.
 """
 
 from __future__ import annotations
@@ -95,6 +101,10 @@ def trajectory_to_texts(traj: dict) -> list[str]:
     return texts
 
 
+class QuotaExhaustedError(RuntimeError):
+    """bigmodel 1310: the weekly/monthly cap is hit - stop, never retry."""
+
+
 class GlmProxy:
     def __init__(self) -> None:
         settings = json.loads(
@@ -121,12 +131,18 @@ class GlmProxy:
                         "messages": [{"role": "user", "content": prompt}],
                     },
                 )
+                if resp.status_code == 429 and "1310" in resp.text:
+                    # Monthly/weekly cap: retrying cannot succeed, and an
+                    # empty answer would be silently scored wrong.
+                    raise QuotaExhaustedError(resp.text[:200])
                 resp.raise_for_status()
                 return "".join(
                     b.get("text", "")
                     for b in resp.json().get("content", [])
                     if b.get("type") == "text"
                 )
+            except QuotaExhaustedError:
+                raise
             except Exception:
                 if attempt == 4:
                     raise
@@ -162,6 +178,8 @@ def llm_judge(question: dict, gold: str, answer: str) -> bool:
             ),
             max_tokens=256,
         )
+    except QuotaExhaustedError:
+        raise
     except Exception as exc:  # noqa: BLE001 - judge failure scores wrong, never crashes the run
         print(f"judge failed for {question['id']}: {exc}", flush=True)
         return False
@@ -203,11 +221,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--domain", default="web")
+    parser.add_argument("--out", default="benchmarks/results/lme2-smoke")
     args = parser.parse_args()
 
     questions = load_questions(args.domain)[: args.limit]
     haystack = load_haystack()
     print(f"questions: {len(questions)} (domain={args.domain})", flush=True)
+
+    out = pathlib.Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    records_path = out / "records.jsonl"
+    done: set[str] = set()
+    if records_path.exists():
+        for line in records_path.read_text().splitlines():
+            if line.strip():
+                done.add(json.loads(line)["id"])
+        print(f"resume: {len(done)} questions already recorded", flush=True)
+    questions = [q for q in questions if q["id"] not in done]
 
     global _PROXY
     proxy = GlmProxy()
@@ -223,21 +253,16 @@ def main() -> int:
 
     results = []
     t_start = time.time()
+    current_domain = None
     for qi, question in enumerate(questions):
         traj_ids = haystack[question["id"]]
-        # Seed only unseen trajectories: within a domain all questions
-        # share the 100-trajectory haystack, so clear only on domain
-        # change (V2 small tier property from SCHEMA.md).
-        if qi == 0 or question["domain"] != results[-1]["domain"]:
+        # Within a domain all questions share the 100-trajectory
+        # haystack (V2 small tier property from SCHEMA.md), so seed
+        # only on domain change.
+        if question["domain"] != current_domain:
+            current_domain = question["domain"]
             from benchmarks.longmemeval import _clear_store
 
-            _clear_store(svc)
-            with svc.store.deferred_commit():
-                for tid in traj_ids:
-                    # trajectories resolved lazily below
-                    pass
-        # resolve + seed (smoke: reload trajectories dict once, outside loop)
-        if qi == 0 or question["domain"] != results[-1]["domain"]:
             _clear_store(svc)
             trajs = load_trajectories()
             needed = [trajs[tid] for tid in traj_ids if tid in trajs]
@@ -259,20 +284,38 @@ def main() -> int:
                 f"Excerpts:\n{context[:20000]}\n\nQuestion: {question['question']}\n\nAnswer concisely:",
                 max_tokens=1024,
             ).strip()
+        except QuotaExhaustedError:
+            print(
+                f"{question['id']}: bigmodel quota exhausted (1310) - aborting "
+                "for resume; empty answers would be silently scored wrong",
+                flush=True,
+            )
+            svc.stop()
+            return 2
         except Exception as exc:  # noqa: BLE001
             print(f"{question['id']}: generation failed {exc}", flush=True)
             answer = ""
-        correct = score_answer(question, answer) if answer else False
-        results.append(
-            {
-                "id": question["id"],
-                "domain": question["domain"],
-                "question_type": question["question_type"],
-                "latency_s": round(latency, 3),
-                "correct": correct,
-                "answer": answer[:200],
-            }
-        )
+        try:
+            correct = score_answer(question, answer) if answer else False
+        except QuotaExhaustedError:
+            print(
+                f"{question['id']}: bigmodel quota exhausted (1310) in judge - "
+                "aborting for resume",
+                flush=True,
+            )
+            svc.stop()
+            return 2
+        row = {
+            "id": question["id"],
+            "domain": question["domain"],
+            "question_type": question["question_type"],
+            "latency_s": round(latency, 3),
+            "correct": correct,
+            "answer": answer[:200],
+        }
+        results.append(row)
+        with open(records_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         print(
             f"{qi + 1}/{len(questions)} {question['id']} type={question['question_type']} "
             f"correct={correct} latency={latency:.2f}s",
@@ -280,23 +323,26 @@ def main() -> int:
         )
     svc.stop()
 
-    acc = sum(r["correct"] for r in results) / max(len(results), 1)
-    lat = sorted(r["latency_s"] for r in results)
+    # Aggregate over ALL records (resume included), not just this session.
+    all_rows = [
+        json.loads(line)
+        for line in records_path.read_text().splitlines()
+        if line.strip()
+    ]
+    acc = sum(bool(r["correct"]) for r in all_rows) / max(len(all_rows), 1)
+    lat = sorted(r["latency_s"] for r in all_rows)
     p50 = lat[len(lat) // 2] if lat else 0
     p95 = lat[int(len(lat) * 0.95)] if lat else 0
     summary = {
         "benchmark": "longmemeval_v2_small",
         "domain": args.domain,
-        "n": len(results),
+        "n": len(all_rows),
         "accuracy": round(acc, 4),
         "latency_p50_s": round(p50, 3),
         "latency_p95_s": round(p95, 3),
         "wall_s": round(time.time() - t_start, 1),
     }
     print(json.dumps(summary, indent=1))
-    out = pathlib.Path("benchmarks/results/lme2-smoke")
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "records.json").write_text(json.dumps(results, ensure_ascii=False, indent=1))
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
     return 0
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import sqlite3
 from collections import Counter
@@ -20,6 +21,22 @@ _MAX_SQLITE_QUERY_TERMS = 64
 # bm25() ranks differing by less than this are treated as tied, so identical
 # documents share one positional weight instead of decaying by row order.
 _BM25_TIE_EPSILON = 1e-9
+
+
+def _fts_field_weights() -> tuple[float, float, float] | None:
+    """MEMPLEX_FTS_FIELD_WEIGHTS: bm25 column weights for (name, domain,
+    body). Default "1,1,1" is byte-identical to unweighted ranking; an
+    unparsable value fails closed to the default (never to None-weights
+    mismatch).
+    """
+    raw = os.environ.get("MEMPLEX_FTS_FIELD_WEIGHTS", "1,1,1")
+    try:
+        parts = [float(p) for p in raw.split(",")]
+    except ValueError:
+        return (1.0, 1.0, 1.0)
+    if len(parts) != 3 or not all(p >= 0.0 for p in parts):
+        return (1.0, 1.0, 1.0)
+    return (parts[0], parts[1], parts[2])
 
 
 def _tokenize_search_text(text: str) -> list[str]:
@@ -121,6 +138,7 @@ class SQLiteFTSIndex:
                 weight=2.0,
                 limit=limit,
                 scores=scores,
+                field_weights=_fts_field_weights(),
             )
             self._score_match_query(
                 conn=conn,
@@ -171,20 +189,29 @@ class SQLiteFTSIndex:
         weight: float,
         limit: int,
         scores: dict[str, float],
+        field_weights: tuple[float, float, float] | None = None,
     ) -> None:
         match_query = _sqlite_match_query(tokens)
         if not match_query:
             return
-        rows = conn.execute(
-            f"""
-            SELECT func_id, bm25({table}) AS rank
-            FROM {table}
-            WHERE {table} MATCH ?
-            ORDER BY rank
-            LIMIT ?
-            """,
-            (match_query, limit),
-        ).fetchall()
+        if table == "memplex_fts" and field_weights is not None:
+            # bm25() column weights ride as bound parameters; the leading
+            # UNINDEXED func_id column can never match, so its weight
+            # slot is 0. (noqa: single SQL literal, no interpolation)
+            rows = conn.execute(
+                "SELECT func_id, bm25(memplex_fts, ?, ?, ?, ?) AS rank FROM memplex_fts WHERE memplex_fts MATCH ? ORDER BY rank LIMIT ?",
+                (0.0, field_weights[0], field_weights[1], field_weights[2], match_query, limit),
+            ).fetchall()
+        elif table == "memplex_fts":
+            rows = conn.execute(
+                "SELECT func_id, bm25(memplex_fts) AS rank FROM memplex_fts WHERE memplex_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match_query, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT func_id, bm25(memplex_trigram) AS rank FROM memplex_trigram WHERE memplex_trigram MATCH ? ORDER BY rank LIMIT ?",
+                (match_query, limit),
+            ).fetchall()
         prev_rank: float | None = None
         group_start = 0
         for idx, row in enumerate(rows):

@@ -421,6 +421,9 @@ class EmbeddingService:
         # RLock because batch helpers delegate to single-text paths on
         # the same object.
         self._model_lock = threading.RLock()
+        # Sparse leg backend (BGEM3FlagModel): lazily loaded, False once a
+        # load/encode failed (leg off for the process lifetime).
+        self._sparse_model: object | None = None
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -428,6 +431,49 @@ class EmbeddingService:
         """Generate an embedding vector for a single text."""
         with self._model_lock:
             return self._embedder.encode(text)
+
+    def embed_sparse_batch(
+        self, texts: list[str], batch_size: int | None = None
+    ) -> list[dict[str, float]] | None:
+        """bge-m3 sparse lexical weights (token-id string -> weight).
+
+        Only available when FlagEmbedding is importable and the
+        configured model is bge-m3; returns None otherwise so the sparse
+        retrieval leg fails closed to off (never blocks a query). The
+        sparse backend is a separate lazy instance - SentenceTransformer
+        cannot expose bge-m3's lexical head - serialized under the same
+        model lock.
+        """
+        if self.model != "bge-m3":
+            return None
+        with self._model_lock:
+            if self._sparse_model is None:
+                try:
+                    from FlagEmbedding import BGEM3FlagModel  # type: ignore
+
+                    self._sparse_model = BGEM3FlagModel(
+                        "BAAI/bge-m3", use_fp16=False
+                    )
+                except Exception:  # noqa: BLE001 - no backend = leg off
+                    self._sparse_model = False
+                    return None
+            if self._sparse_model is False:
+                return None
+            backend = self._sparse_model
+            clamped = [t[:8192] if len(t) > 8192 else t for t in texts]
+            chunk = min(batch_size or self.batch_size, 16) or 16
+            weights: list[dict[str, float]] = []
+            for i in range(0, len(clamped), chunk):
+                part = clamped[i : i + chunk]
+                try:
+                    out = backend.encode(part, return_sparse=True)
+                except Exception:  # noqa: BLE001 - sparse failure = leg off
+                    return None
+                for lex in out["lexical_weights"]:
+                    weights.append(
+                        {k: float(v) for k, v in lex.items() if float(v) > 0.0}
+                    )
+            return weights
 
     def embed_query(self, text: str) -> Vector:
         """Embed a query-time text without mutating corpus statistics.
