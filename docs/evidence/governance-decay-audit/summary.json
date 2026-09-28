@@ -1,0 +1,25 @@
+{
+ "benchmark": "governance_decay_local_audit",
+ "protocol": "200 filler turns; constrained arm adds an early governance rule; run compaction; check constraint survival in store + top-10 retrieval surface for a constraint probe",
+ "docs": 200,
+ "rows": [
+  {
+   "arm": "control",
+   "functions_before": 200,
+   "functions_after": 200,
+   "constraint_in_store": false,
+   "constraint_in_retrieval_surface": false
+  },
+  {
+   "arm": "constrained",
+   "functions_before": 200,
+   "functions_after": 200,
+   "constraint_in_store": true,
+   "constraint_in_retrieval_surface": true
+  }
+ ],
+ "verdict": {
+  "decay_in_store": false,
+  "decay_in_retrieval": false
+ }
+}
