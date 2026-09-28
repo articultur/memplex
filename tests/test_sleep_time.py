@@ -58,9 +58,10 @@ def test_run_once_improves_and_reports(tmp_path):
         )
         agent = SleepTimeAgent(svc)
         report = agent.run_once()
-        assert set(report) == {"improved", "pinned_inferences"}
+        assert set(report) == {"improved", "pinned_inferences", "consolidated"}
         assert report["improved"]["index_rebuilt"] is True
         assert report["pinned_inferences"] == 0  # no working memory tier
+        assert report["consolidated"]["enabled"] is False  # opt-in default
     finally:
         svc.stop()
 

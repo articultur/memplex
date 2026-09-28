@@ -100,7 +100,11 @@ class SleepTimeAgent:
     # ── The pass itself (synchronous, testable) ──────────────────────
 
     def run_once(self) -> dict[str, Any]:
-        report: dict[str, Any] = {"improved": {}, "pinned_inferences": 0}
+        report: dict[str, Any] = {
+            "improved": {},
+            "pinned_inferences": 0,
+            "consolidated": {},
+        }
         try:
             report["improved"] = self._service.improve()
         except Exception as exc:  # noqa: BLE001 - logged degradation path
@@ -109,8 +113,23 @@ class SleepTimeAgent:
             report["pinned_inferences"] = self._precompute_inferences()
         except Exception as exc:  # noqa: BLE001 - logged degradation path
             logger.debug("sleep-time inference precompute failed: %s", exc)
+        try:
+            report["consolidated"] = self._consolidate_memory()
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
+            logger.debug("sleep-time consolidation failed: %s", exc)
         self.last_report = report
         return report
+
+    def _consolidate_memory(self) -> dict[str, Any]:
+        # ADR-013 F3: episodic -> sustained promotion + forgetting, the
+        # same authorized-facade scan pattern as the inference precompute.
+        # Disabled-by-default in the module (MEMPLEX_CONSOLIDATION=1).
+        from memplex.auth import local_development_context
+        from memplex.consolidation import consolidate
+
+        context = local_development_context()
+        store = self._service._store_for(context)
+        return consolidate(store).to_dict()
 
     def _precompute_inferences(self) -> int:
         working_memory = getattr(self._service, "_working_memory", None)
