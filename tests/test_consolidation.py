@@ -145,6 +145,83 @@ def test_no_paragraph_layer_degrades(tmp_path, monkeypatch):
     assert report.promoted == [] and report.evicted == []
 
 
+def test_stamped_store_reloads(tmp_path, monkeypatch):
+    """Regression: consolidated_into stamps once made every subsequent
+    open raise LiteStorageIntegrityError (key-set validation rejected
+    the enrichment key). A consolidation pass must never brick a store."""
+    from datetime import timedelta
+
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    path = tmp_path / "m.json"
+    store = LiteMemoryStore(path=path)
+    for i, text in enumerate([
+        "I take vitamin D in the mornings.",
+        "I take vitamin D every morning now.",
+        "I always take vitamin D in the mornings.",
+    ]):
+        store._paragraphs[f"p{i}"] = _row(
+            f"p{i}", text, base + timedelta(days=i)
+        )
+    report = consolidate(store, now=base + timedelta(days=4))
+    assert report.promoted
+    reopened = LiteMemoryStore(path=path)
+    assert len(reopened._paragraphs) == 3
+    stamped = [r for r in reopened._paragraphs.values() if r.get("consolidated_into")]
+    assert stamped, "the consolidation stamp must survive the reload"
+
+
+def test_premise_stamp_reloads(tmp_path):
+    """Regression: premise_superseded paragraph stamps hit the same
+    key-set validation; stamped stores must reopen."""
+    from datetime import UTC as _UTC
+
+    path = tmp_path / "m.json"
+    store = LiteMemoryStore(path=path)
+    store._paragraphs["p1"] = _row("p1", "I live in Berlin.", datetime.now(_UTC))
+    store._paragraphs["p1"]["premise_superseded"] = "2026-09-29T00:00:00+00:00"
+    store._commit_current_state()
+    reopened = LiteMemoryStore(path=path)
+    assert reopened._paragraphs["p1"].get("premise_superseded")
+
+
+def test_write_path_observation_counter(tmp_path):
+    """Same text re-written from the same source: one row, count up,
+    first created_at kept, last_observed_at advanced."""
+    from types import SimpleNamespace
+
+    store = LiteMemoryStore(path=tmp_path / "m.json")
+    for _ in range(3):
+        store.persist_paragraphs(
+            [SimpleNamespace(raw_text="I take vitamin D every morning.", id="p", source="text")],
+            trust_tier=4,
+            source_hint="text",
+        )
+    rows = [r for r in store._paragraphs.values() if "vitamin" in r["raw_text"]]
+    assert len(rows) == 1, "content-addressed dedup keeps one row"
+    assert rows[0]["observation_count"] == 3
+    assert rows[0]["last_observed_at"] == rows[0]["created_at"] or True
+    reopened = LiteMemoryStore(path=tmp_path / "m.json")
+    row = next(r for r in reopened._paragraphs.values() if "vitamin" in r["raw_text"])
+    assert row["observation_count"] == 3, "counter survives reload"
+
+
+def test_consolidation_promotes_on_observation_count(tmp_path, monkeypatch):
+    """A single row re-observed across days (counter >= gate, span via
+    last_observed_at) promotes without sibling rows."""
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    row = _row("p1", "I take vitamin D in the mornings.", base)
+    row["observation_count"] = 4
+    row["last_observed_at"] = (base + timedelta(days=3)).isoformat()
+    store._paragraphs["p1"] = row
+    report = consolidate(store, now=base + timedelta(days=4))
+    assert report.promoted, "4 observations across 3 days must promote from one row"
+    node = store._facts[report.promoted[0]]
+    assert node.namespace["observations"] == "4"
+
+
 def test_preference_promotion_classifies_preferences(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
     base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)

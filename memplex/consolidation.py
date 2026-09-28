@@ -306,12 +306,26 @@ def consolidate(
 
     promoted_nodes: list[tuple[str, Any]] = []
     for rows in clusters:
-        timestamps = [_parse_ts(r.get("created_at")) for _, r in rows]
+        # F3 observation counter: a row re-observed N times from the same
+        # source carries observation_count=N (write-path dedup keeps one
+        # row), so the repetition gate sums counts; legacy rows default
+        # to 1 and reduce to the old row-count gate. The span runs from
+        # first creation to last observation.
+        timestamps = []
+        observations = 0
+        for _, r in rows:
+            created = _parse_ts(r.get("created_at"))
+            if created is not None:
+                timestamps.append(created)
+            last = _parse_ts(r.get("last_observed_at")) or created
+            if last is not None:
+                timestamps.append(last)
+            observations += int(r.get("observation_count", 1) or 1)
         valid = [t for t in timestamps if t is not None]
         span_days = 0.0
         if len(valid) >= 2:
             span_days = (max(valid) - min(valid)).total_seconds() / 86400.0
-        if len(rows) < min_observations or span_days < float(min_span_days):
+        if observations < min_observations or span_days < float(min_span_days):
             continue
 
         canonical = _canonical_text(rows)
@@ -321,7 +335,7 @@ def consolidate(
         latest = max(valid).isoformat()
         stamps = {
             "consolidated": current.isoformat(),
-            "observations": str(len(rows)),
+            "observations": str(observations),
         }
         if _PREFERENCE_RE.match(canonical):
             node = Preference(

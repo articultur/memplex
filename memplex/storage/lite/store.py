@@ -112,7 +112,22 @@ _FIELD_VALUE_KEYS = {"desc", "sources", "source_method", "weight", "observation"
 _EDGE_KEYS = {"source", "target", "edge_type", "weight", "evidence", "created_at"}
 # ADR-013 Stage 2 raw-paragraph rows: JSON-safe dicts, validated as a
 # fixed key set with exact types.
-_PARAGRAPH_KEYS = {"id", "raw_text", "trust_tier", "created_at", "source"}
+# Enrichment keys are written by maintenance passes (B1 premise
+# supersession, F3 consolidation) and the write path's observation
+# counter; rows without them load fine (legacy pairs), but rows WITH
+# them must validate - rejecting them made a stamped store permanently
+# unloadable ( LiteStorageIntegrityError on every subsequent open).
+_PARAGRAPH_KEYS = {
+    "id",
+    "raw_text",
+    "trust_tier",
+    "created_at",
+    "source",
+    "consolidated_into",
+    "premise_superseded",
+    "observation_count",
+    "last_observed_at",
+}
 # Every Nth commit pays the full double pre-durable decode audit even while
 # batching is not active, so a serializer regression cannot outlive an audit
 # window undetected (loads stay fail-closed full decodes regardless).
@@ -411,8 +426,10 @@ def _validate_raw_keys(raw: dict, allowed: set[str], *, legacy: bool, label: str
 def _validate_raw_paragraph(row: Any) -> dict:
     """Validate one raw-paragraph row and return it (ADR-013 Stage 2).
 
-    Rows are plain dicts with a fixed key set; ids must be non-empty
-    strings and missing tiers default to the legacy session_derived.
+    Rows are plain dicts; ids must be non-empty strings, missing tiers
+    default to the legacy session_derived, and the maintenance-stamp /
+    observation-counter keys default to their unset values so legacy
+    pairs load unchanged.
     """
     if type(row) is not dict:
         raise ValueError("invalid Lite paragraph row")
@@ -424,6 +441,11 @@ def _validate_raw_paragraph(row: Any) -> dict:
     row.setdefault("trust_tier", 3)
     row.setdefault("created_at", None)
     row.setdefault("source", "")
+    row.setdefault("consolidated_into", "")
+    row.setdefault("premise_superseded", "")
+    # A legacy row without a counter is one historical observation.
+    row.setdefault("observation_count", 1)
+    row.setdefault("last_observed_at", row.get("created_at"))
     return row
 
 
@@ -1169,6 +1191,12 @@ class LiteMemoryStore:
             row_id = persisted_paragraph_id(source_hint, getattr(para, "id", ""), raw_text)
             existing = self._paragraphs.get(row_id)
             if existing is not None and existing.get("raw_text") == raw_text:
+                # F3 observation counter: identical text re-observed from
+                # the same source bumps the count instead of writing a
+                # duplicate row (content-addressed dedup); the first
+                # observed timestamp is kept for span computations.
+                existing["observation_count"] = int(existing.get("observation_count", 1)) + 1
+                existing["last_observed_at"] = now
                 continue
             self._paragraphs[row_id] = {
                 "id": row_id,
@@ -1176,6 +1204,8 @@ class LiteMemoryStore:
                 "trust_tier": int(trust_tier),
                 "created_at": now,
                 "source": (getattr(para, "source", "") or "")[:200],
+                "observation_count": 1,
+                "last_observed_at": now,
             }
         self._enforce_tier2_paragraph_cap()
         self._commit_current_state()
@@ -1476,7 +1506,15 @@ class LiteMemoryStore:
             return self._enforce_trust_quota(
                 self._premise_resolution(self._apply_trust_penalty(results)), top_k
             )[:top_k]
-        fused = self._fuse_search_legs([results, vector_results], fetch_k)
+        legs: list[list[SearchResult]] = [results, vector_results]
+        if os.environ.get("MEMPLEX_SPARSE_LEG") == "1":
+            # bge-m3 sparse lexical leg: learned token weights complement
+            # BM25 (morphology/multilingual) without a semantic model's
+            # false friends. Fails closed to an empty leg.
+            sparse_leg = self._sparse_search_leg(text, top_k)
+            if sparse_leg:
+                legs.append(sparse_leg)
+        fused = self._fuse_search_legs(legs, fetch_k)
         # Attach already-cached corpus vectors to the fused hits: the
         # retrieval layer's vector pre-fill (and the Reranker behind it)
         # otherwise re-embeds these same projections per query, which
@@ -1666,16 +1704,9 @@ class LiteMemoryStore:
         """
         self._vector_index.set_embedder(embedder)
 
-    def _vector_search_leg(self, text: str, top_k: int) -> list[SearchResult]:
-        """Cosine-search every resident node's embedding for *text*.
-
-        Covers Functions (search-text projection shared with the FTS
-        sidecar) plus Facts and Preferences (projection shared with the
-        pure-Python BM25 path), so low-lexical-overlap queries can reach
-        typed memories the lexical legs structurally miss. Embedding
-        failures degrade to an empty leg -- lexical results stand.
-        """
-        documents: list[tuple] = [
+    def _semantic_documents(self) -> list[tuple[str, str]]:
+        """Document projection shared by the vector and sparse legs."""
+        documents: list[tuple[str, str]] = [
             (func.id, self._function_to_search_text(func))
             for func in self._functions.values()
             if not self._premise_superseded(func)
@@ -1692,10 +1723,43 @@ class LiteMemoryStore:
             for row in self._paragraphs.values():
                 if not row.get("premise_superseded"):
                     documents.append((row["id"], row["raw_text"]))
+        return documents
+
+    def _vector_search_leg(self, text: str, top_k: int) -> list[SearchResult]:
+        """Cosine-search every resident node's embedding for *text*.
+
+        Covers Functions (search-text projection shared with the FTS
+        sidecar) plus Facts and Preferences (projection shared with the
+        pure-Python BM25 path), so low-lexical-overlap queries can reach
+        typed memories the lexical legs structurally miss. Embedding
+        failures degrade to an empty leg -- lexical results stand.
+        """
+        documents = self._semantic_documents()
         if not documents:
             return []
 
         ranked = self._vector_index.search(documents, text, top_k)
+        return self._results_from_ranked(ranked)
+
+    def _sparse_search_leg(self, text: str, top_k: int) -> list[SearchResult]:
+        """bge-m3 sparse lexical leg (MEMPLEX_SPARSE_LEG=1).
+
+        Learned token-weight overlap complements BM25 (morphology,
+        multilingual) without the dense leg's false friends; fails
+        closed to an empty leg whenever the sparse backend is absent.
+        """
+        documents = self._semantic_documents()
+        if not documents:
+            return []
+        ranked = self._vector_index.sparse_search(documents, text, top_k)
+        return self._results_from_ranked(ranked)
+
+    def _results_from_ranked(
+        self, ranked: list[tuple[str, float]]
+    ) -> list[SearchResult]:
+        """Build SearchResults from (node_id, score) hits across every
+        typed collection plus the raw paragraph layer."""
+        nodes: dict[str, Any] = {**self._facts, **self._preferences}
         results: list[SearchResult] = []
         for node_id, similarity in ranked:
             func = self._functions.get(node_id)
