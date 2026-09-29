@@ -124,6 +124,18 @@ def main() -> int:
                 latency=3.331,
             ),
         ],
+        "medium": [
+            Point(
+                "Memplex text-projection union-store (enterprise)",
+                acc=19.43,
+                latency=34.956,
+            ),
+            Point(
+                "Memplex text-projection union-store (web)",
+                acc=19.58,
+                latency=2.296,
+            ),
+        ],
     }
     report = {
         "benchmark": "lme_v2_lafs",

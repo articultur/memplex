@@ -1,0 +1,30 @@
+{
+ "benchmark": "longmemeval_v2_medium_full_both_domains",
+ "question": "medium-tier full-population points on both domains (union-store protocol)",
+ "design": "official medium tier gives each question a distinct 500-trajectory subset; official harness builds fresh per-question memory. This run seeds each domain's union once (enterprise 874 trajectories / 33,212 docs, web union similar) and answers every question against it - a superset haystack, so retrieval faces more distractors than the official per-question setting and accuracy is a LOWER BOUND for the protocol. Same text-projection pipeline, orchestrated top-12, glm-5.3 answerer, deterministic evaluator specs + glm-5.3 llm judges; CPU embedding device",
+ "results": {
+  "enterprise_medium": {"accuracy": 0.1943, "n": 211, "p50_s": 34.956, "p95_s": 50.661, "wall_s": 59391.6},
+  "web_medium": {"accuracy": 0.1958, "n": 240, "p50_s": 2.296, "p95_s": 8.454, "wall_s": 12363.2},
+  "by_type_enterprise": {
+   "static-environment": 0.297, "procedure": 0.219, "procedure-abs": 0.25,
+   "static-environment-abs": 0.25, "dynamic-environment": 0.029,
+   "dynamic-environment-abs": 0.05, "errors-gotchas": 0.071
+  },
+  "by_type_web": {
+   "procedure": 0.381, "errors-gotchas": 0.267, "static-environment": 0.217,
+   "dynamic-environment": 0.157, "static-environment-abs": 0.129,
+   "dynamic-environment-abs": 0.048, "procedure-abs": 0.05
+  }
+ },
+ "findings": [
+  "5x deeper haystack barely moves accuracy on the same protocol: enterprise medium 0.1943 vs small 0.1896 (+0.5pp). The misses were never about haystack depth - the structural strata (dynamic-environment, cross-state answers) dominate, so adding distractors is nearly free for what the stack already could not do.",
+  "Web-medium 0.1958 exceeds the archived web-small text arm 0.158, but the protocols differ (this run: glm-5.3 answerer via run_lme_v2.py; the archived arm: glm-5.3-flash via the mm runner) - not a comparable pair; the same-protocol enterprise pair above is the controlled comparison.",
+  "Latency splits by corpus shape: web union docs are short (p50 2.3s), enterprise a11y states are long (p50 35.0s over 33k docs) - both inside the official [1s, 200s] band.",
+  "web procedure 0.381 is the best stratum anywhere in V2 for this stack; web dynamic-environment-abs 0.048 the worst."
+ ],
+ "honest_reading": "union-store superset setting (lower bound); 12/211 enterprise and 33/240 web answers are empty generation degradations scored wrong (web 13.8% - worth a degradation-path look); glm-5.3 same-family answerer+judge; CPU device. LAFS (official formula): medium reference 51.0741, both points gain exactly 0.0 - dominated by the RAG 45.9@0.3s floor at every budget; the frontier gap remains accuracy, not latency.",
+ "evidence_level": "E1",
+ "runner": "scripts/run_lme_v2.py --tier medium --domain {enterprise,web} --store-dir persistent",
+ "artifacts": ["records.jsonl", "summary.json"],
+ "timestamp": "2026-09-30T07:48:00Z"
+}
