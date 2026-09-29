@@ -21,6 +21,20 @@ Codex 69.9@177.2s (dominated off the Pareto set).
 | submission LAFS | 55.7648 |
 | **LAFS gain** | **0.0000 (exactly)** |
 
+## Result (medium tier, union-store points)
+
+| quantity | value |
+|---|---:|
+| reference LAFS | 51.0741 |
+| submission points | enterprise 19.43 pp @ p50 34.956s; web 19.58 pp @ p50 2.296s |
+| submission LAFS | 51.0741 |
+| **LAFS gain** | **0.0000 (exactly)** |
+
+Same mechanism: the medium reference floor (RAG 45.9 pp @ 0.3s) dominates
+every budget in [1s, 200s], and both union-store points sit far below
+45.9 pp. Medium gain conditions: > 45.9 pp (any latency), > 57.0 pp
+(< 25.8s), or > 70.1 pp (< 139.9s).
+
 ## Reading
 
 - The gain is exactly zero, not approximately: the RAG point (51.0 pp at
@@ -34,9 +48,5 @@ Codex 69.9@177.2s (dominated off the Pareto set).
   band.
 - Latency is not the binding constraint: our per-question p50 (3.3s)
   already sits in the fast band; the frontier gap is purely accuracy.
-- The medium-tier reference LAFS becomes computable the same way once
-  the medium runs land (reference: RAG 45.9@0.3s / AgentRunbook-R
-  57.0@25.8s / AgentRunbook-C 70.1@139.9s / Codex 68.7@185.8s).
-
 Artifacts: `benchmarks/results/lme2-lafs/summary.json` (gitignored);
 `scripts/lafs_v2.py` committed.
