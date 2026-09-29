@@ -61,8 +61,8 @@ def load_questions(domain: str | None) -> list[dict]:
     return rows
 
 
-def load_haystack() -> dict[str, list[str]]:
-    with open(DATA_ROOT / "haystacks/lme_v2_small.json") as fh:
+def load_haystack(tier: str = "small") -> dict[str, list[str]]:
+    with open(DATA_ROOT / f"haystacks/lme_v2_{tier}.json") as fh:
         return json.load(fh)
 
 
@@ -221,6 +221,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--domain", default="web")
+    parser.add_argument(
+        "--tier",
+        default="small",
+        choices=["small", "medium"],
+        help="haystack tier; medium gives each question a distinct "
+        "500-trajectory subset (official protocol: fresh per-question "
+        "memory). This runner seeds the domain UNION once - a superset "
+        "of any single question's haystack, so retrieval faces more "
+        "distractors and accuracy is a lower bound for the protocol.",
+    )
     parser.add_argument("--out", default="benchmarks/results/lme2-smoke")
     parser.add_argument(
         "--store-dir",
@@ -231,7 +241,7 @@ def main() -> int:
     args = parser.parse_args()
 
     questions = load_questions(args.domain)[: args.limit]
-    haystack = load_haystack()
+    haystack = load_haystack(args.tier)
     print(f"questions: {len(questions)} (domain={args.domain})", flush=True)
 
     out = pathlib.Path(args.out)
@@ -289,6 +299,11 @@ def main() -> int:
 
             _clear_store(svc)
             trajs = load_trajectories()
+            if args.tier == "medium":
+                union_ids: set[str] = set()
+                for q in questions:
+                    union_ids.update(haystack.get(q["id"], []))
+                traj_ids = sorted(union_ids)
             needed = [trajs[tid] for tid in traj_ids if tid in trajs]
             with svc.store.deferred_commit():
                 for traj in needed:
@@ -358,7 +373,7 @@ def main() -> int:
     p50 = lat[len(lat) // 2] if lat else 0
     p95 = lat[int(len(lat) * 0.95)] if lat else 0
     summary = {
-        "benchmark": "longmemeval_v2_small",
+        "benchmark": f"longmemeval_v2_{args.tier}",
         "domain": args.domain,
         "n": len(all_rows),
         "accuracy": round(acc, 4),
