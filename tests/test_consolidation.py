@@ -297,7 +297,15 @@ def test_embedder_clustering_promotes_lexically_distant_rephrases(
     assert report.promoted, "embedder clustering must group semantic rephrases"
     node_id = report.promoted[0]
     assert node_id in store._facts
-    assert "aloe" in store._facts[node_id].object_
+    # The medoid canonical is legitimately any member of the cluster
+    # (whichever rephrase is most central), not necessarily one naming
+    # the subject - assert membership, not a specific token.
+    members = {m for m in [
+        "The aloe gets hydrated midweek.",
+        "Wednesday is plant care day for the succulent.",
+        "Midweek is when the aloe drinks water.",
+    ]}
+    assert any(store._facts[node_id].object_.startswith(m) for m in members)
 
 
 def test_promotion_synthesizes_cadence_phrase(tmp_path, monkeypatch):
@@ -418,3 +426,24 @@ def test_cadence_phrase_idempotent_rerun(tmp_path, monkeypatch):
     assert third.promoted == [node_id]
     assert store._facts[node_id].object_ == text
     assert store._facts[node_id].object_.count("times across") == 1
+
+
+def test_consolidated_paragraph_demotes_below_plain_rows(tmp_path):
+    """F3 hierarchy: once a pattern is promoted, its raw evidence rows
+    demote (never filter) in the paragraph search leg so the sustained
+    node can outrank them for aggregate questions."""
+    store = _store(tmp_path)
+    store._paragraphs["plain"] = _row(
+        "plain", "The aloe gets water on schedule.", datetime.now(UTC)
+    )
+    stamped = _row(
+        "stamped", "The aloe gets hydrated every week.", datetime.now(UTC)
+    )
+    stamped["consolidated_into"] = "consol-abc"
+    store._paragraphs["stamped"] = stamped
+    hits = store._search_paragraphs("aloe water schedule hydrated", top_k=2)
+    assert {h.func_id for h in hits} == {"plain", "stamped"}
+    scores = {h.func_id: h.relevance_score for h in hits}
+    assert scores["plain"] > scores["stamped"], (
+        "the consolidated row must rank below an equal plain row"
+    )

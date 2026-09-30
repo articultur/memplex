@@ -61,15 +61,28 @@ one-off noise row:
   observation counter (content-addressed dedup collapses exact repeats to
   one row at write time).
 
-## v3 addendum (2026-09-30): cadence synthesis
+## v3 addendum (2026-09-30): cadence synthesis — at probe ceiling
 
-Promoted nodes now append a synthesized cadence to their text facet —
+Promoted nodes append a synthesized cadence to their text facet —
 `" (observed N times across D days)"` from the observation counter and
 span (sub-day spans stay verbatim; node id stays keyed on the raw
-canonical so re-promotion is byte-identical). Habit-probe implicit arm:
-`cadence_phrase_recall` 0.0 → 0.5 (2 promoted nodes; the day-token
-metric stays 0.0 by construction — the mentions never name the day).
-4 new contract tests; full lite suite green.
+canonical so re-promotion is byte-identical). Two follow-up fixes took
+the habit-probe implicit arm from 0.0 to the full 1.0:
+
+- **Medoid canonical** (0.5 → the remaining gap closed): frequency ties
+  in a semantically-formed cluster admitted peripheral texts — a pool
+  filler ("My plant watering day is Wednesday.") won the aloe cluster's
+  canonical by earliest-index, so the promoted node named Wednesday, not
+  aloe. The canonical is now the cluster medoid (highest mean cosine),
+  which is the member the cluster is actually about.
+- **Evidence demotion**: paragraphs whose pattern was promoted demote
+  x0.5 in the paragraph search leg (never filtered) — the sustained
+  node can outrank its own evidence for aggregate questions.
+
+Final: `cadence_phrase_recall` **1.0** (both implicit habits promote
+with a subject-bearing, phrase-carrying retrievable node); the
+day-token metric stays 0.0 by construction (the mentions never name
+the day). 6 new contract tests; full lite suite green.
 
 ## Honest scope
 

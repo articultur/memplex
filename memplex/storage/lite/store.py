@@ -3123,6 +3123,13 @@ class LiteMemoryStore:
         for row, _para_text, score in ranked:
             para = cast(dict, row)
             relevance = score / (score + 1.0)
+            # F3 hierarchy: a paragraph whose pattern was promoted into a
+            # sustained node is evidence, not the canonical surface - its
+            # promoted node (carrying the synthesized cadence) must be
+            # able to outrank it for aggregate questions. Demote, never
+            # filter: verbatim-recall queries still surface the mention.
+            if para.get("consolidated_into"):
+                relevance *= 0.5
             results.append(
                 SearchResult(
                     func_id=para["id"],
@@ -3135,7 +3142,7 @@ class LiteMemoryStore:
                     updated_at=para.get("created_at"),
                     origin="",
                     trust_tier=int(para.get("trust_tier", 3)),
-                )
+                ),
             )
         return results
 

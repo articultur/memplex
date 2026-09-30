@@ -185,7 +185,8 @@ def _cluster(
     """
     if embedder is not None:
         try:
-            return _cluster_embedded(parseable, embedder, threshold)
+            embedded, _vectors = _cluster_embedded(parseable, embedder, threshold)
+            return embedded
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             logger.debug("embedder clustering failed, lexical fallback: %s", exc)
     clusters: list[list[tuple[str, dict[str, Any]]]] = []
@@ -222,7 +223,8 @@ def _cluster_embedded(
     parseable: dict[str, dict[str, Any]],
     embedder: Any,
     threshold: float,
-) -> list[list[tuple[str, dict[str, Any]]]]:
+) -> tuple[list[list[tuple[str, dict[str, Any]]]], list[list[list[float]]]]:
+    """Clusters plus each cluster's member vectors (for medoid pickup)."""
     rows = [
         (row_id, row, str(row.get("raw_text") or "").strip())
         for row_id, row in parseable.items()
@@ -230,15 +232,17 @@ def _cluster_embedded(
         and str(row.get("raw_text") or "").strip()
     ]
     if not rows:
-        return []
+        return [], []
     vectors = embedder.embed_batch([text for _, _, text in rows])
     clusters: list[list[tuple[str, dict[str, Any]]]] = []
+    cluster_vectors: list[list[list[float]]] = []
     means: list[list[float]] = []
     for (row_id, row, _text), vector in zip(rows, vectors):
         placed = False
         for i, mean in enumerate(means):
             if _cosine(vector, mean) >= threshold:
                 clusters[i].append((row_id, row))
+                cluster_vectors[i].append(vector)
                 n = len(clusters[i])
                 means[i] = [
                     ((n - 1) * m + v) / n for m, v in zip(mean, vector)
@@ -247,8 +251,43 @@ def _cluster_embedded(
                 break
         if not placed:
             clusters.append([(row_id, row)])
+            cluster_vectors.append([vector])
             means.append(list(vector))
-    return clusters
+    return clusters, cluster_vectors
+
+
+def _cluster_rows(
+    parseable: dict[str, dict[str, Any]],
+    embedder: Any,
+    threshold: float,
+) -> tuple[list[list[tuple[str, dict[str, Any]]]], list[list[list[float]]]]:
+    """Dispatch to the semantic or lexical clusterer (vectors only for
+    the semantic path, where the medoid canonical needs them)."""
+    if embedder is None:
+        return _cluster(parseable), []
+    return _cluster_embedded(parseable, embedder, threshold)
+
+
+def _medoid_text(
+    rows: list[tuple[str, dict[str, Any]]], vectors: list[list[float]]
+) -> str | None:
+    """The cluster member with the highest mean cosine to the cluster.
+
+    Frequency ties in a semantically-formed cluster admit peripheral
+    texts (a one-off filler that cosine-dragged into the cluster): the
+    medoid is the member the cluster is actually about, so the promoted
+    node's text names the habit, not a hitchhiker.
+    """
+    if not vectors:
+        return None
+    best_idx = 0
+    best_score = -1.0
+    for i, vi in enumerate(vectors):
+        total = sum(_cosine(vi, vj) for vj in vectors)
+        if total > best_score:
+            best_score = total
+            best_idx = i
+    return str(rows[best_idx][1].get("raw_text") or "").strip()
 
 
 def _canonical_text(rows: list[tuple[str, dict[str, Any]]]) -> str:
@@ -275,6 +314,18 @@ def _cadence_suffix(observations: int, span_days: float) -> str:
     if span_days < 1.0:
         return ""
     return f" (observed {observations} times across {round(span_days)} days)"
+
+
+def _pick_canonical(
+    rows: list[tuple[str, dict[str, Any]]], vectors: list[list[float]]
+) -> str:
+    """Medoid text for semantically-formed clusters, most-frequent text
+    otherwise; an empty medoid (defensive) falls back to frequency."""
+    if vectors:
+        medoid = _medoid_text(rows, vectors)
+        if medoid:
+            return medoid
+    return _canonical_text(rows)
 
 
 def consolidate(
@@ -318,13 +369,15 @@ def consolidate(
             continue
         parseable[row_id] = row
 
-    clusters = _cluster(parseable, embedder=embedder, threshold=embed_threshold)
+    clusters, cluster_vectors = _cluster_rows(
+        parseable, embedder, embed_threshold
+    )
     report.clusters = len(clusters)
 
     from memplex.models import Fact, Preference, SourceType
 
     promoted_nodes: list[tuple[str, Any]] = []
-    for rows in clusters:
+    for ci, rows in enumerate(clusters):
         # F3 observation counter: a row re-observed N times from the same
         # source carries observation_count=N (write-path dedup keeps one
         # row), so the repetition gate sums counts; legacy rows default
@@ -347,7 +400,9 @@ def consolidate(
         if observations < min_observations or span_days < float(min_span_days):
             continue
 
-        canonical = _canonical_text(rows)
+        canonical = _pick_canonical(
+            rows, cluster_vectors[ci] if cluster_vectors else []
+        )
         tiers = [int(r.get("trust_tier", 3)) for _, r in rows]
         node_id = "consol-" + hashlib.sha256(canonical.encode()).hexdigest()[:12]
         # v3 cadence synthesis: the suffix rides the text facet so the
