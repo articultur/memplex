@@ -68,6 +68,10 @@ GENERATION_PROMPT = (
 JUDGE_TEMPLATE = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
 
 
+class QuotaExhaustedError(RuntimeError):
+    """bigmodel 1310: the weekly/monthly cap is hit - stop, never retry."""
+
+
 class Proxy:
     """Anthropic-compatible bigmodel client (user-authorized endpoint).
 
@@ -103,6 +107,11 @@ class Proxy:
         for attempt in range(5):
             try:
                 resp = self._client.post("/v1/messages", json=payload)
+                if resp.status_code == 429 and "1310" in resp.text:
+                    # Quota cap: retrying cannot succeed, and silent
+                    # empty answers would corrupt the run (the v2
+                    # empty-answer lesson).
+                    raise QuotaExhaustedError(resp.text[:200])
                 resp.raise_for_status()
                 return "".join(
                     b.get("text", "")

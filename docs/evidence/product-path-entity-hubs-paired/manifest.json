@@ -1,0 +1,23 @@
+{
+ "benchmark": "product_path_entity_hubs_paired_full",
+ "question": "does the productized v13 entity-hub recipe lift the write_text product path on the multi-session pool?",
+ "design": "full-population paired A/B on all 133 multi-session questions: identical seeding (write_text per [sid @ date] session text), identical orchestration; the hubs arm additionally attributes paragraphs to sessions and runs build_entity_hubs (MEMPLEX_ENTITY_HUBS=1, glm-5.3 extraction thinking-disabled) before the query. Both arms glm-5.3 answerer/judge, fallback paragraph composition, MPS device (same instrument as the archived probes). Quota abort wired before the full run; resume rode out 7 environment kills (client restarts) with zero loss.",
+ "results": {
+  "hubs_arm": {"accuracy": 0.4662, "correct": 62},
+  "control_arm": {"accuracy": 0.3684, "correct": 49},
+  "delta": "+9.8pp",
+  "flips": "18 up / 5 down",
+  "trajectory_by_n": "+3.7 (n=27) -> +2.4 (n=42) -> +7.0 (n=57) -> +9.9 (n=71) -> +9.3 (n=86) -> +7.9 (n=101) -> +9.5 (n=116) -> +9.2 (n=131) -> +9.8 (n=133)"
+ },
+ "findings": [
+  "The productized hub recipe EXCEEDS its harness effect on the same pool: +9.8pp paired vs the harness's +6.8pp - the product path (write_text -> paragraphs -> hubs) benefits even more than the harness seeding did, because flat retrieval was the product's bottleneck on this pool.",
+  "18 up / 5 down: the flip ratio stabilizes the verdict well beyond noise (the delta never left positive territory after n=27 and settled into the +8-10pp band from n=57).",
+  "J-scale projection: multi-session is 133/500 of LongMemEval-J, so +9.8pp on this pool is worth ~+2.6pp overall - the single largest product-path lever measured to date (previous best: paragraph-primary fusion's pool gain).",
+  "Composition note: both arms ran fallback composition, so absolute numbers are not comparable to the 0.7669 primary-fusion reading; the paired delta is composition-robust. The primary-composition hub run is the follow-up that sets the official product-path number."
+ ],
+ "honest_reading": "paired same-questions A/B, same answerer/judge family; hub extraction itself is glm-3.3-family LLM output (the recipe's known dependence); the 7 environment kills during the run were absorbed by per-question jsonl resume (records never regressed); no quota interruption (abort never fired).",
+ "evidence_level": "E1",
+ "runner": "scripts/product_parity_multi.py --hubs",
+ "artifacts": ["product-parity-hubs-arm/shard0.jsonl", "product-parity-hubs-ctl/shard0.jsonl"],
+ "timestamp": "2026-10-01T04:30:00Z"
+}
