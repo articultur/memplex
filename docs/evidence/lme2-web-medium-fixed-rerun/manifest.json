@@ -1,0 +1,20 @@
+{
+ "benchmark": "longmemeval_v2_web_medium_fixed_rerun",
+ "question": "how much of the +13.8pp empty-answer artifact does the fixed answerer actually recover?",
+ "design": "identical protocol to lme2-web-medium-full (240 questions, web union-store, deterministic specs + glm-5.3 llm judges, CPU) with the two-stage fixed answerer: max_tokens 8192 (thinking completes; worst measured case 5805), fallback retry with thinking disabled on empty text; judge runs thinking-disabled. The artifacted run's 33 empty answers were silently scored wrong.",
+ "results": {
+  "artifacted_run": {"accuracy": 0.1958, "empty_answers": 33},
+  "fixed_run": {"accuracy": 0.25, "empty_answers": 0, "latency_p50_s": 2.465},
+  "recovered": "+5.4pp (13 of the 33 recovered answers scored correct; 39% of recoveries were right)"
+ },
+ "findings": [
+  "The measurement artifact is fully eliminated (0 empty answers) and the honest web-medium text-arm number is 0.250, not 0.1958.",
+  "Recovery is +5.4pp of the +13.8pp ceiling: 20 of the 33 previously-empty answers were answered but scored wrong - the empty answers were concentrated on reasoning-heavy questions where the model, given the budget, still does not answer correctly. The artifact inflated the apparent gap; the real gap is capability, not budget.",
+  "Latency unchanged (p50 2.5s): the 8192 budget costs nothing when thinking finishes early."
+ ],
+ "honest_reading": "single re-run, no variance repetition (judge temperature 0; SC absent in this runner so variance is minimal); enterprise-medium keeps its 0.1943 artifacted number (5.7pp ceiling; a re-run costs a 14h reseed for ~12 questions - uneconomical, disclosed here); LAFS recomputed with the fixed web point - medium gain remains exactly 0.0 (25.0 < 45.9 floor).",
+ "evidence_level": "E1",
+ "runner": "scripts/run_lme_v2.py --tier medium --domain web",
+ "artifacts": ["records.jsonl", "summary.json"],
+ "timestamp": "2026-09-30T16:42:00Z"
+}

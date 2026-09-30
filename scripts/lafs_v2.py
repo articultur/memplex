@@ -131,9 +131,9 @@ def main() -> int:
                 latency=34.956,
             ),
             Point(
-                "Memplex text-projection union-store (web)",
-                acc=19.58,
-                latency=2.296,
+                "Memplex text-projection union-store (web, fixed answerer)",
+                acc=25.0,
+                latency=2.465,
             ),
             Point(
                 "Memplex mm (web, screenshot injection, union-store)",
