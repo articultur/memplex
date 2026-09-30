@@ -61,6 +61,16 @@ one-off noise row:
   observation counter (content-addressed dedup collapses exact repeats to
   one row at write time).
 
+## v3 addendum (2026-09-30): cadence synthesis
+
+Promoted nodes now append a synthesized cadence to their text facet —
+`" (observed N times across D days)"` from the observation counter and
+span (sub-day spans stay verbatim; node id stays keyed on the raw
+canonical so re-promotion is byte-identical). Habit-probe implicit arm:
+`cadence_phrase_recall` 0.0 → 0.5 (2 promoted nodes; the day-token
+metric stays 0.0 by construction — the mentions never name the day).
+4 new contract tests; full lite suite green.
+
 ## Honest scope
 
 - This is a **local mechanism demonstration**, not a reproduction of

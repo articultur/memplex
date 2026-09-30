@@ -119,18 +119,28 @@ class GlmProxy:
             },
         )
 
-    def complete(self, prompt: str, *, max_tokens: int, temperature: float = 0.0) -> str:
+    def complete(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float = 0.0,
+        thinking: str = "default",
+    ) -> str:
+        """One completion. ``thinking="disabled"`` short-circuits the
+        thinking block (glm-5.3 on the bigmodel endpoint thinks by
+        default, and thinking tokens share the max_tokens budget)."""
+        body = {
+            "model": "glm-5.3",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if thinking == "disabled":
+            body["thinking"] = {"type": "disabled"}
         for attempt in range(5):
             try:
-                resp = self._client.post(
-                    "/v1/messages",
-                    json={
-                        "model": "glm-5.3",
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
+                resp = self._client.post("/v1/messages", json=body)
                 if resp.status_code == 429 and "1310" in resp.text:
                     # Monthly/weekly cap: retrying cannot succeed, and an
                     # empty answer would be silently scored wrong.
@@ -148,6 +158,24 @@ class GlmProxy:
                     raise
                 time.sleep(min(60, 5 * 2**attempt))
         return ""
+
+    def complete_answer(self, prompt: str) -> str:
+        """Answerer path with the empty-answer degradation fixed.
+
+        glm-5.3 thinks by default and thinking shares max_tokens: on
+        reasoning-heavy questions a 1024 cap burned the whole budget on
+        the thinking block (HTTP 200, stop_reason=max_tokens, no text
+        block) - the measured cause of all 33 web-medium empty answers
+        (docs/evidence/lme2-empty-answers-audit). Two-stage fix: give
+        thinking room to finish (8192; the reproduced worst case needed
+        5805), and if the response still carries no text, retry once
+        with thinking disabled (87-147 tokens observed) so an answer is
+        always produced.
+        """
+        answer = self.complete(prompt, max_tokens=8192)
+        if answer.strip():
+            return answer
+        return self.complete(prompt, max_tokens=1024, thinking="disabled")
 
 
 def _normalize(text: str) -> list[str]:
@@ -177,6 +205,7 @@ def llm_judge(question: dict, gold: str, answer: str) -> bool:
                 answer=answer[:600],
             ),
             max_tokens=256,
+            thinking="disabled",
         )
     except QuotaExhaustedError:
         raise
@@ -317,11 +346,10 @@ def main() -> int:
         context = "\n".join(f"- {r.summary[:1500]}" for r in retrieved.results[:TOP_K])
 
         try:
-            answer = proxy.complete(
+            answer = proxy.complete_answer(
                 "Answer using ONLY the memory excerpts below. If they do "
                 "not contain the answer, say what is missing concisely.\n\n"
                 f"Excerpts:\n{context[:20000]}\n\nQuestion: {question['question']}\n\nAnswer concisely:",
-                max_tokens=1024,
             ).strip()
         except QuotaExhaustedError:
             print(

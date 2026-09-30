@@ -20,7 +20,11 @@ Mechanism (all offline - the query path is never touched):
   graduate as Preference nodes; everything else as a "stated" Fact. The
   node carries trust_tier = min of the cluster (merge-takes-min),
   namespace stamps {"consolidated": ts, "observations": n}, and the
-  source paragraph ids. Cluster rows get a ``consolidated_into`` stamp,
+  source paragraph ids. Since v3 the node text also carries a synthesized
+  cadence suffix (`` (observed N times across D days)``, N=observations,
+  D=rounded span in days) whenever the cluster spans >= 1 day, so the
+  frequency is retrievable from text, not just counted in the stamp.
+  Cluster rows get a ``consolidated_into`` stamp,
   which makes promotion idempotent and marks them sustained (they then
   survive paragraph eviction).
 * Forgetting: paragraphs older than
@@ -258,6 +262,21 @@ def _canonical_text(rows: list[tuple[str, dict[str, Any]]]) -> str:
     return max(counts, key=lambda t: (counts[t], -order[t]))
 
 
+def _cadence_suffix(observations: int, span_days: float) -> str:
+    """Synthesized cadence for a promoted node's text facet ("" when the
+    span is too short to carry one).
+
+    A node that counts repetition only in a namespace stamp keeps the
+    cadence off every text surface: retrieval then surfaces the evidence
+    yet never the answer to "how often?". The format is a frozen
+    contract (the habit-semantics probe keys on "times across"); a
+    sub-day span rounds to 0 days and is deliberately left verbatim.
+    """
+    if span_days < 1.0:
+        return ""
+    return f" (observed {observations} times across {round(span_days)} days)"
+
+
 def consolidate(
     store: Any,
     *,
@@ -331,6 +350,12 @@ def consolidate(
         canonical = _canonical_text(rows)
         tiers = [int(r.get("trust_tier", 3)) for _, r in rows]
         node_id = "consol-" + hashlib.sha256(canonical.encode()).hexdigest()[:12]
+        # v3 cadence synthesis: the suffix rides the text facet so the
+        # frequency is retrievable. The node id stays keyed on the raw
+        # canonical text and add_* upserts replace the text wholesale, so
+        # re-promotion of the same cluster yields a byte-identical node -
+        # the suffix can never stack.
+        text = canonical + _cadence_suffix(observations, span_days)
         earliest = min(valid).isoformat()
         latest = max(valid).isoformat()
         stamps = {
@@ -341,7 +366,7 @@ def consolidate(
             node = Preference(
                 id=node_id,
                 aspect="",
-                preference=canonical,
+                preference=text,
                 source_type=SourceType.WIKI,
                 trust_tier=min(tiers),
                 created_at=earliest,
@@ -355,7 +380,7 @@ def consolidate(
                 id=node_id,
                 subject="user",
                 predicate="stated",
-                object_=canonical,
+                object_=text,
                 source_type=SourceType.WIKI,
                 trust_tier=min(tiers),
                 created_at=earliest,

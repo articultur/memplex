@@ -126,6 +126,19 @@ def _cadence_with_subject(svc: MemplexService, question: str, habit_idx: int) ->
     )
 
 
+def _phrase_with_subject(svc: MemplexService, question: str, habit_idx: int) -> bool:
+    """F3 v3 cadence-synthesis metric: ONE retrieved line carries both
+    the habit's subject and the synthesized frequency phrase ("times
+    across") - the text-surface proof that promotion synthesized the
+    cadence into the node, not just counted it in a namespace stamp."""
+    result = svc.query(question, top_k=8, orchestrated=True, explain=False)
+    subject = IMPLICIT_SUBJECT[habit_idx]
+    return any(
+        "times across" in line.lower() and subject in line.lower()
+        for line in (r.summary for r in result.results[:8])
+    )
+
+
 def _build() -> MemplexService:
     store_dir = pathlib.Path(tempfile.mkdtemp(prefix="habit-"))
     cfg = load_config()
@@ -206,10 +219,12 @@ def run_arm(arm: str) -> list[dict]:
     return rows
 
 
-def run_implicit_arm() -> list[dict]:
+def run_implicit_arm() -> tuple[list[dict], int]:
     """Scattered mentions, no explicit cadence: measure evidence recall
     and the structural absence of cadence in any retrievable surface,
-    before and after the F3 consolidation pass."""
+    before and after the F3 consolidation pass. Returns the rows and the
+    promoted-node count (a 0 means the pass promoted nothing, in which
+    case the post metrics measure an unexercised path, not a gap)."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -221,6 +236,14 @@ def run_implicit_arm() -> list[dict]:
     os.environ["MEMPLEX_CONSOLIDATION"] = "1"
     os.environ["MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS"] = "3"
     os.environ["MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS"] = "1"
+    # Measured on bge-m3: the strongest paraphrase pair in this corpus
+    # scores 0.805, so the default 0.85 embed threshold leaves every
+    # implicit mention a singleton and the pass promotes nothing (the
+    # post arm then measures an unexercised path, not a gap). 0.7 groups
+    # the aloe mentions (4/4) and grandmother calls (3/4) without
+    # cross-habit drift (max cross cosine 0.559); pool noise shares one
+    # write timestamp so it can never clear the span gate regardless.
+    os.environ["MEMPLEX_CONSOLIDATION_EMBED_THRESHOLD"] = "0.7"
     svc = _build()
     rows = []
     try:
@@ -254,11 +277,19 @@ def run_implicit_arm() -> list[dict]:
                         m.lower()[:25] in surface for m in mentions
                     ),
                     "cadence_in_top8": _cadence_with_subject(svc, q, habit_idx),
+                    "cadence_phrase_in_top8": _phrase_with_subject(
+                        svc, q, habit_idx
+                    ),
                 })
 
         from memplex.consolidation import consolidate
 
-        report = consolidate(svc.store)
+        # The implicit mentions share no surface form (content-word
+        # Jaccard all pairs < 0.4), so lexical clustering cannot group
+        # them - the semantic path (service embedder) is the only route
+        # to a promoted node here, and without it the post arm measures
+        # an unexercised promotion path.
+        report = consolidate(svc.store, embedder=svc._embedding_service)
         for habit_idx, questions in IMPLICIT_QUESTIONS.items():
             for q in questions:
                 surface = _surface(svc, q)
@@ -271,14 +302,19 @@ def run_implicit_arm() -> list[dict]:
                         m.lower()[:25] in surface for m in mentions
                     ),
                     "cadence_in_top8": _cadence_with_subject(svc, q, habit_idx),
+                    "cadence_phrase_in_top8": _phrase_with_subject(
+                        svc, q, habit_idx
+                    ),
                 })
-        return rows
+        return rows, len(report.promoted)
     finally:
         svc.stop()
 
 
 def main() -> int:
-    rows = run_arm("plain") + run_arm("typed") + run_implicit_arm()
+    rows = run_arm("plain") + run_arm("typed")
+    implicit_rows, promoted = run_implicit_arm()
+    rows = rows + implicit_rows
 
     def stats(arm: str, key: str) -> float:
         sub = [r for r in rows if r["arm"] == arm]
@@ -306,10 +342,13 @@ def main() -> int:
         "implicit_pre_consolidation": {
             "evidence_recall": stats("implicit_pre", "evidence_in_top8"),
             "cadence_recall": stats("implicit_pre", "cadence_in_top8"),
+            "cadence_phrase_recall": stats("implicit_pre", "cadence_phrase_in_top8"),
         },
         "implicit_post_consolidation": {
             "evidence_recall": stats("implicit_post", "evidence_in_top8"),
             "cadence_recall": stats("implicit_post", "cadence_in_top8"),
+            "cadence_phrase_recall": stats("implicit_post", "cadence_phrase_in_top8"),
+            "promoted_nodes": promoted,
         },
     }
     print(json.dumps(summary, indent=1), flush=True)

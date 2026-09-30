@@ -2,8 +2,8 @@
 
 Covers: default-off gating, near-duplicate promotion (rephrased
 repetition across a time span), idempotency, TTL forgetting with
-sustained-row protection, threshold gates, and the no-paragraph-layer
-degradation.
+sustained-row protection, threshold gates, the no-paragraph-layer
+degradation, and v3 cadence-phrase synthesis into the promoted text.
 """
 
 import os
@@ -298,3 +298,123 @@ def test_embedder_clustering_promotes_lexically_distant_rephrases(
     node_id = report.promoted[0]
     assert node_id in store._facts
     assert "aloe" in store._facts[node_id].object_
+
+
+def test_promotion_synthesizes_cadence_phrase(tmp_path, monkeypatch):
+    """v3: the promoted Fact's text facet carries the repetition signal
+    as a fixed-format suffix - " (observed N times across D days)" - so
+    the cadence lives on a retrievable surface, not only in the
+    namespace stamp."""
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    monkeypatch.delenv("MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS", raising=False)
+    monkeypatch.delenv("MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    store._paragraphs["p1"] = _row("p1", "I take vitamin D in the mornings.", base)
+    store._paragraphs["p2"] = _row(
+        "p2", "I always take vitamin D in the mornings.", base + timedelta(days=1)
+    )
+    store._paragraphs["p3"] = _row(
+        "p3", "I take vitamin D every morning now.", base + timedelta(days=3)
+    )
+    report = consolidate(store, now=base + timedelta(days=4))
+    fact = store._facts[report.promoted[0]]
+    assert fact.object_ == (
+        "I take vitamin D in the mornings. (observed 3 times across 3 days)"
+    ), "canonical text + synthesized cadence, N=rows, D=round(span days)"
+
+
+def test_preference_promotion_synthesizes_cadence_phrase(tmp_path, monkeypatch):
+    """The suffix lands on the Preference text facet too (preference
+    field), same fixed format."""
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    store._paragraphs["p1"] = _row(
+        "p1", "I prefer rooibos tea in the afternoon.", base
+    )
+    store._paragraphs["p2"] = _row(
+        "p2", "I prefer rooibos tea after lunch.", base + timedelta(days=1)
+    )
+    store._paragraphs["p3"] = _row(
+        "p3", "I prefer rooibos tea with honey now.", base + timedelta(days=2)
+    )
+    report = consolidate(store, now=base + timedelta(days=3))
+    node_id = report.promoted[0]
+    assert store._preferences[node_id].preference == (
+        "I prefer rooibos tea in the afternoon. (observed 3 times across 2 days)"
+    )
+
+
+def test_cadence_phrase_gates_short_span_and_low_count(tmp_path, monkeypatch):
+    """Below the observation gate: no node at all. Span < 1 day (only
+    reachable by lowering MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS): the
+    cluster promotes, but no cadence suffix - a sub-day span rounds to a
+    meaningless "across 0 days" cadence."""
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS", "0")
+    monkeypatch.delenv("MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    # Two rows across days: clusters, but 2 < 3 observations - no node.
+    store._paragraphs["a1"] = _row("a1", "We run the sync job nightly.", base)
+    store._paragraphs["a2"] = _row(
+        "a2", "The sync job runs nightly here.", base + timedelta(days=2)
+    )
+    # Three rows within four hours: passes only with the lowered span
+    # gate (rows kept lexically tight - word-form drift would split the
+    # lexical cluster and test nothing).
+    store._paragraphs["b1"] = _row("b1", "The deploy target is cobalt.", base)
+    store._paragraphs["b2"] = _row(
+        "b2", "Our deploy target is the cobalt node.", base + timedelta(hours=2)
+    )
+    store._paragraphs["b3"] = _row(
+        "b3", "The deploy target moved to cobalt west.", base + timedelta(hours=4)
+    )
+    report = consolidate(store, now=base + timedelta(days=3))
+    assert len(report.promoted) == 1, (
+        "only the cobalt cluster clears both gates; the sync pair stays "
+        "below the observation gate"
+    )
+    fact = store._facts[report.promoted[0]]
+    assert "times across" not in fact.object_
+    assert fact.object_ == "The deploy target is cobalt.", (
+        "sub-day span: canonical text promoted verbatim, no suffix"
+    )
+
+
+def test_cadence_phrase_idempotent_rerun(tmp_path, monkeypatch):
+    """Re-promoting the same cluster never stacks suffixes: the node text
+    is recomputed from the cluster rows (never read back from the node),
+    so a forced re-promotion of identical rows yields a byte-identical
+    text with exactly one cadence suffix."""
+    monkeypatch.setenv("MEMPLEX_CONSOLIDATION", "1")
+    monkeypatch.delenv("MEMPLEX_CONSOLIDATION_MIN_OBSERVATIONS", raising=False)
+    monkeypatch.delenv("MEMPLEX_CONSOLIDATION_MIN_SPAN_DAYS", raising=False)
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    store = _store(tmp_path)
+    store._paragraphs["p1"] = _row("p1", "I take vitamin D in the mornings.", base)
+    store._paragraphs["p2"] = _row(
+        "p2", "I always take vitamin D in the mornings.", base + timedelta(days=1)
+    )
+    store._paragraphs["p3"] = _row(
+        "p3", "I take vitamin D every morning now.", base + timedelta(days=3)
+    )
+    first = consolidate(store, now=base + timedelta(days=4))
+    node_id = first.promoted[0]
+    text = store._facts[node_id].object_
+    assert text.count("times across") == 1
+
+    # Natural rerun: stamped rows cluster to nothing new, text untouched.
+    second = consolidate(store, now=base + timedelta(days=5))
+    assert second.promoted == []
+    assert store._facts[node_id].object_ == text
+
+    # Forced re-promotion (stamps cleared, same rows): the deterministic
+    # node id resolves to the same node and the text must not change.
+    for row in store._paragraphs.values():
+        row.pop("consolidated_into", None)
+    third = consolidate(store, now=base + timedelta(days=6))
+    assert third.promoted == [node_id]
+    assert store._facts[node_id].object_ == text
+    assert store._facts[node_id].object_.count("times across") == 1
