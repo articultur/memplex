@@ -31,9 +31,19 @@ Codex 69.9@177.2s (dominated off the Pareto set).
 | **LAFS gain** | **0.0000 (exactly)** |
 
 Same mechanism: the medium reference floor (RAG 45.9 pp @ 0.3s) dominates
-every budget in [1s, 200s], and both union-store points sit far below
-45.9 pp. Medium gain conditions: > 45.9 pp (any latency), > 57.0 pp
-(< 25.8s), or > 70.1 pp (< 139.9s).
+every budget in [1s, 200s]. Medium gain conditions: > 45.9 pp (any
+latency), > 57.0 pp (< 25.8s), or > 70.1 pp (< 139.9s).
+
+## 2026-09-30 update: the mm operating point
+
+The web-medium screenshot-injection point (43.75 pp @ p50 3.3s,
+union-store lower bound) still gains exactly 0.0 — it sits **2.2 pp
+below the 45.9 pp floor**. Two of its strata already cross 50 pp
+(static-environment 0.550, procedure 0.548); the remaining gap is the
+retrieval-side class (answer page never ranks into top-12) plus
+procedure-abs. This is the closest any Memplex operating point has
+come to the official scoring line, and the gap is accuracy, not
+latency.
 
 ## Reading
 

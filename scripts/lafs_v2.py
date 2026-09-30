@@ -135,6 +135,11 @@ def main() -> int:
                 acc=19.58,
                 latency=2.296,
             ),
+            Point(
+                "Memplex mm (web, screenshot injection, union-store)",
+                acc=43.75,
+                latency=3.311,
+            ),
         ],
     }
     report = {

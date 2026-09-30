@@ -1,0 +1,33 @@
+{
+ "benchmark": "longmemeval_v2_web_medium_multimodal_full",
+ "question": "does screenshot injection hold at web-medium scale (240 questions, union-store superset)?",
+ "design": "full-population paired A/B: text arm vs anchored-screenshot injection arm (mean 5.65 images/question), both arms on glm-5.3-flash (vision) with glm-5.3 judge, plain hybrid retrieval shared. Union-store superset haystack (each question's official 387-500-trajectory subset is contained in the seeded union - accuracy is a LOWER BOUND for the protocol). Two-stage fixed answerer (thinking-budget + fallback) from the start; empty-answer audit applies.",
+ "results": {
+  "text_arm": 0.2,
+  "mm_arm": 0.4375,
+  "delta": "+23.75pp (2.19x)",
+  "flips": "65 up / 8 down",
+  "by_type_mm": {
+   "static-environment": 0.55,
+   "procedure": 0.5476,
+   "errors-gotchas": 0.4,
+   "dynamic-environment": 0.3922,
+   "static-environment-abs": 0.3871,
+   "dynamic-environment-abs": 0.381,
+   "procedure-abs": 0.15
+  },
+  "latency_p50_s": 3.311,
+  "latency_p95_s": 12.107
+ },
+ "findings": [
+  "Screenshot injection MORE than holds at medium scale: +23.75pp (web-small was +19.2pp) - against a 5x deeper, union-superset haystack.",
+  "dynamic-environment-abs 0.0 -> 0.381: the abstention variants of the hardest stratum flip from zero to answerable when the answer page's screenshot reaches the answerer.",
+  "static-environment 0.550 and procedure 0.548: both cross the 50pp line - the mm operating point sits 2.2pp below the medium-tier LAFS floor (RAG 45.9@0.3s) overall (43.75 vs 45.9).",
+  "Latency stays in the fast band (p50 3.3s) - the frontier gap to the LAFS scoring line is now a 2.2pp accuracy gap, not latency."
+ ],
+ "honest_reading": "union-store lower bound (superset haystack); glm-5.3-flash answerer + glm-5.3 judge (same-family disclosure as all V2 points); plain non-orchestrated retrieval shared by both arms so the A/B delta attributes to screenshots alone; residual = questions whose answer page never ranks into top-12 (the retrieval-side class), plus procedure-abs 0.15 where procedural text, not vision, is the bottleneck.",
+ "evidence_level": "E1",
+ "runner": "scripts/run_lme_v2_mm_medium.py",
+ "artifacts": ["summary.json", "records.jsonl", "paired.json"],
+ "timestamp": "2026-09-30T14:42:00Z"
+}
