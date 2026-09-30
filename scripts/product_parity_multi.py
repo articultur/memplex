@@ -40,8 +40,8 @@ from memplex.config import load_config
 from memplex.service import MemplexService
 
 sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-from run_lme_official_j import generate_answer as _harness_generate_answer
 from run_lme_official_j import Proxy as _HarnessProxy
+from run_lme_official_j import generate_answer as _harness_generate_answer
 
 DATA = _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval_s_cleaned.json"
 TOP_K = 24
@@ -122,7 +122,7 @@ class Proxy:
         return ""
 
 
-def run_question(q: dict, answerer: Proxy, judge: Proxy) -> dict:
+def run_question(q: dict, answerer: Proxy, judge: Proxy, *, hubs: bool = False) -> dict:
     store_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"pp-{q['question_id']}-"))
     cfg = load_config()
     cfg.storage.backend = "lite"
@@ -142,6 +142,27 @@ def run_question(q: dict, answerer: Proxy, judge: Proxy) -> dict:
                     svc.write_text(f"[{sid} @ {date}] {text}", source_type="text")
                 except ValueError:
                     continue  # duplicate extraction id: memory already stored
+        if hubs:
+            # Entity-hub arm (product port of the v13 recipe): the seeded
+            # texts carry "[sid @ date]" prefixes; attribute paragraphs to
+            # their session, then materialize cross-session anchors as
+            # searchable Function records before the query.
+            import re as _re
+
+            for row in getattr(svc.store, "_paragraphs", {}).values():
+                m = _re.match(r"\[([^\] ]+) @ ([^\]]+)\]", row.get("raw_text", ""))
+                if m:
+                    row["source"] = m.group(1)
+            os.environ["MEMPLEX_ENTITY_HUBS"] = "1"
+            from memplex.entity_hubs import build_entity_hubs
+
+            def _hub_llm(prompt: str) -> str:
+                return answerer.complete(
+                    prompt, max_tokens=1500, disable_thinking=True
+                )
+
+            hub_report = build_entity_hubs(svc.store, _hub_llm)
+            print(f"    hubs: {hub_report.hubs} built", flush=True)
         result = svc.query(q["question"], top_k=TOP_K, orchestrated=True, explain=False)
         # Raw-first context: paragraphs are the verbatim authoritative
         # layer; when the retrieval surface carries them they win the
@@ -192,6 +213,12 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--out", default="benchmarks/results/product-parity-multi")
+    parser.add_argument(
+        "--hubs",
+        action="store_true",
+        help="build cross-session entity hubs from the seeded sessions "
+        "before the query (product port of the v13 recipe)",
+    )
     args = parser.parse_args()
 
     with open(DATA) as fh:
@@ -213,7 +240,7 @@ def main() -> int:
     judge = Proxy("glm-5.3")
     with open(resume, "a", encoding="utf-8") as fh:
         for i, q in enumerate(todo):
-            row = run_question(q, answerer, judge)
+            row = run_question(q, answerer, judge, hubs=args.hubs)
             fh.write(json.dumps(row) + "\n")
             fh.flush()
             print(f"  {i + 1}/{len(todo)} {q['question_id']} correct={row['correct']}", flush=True)
@@ -222,6 +249,7 @@ def main() -> int:
     acc = sum(r["correct"] for r in rows) / max(len(rows), 1)
     summary = {
         "benchmark": "product_parity_multi",
+        "hubs": args.hubs,
         "pool": "multi-session",
         "n": len(rows),
         "accuracy": round(acc, 4),

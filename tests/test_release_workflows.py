@@ -368,6 +368,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/sleep_time.py",
         "memplex/improve.py",
         "memplex/consolidation.py",
+        "memplex/entity_hubs.py",
         "memplex/service.py",
         "memplex/retrieval/reranker.py",
         "memplex/retrieval/multi_path.py",

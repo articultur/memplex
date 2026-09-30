@@ -157,6 +157,7 @@ files = [
     "memplex/sleep_time.py",
     "memplex/improve.py",
     "memplex/consolidation.py",
+    "memplex/entity_hubs.py",
     "memplex/service.py",
     "memplex/retrieval/reranker.py",
     "memplex/retrieval/multi_path.py",
