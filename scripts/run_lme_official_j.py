@@ -103,6 +103,10 @@ def judge_prompt(task: str, question: str, answer: str, response: str, abstentio
     raise NotImplementedError(task)
 
 
+class QuotaExhaustedError(RuntimeError):
+    """bigmodel 1310: the weekly/monthly cap is hit - stop, never retry."""
+
+
 class Proxy:
     """Anthropic-compatible bigmodel proxy client (authorized by the user)."""
 
@@ -137,6 +141,10 @@ class Proxy:
                 if disable_thinking:
                     payload["thinking"] = {"type": "disabled"}
                 resp = self._client.post("/v1/messages", json=payload)
+                if resp.status_code == 429 and "1310" in resp.text:
+                    # Quota cap: retrying cannot succeed, and silent empty
+                    # answers would corrupt the run (the v2 lesson).
+                    raise QuotaExhaustedError(resp.text[:200])
                 resp.raise_for_status()
                 # thinking models emit {"type": "thinking"} blocks first;
                 # only concatenating "text" blocks reproduces the visible
