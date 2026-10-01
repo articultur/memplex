@@ -537,6 +537,40 @@ def summarize(rows: list[dict], *, orchestrated: bool, wall_s: float) -> tuple[d
         }
         for r in rows
     }
+    # Paired gains and paired accuracies are computed on the BOTH-JUDGED
+    # subset only (external review phase 1 follow-up): an unjudged (None)
+    # side must never count as a flip in either direction — unjudged→correct
+    # is a measurement gap, not an improvement — and the two per-arm overall
+    # accuracies may sit on different judged subsets, so paired_stats restates
+    # both arms on the same question set with unjudged counts listed
+    # separately instead of silently dropped.
+    both_judged = [
+        r
+        for r in rows
+        if r["text"]["correct"] is not None and r["mm"]["correct"] is not None
+    ]
+    flips_up = sum(
+        1 for r in both_judged if not r["text"]["correct"] and r["mm"]["correct"]
+    )
+    flips_down = sum(
+        1 for r in both_judged if r["text"]["correct"] and not r["mm"]["correct"]
+    )
+    paired_text_acc = round(
+        sum(bool(r["text"]["correct"]) for r in both_judged) / max(len(both_judged), 1), 4
+    )
+    paired_mm_acc = round(
+        sum(bool(r["mm"]["correct"]) for r in both_judged) / max(len(both_judged), 1), 4
+    )
+    paired_stats = {
+        "n_both_judged": len(both_judged),
+        "n_unjudged_text": sum(1 for r in rows if r["text"]["correct"] is None),
+        "n_unjudged_mm": sum(1 for r in rows if r["mm"]["correct"] is None),
+        "flips_up": flips_up,
+        "flips_down": flips_down,
+        "text_acc": paired_text_acc,
+        "mm_acc": paired_mm_acc,
+        "delta_pp": round((paired_mm_acc - paired_text_acc) * 100, 1),
+    }
     lat = sorted(r["latency_s"] for r in rows)
     summary = {
         "benchmark": f"longmemeval_v2_web_{TIER}_multimodal_full",
@@ -552,8 +586,11 @@ def summarize(rows: list[dict], *, orchestrated: bool, wall_s: float) -> tuple[d
         "n": len(rows),
         "text_arm": arm_acc("text"),
         "mm_arm": arm_acc("mm"),
-        "flips_up": sum(1 for r in rows if not r["text"]["correct"] and r["mm"]["correct"]),
-        "flips_down": sum(1 for r in rows if r["text"]["correct"] and not r["mm"]["correct"]),
+        # Top-level flips are the both-judged paired gains (see paired_stats
+        # for the full same-set view incl. unjudged counts).
+        "flips_up": flips_up,
+        "flips_down": flips_down,
+        "paired_stats": paired_stats,
         "by_type_text": by_type("text"),
         "by_type_mm": by_type("mm"),
         "mean_images": round(sum(r["n_images"] for r in rows) / max(len(rows), 1), 2),
