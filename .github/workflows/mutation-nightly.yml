@@ -40,10 +40,41 @@ jobs:
           from pathlib import Path
 
           report = Path(sys.argv[1]).read_text(encoding="utf-8")
-          killed = len(re.findall(r"test outcome: killed", report))
-          survived = len(re.findall(r"test outcome: survived", report))
-          incompetent = len(re.findall(r"test outcome: incompetent", report))
-          print(f"mutation pilot: {killed} killed / {survived} survived / {incompetent} incompetent")
+          # Robust to the enum repr form (TestOutcome.KILLED / killed /
+          # KILLED) across cosmic-ray versions; a silent zero here once
+          # reported "0 killed / 0 survived" while jobs existed.
+          outcome = re.compile(
+              r"test outcome:\s*(?:TestOutcome\.)?(killed|survived|incompetent)",
+              re.IGNORECASE,
+          )
+          counts = {"killed": 0, "survived": 0, "incompetent": 0}
+          for m in outcome.finditer(report):
+              counts[m.group(1).lower()] += 1
+          killed, survived, incompetent = (
+              counts["killed"], counts["survived"], counts["incompetent"],
+          )
+          # Cross-check against the report's own summary lines: a parser
+          # that finds zero while the summary says jobs completed is a
+          # parse failure, not a mutation result.
+          total_match = re.search(r"^total jobs:\s*(\d+)", report, re.MULTILINE)
+          surviving_match = re.search(r"^surviving mutants:\s*(\d+)", report, re.MULTILINE)
+          total_jobs = int(total_match.group(1)) if total_match else 0
+          if total_jobs > 0 and killed + survived + incompetent == 0:
+              raise SystemExit(
+                  f"mutation parser found 0 outcomes in a report with "
+                  f"{total_jobs} jobs - report format changed again; "
+                  "fix the regex in mutation-nightly.yml"
+              )
+          if surviving_match:
+              summary_survived = total_jobs - int(surviving_match.group(1)) - (
+                  killed + survived + incompetent - total_jobs
+              )
+              if int(surviving_match.group(1)) != survived:
+                  print(
+                      f"warning: summary surviving={surviving_match.group(1)} "
+                      f"!= parsed survived={survived}"
+                  )
+          print(f"mutation pilot: {killed} killed / {survived} survived / {incompetent} incompetent (total jobs: {total_jobs})")
           BASELINE_KILLED = 77
           BASELINE_SURVIVED = 33
           SLACK = 5

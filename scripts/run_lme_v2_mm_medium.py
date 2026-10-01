@@ -192,7 +192,15 @@ _JUDGE_PROMPT = (
 _PROXY: GlmProxy | None = None
 
 
-def llm_judge(question: dict, gold: str, answer: str) -> bool:
+def llm_judge(question: dict, gold: str, answer: str) -> bool | None:
+    """True/False when judged; None = UNJUDGED (empty verdict, API error).
+
+    glm-5.3 thinks by default and thinking shares max_tokens: a 256
+    budget can burn entirely on the thinking block and return no text.
+    An empty verdict is an unfinished judgment, not a wrong answer -
+    scoring it False mixes measurement failure into capability (the
+    v2 empty-answer lesson, judge side).
+    """
     try:
         verdict = _PROXY.complete(
             _JUDGE_PROMPT.format(
@@ -202,16 +210,25 @@ def llm_judge(question: dict, gold: str, answer: str) -> bool:
             ),
             model=JUDGE_MODEL,
             max_tokens=256,
+            disable_thinking=True,
         )
     except QuotaExhaustedError:
         raise
-    except Exception as exc:  # noqa: BLE001 - judge failure scores wrong, never crashes
+    except Exception as exc:  # noqa: BLE001 - unjudged, never crashes
         print(f"judge failed for {question['id']}: {exc}", flush=True)
-        return False
+        return None
+    if not verdict.strip():
+        return None
     return verdict.strip().upper().startswith("YES")
 
 
-def score_answer(question: dict, answer: str) -> bool:
+def score_answer(question: dict, answer: str) -> bool | None:
+    """None = unjudged (empty answer or unfinished llm judgment); the
+    summary counts accuracy over judged rows and reports n_unjudged
+    separately so measurement failures never masquerade as wrong
+    answers."""
+    if not answer.strip():
+        return None
     spec = question["eval_function"].split("|")[0]
     gold = str(question.get("answer", "")).strip()
     ans = answer.strip()
@@ -484,19 +501,27 @@ def process_question(
             extra=extra, context=context[:20000], question=question["question"]
         )
         answer = run_arm(prompt, images if arm == "mm" else [], proxy)
-        correct = score_answer(question, answer) if answer else False
+        # None = unjudged (empty answer / unfinished judgment): recorded
+        # as null, never coerced to False.
+        correct = score_answer(question, answer) if answer else None
         record[arm] = {"correct": correct, "answer": answer[:200]}
     return record
 
 
 def summarize(rows: list[dict], *, orchestrated: bool, wall_s: float) -> tuple[dict, dict]:
     def arm_acc(arm: str) -> dict:
-        flags = [bool(r[arm]["correct"]) for r in rows]
-        return {"n": len(flags), "accuracy": round(sum(flags) / max(len(flags), 1), 4)}
+        judged = [bool(r[arm]["correct"]) for r in rows if r[arm]["correct"] is not None]
+        return {
+            "n": len(judged),
+            "n_unjudged": len(rows) - len(judged),
+            "accuracy": round(sum(judged) / max(len(judged), 1), 4),
+        }
 
     def by_type(arm: str) -> dict:
         buckets: dict[str, list[bool]] = {}
         for r in rows:
+            if r[arm]["correct"] is None:
+                continue
             buckets.setdefault(r["question_type"], []).append(bool(r[arm]["correct"]))
         return {
             k: round(sum(v) / len(v), 4)

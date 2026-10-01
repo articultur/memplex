@@ -154,6 +154,8 @@ class Proxy:
                     for block in resp.json().get("content", [])
                     if block.get("type") == "text"
                 )
+            except QuotaExhaustedError:
+                raise
             except Exception:
                 if attempt == retries:
                     raise
@@ -737,7 +739,9 @@ def generate_answer(
     return answer
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901 - benchmark main: pool loops + fail-soft
+    # phases; not in the repo's pinned lint gate, kept under the same
+    # standard via targeted noqa with reason.
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
@@ -869,6 +873,9 @@ def main() -> int:
                 context,
                 metadata.get("question_date", "unknown"),
             )
+        except QuotaExhaustedError:
+            print(f"{qid}: quota exhausted - aborting for resume", flush=True)
+            raise
         except Exception as exc:  # noqa: BLE001 - one failed generation must not kill the run
             print(f"{qid}: generation failed: {exc}", flush=True)
             answer = ""
@@ -881,6 +888,9 @@ def main() -> int:
                 temperature=0.0,
             )
             label = "yes" in verdict.lower()
+        except QuotaExhaustedError:
+            print(f"{qid}: judge quota exhausted - aborting for resume", flush=True)
+            raise
         except Exception as exc:  # noqa: BLE001
             print(f"{qid}: judge failed: {exc}", flush=True)
             label = None

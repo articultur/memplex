@@ -32,7 +32,13 @@ def _load(run_dir: pathlib.Path) -> dict:
                 continue
             row = json.loads(line)
             qid = row.get("question_id")
-            verdict = row.get("judge_verdict")
+            # autoeval_label is the field summaries score from;
+            # judge_verdict is the raw judge text (they can differ by
+            # label post-processing - the v131->v132 reconciliation
+            # measured 6/5 flips on the label vs 8/5 on the raw text).
+            verdict = row.get("autoeval_label")
+            if verdict is None:
+                verdict = row.get("judge_verdict")
             if qid is not None and verdict is not None:
                 per_question[str(qid)] = {
                     "correct": _verdict_correct(verdict),
