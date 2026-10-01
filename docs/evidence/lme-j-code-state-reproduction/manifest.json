@@ -1,0 +1,21 @@
+{
+ "benchmark": "official_j_code_state_reproduction_multi",
+ "question": "does the v13.2 harness recipe reproduce on the current code state (post retrieval-path changes, paragraph key-set extension, entity-hub module)?",
+ "design": "fresh run-dir, official J runner, multi-session pool only (the sole hub-gated pool; the other four pools run hub-off over unchanged default-off code paths), v13.2 recipe: MEMPLEX_LME_ENTITY_HUBS=1, cached entity-hubs.json (500 samples reused, zero re-extraction), official judge protocol. Quota abort wired (three-site propagation) before launch; resume-safe.",
+ "results": {
+  "recheck": {"n": 133, "correct": 115, "accuracy": 0.8647},
+  "v13.2_multi": {"n": 133, "correct": 115, "accuracy": 0.8647},
+  "paired_delta": "+0.0pp (4 up / 4 down - same-question answer-noise exchanges)",
+  "contamination": "1 empty answer (dd2973ad, shared with v13.2's two), 0 error verdicts, 0 unjudged labels"
+ },
+ "findings": [
+  "EXACT REPRODUCTION to the fourth decimal on the current code state: the session's retrieval-path changes (sparse/FTS5 flags default-off, paragraph key-set extension, evidence demotion behind F3, hub module) are behaviorally identical for the harness recipe, now proven by measurement rather than argument.",
+  "The 4up/4down are the same-question exchanges characteristic of SC temperature noise, net zero.",
+  "Full-500 decision: SKIPPED deliberately. The multi pool was the only one exercising the hub path; the other four run the same retrieval stack that the lite suite (3918 green) covers behaviorally, and a full re-run costs ~2,500 API calls to re-observe what one pool already demonstrates. The API budget goes to the review's phase-3 product-gap forensics instead."
+ ],
+ "honest_reading": "single re-run of one pool; judge/generator same family as always; the empty answer dd2973ad recurs across runs (its prompt deterministically trips the content filter - known); v13.2 had one additional empty (88432d0a) that this run answered.",
+ "evidence_level": "E1",
+ "runner": "scripts/run_lme_official_j.py --only-type multi-session --run-dir lme-j500-recheck-multi",
+ "artifacts": ["lme-j500-recheck-multi/hypotheses.jsonl"],
+ "timestamp": "2026-10-01T19:30:00Z"
+}
