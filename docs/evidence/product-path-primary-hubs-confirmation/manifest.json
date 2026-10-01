@@ -1,0 +1,23 @@
+{
+ "benchmark": "product_path_primary_hubs_confirmation",
+ "question": "do entity hubs add on top of the paragraph-primary composition (the official 0.7669 instrument)?",
+ "design": "same runner, same flags, same device defaults as the archived 0.7669 run (write_text seeding, orchestrated top-24, harness SC answer path, official judge, MEMPLEX_PARAGRAPH_FUSION=primary), plus --hubs (MEMPLEX_ENTITY_HUBS=1, session attribution from [sid @ date] prefixes). Paired per-question against the archived control records (docs/evidence/product-parity-primary/shard0.jsonl). Quota abort wired; 8 environment kills absorbed by resume with zero loss.",
+ "results": {
+  "hubs_primary_arm": {"accuracy": 0.7669, "correct": 102, "n": 133},
+  "archived_control": {"accuracy": 0.7669, "correct": 102, "n": 133},
+  "delta": "+0.0pp",
+  "flips": "4 up / 4 down",
+  "trajectory_by_n": "-6.7 (n=15) -> +0.0 (n=30) -> +0.0 (n=45) -> +3.3 (n=60) -> +1.3 (n=75) -> +0.0 (n=90) -> +0.0 (n=119) -> +0.0 (n=133)"
+ },
+ "findings": [
+  "The hub arm reproduces the official product-path number to the fourth decimal (0.7669, 102/133 both arms): the archived reading is confirmed by a full independent re-run of the instrument.",
+  "Hubs add ZERO net on top of paragraph-primary: the verbatim paragraph pool already carries every cross-session mention, so the hub's pre-computed enumeration is redundant where raw sessions rank. The 4up/4down flips are answer-noise exchanges, not a signal.",
+  "Composition determines the hub lever entirely: +9.8pp on fallback/digest composition (extraction digests lose mentions; the hub restores the enumeration) vs +0.0pp on verbatim-primary. Hubs are the fix for digest compositions, not a lever on top of verbatim ones.",
+  "Harness consistency: the harness gained +6.8pp from hubs over its WHOLE-SESSION verbatim units because its unit granularity packs one session per slot; the product primary's finer paragraph units give the answerer more mention coverage per top-k, which substitutes for the hub. Both measurements stand."
+ ],
+ "honest_reading": "single run per arm (temperature-0 answers; the archived control is itself a single run - the exact 0.7669 coincidence is same-band reproduction, not determinism); 4up/4down sits inside the measured SC variance band; hub extraction consumed one LLM call per question with no quota interruption.",
+ "evidence_level": "E1",
+ "runner": "scripts/product_parity_multi.py --hubs with MEMPLEX_PARAGRAPH_FUSION=primary",
+ "artifacts": ["product-parity-primary-hubs/shard0.jsonl"],
+ "timestamp": "2026-10-01T13:20:00Z"
+}
