@@ -111,3 +111,81 @@ def test_service_disabled_by_default(tmp_path):
     cfg.storage.path = str(tmp_path)
     svc = MemplexService(config=cfg)
     assert svc._working_memory is None
+
+
+def test_recall_acl_filters_workspace_and_private_entries():
+    """V4: the hot tier re-checks entries against the recalling principal.
+
+    A workspace-restricted capture must not cross workspaces inside the
+    same tenant; a private capture stays with its owner - the same
+    boundary the store's ACL enforces on the retrieval path.
+    """
+    from memplex.working_memory import WorkingMemory
+
+    wm = WorkingMemory()
+    wm.add("shared", "team note", scope="tenant:t1",
+           workspace_id="ws-a", visibility="workspace")
+    wm.add("other-ws", "other workspace note", scope="tenant:t1",
+           workspace_id="ws-b", visibility="workspace")
+    wm.add("alice-private", "alice private note", scope="tenant:t1",
+           owner_subject_id="alice", workspace_id="ws-a", visibility="private")
+
+    def acl_for(subject: str, workspace: str):
+        def check(entry) -> bool:
+            if entry.workspace_id is not None and entry.workspace_id != workspace:
+                return False
+            if entry.visibility == "private":
+                return entry.owner_subject_id == subject
+            return True
+        return check
+
+    # bob, same workspace as alice: sees the shared note, not the other
+    # workspace's, not alice's private one.
+    bob = wm.recall_context(limit=10, scope="tenant:t1", acl=acl_for("bob", "ws-a"))
+    assert bob == ["team note"]
+    # alice sees her private note too.
+    alice = wm.recall_context(limit=10, scope="tenant:t1", acl=acl_for("alice", "ws-a"))
+    assert set(alice) == {"team note", "alice private note"}
+    # no acl argument = historical behaviour (scope filtering only).
+    assert len(wm.recall_context(limit=10, scope="tenant:t1")) == 3
+
+
+def test_service_write_stamps_node_visibility_on_hot_entries(tmp_path):
+    """The write path stamps the writer's ACL triple on hot entries so
+    the injection filter has provenance to enforce."""
+    from memplex.auth import AuthorizationContext, Principal
+    from memplex.config import MemplexConfig
+    from memplex.service import MemplexService
+
+    cfg = MemplexConfig()
+    cfg.storage.backend = "lite"
+    cfg.storage.path = str(tmp_path / "s.sqlite3")
+    cfg.working_memory.enabled = True
+    cfg.llm.query_enhancement = False
+    svc = MemplexService(config=cfg)
+    svc.start()
+    try:
+        from memplex.models import SourceDocument, SourceType
+
+        ctx = AuthorizationContext(
+            principal=Principal(subject_id="alice", tenant_id="t1"),
+            workspace_id="ws-a",
+        )
+        svc.write(
+            SourceDocument(
+                type="conversation",
+                content="Alice keeps a blue parrot named Kiwi.",
+                source_type=SourceType.MEETING,
+            ),
+            authorization=ctx,
+        )
+        entries = [
+            e
+            for e in svc._working_memory._entries.values()
+        ]
+        assert entries, "capture pins hot entries"
+        assert all(e.workspace_id == "ws-a" for e in entries)
+        assert all(e.owner_subject_id == "alice" for e in entries)
+        assert all(e.visibility in {"workspace", "private", "tenant"} for e in entries)
+    finally:
+        svc.stop()

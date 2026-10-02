@@ -890,6 +890,12 @@ class LiteMemoryStore:
             self._decode_pair(target)
             # The flock has been held continuously since ``base`` was read.
             committed = self._durability.commit_locked(base, target, base_verified=True)
+            if _sqlite_write_authority():
+                # The restore IS a commit: mirror base -> restored into the
+                # SQLite authority too, or a rw-mode restart would read the
+                # pre-restore rows back out of the authority DB and undo
+                # the restore (external review: lateral consistency).
+                self._sqlite_authoritative_commit(base, committed)
             self._publish_pair(committed)
             self._fts_index.rebuild()
 
@@ -2597,6 +2603,7 @@ class LiteMemoryStore:
         if self._pair_fingerprint is None:
             return False
         if self._pair_fingerprint is _PAIR_FILES_ABSENT:
+            # Legacy sentinel (pre-uniform fingerprints): unchanged logic.
             try:
                 self._path.stat()
                 self._path.with_name("changelog.json").stat()
@@ -2605,18 +2612,15 @@ class LiteMemoryStore:
                 # emptiness stays authoritative (no peer pair can exist).
                 return True
             return False
-        try:
-            memory_stat = self._path.stat()
-            changelog_stat = self._path.with_name("changelog.json").stat()
-        except OSError:
-            return False  # stat failure → caller falls back to the authoritative load
-        current = (
-            memory_stat.st_mtime_ns,
-            memory_stat.st_size,
-            changelog_stat.st_mtime_ns,
-            changelog_stat.st_size,
-        )
-        return current == self._pair_fingerprint
+        current: list[int] = []
+        for name in (self._path.name, "changelog.json"):
+            try:
+                stat = self._path.with_name(name).stat()
+                current.extend((stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                current.extend((0, 0))
+        current.extend(self._authority_stat())
+        return tuple(current) == self._pair_fingerprint
 
     def _reload_for_mutation(self, *, force: bool = False) -> None:
         """Refresh a pre-opened instance before it derives a write target.
@@ -2950,30 +2954,43 @@ class LiteMemoryStore:
         self._committed_pair = pair
         self._committed_record = None
 
-    def _refresh_fingerprint(self) -> None:
-        """Record the (mtime, size) fingerprint so unchanged reads skip reload."""
-        try:
-            memory_stat = self._path.stat()
-            changelog_stat = self._path.with_name("changelog.json").stat()
-            self._pair_fingerprint = (
-                memory_stat.st_mtime_ns,
-                memory_stat.st_size,
-                changelog_stat.st_mtime_ns,
-                changelog_stat.st_size,
-            )
-        except OSError:
-            # A fresh store has neither file yet: record that absence
-            # explicitly so an unchanged check under batching (or repeated
-            # retries on an empty store) does not force an authoritative
-            # reload before every mutation.  A fingerprint of None means
-            # "unknown" (e.g. only one file exists) and keeps the reload.
+    def _authority_stat(self) -> tuple[int, ...]:
+        """(mtime_ns, size) of the SQLite authority DB, or (0, 0).
+
+        Under rw authority most commits change only SQLite: a freshness
+        fingerprint over the JSON pair alone cannot see a peer's commit,
+        and a second instance would keep serving its stale resident state
+        (or overwrite the peer's write). Included in the fingerprint so
+        peer rw commits invalidate the cache like JSON writes do.
+        """
+        parts: list[int] = []
+        for name in ("shadow_v2.sqlite3", "shadow_v2.sqlite3-wal"):
             try:
-                self._path.stat()
-                self._path.with_name("changelog.json").stat()
+                stat = self._path.parent.joinpath(name).stat()
+                parts.extend((stat.st_mtime_ns, stat.st_size))
             except OSError:
-                self._pair_fingerprint = _PAIR_FILES_ABSENT
-            else:
-                self._pair_fingerprint = None
+                parts.extend((0, 0))
+        return tuple(parts)
+
+    def _refresh_fingerprint(self) -> None:
+        """Record the (mtime, size) fingerprint so unchanged reads skip reload.
+
+        Uniform shape: absent files record (0, 0) - an rw-authority store
+        legitimately has no JSON pair, and its authoritative surface (the
+        SQLite DB, WAL included in the stat) must fingerprint like the
+        JSON pair does, or a peer's SQLite-only commit stays invisible to
+        the unchanged-files short-circuit.
+        """
+        stats: list[int] = []
+        for name in (self._path.name, "changelog.json"):
+            try:
+                stat = self._path.with_name(name).stat()
+                stats.extend((stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                stats.extend((0, 0))
+        stats.extend(self._authority_stat())
+        self._pair_fingerprint = tuple(stats)
+
 
     def _publish_committed_locally(self, committed: LitePair) -> None:
         """Bind commit results without re-decoding the freshly written pair.

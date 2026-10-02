@@ -1243,15 +1243,26 @@ class MemplexService:
             # the team's shared hot context (matching the knowledge-tier
             # visibility model).
             scope = f"tenant:{context.principal.tenant_id}"
+            # V4: entries inherit their write's visibility contract so the
+            # hot tier can never widen a restricted capture's audience.
+            # Node-level visibility is the truth (bind_extracted_identity
+            # already stamped it); the workspace is the write's workspace.
+            def _acl_of(node: Any) -> dict[str, Any]:
+                return {
+                    "owner_subject_id": getattr(context.principal, "subject_id", None),
+                    "workspace_id": getattr(context, "workspace_id", None),
+                    "visibility": getattr(node, "visibility", "workspace") or "workspace",
+                }
+
             for node in [*extracted.facts, *extracted.preferences]:
                 content = getattr(node, "preference", None) or getattr(node, "context", None) or ""
                 key = getattr(node, "id", None)
                 if content and key:
-                    self._working_memory.add(str(key), str(content), scope=scope)
+                    self._working_memory.add(str(key), str(content), scope=scope, **_acl_of(node))
             for func in extracted.functions:
                 name = getattr(func, "name", "")
                 if name:
-                    self._working_memory.add(f"fn:{func.id}", name, scope=scope)
+                    self._working_memory.add(f"fn:{func.id}", name, scope=scope, **_acl_of(func))
 
         # 1c. Persist Fact / Preference nodes. Previously only Functions
         #     were stored, so fact/preference-intent paragraphs (e.g.

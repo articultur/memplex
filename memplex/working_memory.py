@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -33,6 +34,13 @@ class WorkingMemoryEntry:
     pinned: bool = False
     expires_at: float | None = None  # monotonic deadline; None = pinned-only
     created_at: float = field(default_factory=time.monotonic)
+    # ACL provenance (V4): the writer's visibility contract. Entries
+    # inherit the visibility of their write; recall re-checks them so a
+    # workspace- or user-restricted capture cannot reach a broader
+    # audience through the hot tier than through the store.
+    owner_subject_id: str | None = None
+    workspace_id: str | None = None
+    visibility: str = "tenant"  # tenant | workspace | private
 
 
 class WorkingMemory:
@@ -70,12 +78,17 @@ class WorkingMemory:
         ttl_seconds: float | None = None,
         pinned: bool = False,
         scope: str | None = None,
+        owner_subject_id: str | None = None,
+        workspace_id: str | None = None,
+        visibility: str = "tenant",
     ) -> None:
         """Add or refresh one entry; evicts the oldest unpinned entry at cap.
 
         ``scope`` partitions the tier per principal (V3 fix); entries added
         under one scope are invisible to ``recall_context`` calls with a
-        different scope.
+        different scope. The ACL triple (owner/workspace/visibility)
+        records the write's visibility contract for recall-time
+        re-checking (V4).
         """
         if not key or not content:
             return
@@ -86,6 +99,9 @@ class WorkingMemory:
             category=category,
             pinned=pinned,
             expires_at=None if pinned else time.monotonic() + max(0.0, ttl),
+            owner_subject_id=owner_subject_id or None,
+            workspace_id=workspace_id or None,
+            visibility=visibility if visibility in {"tenant", "workspace", "private"} else "tenant",
         )
         with self._lock:
             if key in self._entries:
@@ -136,11 +152,19 @@ class WorkingMemory:
         for key in expired:
             self._entries.pop(key, None)
 
-    def recall_context(self, limit: int = 8, scope: str | None = None) -> list[str]:
+    def recall_context(
+        self,
+        limit: int = 8,
+        scope: str | None = None,
+        acl: Callable[[WorkingMemoryEntry], bool] | None = None,
+    ) -> list[str]:
         """Live entries for *scope*, most-recent first, as context lines.
 
         Scope-filtered: a recall under scope A never returns entries pinned
         under scope B (V3 fix). Unscoped recall sees only unscoped entries.
+        ``acl`` (V4) re-checks each entry against the RECALLING principal:
+        entries whose write was workspace- or user-restricted stay inside
+        that boundary even though the scope (tenant) is broader.
         """
         prefix = f"{scope}::" if scope else ""
         with self._lock:
@@ -155,6 +179,8 @@ class WorkingMemory:
                 entry for key, entry in self._entries.items() if "::" not in key
             ]
             scoped.sort(key=lambda e: e.created_at, reverse=True)
+            if acl is not None:
+                scoped = [e for e in scoped if acl(e)]
             return [e.content for e in scoped[: max(0, limit)]]
 
     def __len__(self) -> int:

@@ -177,3 +177,93 @@ def test_shadow_mirror_lag_still_falls_back_to_json(tmp_path, monkeypatch):
         )
     finally:
         svc2.stop()
+
+
+def test_T4_restore_mirrors_into_sqlite_authority(tmp_path, monkeypatch):
+    """External review: restore wrote only JSON - under rw a restart would
+    read the pre-restore rows out of the authority DB and undo it."""
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "rw")
+    from memplex.models import Function, SourceDocument, SourceType
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    path = tmp_path / "s.sqlite3" / "memory.json"
+    store = LiteMemoryStore(path, deployment_profile="development")
+    source = SourceDocument(type="test", source_type=SourceType.WIKI)
+    store.add(Function(id="before", name="before", name_normalized="before"), source)
+    manifest = store.create_backup(tmp_path / "backups", bytes(range(32)), "k")
+    artifact = tmp_path / "backups" / manifest.backup_id
+    store.delete("before")
+    store.add(Function(id="after", name="after", name_normalized="after"), source)
+
+    store.restore_backup(artifact, bytes(range(32)))
+
+    reopened = LiteMemoryStore(path, deployment_profile="development")
+    assert reopened.get("before") is not None, (
+        "restore undone after restart: the authority DB still held the pre-restore state"
+    )
+    assert reopened.get("after") is None
+    monkeypatch.delenv("MEMPLEX_LITE_SQLITE_AUTHORITY")
+
+
+def test_T5_fingerprint_tracks_sqlite_authority(tmp_path, monkeypatch):
+    """External review: freshness fingerprint covered only the JSON pair,
+    so a peer's rw commit (SQLite-only) was invisible to a second
+    instance's unchanged-files short-circuit."""
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "rw")
+    from memplex.models import Function, SourceDocument, SourceType
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    path = tmp_path / "s.sqlite3" / "memory.json"
+    store = LiteMemoryStore(path, deployment_profile="development")
+    source = SourceDocument(type="test", source_type=SourceType.WIKI)
+    store.add(Function(id="a", name="a", name_normalized="a"), source)
+    fingerprint_before = store._pair_fingerprint
+
+    # A peer rw commit changes only the authority DB.
+    db = tmp_path / "s.sqlite3" / "shadow_v2.sqlite3"
+    import sqlite3 as sq
+
+    conn = sq.connect(str(db))
+    conn.execute(
+        "INSERT INTO memories (kind, payload_json, content_hash) VALUES (?, ?, ?)",
+        ("function", '{"id": "peer"}', "irrelevant-for-stat"),
+    )
+    conn.commit()
+    conn.close()
+
+    assert store._pair_fingerprint == fingerprint_before, "precondition"
+    assert not store._pair_files_unchanged(), (
+        "a peer's SQLite-only commit must invalidate the unchanged-files "
+        "short-circuit"
+    )
+    monkeypatch.delenv("MEMPLEX_LITE_SQLITE_AUTHORITY")
+
+
+def test_T6_unknown_kind_fails_closed_under_rw(tmp_path, monkeypatch):
+    """External review: an unknown record kind returned None (JSON
+    fallback) even on a write-authoritative store."""
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "rw")
+    from memplex.models import Function, SourceDocument, SourceType
+    from memplex.storage.lite.sqlite_v2 import SQLiteAuthorityError
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    path = tmp_path / "s.sqlite3" / "memory.json"
+    store = LiteMemoryStore(path, deployment_profile="development")
+    source = SourceDocument(type="test", source_type=SourceType.WIKI)
+    store.add(Function(id="a", name="a", name_normalized="a"), source)
+
+    import sqlite3 as sq
+
+    from memplex.storage.lite.sqlite_v2 import _content_hash
+
+    conn = sq.connect(str(tmp_path / "s.sqlite3" / "shadow_v2.sqlite3"))
+    conn.execute(
+        "INSERT INTO memories (kind, payload_json, content_hash) VALUES (?, ?, ?)",
+        ("mystery-kind", "{}", _content_hash("{}")),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SQLiteAuthorityError, match="unknown record kind"):
+        LiteMemoryStore(path, deployment_profile="development")
+    monkeypatch.delenv("MEMPLEX_LITE_SQLITE_AUTHORITY")

@@ -87,9 +87,13 @@ def test_unknown_hf_model_fails_closed():
 
     Silent TF-IDF fallback would let a benchmark labelled with a semantic
     model measure the lexical stack and publish it as semantic evidence.
+    The fail-closed contract presumes the loader library is installed:
+    without sentence_transformers the import itself raises a different
+    exception (the CI test env installs no embedding extra), so skip.
     """
     import pytest
 
+    pytest.importorskip("sentence_transformers")
     with pytest.raises(RuntimeError, match="Failed to load embedding model"):
         EmbeddingService(
             model="hf:definitely-not-a-real-model-xyz", dimension=8, storage=None

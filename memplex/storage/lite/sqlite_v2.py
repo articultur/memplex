@@ -237,7 +237,15 @@ def read_authoritative_pair(db_path: Path, *, fail_closed: bool = False) -> Any:
             ):
                 key = _KIND_TO_MEMORY_KEY.get(kind)
                 if key is None:
-                    return None  # unknown kind: refuse rather than drop rows
+                    if authority_mode == "rw":
+                        # A write-authoritative store carrying an unknown
+                        # kind is schema divergence on the authority itself:
+                        # falling back to the stale JSON snapshot would
+                        # silently rewind committed state.
+                        raise SQLiteAuthorityError(
+                            f"unknown record kind in authoritative store: {kind!r}"
+                        )
+                    return None  # mirror: refuse rather than drop rows
                 memory[key].append(json.loads(payload_json))
             for payload_json, _hash in conn.execute(
                 "SELECT payload_json, content_hash FROM graph_edges"

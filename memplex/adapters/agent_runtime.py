@@ -738,9 +738,26 @@ class AgentMemoryRuntime:
             if tenant.startswith("local-process-"):
                 from memplex.auth import local_development_context
 
-                tenant = local_development_context().principal.tenant_id
+                auth = local_development_context()
+                tenant = auth.principal.tenant_id
             scope = f"tenant:{tenant}"
-            hot = working_memory.recall_context(limit=limit, scope=scope)
+            # V4: re-check each hot entry against the RECALLING principal.
+            # The tier is the workspace's shared hot context (the stated
+            # V3 design); a capture whose write was workspace-restricted
+            # must not cross workspaces, and a private capture stays with
+            # its owner - the same boundary the store's ACL enforces.
+            workspace_id = getattr(auth, "workspace_id", None)
+            subject_id = getattr(auth.principal, "subject_id", None)
+
+            def _hot_acl(entry: Any) -> bool:
+                entry_ws = getattr(entry, "workspace_id", None)
+                if entry_ws is not None and workspace_id is not None and entry_ws != workspace_id:
+                    return False
+                if getattr(entry, "visibility", "workspace") == "private":
+                    return getattr(entry, "owner_subject_id", None) == subject_id
+                return True
+
+            hot = working_memory.recall_context(limit=limit, scope=scope, acl=_hot_acl)
             if hot:
                 prefix = "[WORKING MEMORY]\n" + "\n".join(f"- {line}" for line in hot)
                 context = prefix + ("\n\n" + context if context else "")

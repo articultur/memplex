@@ -67,13 +67,6 @@ _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
-os.environ.setdefault("MEMPLEX_LLM_QUERY_ENHANCEMENT", "false")
-os.environ.setdefault("MEMPLEX_EMBEDDING_MODEL", "bge-m3")
-os.environ.setdefault("MEMPLEX_EMBEDDING_DIMENSION", "1024")
-os.environ.setdefault("MEMPLEX_EMBEDDING_DEVICE", "mps")
-os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
-
 import httpx
 
 from memplex.config import load_config
@@ -803,7 +796,26 @@ def _self_check() -> int:
 # ── Main ────────────────────────────────────────────────────────────────
 
 
+def _apply_env_defaults() -> None:
+    """Runtime env defaults, applied in main() ONLY.
+
+    These are the benchmark's own operating parameters. They must never
+    run at import time: a test importing this module's summarize() (the
+    paired-summary statistics) would otherwise configure the WHOLE test
+    process to bge-m3/mps - on CI, where the embedding extra is absent,
+    that import side-effect cascaded into 38 failed / 31 errored
+    service tests across the matrix.
+    """
+    os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
+    os.environ.setdefault("MEMPLEX_LLM_QUERY_ENHANCEMENT", "false")
+    os.environ.setdefault("MEMPLEX_EMBEDDING_MODEL", "bge-m3")
+    os.environ.setdefault("MEMPLEX_EMBEDDING_DIMENSION", "1024")
+    os.environ.setdefault("MEMPLEX_EMBEDDING_DEVICE", "mps")
+    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+
 def main() -> int:
+    _apply_env_defaults()
     parser = argparse.ArgumentParser(
         description="web medium tier paired A/B: text vs screenshot injection"
     )
