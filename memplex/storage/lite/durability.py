@@ -900,11 +900,13 @@ class LiteDurability:
         # (absent/empty/unreadable store) falls back to the JSON pair
         # path unchanged. The reconstructed payload runs through the
         # identical validation below.
-        if os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") in {"read", "rw"}:
+        authority_mode = os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+        if authority_mode in {"read", "rw"}:
             from memplex.storage.lite.sqlite_v2 import read_authoritative_pair
 
             candidate = read_authoritative_pair(
-                self._memory_path.parent / "shadow_v2.sqlite3"
+                self._memory_path.parent / "shadow_v2.sqlite3",
+                fail_closed=(authority_mode == "rw"),
             )
             if candidate is not None:
                 # Reader payload is the raw (non-envelope) shape; the

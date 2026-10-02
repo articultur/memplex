@@ -46,6 +46,16 @@ _RAW_MEMORY_KEY_KIND = (
 )
 
 
+class SQLiteAuthorityError(RuntimeError):
+    """An authoritative SQLite store failed its integrity contract.
+
+    Raised (not silently fallen back) when a store that itself claims
+    write authority carries tampered rows or cannot be read: falling
+    back to the stale JSON snapshot would invisibly rewind committed
+    state (the delete-to-empty resurrection and corruption cases).
+    """
+
+
 def _content_hash(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
@@ -177,7 +187,11 @@ _KIND_TO_MEMORY_KEY = {
 }
 
 
-def read_authoritative_pair(db_path: Path) -> Any:
+def read_authoritative_pair(db_path: Path, *, fail_closed: bool = False) -> Any:
+    """``fail_closed`` (the durability caller passes it when the process
+    runs under rw authority): an unreadable store raises instead of
+    falling back - under rw the JSON snapshot is stale by contract, so
+    the fallback would silently rewind committed state."""
     """Reconstruct a LitePair-shaped memory payload from the SQLite store.
 
     B1 of the Phase-B blueprint: the read-authority experiment. Returns
@@ -192,6 +206,7 @@ def read_authoritative_pair(db_path: Path) -> Any:
     try:
         conn = sqlite3.connect(str(db_path))
         try:
+            meta: dict[str, str] = dict(conn.execute("SELECT key, value FROM meta"))
             memory: dict[str, Any] = {
                 "schema_version": 2,
                 "functions": [],
@@ -202,6 +217,21 @@ def read_authoritative_pair(db_path: Path) -> Any:
                 "paragraphs": [],
                 "sync": {},
             }
+            authority_mode = meta.get("authority_mode", "")
+            if authority_mode == "rw":
+                # Integrity contract of a write-authoritative store:
+                # every payload must still hash to its content_hash. A
+                # mismatch means tampering or corruption - fail closed
+                # rather than load unverified bytes.
+                for row_json, row_hash in conn.execute(
+                    "SELECT payload_json, content_hash FROM memories"
+                ).fetchall() + conn.execute(
+                    "SELECT payload_json, content_hash FROM graph_edges"
+                ).fetchall():
+                    if _content_hash(row_json) != row_hash:
+                        raise SQLiteAuthorityError(
+                            "content_hash mismatch in authoritative store"
+                        )
             for kind, payload_json, _hash in conn.execute(
                 "SELECT kind, payload_json, content_hash FROM memories"
             ):
@@ -217,16 +247,29 @@ def read_authoritative_pair(db_path: Path) -> Any:
                 json.loads(row[0])
                 for row in conn.execute("SELECT event_json FROM change_log ORDER BY seq")
             ]
-            meta = dict(conn.execute("SELECT key, value FROM meta"))
             generation = int(meta.get("generation", "0") or 0)
             if "sync_state" in meta:
                 memory["sync"] = json.loads(meta["sync_state"])
             if not any(memory[k] for k in _KIND_TO_MEMORY_KEY.values()):
-                return None  # empty store: not authoritative over any JSON pair
+                if meta.get("authority_mode") == "rw":
+                    # A write-authoritative store deleted to empty IS the
+                    # truth: returning None would resurrect the last JSON
+                    # snapshot (the stale-snapshot fallback window).
+                    return {"memory": memory, "changelog": events, "generation": generation}
+                return None  # mirror lag: not authoritative over any JSON pair
             return {"memory": memory, "changelog": events, "generation": generation}
         finally:
             conn.close()
-    except Exception as exc:  # noqa: BLE001 - unreadable store falls back to JSON
+    except SQLiteAuthorityError:
+        raise
+    except Exception as exc:  # unreadable store falls back to JSON
+        if fail_closed:
+            # The process runs under rw authority: the JSON snapshot is
+            # stale by contract, so falling back would silently rewind
+            # committed state (the corruption resurrection case).
+            raise SQLiteAuthorityError(
+                f"unreadable authoritative store: {exc}"
+            ) from exc
         logger.warning("sqlite authority read failed, falling back to JSON: %s", exc)
         return None
 
@@ -402,6 +445,10 @@ class AuthoritativeWriter:
                 conn.execute(
                     "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     ("generation", str(generation)),
+                )
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("authority_mode", "rw"),
                 )
                 if "sync" in target_memory:
                     conn.execute(

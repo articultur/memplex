@@ -73,6 +73,7 @@ from memplex.storage.changelog import ChangelogStore
 from memplex.storage.lite import durability as durability_module
 from memplex.storage.lite.durability import LiteDurability, LitePair, LiteStorageIntegrityError
 from memplex.storage.lite.search_index import SQLiteFTSIndex, local_bm25_search
+from memplex.storage.lite.sqlite_v2 import SQLiteAuthorityError
 from memplex.storage.lite.vector_index import VectorSearchIndex
 from memplex.sync_protocol import (
     SyncApplyResult,
@@ -2723,7 +2724,7 @@ class LiteMemoryStore:
                     self._decode_pair(target)
                     pair = self._durability.commit_locked(pair, target, base_verified=True)
                 self._publish_pair(pair)
-        except LiteStorageIntegrityError:
+        except (LiteStorageIntegrityError, SQLiteAuthorityError):
             raise
         except Exception as exc:
             raise LiteStorageIntegrityError("invalid Lite authoritative payload") from exc
