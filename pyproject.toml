@@ -315,6 +315,14 @@ include = ["memplex*"]
 [tool.setuptools.exclude-package-data]
 "memplex._plugin" = ["**/__pycache__/**", "**/*.pyc"]
 
+# Optional embedding dependency: the CI test env installs only [dev]
+# (no embedding extra), so the import has no implementation there -
+# locally the package exists and mypy passes. Declared missing-import-
+# tolerant so both environments check identically.
+[[tool.mypy.overrides]]
+module = "sentence_transformers"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
