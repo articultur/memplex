@@ -1,0 +1,25 @@
+{
+ "benchmark": "product_gap_forensics",
+ "question": "where do the 13 net questions (harness 0.8647 vs product 0.7669, multi-session, same answerer) die?",
+ "design": "all 17 harness-only-correct questions re-run through the product retrieval stack locally (write_text seeding, orchestrated top-24, paragraph-primary, raw-first context under the runner's 20k budget); loss attributed to the first failing stage against the dataset's gold answer_session_ids: write (gold session has no paragraph), retrieval (stored but nothing surfaces in top-24), context (surfaced but assembled context lacks the gold answer text), answerer (context has the answer text). Counting intent via the harness runner's own counting_intent() heuristic.",
+ "results": {
+  "stage_counts": {"write": 0, "retrieval": 5, "context": 11, "answerer": 1},
+  "counting_intent_correlation": {
+   "context_stage": "10/11 counting-intent",
+   "retrieval_stage": "5/5 counting-intent",
+   "overall": "15/17 losses are counting-intent questions"
+  }
+ },
+ "findings": [
+  "The write path loses NOTHING (0/17): paragraphs preserve every gold session verbatim - the earlier fidelity-audit worry is closed for this pool.",
+  "The dominant bucket is CONTEXT ASSEMBLY (11/17): gold sessions surface in top-24 but the raw-first, 20k-budget context lacks the answer text. 10 of the 11 are counting-intent questions - exactly what the harness's COUNT_FULL mechanism (prepend complete candidate sessions for counting questions) covers and the product has no equivalent of. This is a context-assembly feature gap, not a retrieval-component gap.",
+  "Retrieval losses (5/17) are ALL counting-intent too: counting questions need the complete enumeration of sessions, so top-24 recall of gold sessions is systematically harder for them - the harness's counting-intent branch also drives its retrieval composition.",
+  "Answerer-side: 1/17 (noise-level).",
+  "Actionable direction (fits the review's no-new-retrieval-components constraint): productize the COUNT_FULL equivalent - counting/aggregation-intent queries get complete candidate sessions prepended to the answer context. Upper bound if all 15 counting-intent losses flip: 102+15=117/133 = 0.8796 on this pool (harness parity band)."
+ ],
+ "honest_reading": "17 harness-only-correct minus 4 product-only-correct = the net 13; stage attribution is single-run retrieval (no SC variance here - retrieval is deterministic at temperature 0 embedding); the counting-intent heuristic is the harness's own keyword classifier, not a ground truth; the 0.8796 upper bound assumes every flipped loss scores correct (the harness scored these same questions correct with the same answerer, which bounds the assumption from above).",
+ "evidence_level": "E1",
+ "runner": "scripts/gap_forensics.py (local, no API)",
+ "artifacts": ["records.json", "summary.json"],
+ "timestamp": "2026-10-02T21:30:00Z"
+}
