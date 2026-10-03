@@ -96,6 +96,10 @@ from memplex.sync_repository import (
     SyncCapturePolicy,
     SyncCursorExpired,
 )
+from tests.helpers.context_peer import (
+    replace_function_action_for_context_test,
+    run_completed_peer_mutation,
+)
 
 
 def _ready_resources(dsn: str, dim: int = 0) -> PostgresStorageResources:
@@ -9237,3 +9241,131 @@ def test_v5_ingress_preflight_rejects_later_bad_event_without_outbox_sequence_le
     assert _admin_query(migration_dsn, "SELECT count(*) FROM memplex_sync_deliveries") == [(0,)]
     assert _admin_query(migration_dsn, "SELECT last_value, is_called FROM memplex_sync_outbox_stream_seq_seq") == [(1, False)]
     _drop_unprivileged_role(migration_dsn, role)
+
+
+@pytest.mark.parametrize("bob_tenant", ["context-tenant-a", "context-tenant-b"])
+def test_context_read_nodes_keeps_request_principal(pg_dsn, pgvector_available, monkeypatch, bob_tenant):
+    """Real committed queries retain Alice/Bob scopes on the same store."""
+    assert pgvector_available, "context source contract requires real pgvector"
+    resources = _ready_resources(pg_dsn)
+    store = PostgresMemoryStore(
+        dsn=pg_dsn, ready_pool=resources.ready_pool, require_authorization=True,
+    )
+    alice_context = _authorization(tenant="context-tenant-a", subject="alice")
+    bob_context = _authorization(tenant=bob_tenant, subject="bob")
+    alice = store.authorized(alice_context)
+    bob = store.authorized(bob_context)
+    alice_ids = ["context-function", "context-fact", "context-preference", "context-observation"]
+    bob_ids = (
+        [f"bob-{node_id}" for node_id in alice_ids]
+        if bob_tenant == alice_context.principal.tenant_id else alice_ids
+    )
+
+    def write_nodes(facade, ids, marker):
+        function = _func(ids[0], f"{marker} function", visibility="user")
+        fact = Fact(id=ids[1], subject=marker, predicate="is", object_=marker, visibility="user")
+        preference = Preference(
+            id=ids[2], aspect="context", preference=marker, visibility="user",
+        )
+        observation = Observation(id=ids[3], event=marker, context=marker, visibility="user")
+        facade.add(function, SRC)
+        facade.add_fact(fact)
+        facade.add_preference(preference)
+        facade.add_observation(observation)
+
+    try:
+        write_nodes(alice, alice_ids, "alice committed")
+        write_nodes(bob, bob_ids, "bob committed")
+        original_bind = store._bind_transaction_scope
+        first_queries = Barrier(2)
+        paused_subjects = set()
+        pause_lock = threading.Lock()
+
+        def bind_with_barrier(cur, context):
+            original_bind(cur, context)
+            with pause_lock:
+                first_query = context.principal.subject_id not in paused_subjects
+                paused_subjects.add(context.principal.subject_id)
+            if first_query:
+                first_queries.wait(timeout=5)
+
+        monkeypatch.setattr(store, "_bind_transaction_scope", bind_with_barrier)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            alice_read = pool.submit(alice.read_context_nodes, [*alice_ids, alice_ids[0], "missing"])
+            bob_read = pool.submit(bob.read_context_nodes, bob_ids)
+            alice_nodes = alice_read.result(timeout=10)
+            bob_nodes = bob_read.result(timeout=10)
+        assert set(alice_nodes) == set(alice_ids)
+        assert set(bob_nodes) == set(bob_ids)
+        assert alice_nodes[alice_ids[0]].name == "alice committed function"
+        assert bob_nodes[bob_ids[0]].name == "bob committed function"
+        for node in alice_nodes.values():
+            assert node.owner_subject_id == "alice"
+            assert node.tenant_id == "context-tenant-a"
+        for node in bob_nodes.values():
+            assert node.owner_subject_id == "bob"
+            assert node.tenant_id == bob_tenant
+        if bob_tenant == alice_context.principal.tenant_id:
+            assert bob.read_context_nodes(alice_ids) == {}
+            assert alice.read_context_nodes(bob_ids) == {}
+        with pytest.raises(PermissionError, match="authorization context"):
+            store.read_context_nodes(alice_ids)
+    finally:
+        resources.close()
+
+
+def _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, mutation):
+    """Real-PG final output after a completed write with distinct app/admin roles."""
+    from copy import deepcopy
+
+    from memplex.auth import AuthorizationContext, Principal, bind_node_identity
+
+    assert pgvector_available, "this contract requires the real pgvector test environment"
+    cfg, role = _production_service_config(migration_dsn)
+    cfg.working_memory.enabled = True
+    first = peer = None
+    owner = AuthorizationContext(Principal(tenant_id="context-tenant", subject_id="alice"), workspace_id="workspace", agent_id="codex", session_id="session")
+    query = "database transaction evidence"
+    try:
+        first = MemplexService(config=cfg)
+        peer = MemplexService(config=deepcopy(cfg))
+        for identifier, text in (("peer-target", "OLD-PEER-TEXT"), ("peer-control", "OWNER-POSITIVE-CONTROL")):
+            node = Function(id=identifier, name=f"{query} {identifier}", action=[FieldValue(desc=text)])
+            bind_node_identity(node, owner)
+            first._store_for(owner).add(node, SourceDocument(type="test"))
+        runtime = AgentMemoryRuntime(service=first, authorization=owner)
+        if path == "prefetch":
+            assert "OLD-PEER-TEXT" in runtime.prefetch(query).context
+        else:
+            assert "OLD-PEER-TEXT" in runtime.before_prompt(query).context
+        def mutate():
+            if mutation == "update":
+                replace_function_action_for_context_test(
+                    peer._store_for(owner), owner, "peer-target", "CURRENT-PEER-TEXT",
+                )
+            else:
+                peer.delete("peer-target", authorization=owner)
+
+        run_completed_peer_mutation(mutate)
+        result = runtime.before_prompt(query)
+        assert result.source == path
+        assert "OWNER-POSITIVE-CONTROL" in result.context
+        assert "OLD-PEER-TEXT" not in result.context
+        assert ("CURRENT-PEER-TEXT" in result.context) is (mutation == "update")
+        assert result.total == (2 if mutation == "update" else 1)
+    finally:
+        if first is not None:
+            first.stop()
+        if peer is not None:
+            peer.stop()
+        _drop_unprivileged_role(migration_dsn, role)
+
+
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_context_after_completed_peer_update(migration_dsn, pgvector_available, path):
+    _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, "update")
+
+
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_context_after_completed_peer_delete(migration_dsn, pgvector_available, path):
+    _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, "delete")

@@ -15,6 +15,7 @@ overwrite one another.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from memplex.auth import (
@@ -23,6 +24,7 @@ from memplex.auth import (
     bind_node_identity,
     local_development_context,
 )
+from memplex.models.source import SourceType
 
 if TYPE_CHECKING:
     from memplex.models import ExtractedData, SearchResult
@@ -80,25 +82,49 @@ class _RawParagraphView:
     """ACL-visible facade over one raw-paragraph row (dict-native).
 
     Carries the identity/visibility fields ``is_node_visible`` reads.
-    The persisted row trusts the writing identity (bind-time stamping
-    happens in the write path), so the view projects the same
-    tenant/workspace/user fields the extraction nodes carry.
+    Only identity actually persisted in the row is projected. Historic raw
+    payloads may lack tenant/workspace identity; the canonical gate limits
+    those records to its explicit local-development compatibility boundary.
     """
 
     __slots__ = (
-        "id", "namespace", "owner_subject", "raw_text",
-        "tenant_id", "trust_tier", "visibility", "workspace_id",
+        "id",
+        "memory_type",
+        "name",
+        "namespace",
+        "origin_session",
+        "owner_subject",
+        "owner_subject_id",
+        "provenance",
+        "raw_text",
+        "source_type",
+        "tenant_id",
+        "trust_tier",
+        "visibility",
+        "workspace_id",
     )
 
     def __init__(self, row: dict) -> None:
+        # Project only persisted fields. In particular, a request principal or
+        # mapping key cannot fill missing ACL identity or a missing row ID.
         self.id = row.get("id", "")
+        self.memory_type = "paragraph"
+        self.name = row.get("name", "")
+        self.source_type = row.get("source_type") or SourceType.WIKI
         self.tenant_id = row.get("tenant_id")
         self.workspace_id = row.get("workspace_id")
         self.owner_subject = row.get("owner_subject")
+        self.owner_subject_id = row.get("owner_subject_id") or self.owner_subject
+        self.origin_session = row.get("origin_session")
+        self.provenance = dict(row.get("provenance") or {})
         self.visibility = row.get("visibility") or "workspace"
         self.namespace = dict(row.get("namespace") or {})
         self.trust_tier = int(row.get("trust_tier", 3))
         self.raw_text = row.get("raw_text", "")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Expose all projected fields to the existing bounded safety scan."""
+        return {field: getattr(self, field) for field in self.__slots__}
 
 
 class AuthorizationGate:
@@ -225,14 +251,24 @@ class AuthorizationGate:
             part.strip() for part in str(raw).split(",") if part.strip()
         ]
 
-    def is_node_visible(self, node: Any, context: AuthorizationContext) -> bool:
-        """Return whether *node* is in the authenticated caller's ACL scope.
+    def is_node_visible(
+        self, node: Any, context: AuthorizationContext, *,
+        source_lookup: Callable[[str], Any] | None = None,
+        _source_path: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Apply the canonical own ACL and existing default lineage lookup."""
+        if not self._is_node_in_scope(node, context):
+            return False
+        if source_lookup is None and self.identity_value(node, "tenant_id", "memplex_tenant_id") is None:
+            # Keep the explicit identity-less legacy compatibility default.
+            # M1 snapshot evaluation always checks its declared dependencies.
+            return True
+        return self._sources_still_visible(
+            node, context, source_lookup=source_lookup, _source_path=_source_path,
+        )
 
-        An identity-less historic node is visible only through the explicit
-        local-development compatibility context.  Every explicit tenant
-        context is fail-closed before applying workspace, user, or session
-        visibility.
-        """
+    def _is_node_in_scope(self, node: Any, context: AuthorizationContext) -> bool:
+        """Single own-node ACL decision, shared by both lineage evaluators."""
         tenant_id = self.identity_value(node, "tenant_id", "memplex_tenant_id")
         if tenant_id is None:
             return self.is_local_development_context(context)
@@ -259,7 +295,7 @@ class AuthorizationGate:
                 # overriding the user-private default within the tenant.
                 allowed = self._agent_has_grant(node, context)
         elif visibility == "workspace":
-            allowed = workspace_id == context.workspace_id
+            allowed = bool(workspace_id and context.workspace_id) and workspace_id == context.workspace_id
         elif visibility == "session":
             provenance = getattr(node, "provenance", {}) or {}
             if not isinstance(provenance, dict):
@@ -269,18 +305,22 @@ class AuthorizationGate:
                 or namespace.get("memplex_source_agent")
                 or namespace.get("memplex_agent")
             )
+            source_session = getattr(node, "origin_session", None)
             allowed = (
-                workspace_id == context.workspace_id
+                all((
+                    workspace_id, context.workspace_id,
+                    subject_id, context.principal.subject_id,
+                    source_session, context.session_id,
+                    source_agent, context.agent_id,
+                ))
+                and workspace_id == context.workspace_id
                 and subject_id == context.principal.subject_id
-                and getattr(node, "origin_session", None) == context.session_id
+                and source_session == context.session_id
                 and source_agent == context.agent_id
             )
         else:
             allowed = False
-        # Derived-record lineage gate: every declared source must still
-        # be visible to this caller, whatever the node's own visibility
-        # says (revocation propagates; missing source = revoked).
-        return allowed and self._sources_still_visible(node, context)
+        return allowed
 
     # ── Derived-record ACL lineage (ADR: derived never wider than sources) ──
 
@@ -351,8 +391,21 @@ class AuthorizationGate:
                     node.visibility = name
                     break
 
+    @classmethod
+    def _source_ids(cls, node: Any) -> tuple[str, ...]:
+        """Canonical declared lineage, with stable duplicate-edge removal."""
+        namespace = getattr(node, "namespace", {}) or {}
+        if not isinstance(namespace, dict):
+            return ()
+        source_refs = namespace.get(cls._SOURCE_REFS_KEY)
+        if not source_refs:
+            return ()
+        return tuple(dict.fromkeys(part for part in str(source_refs).split(",") if part))
+
     def _sources_still_visible(
-        self, node: Any, context: AuthorizationContext
+        self, node: Any, context: AuthorizationContext, *,
+        source_lookup: Callable[[str], Any] | None = None,
+        _source_path: frozenset[str] = frozenset(),
     ) -> bool:
         """Lineage gate: every source must still be visible to the caller.
 
@@ -360,25 +413,41 @@ class AuthorizationGate:
         that is deleted, revoked, or no longer visible hides the derived
         record entirely (fail-closed).
         """
-        namespace = getattr(node, "namespace", {}) or {}
-        if not isinstance(namespace, dict):
+        source_ids = self._source_ids(node)
+        if not source_ids:
             return True
-        source_refs = namespace.get(self._SOURCE_REFS_KEY)
-        if not source_refs:
-            return True
-        source_ids = [
-            part for part in str(source_refs).split(",") if part
-        ]
-        lookup = self.typed_lookup_for(context)
+        node_id = str(getattr(node, "id", "") or "")
+        if node_id in _source_path:
+            return False
+        source_path = _source_path | {node_id}
+        lookup = source_lookup or self.typed_lookup_for(context).get
+        visibility = _SnapshotAuthorization(
+            self, context, lookup, lambda: "lookup_error",
+            _legacy_source_path=source_path,
+            _legacy_identityless=source_lookup is None,
+        )
         for source_id in source_ids:
             try:
-                source = lookup.get(str(source_id))
+                source = lookup(str(source_id))
             except Exception as exc:  # noqa: BLE001 - lineage is fail-closed
                 logger.debug(
                     "lineage source lookup failed for %s: %s", source_id, exc
                 )
                 return False
-            if source is None or not self.is_node_visible(source, context):
+            if source is None:
+                return False
+            # A custom legacy lookup may return aliases or ID-less nodes.
+            # Such graphs cannot safely share ID-keyed verdicts. Preserve
+            # their original path-sensitive recursion rather than widen ACLs.
+            verdict = (False, "legacy_alias")
+            if getattr(source, "id", None) == source_id:
+                verdict = visibility.check(source)
+            allowed = verdict[0]
+            if verdict[1] == "legacy_alias":
+                allowed = self.is_node_visible(
+                    source, context, source_lookup=source_lookup, _source_path=source_path,
+                )
+            if not allowed:
                 return False
         return True
 
@@ -446,3 +515,92 @@ class AuthorizationGate:
                         namespace["domain"] = str(domain)
                     else:
                         node.namespace = {"domain": str(domain)}
+
+
+class _SnapshotAuthorization:
+    """Request-local iterative lineage evaluation with completed verdicts.
+
+    The service supplies a bounded, scoped committed lookup. Canonical own
+    ACLs and source declarations remain on AuthorizationGate. Only existence
+    and ACL propagate through ancestors; no transitive safety/expiry policy
+    is introduced. A completed verdict is independent of an active DFS path.
+    """
+
+    def __init__(
+        self,
+        gate: AuthorizationGate,
+        context: AuthorizationContext,
+        lookup: Callable[[str], Any],
+        lookup_failure: Callable[[], str],
+        *,
+        _legacy_source_path: frozenset[str] | None = None,
+        _legacy_identityless: bool = False,
+    ) -> None:
+        self._gate = gate
+        self._context = context
+        self._lookup = lookup
+        self._lookup_failure = lookup_failure
+        # None keeps strict committed-snapshot semantics. Ordinary callers
+        # retain their existing identity-less and inherited-path behavior.
+        self._legacy_source_path = _legacy_source_path
+        self._legacy_identityless = _legacy_identityless
+        self._verdicts: dict[str, tuple[bool, str]] = {}
+
+    def check(self, node: Any) -> tuple[bool, str]:
+        """Evaluate each reachable source once, without Python recursion."""
+        root_id = node.id
+        if root_id in self._verdicts:
+            return self._verdicts[root_id]
+        stack: list[tuple[Any, tuple[str, ...] | None, int]] = [(node, None, 0)]
+        active: set[str] = set(self._legacy_source_path or ())
+
+        def complete(node_id: str, verdict: tuple[bool, str]) -> None:
+            self._verdicts[node_id] = verdict
+            active.discard(node_id)
+            stack.pop()
+
+        while stack:
+            current, sources, position = stack[-1]
+            current_id = current.id
+            try:
+                if sources is None:
+                    if not self._gate._is_node_in_scope(current, self._context):
+                        complete(current_id, (False, "denied"))
+                        continue
+                    sources = self._gate._source_ids(current)
+                    if self._legacy_identityless and self._gate.identity_value(
+                        current, "tenant_id", "memplex_tenant_id",
+                    ) is None:
+                        sources = ()
+                    if sources and current_id in active:
+                        complete(current_id, (False, "denied"))
+                        continue
+                    active.add(current_id)
+                    stack[-1] = current, sources, position
+                if position >= len(sources):
+                    complete(current_id, (True, ""))
+                    continue
+                source_id = sources[position]
+                verdict = self._verdicts.get(source_id)
+                if verdict is not None:
+                    if not verdict[0]:
+                        complete(current_id, verdict)
+                    else:
+                        stack[-1] = current, sources, position + 1
+                elif source_id in active and self._legacy_source_path is None:
+                    complete(current_id, (False, "denied"))
+                else:
+                    source = self._lookup(source_id)
+                    if source is None:
+                        self._verdicts[source_id] = (
+                            False, self._lookup_failure() or "missing",
+                        )
+                    else:
+                        # Leave the parent's edge pending until this source's
+                        # completed verdict can be consumed on the next visit.
+                        if self._legacy_source_path is not None and getattr(source, "id", None) != source_id:
+                            return False, "legacy_alias"
+                        stack.append((source, None, 0))
+            except Exception:  # noqa: BLE001 - an uncertain subtree fails closed and is memoized
+                complete(current_id, (False, "lookup_error"))
+        return self._verdicts[root_id]

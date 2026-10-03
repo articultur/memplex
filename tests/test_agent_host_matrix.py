@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from memplex.adapters.agent_installer import install_agent, uninstall_agent
 from memplex.adapters.agent_runtime import AgentMemoryRuntime
 from memplex.config import MemplexConfig
@@ -882,3 +884,42 @@ def test_session_source_visibility_isolated_from_other_hosts_and_sessions(tmp_pa
         )
     finally:
         uninstall_agent("claude-code", target_dir=claude_home)
+
+
+@pytest.mark.parametrize("host", _HOSTS)
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_context_cross_host_final_boundary(tmp_path, monkeypatch, host, path):
+    """Shared runtime contracts, not installation/live-host certification."""
+    from memplex.auth import AuthorizationContext, Principal, bind_node_identity
+    from memplex.models import FieldValue, Function, SourceDocument
+
+    cfg = MemplexConfig()
+    cfg.storage.path = str(tmp_path / "memory.json")
+    cfg.working_memory.enabled = True
+    cfg.llm.query_enhancement = False
+    service = MemplexService(config=cfg)
+    query = "workspace isolation evidence"
+    owner = AuthorizationContext(Principal(tenant_id="tenant", subject_id="alice"), workspace_id="workspace", agent_id=host, session_id="session")
+    denied = AuthorizationContext(Principal(tenant_id="tenant", subject_id="bob"), workspace_id="workspace", agent_id=host, session_id="other")
+    secret = Function(id="private-secret", name=query, action=[FieldValue(desc="ALICE-SECRET-TEXT")])
+    control = Function(id="reader-control", name=f"{query} control", action=[FieldValue(desc="BOB-OWNER-CONTROL")])
+    try:
+        for node, auth in ((secret, owner), (control, denied)):
+            bind_node_identity(node, auth, visibility="session")
+            service.store.add(node, SourceDocument(type="test"))
+            service._working_memory.add_reference(node.id, storage_namespace=service.storage_namespace(), tenant_id="tenant")
+        own_runtime = AgentMemoryRuntime(service=service, agent=host, authorization=owner)
+        reader = AgentMemoryRuntime(service=service, agent=host, authorization=denied)
+        if path == "prefetch":
+            assert "ALICE-SECRET-TEXT" in own_runtime.prefetch(query).context
+            reader.prefetch(query)
+        own_result = own_runtime.before_prompt(query)
+        result = reader.before_prompt(query)
+        assert own_result.source == result.source == path
+        assert "ALICE-SECRET-TEXT" in own_result.context
+        assert "BOB-OWNER-CONTROL" in result.context
+        assert "ALICE-SECRET-TEXT" not in result.context
+        assert result.total == 1
+        assert secret.id not in json.dumps(reader.search_memories(query, explain=True).explanation)
+    finally:
+        service.stop()
