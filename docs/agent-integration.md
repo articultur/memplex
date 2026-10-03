@@ -97,7 +97,7 @@ The portable profile registry is implemented in
 | Codex | MCP, CLI, hooks | auto recall, auto capture, background consolidation |
 | Claude Code | plugin, MCP, lifecycle hooks, CLI | lifecycle prompt recall/tool observation plus MCP tools |
 | OpenClaw | plugin slot, CLI, MCP | triage, recall, dream shape; memory slot config |
-| Hermes | memory provider, CLI, MCP | sync after response plus zero-latency prefetch |
+| Hermes | memory provider, CLI, MCP | sync after response plus candidate prefetch |
 
 Discover profiles:
 
@@ -292,9 +292,26 @@ memplex --output json agent capture \
 ```
 
 The shell CLI is process-per-call, so it persists captured turns and recalls them
-through live search on the next invocation. Hermes-style zero-latency prefetch is
-available when the adapter uses a long-lived MCP/server process; the prefetch
-cache is scoped by storage path, project path, agent, user, and session.
+through live search on the next invocation. Hermes-style candidate prefetch is
+available when the adapter uses a long-lived MCP/server process. Each service
+owns a bounded cache of candidate IDs, order and origin, scoped by actual storage
+namespace, tenant, subject, workspace, agent, session and normalized query.
+Every hit revalidates live hot references and reassembles current committed,
+authorized, safe source text within the current budget. It does not guarantee
+zero latency. The historical `zero_latency_prefetch` capability key retains its
+existing value/default for host compatibility and means candidate-prefetch
+enablement; it never disables current-source validation.
+
+The generic `memplex query` command advertised by the Claude skill also returns
+current committed, authorized wrapped memories, in both JSON and human output.
+`--explain` never restores rejected IDs. `tokens_used` covers joined wrapped
+memory fragments (the existing character estimate), not the surrounding
+JSON/table fields or diagnostics; `--max-tokens` is bounded to 0–32000
+(zero returns no memory fragments).
+MCP search-to-detail reads are current committed views. Explicit Fact history
+and pending-review tools retain historical inspection, subject to the same
+committed-source and authorization checks. Ordinary service CRUD and raw
+HTTP/corpus candidate inspection are separate APIs.
 
 Use the closed loop from MCP:
 

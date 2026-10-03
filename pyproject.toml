@@ -154,6 +154,7 @@ files = [
     "memplex/compaction.py",
     "memplex/temporal.py",
     "memplex/working_memory.py",
+    "memplex/context.py",
     "memplex/sleep_time.py",
     "memplex/improve.py",
     "memplex/consolidation.py",
@@ -408,6 +409,7 @@ source_modules = [
     "memplex.temporal",
     "memplex.worker",
     "memplex.working_memory",
+    "memplex.context",
 ]
 forbidden_modules = ["memplex.adapters"]
 
@@ -448,6 +450,12 @@ forbidden_modules = [
     "memplex.adapters.yaml_edit",
     "memplex.adapters._shared",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Context assembly stays a storage-independent leaf"
+type = "forbidden"
+source_modules = ["memplex.context"]
+forbidden_modules = ["memplex.service", "memplex.storage", "memplex.adapters"]
 
 [tool.ruff.lint]
 # C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.

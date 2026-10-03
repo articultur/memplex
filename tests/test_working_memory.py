@@ -72,8 +72,9 @@ def test_limit_and_invalid_inputs():
 
 
 def test_service_integration_injects_on_recall(tmp_path):
-    """End to end: enabled tier captures typed writes and prepends on recall."""
-    from memplex.adapters.agent_runtime import AgentMemoryRuntime
+    """Committed IDs and host-annotated ordinary before_prompt stay usable."""
+    from memplex.adapters.agent_runtime import AgentMemoryRuntime, describe_memory_scope
+    from memplex.auth import AuthorizationContext, Principal
     from memplex.config import MemplexConfig
     from memplex.service import MemplexService
 
@@ -88,16 +89,40 @@ def test_service_integration_injects_on_recall(tmp_path):
     try:
         from memplex.models import SourceDocument, SourceType
 
+        context = AuthorizationContext(
+            principal=Principal(subject_id="alice", tenant_id="t1"),
+            workspace_id="ws-a", agent_id="codex", session_id="session-a",
+        )
+        runtime = AgentMemoryRuntime(
+            service=svc, agent="codex", authorization=context, project_path=tmp_path,
+        )
         svc.write(
             SourceDocument(
                 type="conversation",
                 content="The deployment pipeline now requires two reviewers.",
                 source_type=SourceType.MEETING,
-            )
+            ),
+            authorization=context,
         )
-        runtime = AgentMemoryRuntime(service=svc, agent="codex")
-        ctx = runtime._recall("pipeline", source="live").context
-        assert "[WORKING MEMORY]" in ctx
+        refs = svc._working_memory.recall_references(
+            storage_namespace=svc.storage_namespace(), tenant_id=context.principal.tenant_id,
+        )
+        assert refs, "successful captures publish resolvable source IDs"
+        assert set(refs) <= set(svc._store_for(context).read_context_nodes(refs))
+        nodes = svc._store_for(context).read_context_nodes(refs)
+        assert any("two reviewers" in nodes[node_id].name for node_id in refs)
+        assert svc._working_memory.recall_context(scope="tenant:t1") == []
+        scope = describe_memory_scope(
+            agent="codex", user_id="alice", session_id="session-a", project_path=tmp_path,
+            storage_namespace=svc.storage_namespace(), workspace_id="ws-a",
+        )
+        svc.annotate_memories(refs, attributes=scope["write_namespace"], authorization=context)
+        assert svc._working_memory.recall_references(
+            storage_namespace=svc.storage_namespace(), tenant_id="t1",
+        ) == ()
+        recalled = runtime.before_prompt("pipeline")
+        assert "two reviewers" in recalled.context
+        assert recalled.total > 0
     finally:
         svc.stop()
 
@@ -151,8 +176,7 @@ def test_recall_acl_filters_workspace_and_private_entries():
 
 
 def test_service_write_stamps_node_visibility_on_hot_entries(tmp_path):
-    """The write path stamps the writer's ACL triple on hot entries so
-    the injection filter has provenance to enforce."""
+    """Hot references resolve current committed ACLs without copying them."""
     from memplex.auth import AuthorizationContext, Principal
     from memplex.config import MemplexConfig
     from memplex.service import MemplexService
@@ -179,13 +203,123 @@ def test_service_write_stamps_node_visibility_on_hot_entries(tmp_path):
             ),
             authorization=ctx,
         )
-        entries = [
-            e
-            for e in svc._working_memory._entries.values()
-        ]
-        assert entries, "capture pins hot entries"
-        assert all(e.workspace_id == "ws-a" for e in entries)
-        assert all(e.owner_subject_id == "alice" for e in entries)
-        assert all(e.visibility in {"workspace", "private", "tenant"} for e in entries)
+        refs = svc._working_memory.recall_references(
+            storage_namespace=svc.storage_namespace(), tenant_id="t1",
+        )
+        assert refs, "successful capture registers source IDs"
+        nodes = svc._store_for(ctx).read_context_nodes(refs)
+        assert set(refs) <= set(nodes)
+        assert all(nodes[node_id].workspace_id == "ws-a" for node_id in refs)
+        assert all(nodes[node_id].owner_subject_id == "alice" for node_id in refs)
+        assert all(nodes[node_id].visibility in {"workspace", "user", "session"} for node_id in refs)
+        assert svc._working_memory._entries == {}
     finally:
         svc.stop()
+
+
+def test_reference_keys_do_not_alias_delimiters():
+    wm = WorkingMemory()
+    ns, tenant = "source::store", "tenant::one"
+    assert wm.add_reference("id", storage_namespace=ns, tenant_id=tenant)
+    assert wm.add_reference("one::id", storage_namespace=ns, tenant_id="tenant")
+    assert wm.recall_references(storage_namespace=ns, tenant_id=tenant) == ("id",)
+    assert wm.recall_references(storage_namespace=ns, tenant_id="tenant") == ("one::id",)
+    assert wm.recall_references(storage_namespace="other", tenant_id=tenant) == ()
+    assert wm.remove_reference("id", storage_namespace=ns, tenant_id="tenant") is False
+    assert wm.remove_reference("id", storage_namespace=ns, tenant_id=tenant) is True
+    assert wm.recall_references(storage_namespace=ns, tenant_id="tenant") == ("one::id",)
+
+
+def test_all_pinned_rejects_new_reference_at_cap():
+    wm = WorkingMemory(max_entries=3)
+    for node_id in ("one", "two", "three"):
+        assert wm.add_reference(node_id, storage_namespace="ns", tenant_id="tenant", pinned=True)
+    assert len(wm) == 3
+    assert wm.add_reference("new", storage_namespace="ns", tenant_id="tenant") is False
+    wm.add("legacy", "uncommitted legacy string", pinned=True)
+    assert len(wm) == 3
+    assert wm.recall_context() == []
+    assert wm.recall_references(storage_namespace="other", tenant_id="tenant") == ()
+
+
+def test_pin_only_suspends_ttl(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("memplex.working_memory.time.monotonic", lambda: clock[0])
+    wm = WorkingMemory(default_ttl_seconds=5)
+    assert wm.add_reference("id", storage_namespace="ns", tenant_id="tenant")
+    clock[0] = 104
+    assert wm.set_reference_pinned("id", storage_namespace="ns", tenant_id="tenant", pinned=True)
+    clock[0] = 200
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ("id",)
+    assert wm.recall_references(storage_namespace="ns", tenant_id="another") == ()
+    assert wm.set_reference_pinned("id", storage_namespace="ns", tenant_id="tenant", pinned=False)
+    clock[0] = 204
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ("id",)
+    clock[0] = 205
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ()
+    assert not wm.set_reference_pinned("id", storage_namespace="ns", tenant_id="tenant", pinned=True)
+    assert len(wm) == 0
+
+
+def test_reference_recency_and_refresh_use_insertion_order(monkeypatch):
+    monkeypatch.setattr("memplex.working_memory.time.monotonic", lambda: 100.0)
+    wm = WorkingMemory()
+    for node_id in ("first", "second", "third", "first"):
+        assert wm.add_reference(node_id, storage_namespace="ns", tenant_id="tenant")
+    assert len(wm) == 3
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ("first", "third", "second")
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant", limit=1) == ("first",)
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant", limit=0) == ()
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant", limit=-1) == ()
+
+
+def test_reference_and_legacy_containers_share_one_cap():
+    wm = WorkingMemory(max_entries=3)
+    wm.add("legacy-old", "old")
+    assert wm.add_reference("ref-old", storage_namespace="ns", tenant_id="tenant")
+    wm.add("legacy-pinned", "pinned", pinned=True)
+    assert wm.add_reference("ref-new", storage_namespace="ns", tenant_id="tenant")
+    assert len(wm) == 3
+    assert wm.recall_context() == ["pinned"]
+    wm.add("legacy-new", "new")
+    assert len(wm) == 3
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ("ref-new",)
+    assert set(wm.recall_context()) == {"pinned", "new"}
+    wm.clear()
+    assert len(wm) == 0
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ()
+
+
+def test_expired_entries_release_shared_capacity(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("memplex.working_memory.time.monotonic", lambda: clock[0])
+    wm = WorkingMemory(max_entries=2, default_ttl_seconds=2)
+    wm.add("legacy", "expiring")
+    assert wm.add_reference("old", storage_namespace="ns", tenant_id="tenant")
+    clock[0] = 102
+    assert wm.add_reference("new", storage_namespace="ns", tenant_id="tenant", pinned=True)
+    assert len(wm) == 1
+    assert wm.recall_context() == []
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ("new",)
+
+
+def test_reference_entries_have_only_source_and_lifecycle_data():
+    from dataclasses import asdict
+
+    wm = WorkingMemory()
+    assert not wm.add_reference("", storage_namespace="ns", tenant_id="tenant")
+    assert wm.add_reference("source", storage_namespace="ns", tenant_id="tenant")
+    entry = next(iter(wm._references.values()))
+    assert set(asdict(entry)) == {"memory_id", "ttl_seconds", "pinned", "expires_at", "insertion_sequence"}
+    assert wm.recall_context() == []
+
+
+def test_reference_custom_ttl_restarts_from_unpin(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("memplex.working_memory.time.monotonic", lambda: clock[0])
+    wm = WorkingMemory(default_ttl_seconds=90)
+    assert wm.add_reference("id", storage_namespace="ns", tenant_id="tenant", pinned=True, ttl_seconds=3)
+    clock[0] = 200
+    assert wm.set_reference_pinned("id", storage_namespace="ns", tenant_id="tenant", pinned=False)
+    clock[0] = 203
+    assert wm.recall_references(storage_namespace="ns", tenant_id="tenant") == ()

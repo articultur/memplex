@@ -254,3 +254,40 @@ def test_production_or_active_remote_runtime_requires_registry(
 
     with pytest.raises(PermissionError, match="principal registry"):
         AgentMemoryRuntime(service=service, agent="codex", user_id="alice")
+
+
+@pytest.mark.parametrize("agent_id", [None, "", "cli", "codex"])
+def test_explicit_context_is_preserved_without_host_identity_elevation(tmp_path, agent_id):
+    from memplex.auth import AuthorizationContext, Principal, bind_node_identity
+    from memplex.models import Function, SourceDocument
+
+    service = _service(tmp_path)
+    owner = AuthorizationContext(
+        Principal(tenant_id="tenant", subject_id="alice"), workspace_id="workspace",
+        agent_id="codex", session_id="session",
+    )
+    session = Function(id="session", name="SESSION-SECRET")
+    bind_node_identity(session, owner, visibility="session")
+    service.store.add(session, SourceDocument(type="test"))
+    workspace = Function(id="workspace", name="WORKSPACE-CONTROL")
+    bind_node_identity(workspace, owner)
+    service.store.add(workspace, SourceDocument(type="test"))
+    caller = AuthorizationContext(
+        owner.principal, workspace_id="workspace", agent_id=agent_id, session_id="session",
+    )
+    runtime = AgentMemoryRuntime(service=service, agent="codex", authorization=caller)
+    assert runtime.authorization_context is caller
+    assert runtime.get_accessible_memory(workspace.id) is not None
+    assert (runtime.get_accessible_memory(session.id) is not None) is (agent_id == "codex")
+
+
+@pytest.mark.parametrize("profile,remote", [("production", False), ("development", True)])
+def test_explicit_local_development_still_rejected_for_production_or_remote(profile, remote):
+    from memplex.auth import local_development_context
+
+    service = SimpleNamespace(
+        _config=SimpleNamespace(deployment=SimpleNamespace(profile=profile)),
+        store=SimpleNamespace(_config=SimpleNamespace(active=remote)),
+    )
+    with pytest.raises(PermissionError, match="local-development authorization"):
+        AgentMemoryRuntime(service=service, authorization=local_development_context())
