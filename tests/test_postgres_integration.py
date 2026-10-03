@@ -96,6 +96,10 @@ from memplex.sync_repository import (
     SyncCapturePolicy,
     SyncCursorExpired,
 )
+from tests.helpers.context_peer import (
+    replace_function_action_for_context_test,
+    run_completed_peer_mutation,
+)
 
 
 def _ready_resources(dsn: str, dim: int = 0) -> PostgresStorageResources:
@@ -9313,7 +9317,6 @@ def test_context_read_nodes_keeps_request_principal(pg_dsn, pgvector_available, 
 def _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, mutation):
     """Real-PG final output after a completed write with distinct app/admin roles."""
     from copy import deepcopy
-    from threading import Event
 
     from memplex.auth import AuthorizationContext, Principal, bind_node_identity
 
@@ -9335,22 +9338,16 @@ def _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_availa
             assert "OLD-PEER-TEXT" in runtime.prefetch(query).context
         else:
             assert "OLD-PEER-TEXT" in runtime.before_prompt(query).context
-        completed = Event()
-
         def mutate():
             if mutation == "update":
-                replacement = peer._store_for(owner).get("peer-target")
-                replacement.action = [FieldValue(desc="CURRENT-PEER-TEXT")]
-                peer._store_for(owner).replace_function(replacement)
+                replace_function_action_for_context_test(
+                    peer._store_for(owner), owner, "peer-target", "CURRENT-PEER-TEXT",
+                )
             else:
                 peer.delete("peer-target", authorization=owner)
-            completed.set()
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            pending = pool.submit(mutate)
-            assert completed.wait(timeout=10)
-            pending.result(timeout=10)
-            result = runtime.before_prompt(query)
+        run_completed_peer_mutation(mutate)
+        result = runtime.before_prompt(query)
         assert result.source == path
         assert "OWNER-POSITIVE-CONTROL" in result.context
         assert "OLD-PEER-TEXT" not in result.context

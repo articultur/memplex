@@ -41,6 +41,10 @@ from memplex.storage.postgres import (
     _obs_to_json,
 )
 from memplex.sync_repository import SyncCapturePolicy
+from tests.helpers.context_peer import (
+    replace_function_action_for_context_test,
+    run_completed_peer_mutation,
+)
 
 # ── Serialization round-trip ─────────────────────────────────────────
 
@@ -3012,6 +3016,83 @@ def pg_store(monkeypatch):
 
 
 # ── Write operations (SQL + params verified) ─────────────────────────
+
+
+def test_context_peer_fixture_worker_propagates_original_exception():
+    error = AttributeError("peer mutation failed before completion")
+
+    def fail():
+        raise error
+
+    with pytest.raises(AttributeError) as caught:
+        run_completed_peer_mutation(fail, timeout=0.1)
+    assert caught.value is error
+
+
+def test_context_peer_fixture_worker_returns_after_success():
+    outcomes = []
+    run_completed_peer_mutation(lambda: outcomes.append("committed"))
+    assert outcomes == ["committed"]
+
+
+@pytest.mark.parametrize("write_rejected", [False, True])
+def test_context_peer_fixture_replaces_exact_body_with_preserved_identity(
+    pg_store, monkeypatch, write_rejected,
+):
+    from memplex.auth import bind_node_identity
+    from memplex.storage.postgres import PostgresWriteRejected
+
+    store, conn = pg_store
+    owner = _authorization()
+    node = _sample_func()
+    node.action = [FieldValue(desc="OLD-PEER-TEXT")]
+    bind_node_identity(node, owner, visibility="user")
+    identity = store._row_identity_values(owner, node)
+    cursor = conn._cursor
+    original_fetchone = cursor.fetchone
+
+    def fetchone():
+        statement, _params = cursor.executed[-1]
+        if "SELECT id, data, tenant_id" in statement:
+            return (node.id, _func_to_json(node), *identity)
+        if "SELECT data FROM memplex_functions" in statement:
+            return (_func_to_json(node),)
+        if "INSERT INTO memplex_functions" in statement and write_rejected:
+            return None
+        return original_fetchone()
+
+    monkeypatch.setattr(cursor, "fetchone", fetchone)
+    before_commits, before_rollbacks = conn.commits, conn.rollbacks
+    scoped = store.authorized(owner)
+    if write_rejected:
+        with pytest.raises(PostgresWriteRejected):
+            replace_function_action_for_context_test(scoped, owner, node.id, "CURRENT-PEER-TEXT")
+        assert conn.commits == before_commits
+        assert conn.rollbacks == before_rollbacks + 1
+        assert not any("INSERT INTO memplex_changelog" in sql for sql, _ in cursor.executed)
+    else:
+        replace_function_action_for_context_test(scoped, owner, node.id, "CURRENT-PEER-TEXT")
+        assert conn.commits == before_commits + 1
+        assert conn.rollbacks == before_rollbacks
+        params = next(p for sql, p in cursor.executed if "INSERT INTO memplex_functions" in sql)
+        replacement = _func_from_json(json.loads(params[1]))
+        assert [value.desc for value in replacement.action] == ["CURRENT-PEER-TEXT"]
+        assert replacement.id == node.id
+        assert replacement.name_normalized == node.name_normalized
+        assert replacement.trigger == node.trigger
+        assert params[-6:] == identity
+        assert replacement.tenant_id == owner.principal.tenant_id
+        assert replacement.owner_subject_id == owner.principal.subject_id
+        audit = next(p for sql, p in cursor.executed if "INSERT INTO memplex_changelog" in sql)
+        assert audit[0] == node.id
+        assert audit[2] == "updated"
+        assert audit[-6:] == identity
+        statements = [sql for sql, _ in cursor.executed]
+        scope = next(i for i, sql in enumerate(statements) if "set_config('memplex.tenant_id'" in sql)
+        lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        row = next(i for i, sql in enumerate(statements) if "SELECT id, data, tenant_id" in sql)
+        write = next(i for i, sql in enumerate(statements) if "INSERT INTO memplex_functions" in sql)
+        assert scope < lock < row < write
 
 
 def test_add_executes_upsert_sql(pg_store):
