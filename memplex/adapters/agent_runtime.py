@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -31,9 +32,17 @@ from memplex.auth import (
     Principal,
     resolve_environment_authorization,
 )
+from memplex.context import (
+    MAX_CONTEXT_CANDIDATES,
+    ContextCacheKey,
+    ContextCandidate,
+    ContextCandidateCache,
+    project_context_results,
+    redact_context_explanation,
+)
 from memplex.core.hooks.policy import hash_event_payload
 from memplex.intent import classify_observation
-from memplex.models import ExtractedData, Function, Observation, QueryResult
+from memplex.models import ExtractedData, Function, Observation, QueryResult, SearchResult
 from memplex.service import MemplexService
 
 logger = logging.getLogger(__name__)
@@ -206,9 +215,6 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
         },
     ),
 }
-
-_PREFETCH_CACHE: dict[str, RecalledContext] = {}
-
 
 def _normalise_agent(agent: str) -> str:
     key = (agent or "codex").strip().lower().replace("_", "-")
@@ -429,11 +435,8 @@ class AgentMemoryRuntime:
         sync_config = getattr(getattr(service, "store", None), "_config", None)
         remote_active = bool(getattr(sync_config, "active", False))
 
-        # ``local_development_context`` is the service's compatibility
-        # principal, not a host-authenticated adapter identity.  In a pure
-        # local process it must not erase the CLI/hook user, project, session,
-        # or selected host.  Production and remote-sync runtimes never accept
-        # that compatibility context as a fallback.
+        # Explicit compatibility identity is retained only in development.
+        # Never replace an explicit caller context with adapter parameters.
         if authorization is not None:
             principal = authorization.principal
             compatibility_context = (
@@ -443,17 +446,13 @@ class AgentMemoryRuntime:
                 and authorization.workspace_id == "local-development"
                 and authorization.provenance.get("trust_boundary") == "local-development"
             )
-            if compatibility_context:
-                if profile == "production" or remote_active:
-                    raise PermissionError(
-                        "local-development authorization is not valid for production or remote sync"
-                    )
-                authorization = None
+            if compatibility_context and (profile == "production" or remote_active):
+                raise PermissionError(
+                    "local-development authorization is not valid for production or remote sync"
+                )
 
-        # A trusted host-bound context wins over the adapter argument.  A
-        # transport-generic context (for example CLI) carries the principal
-        # but is projected onto the selected host so session provenance stays
-        # meaningful.
+        # A trusted host-bound context selects the host. A generic explicit
+        # context remains generic: selecting a host cannot grant its identity.
         context_agent = ""
         if authorization is not None and authorization.agent_id:
             candidate = _normalise_agent(authorization.agent_id)
@@ -475,15 +474,6 @@ class AgentMemoryRuntime:
                 require_registry=profile == "production" or remote_active,
             )
         if authorization is not None:
-            if authorization.agent_id != self.agent:
-                authorization = AuthorizationContext(
-                    principal=authorization.principal,
-                    workspace_id=authorization.workspace_id,
-                    agent_id=self.agent,
-                    session_id=authorization.session_id,
-                    request_id=authorization.request_id,
-                    provenance=authorization.provenance,
-                )
             self.authorization_context = authorization
             self.user_id = authorization.principal.subject_id
             # A trusted context with no session deliberately does not fall
@@ -501,10 +491,16 @@ class AgentMemoryRuntime:
         self.auto_capture = auto_capture
         self.auto_recall = auto_recall
         capabilities = AGENT_PROFILES[self.agent].capabilities
+        # Historical capability key: candidate prefetch enablement, not a
+        # zero-latency or no-validation guarantee. Preserve host defaults.
         self.prefetch_enabled = (
             capabilities.get("zero_latency_prefetch", False) if prefetch is None else prefetch
         )
-        self._prefetch_cache = _PREFETCH_CACHE
+        # Older duck-typed service integrations receive a service-owned cache
+        # as well. Real MemplexService instances initialize it at construction.
+        if not isinstance(getattr(service, "_context_prefetch_cache", None), ContextCandidateCache):
+            service._context_prefetch_cache = ContextCandidateCache()
+        self._prefetch_cache = service._context_prefetch_cache
         # Deduplication key of the most recent captured turn; consecutive
         # identical captures (e.g. PostToolUse + Stop hooks both firing for
         # the same turn) are dropped. Shared policy: core.hooks.policy.
@@ -540,9 +536,6 @@ class AgentMemoryRuntime:
         """Return prompt-ready memory context for the next model call."""
 
         query = self._query_from_prompt(prompt)
-        cached = self._prefetch_cache.pop(self._cache_key(query), None)
-        if cached is not None:
-            return cached
         if not self.auto_recall:
             return RecalledContext(
                 agent=self.agent,
@@ -550,6 +543,11 @@ class AgentMemoryRuntime:
                 source="disabled",
                 query=query,
                 total=0,
+            )
+        cached = self._prefetch_cache.pop(self._cache_key(query))
+        if cached is not None:
+            return self._assemble_recalled(
+                query, self._revalidate_prefetched_candidates(cached), source="prefetch",
             )
         return self._recall(query, source="live")
 
@@ -565,8 +563,7 @@ class AgentMemoryRuntime:
         if self.auto_capture:
             self.capture_turn(user_message, assistant_message, metadata=metadata)
         if self.prefetch_enabled and next_prompt_hint:
-            recalled = self._recall(self._query_from_prompt(next_prompt_hint), source="prefetch")
-            self._prefetch_cache[self._cache_key(recalled.query)] = recalled
+            self.prefetch(next_prompt_hint)
 
     def capture_turn(
         self,
@@ -710,70 +707,84 @@ class AgentMemoryRuntime:
             return LLMEnhancer._rule_truncate(content, max_length)
 
     def prefetch(self, prompt: str) -> RecalledContext:
-        """Populate and return the cache entry for a likely next prompt."""
+        """Cache candidate references and return immediately assembled context."""
 
         query = self._query_from_prompt(prompt)
-        recalled = self._recall(query, source="prefetch")
-        self._prefetch_cache[self._cache_key(query)] = recalled
+        candidates = self._collect_context_candidates(query)
+        recalled = self._assemble_recalled(query, candidates, source="prefetch")
+        self._prefetch_cache.put(self._cache_key(query), candidates)
         return recalled
 
-    def _recall(self, query: str, source: str) -> RecalledContext:
-        result = self.search_memories(
-            query,
-            top_k=self.top_k,
-            max_tokens=self.token_budget,
+    def _revalidate_prefetched_candidates(
+        self, candidates: Sequence[ContextCandidate],
+    ) -> tuple[ContextCandidate, ...]:
+        """A cached hot origin is not proof its current scoped reference lives."""
+        live_hot: set[str] = set()
+        working_memory = getattr(self.service, "_working_memory", None)
+        if working_memory is not None and any(c.origin == "hot" for c in candidates):
+            live_hot.update(working_memory.recall_references(
+                storage_namespace=self._storage_namespace(),
+                tenant_id=self.authorization_context.principal.tenant_id,
+                limit=min(MAX_CONTEXT_CANDIDATES, max(0, int(
+                    self.service._config.working_memory.inject_limit,
+                ))),
+            ))
+        # Filter provenance before final assembly dedupes IDs. A legitimate
+        # retrieval candidate survives expiry of the same ID's hot reference.
+        return tuple(
+            c for c in candidates if c.origin == "retrieval" or c.memory_id in live_hot
         )
-        context = self._format_context(result)
-        # Working-memory tier (opt-in): prepend live hot-context entries so
-        # the most recent turns are available before any retrieval result.
+
+    def _recall(self, query: str, source: str) -> RecalledContext:
+        return self._assemble_recalled(
+            query, self._collect_context_candidates(query), source=source,
+        )
+
+    def _collect_context_candidates(self, query: str) -> tuple[ContextCandidate, ...]:
+        """Collect live scoped references before ranked retrieval, never text."""
+        candidates: list[ContextCandidate] = []
         working_memory = getattr(self.service, "_working_memory", None)
         if working_memory is not None:
-            limit = self.service._config.working_memory.inject_limit
-            # Scope the recall to the runtime's tenant (V3 fix):
-            # cross-tenant hot context never leaks. Local-process runtimes
-            # share the service's development tenant so single-machine
-            # capture/recall stays seamless.
-            auth = self.authorization_context
-            tenant = auth.principal.tenant_id
-            if tenant.startswith("local-process-"):
-                from memplex.auth import local_development_context
+            limit = min(
+                MAX_CONTEXT_CANDIDATES,
+                max(0, int(self.service._config.working_memory.inject_limit)),
+            )
+            refs = working_memory.recall_references(
+                storage_namespace=self._storage_namespace(),
+                tenant_id=self.authorization_context.principal.tenant_id,
+                limit=limit,
+            )
+            # Legacy namespace migration stays in its controlled read path,
+            # before final committed resolution and the pure callback.
+            candidates.extend(
+                ContextCandidate(memory_id, "hot")
+                for memory_id in refs if self._result_in_namespace(memory_id)
+            )
+        result = self._search_memory_candidates(
+            query, top_k=self.top_k, max_tokens=self.token_budget,
+        )
+        # Keep duplicate provenance: a retrieval candidate remains usable
+        # after its same-ID hot reference expires (prefetch revalidation).
+        candidates.extend(ContextCandidate(item.func_id, "retrieval") for item in result.results)
+        return tuple(candidates[:MAX_CONTEXT_CANDIDATES])
 
-                auth = local_development_context()
-                tenant = auth.principal.tenant_id
-            scope = f"tenant:{tenant}"
-            # V4: re-check each hot entry against the RECALLING principal.
-            # The tier is the workspace's shared hot context (the stated
-            # V3 design); a capture whose write was workspace-restricted
-            # must not cross workspaces, and a private capture stays with
-            # its owner - the same boundary the store's ACL enforces.
-            workspace_id = getattr(auth, "workspace_id", None)
-            subject_id = getattr(auth.principal, "subject_id", None)
-
-            def _hot_acl(entry: Any) -> bool:
-                entry_ws = getattr(entry, "workspace_id", None)
-                if entry_ws is not None and workspace_id is not None and entry_ws != workspace_id:
-                    return False
-                if getattr(entry, "visibility", "workspace") == "private":
-                    return getattr(entry, "owner_subject_id", None) == subject_id
-                return True
-
-            hot = working_memory.recall_context(limit=limit, scope=scope, acl=_hot_acl)
-            if hot:
-                prefix = "[WORKING MEMORY]\n" + "\n".join(f"- {line}" for line in hot)
-                context = prefix + ("\n\n" + context if context else "")
+    def _assemble_recalled(
+        self, query: str, candidates: Sequence[ContextCandidate], *, source: str,
+    ) -> RecalledContext:
+        """One current-source boundary owns the complete context and counts."""
+        assembled = self.service.assemble_context(
+            candidates,
+            authorization=self.authorization_context,
+            runtime_filter=self._context_node_allowed,
+            max_tokens=min(MAX_MODEL_TOKEN_BUDGET, max(1, int(self.token_budget))),
+        )
         return RecalledContext(
-            agent=self.agent,
-            context=context,
-            source=source,
-            query=query,
-            total=len(result.results),
-            tokens_used=result.tokens_used,
-            # Same ~4 chars/token estimate as the service/MCP token
-            # exposure, applied to the injected context string.
-            est_tokens=len(context) // 4 + 1 if context else 0,
+            agent=self.agent, context=assembled.context, source=source, query=query,
+            total=len(assembled.memory_ids), tokens_used=assembled.tokens_used,
+            est_tokens=assembled.tokens_used,
         )
 
-    def search_memories(
+    def _search_memory_candidates(
         self,
         query: str,
         *,
@@ -781,15 +792,14 @@ class AgentMemoryRuntime:
         max_tokens: int | None = None,
         explain: bool = False,
     ) -> QueryResult:
-        """Search only memories visible to this runtime identity."""
+        """Private ranked candidates; their summaries are never authoritative."""
 
         requested_top_k = int(self.top_k if top_k is None else top_k)
         requested_max_tokens = int(self.token_budget if max_tokens is None else max_tokens)
         selected_top_k = min(MAX_MODEL_SEARCH_RESULTS, max(1, requested_top_k))
-        # ``MemplexService.query(max_tokens=0)`` means unlimited.  That is a
-        # useful internal API, but an agent-controlled runtime must never be
-        # able to opt out of its token budget.
-        selected_max_tokens = min(MAX_MODEL_TOKEN_BUDGET, max(1, requested_max_tokens))
+        # Collect ranked candidates without budgeting stale summaries. Only
+        # final current fragments spend this bounded budget; zero means empty.
+        selected_max_tokens = min(MAX_MODEL_TOKEN_BUDGET, max(0, requested_max_tokens))
         query_top_k = min(
             MAX_MODEL_SEARCH_CANDIDATES,
             max(selected_top_k * 5, selected_top_k + 20),
@@ -797,7 +807,7 @@ class AgentMemoryRuntime:
         result = self.service.query(
             text=query,
             top_k=query_top_k,
-            max_tokens=selected_max_tokens,
+            max_tokens=0,
             namespace_filter=self._domain_scoped_filters(),
             explain=explain,
             authorization=self.authorization_context,
@@ -809,90 +819,63 @@ class AgentMemoryRuntime:
             max(item.token_estimate, len(item.summary) // 4 + 1) for item in result.results
         )
         result.truncated = bool(result.truncated or public_top_k_truncated)
-        self._redact_explanation_to_visible_results(result, selected_top_k=selected_top_k)
+        result.max_tokens = selected_max_tokens
         return result
+
+    def search_memories(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        max_tokens: int | None = None,
+        explain: bool = False,
+    ) -> QueryResult:
+        """Return only current, accepted wrapped fragments to public consumers.
+
+        Retrieval supplies ordering and scores only. Every emitted body and
+        source metadata field comes from the same final assembly snapshot.
+        """
+        result = self._search_memory_candidates(
+            query, top_k=top_k, max_tokens=max_tokens, explain=explain,
+        )
+        assembled = self.service.assemble_context(
+            tuple(ContextCandidate(item.func_id, "retrieval") for item in result.results),
+            authorization=self.authorization_context,
+            runtime_filter=self._context_node_allowed,
+            max_tokens=result.max_tokens,
+        )
+        selected_top_k = min(MAX_MODEL_SEARCH_RESULTS, max(1, int(self.top_k if top_k is None else top_k)))
+        return project_context_results(result, assembled, selected_top_k=selected_top_k)
 
     @staticmethod
     def _redact_explanation_to_visible_results(
-        result: QueryResult,
-        *,
-        selected_top_k: int,
+        result: QueryResult, *, selected_top_k: int,
     ) -> None:
-        """Align a public trace with the runtime-authorized result set.
-
-        ``MemplexService`` intentionally has no host identity and therefore
-        builds its trace before this runtime performs the final authorization
-        and legacy-namespace migration check. Rebuild the record projection
-        here so a denied record can never survive only in ``explanation``.
-        Aggregate retrieval counts remain diagnostic and contain no record
-        identity or content.
-        """
-
-        explanation = result.explanation
-        if not isinstance(explanation, dict):
-            return
-        visible_ids = {item.func_id for item in result.results}
-        explanation["results"] = [
-            {
-                "id": item.func_id,
-                "name": item.name,
-                "score": item.relevance_score,
-                "domain": item.domain,
-                "token_estimate": item.token_estimate,
-                "source_type": getattr(item.source_type, "value", str(item.source_type)),
-            }
-            for item in result.results
-        ]
-        # Per-path candidate refs carry record ids and must be scrubbed to
-        # the same authorized set -- a denied record cannot survive there.
-        retrieval = explanation.get("retrieval")
-        if isinstance(retrieval, dict):
-            for path in retrieval.get("paths") or []:
-                if not isinstance(path, dict):
-                    continue
-                refs = path.get("candidate_refs")
-                if isinstance(refs, list):
-                    path["candidate_refs"] = [
-                        ref
-                        for ref in refs
-                        if isinstance(ref, dict) and ref.get("id") in visible_ids
-                    ]
-        budget = explanation.get("budget")
-        if isinstance(budget, dict):
-            budget["tokens_used"] = result.tokens_used
-            budget["truncated"] = result.truncated
-        selection = explanation.get("selection")
-        if isinstance(selection, dict):
-            selection["public_top_k_limit"] = selected_top_k
-            selection["after_runtime_authorization"] = len(result.results)
-            selection["after_token_budget"] = len(result.results)
-        boundaries = explanation.get("boundaries")
-        if isinstance(boundaries, dict):
-            boundaries["runtime_authorization"] = (
-                "Record metadata is projected only after host identity authorization."
-            )
+        """Compatibility entry for the shared current-result trace projection."""
+        redact_context_explanation(result, selected_top_k=selected_top_k)
 
     def _format_context(self, result: QueryResult) -> str:
-        if not result.results:
-            return ""
-        wrapped = self.service.filter_and_wrap_for_context(
-            result.results,
-            authorization=self.authorization_context,
-        )
-        if wrapped:
-            return wrapped
-        return "[MEMORY FILTERED | reason=indirect_injection]\nUnsafe recalled memory was omitted."
+        """Compatibility formatter; retrieval summaries are not context bodies."""
+        return self._assemble_recalled(
+            "", tuple(ContextCandidate(item.func_id, "retrieval") for item in result.results),
+            source="live",
+        ).context
 
     @staticmethod
     def _query_from_prompt(prompt: str) -> str:
         return " ".join(str(prompt or "").strip().split())
 
-    def _cache_key(self, query: str) -> str:
-        raw = (
-            f"{self._storage_namespace()}:{self.project_path}:"
-            f"{self.agent}:{self.user_id}:{self.session_id}:{query}"
+    def _cache_key(self, query: str) -> ContextCacheKey:
+        context = self.authorization_context
+        return ContextCacheKey(
+            storage_namespace=self._storage_namespace(),
+            tenant_id=context.principal.tenant_id,
+            subject_id=context.principal.subject_id,
+            workspace_id=context.workspace_id,
+            agent_id=context.agent_id,
+            session_id=context.session_id,
+            normalized_query=self._query_from_prompt(query),
         )
-        return hashlib.sha256(raw.encode()).hexdigest()
 
     def _storage_namespace(self) -> str:
         return self.service.storage_namespace()
@@ -976,17 +959,26 @@ class AgentMemoryRuntime:
                 continue
             ids.append(node.id)
         if ids:
-            self.service.annotate_memories(
-                ids,
-                attributes=metadata,
-                authorization=self.authorization_context,
+            working_memory = getattr(self.service, "_working_memory", None)
+            # Only restore references already proven by the service write.
+            # Extraction return values alone cannot prove typed persistence
+            # or map a merged Function alias to a committed identity.
+            proven = set(working_memory.recall_references(
+                storage_namespace=self._storage_namespace(),
+                tenant_id=self.authorization_context.principal.tenant_id,
+                limit=MAX_CONTEXT_CANDIDATES,
+            )) if working_memory is not None else set()
+            stamped = self.service.annotate_memories(
+                ids, attributes=metadata, authorization=self.authorization_context,
             )
+            confirmed = [node.id for node in stamped if node.id in proven and node.id in ids]
+            self.service._publish_hot_references(confirmed, context=self.authorization_context)
 
     def _result_in_namespace(self, func_id: str) -> bool:
         node = self.service.get(func_id, authorization=self.authorization_context)
         if node is None:
             return False
-        return self._node_in_namespace(node)
+        return self._node_in_namespace(node) and self._context_node_allowed(node)
 
     def get_accessible_memory(self, memory_id: str) -> Function | None:
         """Return a memory only when it is visible to this runtime."""
@@ -1047,6 +1039,30 @@ class AgentMemoryRuntime:
                     self.workspace_id,
                 )
             return accepted
+        return self._node_in_namespace_readonly(node)
+
+    def _context_node_allowed(self, node: Any) -> bool:
+        """Pure host namespace/domain constraint; service owns canonical ACL."""
+        if not self._node_in_namespace_readonly(node):
+            return False
+        bound = [
+            domain for domain in self.service._config.agent_domains.agent_domains.get(self.agent, [])
+            if domain
+        ]
+        if not bound:
+            return True
+        namespace = getattr(node, "namespace", {}) or {}
+        attributes = getattr(node, "attributes", {}) or {}
+        domain = getattr(node, "domain", None) or namespace.get("domain") or attributes.get("domain")
+        return domain in bound
+
+    def _node_in_namespace_readonly(self, node: Any) -> bool:
+        """Existing host policy without migration, annotation or store writes."""
+        attrs = getattr(node, "attributes", None)
+        namespace = dict(getattr(node, "namespace", {}) or {})
+        if attrs is None and not namespace:
+            # The controlled legacy path must persist its namespace first.
+            return False
         attrs = {**namespace, **(attrs or {})}
         tenant_id = getattr(node, "tenant_id", None) or attrs.get("memplex_tenant_id")
         subject_id = (

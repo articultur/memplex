@@ -240,16 +240,29 @@ def _result_to_dict(result: Any) -> dict:
 
 
 def cmd_query(args: argparse.Namespace) -> int:
-    """Execute a memory query."""
+    """Execute current model recall with the CLI's trusted authorization."""
+    from memplex.adapters._shared import MAX_MODEL_SEARCH_CANDIDATES, MAX_MODEL_TOKEN_BUDGET
+    from memplex.context import ContextCandidate, project_context_results
     raw_service, svc = _make_authorized_service(getattr(args, "config", None))
     try:
+        budget = min(MAX_MODEL_TOKEN_BUDGET, max(0, int(getattr(args, "max_tokens", 4000))))
+        selected_top_k = min(MAX_MODEL_SEARCH_CANDIDATES, max(0, int(getattr(args, "top_k", 10))))
         result = svc.query(
             text=args.text,
-            top_k=getattr(args, "top_k", 10),
-            max_tokens=getattr(args, "max_tokens", 4000),
+            top_k=selected_top_k,
+            # Ranked summaries are candidates, not the final memory budget.
+            max_tokens=0,
             explain=getattr(args, "explain", False),
         )
 
+        assembled = svc.assemble_context(
+            tuple(ContextCandidate(item.func_id, "retrieval") for item in result.results),
+            runtime_filter=lambda _node: True, max_tokens=budget,
+        )
+        result.max_tokens = budget
+        result = project_context_results(
+            result, assembled, selected_top_k=selected_top_k,
+        )
         out = []
         for r in result.results:
             out.append(
@@ -259,8 +272,7 @@ def cmd_query(args: argparse.Namespace) -> int:
                     "relevance": round(r.relevance_score, 4),
                     "summary": r.summary,
                     "scope": r.domain,
-                    # Backfilled per-result by the service when max_tokens > 0;
-                    # otherwise fall back to the same summary-length formula.
+                    # Complete accepted memory wrapper, excluding JSON/table metadata.
                     "est_tokens": r.token_estimate or (len(r.summary) // 4 + 1),
                 }
             )
@@ -270,6 +282,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
             "latency_ms": result.latency_ms,
             "tokens_used": result.tokens_used,
+            "token_budget_scope": "wrapped_memory_fragments_only",
             "max_tokens": result.max_tokens,
             "truncated": result.truncated,
             "results": out,
@@ -1754,9 +1767,19 @@ def cmd_agent(args: argparse.Namespace) -> int:
         print(_fmt(_dataclass_to_dict(result), args.output))
         return 0
 
+    from memplex.authorization import AuthorizationGate
+
     runtime_agent = str(getattr(args, "agent", "codex")).strip().lower() or "codex"
     raw_service, svc = _make_authorized_service(
         getattr(args, "config", None), agent_id=runtime_agent
+    )
+    # The CLI factory synthesizes this compatibility sentinel only when no
+    # principal registry exists. It is not an explicit host caller context:
+    # let the runtime establish its existing local-process user/project/session
+    # identity. Real registry contexts retain every authenticated field.
+    runtime_authorization = (
+        None if AuthorizationGate.is_local_development_context(svc.authorization)
+        else svc.authorization
     )
     try:
         runtime = AgentMemoryRuntime(
@@ -1767,7 +1790,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             project_path=getattr(args, "project_path", None),
             top_k=getattr(args, "top_k", 5),
             token_budget=getattr(args, "token_budget", 1500),
-            authorization=svc.authorization,
+            authorization=runtime_authorization,
         )
         if action == "recall":
             recalled = runtime.before_prompt(args.prompt)

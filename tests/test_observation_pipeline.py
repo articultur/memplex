@@ -203,10 +203,15 @@ def _make_mcp_server(tmp_path):
 
 
 def _add_scoped_mcp_observation(server, observation: Observation) -> None:
+    from memplex.auth import bind_node_identity
+
     runtime = server._agent_runtime({})
     observation.owner = runtime.user_id
     observation.origin_session = runtime.session_id
     observation.namespace = runtime._namespace_metadata()
+    # A legitimate model-read fixture needs canonical identity as well as
+    # host metadata; host filters alone are not an authorization grant.
+    bind_node_identity(observation, runtime.authorization_context)
     server._service.store.add_observation(observation)
 
 

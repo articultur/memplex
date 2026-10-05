@@ -24,10 +24,13 @@ import asyncio
 import concurrent.futures
 import logging
 import os
-from collections.abc import Callable, Iterable
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from threading import Condition, RLock
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from memplex.auth import (
@@ -37,9 +40,23 @@ from memplex.auth import (
     bind_node_identity,
     resolve_environment_authorization,
 )
-from memplex.authorization import AuthorizationGate, _TypedNodeLookup
+from memplex.authorization import (
+    AuthorizationGate,
+    _RawParagraphView,
+    _SnapshotAuthorization,
+    _TypedNodeLookup,
+)
 from memplex.compaction import CompactionPipeline
 from memplex.config import MemplexConfig, load_config, validate_deployment_contract
+from memplex.context import (
+    MAX_CONTEXT_CANDIDATES,
+    ContextAssembly,
+    ContextCandidate,
+    ContextCandidateCache,
+)
+from memplex.context import (
+    assemble_context as _assemble_context,
+)
 from memplex.core import CoreEngine
 from memplex.intent import detect_memory_type as _detect_memory_type
 from memplex.intent import detect_scope_by_keywords
@@ -59,6 +76,7 @@ from memplex.models import (
     FeedbackVerdict,
     Function,
     MemoryFeedback,
+    MemoryNode,
     Observation,
     QueryResult,
     QueryScope,
@@ -139,6 +157,54 @@ def _package_version() -> str:
 # working.
 
 
+class _CommittedContextLookup:
+    """One request's committed snapshot plus bounded lazy source lineage.
+
+    The initial batch preserves the storage backend's error semantics. A
+    lineage lookup failure withholds the dependent candidate, and remembers
+    that failure for every other candidate sharing the same source.
+    """
+
+    def __init__(
+        self, reader: Callable[[Sequence[str]], Mapping[str, Any]], ids: Sequence[str],
+    ) -> None:
+        self._reader = reader
+        self._nodes = dict(reader(ids))
+        self._read_ids = set(ids)
+        self._errors: set[str] = set()
+        self._lineage_reads = 0
+        self.failure_reason = ""
+
+    def get(self, memory_id: str) -> Any:
+        if memory_id not in self._read_ids:
+            if self._lineage_reads >= MAX_CONTEXT_CANDIDATES:
+                self.failure_reason = "lineage_limit"
+                return None
+            self._lineage_reads += 1
+            self._read_ids.add(memory_id)
+            try:
+                self._nodes[memory_id] = self._reader((memory_id,)).get(memory_id)
+            except Exception:  # noqa: BLE001 - failed lineage cannot authorize a candidate
+                self._errors.add(memory_id)
+        if memory_id in self._errors:
+            self.failure_reason = "lookup_error"
+            return None
+        try:
+            node = self._nodes.get(memory_id)
+            if isinstance(node, dict):
+                node = _RawParagraphView(node)
+                self._nodes[memory_id] = node
+            if (not memory_id or not isinstance(node, (MemoryNode, _RawParagraphView))
+                    or node.id != memory_id):
+                self.failure_reason = "missing"
+                return None
+            return node
+        except Exception:  # noqa: BLE001 - malformed current source fails closed
+            self._errors.add(memory_id)
+            self.failure_reason = "lookup_error"
+            return None
+
+
 # ── MemplexService ──────────────────────────────────────────────────────
 
 
@@ -164,6 +230,7 @@ class MemplexService:
 
         self._config = config or load_config()
         cfg = self._config
+        self._context_prefetch_cache = ContextCandidateCache()
         # Authorization gate is constructed early because store construction
         # (below) already needs the production-profile check. Stores are
         # resolved lazily via providers so the gate always reads the service's
@@ -1070,11 +1137,13 @@ class MemplexService:
             # One COW pair commit for a mixed Function/Fact/Preference batch.
             # Visibility is resolved for every ID before this call, so a bad
             # ID cannot leave an earlier sibling partially published.
-            return controlled_annotate(
+            result = controlled_annotate(
                 memory_ids,
                 attributes=attributes,
                 needs_review=needs_review,
             )
+            self._invalidate_hot_references(memory_ids, context=context)
+            return result
         updated: list[Function] = []
         typed_updated: list = []
         for node in visible_nodes:
@@ -1113,6 +1182,7 @@ class MemplexService:
                 replace(func)
             else:
                 store.add(func, source)
+            self._invalidate_hot_references((func.id,), context=context)
         for node in typed_updated:
             add = getattr(
                 store,
@@ -1121,6 +1191,7 @@ class MemplexService:
             )
             if callable(add):
                 add(node)
+                self._invalidate_hot_references((node.id,), context=context)
 
         return updated + typed_updated
 
@@ -1235,41 +1306,12 @@ class MemplexService:
             [*extracted.functions, *extracted.facts, *extracted.preferences]
         )
 
-        # 1b2. Working-memory tier (opt-in): typed captures also land in the
-        # TTL hot-context store for automatic injection on the next recall.
-        if self._working_memory is not None:
-            # Scope hot-context per workspace (V3 fix): entries are
-            # invisible across workspaces; within a workspace the tier is
-            # the team's shared hot context (matching the knowledge-tier
-            # visibility model).
-            scope = f"tenant:{context.principal.tenant_id}"
-            # V4: entries inherit their write's visibility contract so the
-            # hot tier can never widen a restricted capture's audience.
-            # Node-level visibility is the truth (bind_extracted_identity
-            # already stamped it); the workspace is the write's workspace.
-            def _acl_of(node: Any) -> dict[str, Any]:
-                return {
-                    "owner_subject_id": getattr(context.principal, "subject_id", None),
-                    "workspace_id": getattr(context, "workspace_id", None),
-                    "visibility": getattr(node, "visibility", "workspace") or "workspace",
-                }
-
-            for node in [*extracted.facts, *extracted.preferences]:
-                content = getattr(node, "preference", None) or getattr(node, "context", None) or ""
-                key = getattr(node, "id", None)
-                if content and key:
-                    self._working_memory.add(str(key), str(content), scope=scope, **_acl_of(node))
-            for func in extracted.functions:
-                name = getattr(func, "name", "")
-                if name:
-                    self._working_memory.add(f"fn:{func.id}", name, scope=scope, **_acl_of(func))
-
         # 1c. Persist Fact / Preference nodes. Previously only Functions
         #     were stored, so fact/preference-intent paragraphs (e.g.
         #     "I prefer ...") were extracted and then silently dropped,
         #     making them unrecallable. Duck-typed: backends without the
         #     optional typed APIs skip with a debug trace.
-        self._persist_typed_nodes(extracted, store=store)
+        persisted_ids = list(self._persist_typed_nodes(extracted, store=store))
 
         # 1c2. ADR-013 Stage 2: persist the verbatim raw-text layer so
         #      source_paragraphs references resolve and retrieval has the
@@ -1286,15 +1328,35 @@ class MemplexService:
                     trust_tier=tier,
                     source_hint=getattr(source, "type", "text") or "text",
                 )
+                from memplex.models.paragraph import persisted_paragraph_id
+
+                for paragraph in extracted.paragraphs:
+                    raw_text = (paragraph.raw_text or "").strip()
+                    if raw_text:
+                        self._context_prefetch_cache.invalidate(persisted_paragraph_id(
+                            getattr(source, "type", "text") or "text", paragraph.id, raw_text,
+                        ))
 
         # 2. Persist Functions and graph edges after the unified typed scan.
         #    Functions retain the historical marker; other node types are
         #    guarded by their typed content and bounded internal risk cache.
         if extracted.functions:
-            store.merge(extracted.graph)
+            merge_result = store.merge(extracted.graph)
+            if getattr(merge_result, "merged", False):
+                # Existing merge contracts expose no canonical-ID mapping.
+                # Re-read only final input IDs; never guess a name-matched alias.
+                persisted_ids.extend(func.id for func in extracted.functions)
+                for func in extracted.functions:
+                    self._context_prefetch_cache.invalidate(func.id)
 
             # Invalidate graph builder cache so next write sees new data
             self._graph_builder.invalidate_cache()
+
+        # Hot candidates follow every foreground persistence phase. A scoped
+        # committed read excludes failed nodes, unresolved merge aliases and
+        # deferred batches. Raw paragraphs have no typed ACL identity and are
+        # not promoted into this candidate tier.
+        self._publish_hot_references(persisted_ids, context=context)
 
         # 3. Background tasks (index build, wiki compile, etc.)
         # These are submitted to the background worker asynchronously.
@@ -1326,7 +1388,9 @@ class MemplexService:
 
         return extracted
 
-    def _persist_typed_nodes(self, extracted: ExtractedData, *, store: Any = None) -> None:
+    def _persist_typed_nodes(
+        self, extracted: ExtractedData, *, store: Any = None,
+    ) -> tuple[str, ...]:
         """Persist extracted Fact / Preference nodes through the store's
         optional typed APIs.
 
@@ -1334,9 +1398,11 @@ class MemplexService:
         ``add_preference`` the nodes are skipped with a debug log instead
         of failing the write. Individual persistence failures are also
         best-effort (debug-logged) so one bad node cannot lose the rest
-        of the extraction.
+        of the extraction. Returned IDs acknowledge successful individual
+        store calls; hot publication separately verifies committed sources.
         """
         store = self.store if store is None else store
+        persisted_ids: list[str] = []
         for kind, nodes, method_name in (
             ("fact", extracted.facts, "add_fact"),
             ("preference", extracted.preferences, "add_preference"),
@@ -1358,6 +1424,9 @@ class MemplexService:
             for node in nodes:
                 try:
                     add(node)
+                    if node.id:
+                        self._context_prefetch_cache.invalidate(node.id)
+                        persisted_ids.append(node.id)
                 except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.debug(
                         "%s persistence failed for %s: %s",
@@ -1365,6 +1434,54 @@ class MemplexService:
                         getattr(node, "id", "?"),
                         exc,
                     )
+
+        return tuple(dict.fromkeys(persisted_ids))
+
+    def _publish_hot_references(
+        self, memory_ids: Sequence[str], *, context: AuthorizationContext,
+    ) -> None:
+        """Register IDs only after current committed, request-scoped proof."""
+        if self._working_memory is None or not memory_ids:
+            return
+        try:
+            reader = getattr(self._store_for(context), "read_context_nodes", None)
+            if not callable(reader):
+                return
+            memory_ids = tuple(dict.fromkeys(memory_ids))
+            nodes = reader(memory_ids)
+            for memory_id in memory_ids:
+                node = nodes.get(memory_id)
+                # Raw dictionaries do not carry the typed authorization
+                # contract. Never manufacture that identity from the writer.
+                if not isinstance(node, MemoryNode) or node.id != memory_id:
+                    continue
+                if not self._is_node_visible(node, context):
+                    continue
+                self._working_memory.add_reference(
+                    memory_id,
+                    storage_namespace=self.storage_namespace(),
+                    tenant_id=context.principal.tenant_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - hot publication is best-effort, fail closed
+            logger.debug("hot reference publication failed: %s", exc)
+
+    def _invalidate_hot_references(
+        self, memory_ids: Sequence[str], *, context: AuthorizationContext,
+    ) -> None:
+        """Best-effort local cleanup; current-source reads own correctness."""
+        for memory_id in memory_ids:
+            self._context_prefetch_cache.invalidate(memory_id)
+        if self._working_memory is None:
+            return
+        for memory_id in memory_ids:
+            try:
+                self._working_memory.remove_reference(
+                    memory_id,
+                    storage_namespace=self.storage_namespace(),
+                    tenant_id=context.principal.tenant_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - cleanup cannot undo a successful mutation
+                logger.debug("hot reference invalidation failed: %s", exc)
 
     def _supersede_contradicted_facts_batch(
         self, facts: Iterable[Fact], store: Any
@@ -1396,6 +1513,7 @@ class MemplexService:
             for old_fact in superseded:
                 try:
                     store.add_fact(old_fact)
+                    self._context_prefetch_cache.invalidate(old_fact.id)
                 except Exception as exc:  # noqa: BLE001 - logged degradation path
                     logger.debug(
                         "fact supersede persist failed for %s: %s", old_fact.id, exc
@@ -1625,6 +1743,7 @@ class MemplexService:
                 f"store {type(self.store).__name__} has no add_observation API"
             )
         add(observation)
+        self._invalidate_hot_references((observation.id,), context=context)
         return observation
 
     def update_memory(
@@ -1704,6 +1823,7 @@ class MemplexService:
             replace(func)
         else:
             store.add(func, SD(type="manual_update", source_type=SourceType.WIKI))
+        self._invalidate_hot_references((memory_id,), context=context)
 
         return UpdateResult(
             memory_id=memory_id,
@@ -1732,6 +1852,7 @@ class MemplexService:
         if not callable(delete):
             raise MemoryNotFoundError("Memory not found")
         delete(memory_id)
+        self._invalidate_hot_references((memory_id,), context=context)
 
     # ════════════════════════════════════════════════════════════════
     #  Feedback
@@ -2109,6 +2230,86 @@ class MemplexService:
             return f"service:{id(self)}"
         return str(store_path)
 
+    def _resolve_context_snapshot(
+        self, memory_ids: Sequence[str], *, authorization: AuthorizationContext,
+    ) -> tuple[dict[str, Any], Counter[str]]:
+        """Resolve committed sources with internal, aggregate-only diagnostics."""
+        context = self._require_authorization(authorization)
+        ids: list[str] = []
+        seen: set[str] = set()
+        for memory_id in memory_ids:
+            if memory_id not in seen:
+                seen.add(memory_id)
+                ids.append(memory_id)
+            if len(ids) >= MAX_CONTEXT_CANDIDATES:
+                break
+        dropped: Counter[str] = Counter()
+        reader = getattr(self._store_for(context), "read_context_nodes", None)
+        if not callable(reader):
+            dropped["missing"] = len(ids)
+            return {}, dropped
+        if not ids:
+            return {}, dropped
+        lookup = _CommittedContextLookup(reader, ids)
+        visibility = _SnapshotAuthorization(
+            self._auth, context, lookup.get, lambda: lookup.failure_reason,
+        )
+        nodes: dict[str, Any] = {}
+        for memory_id in ids:
+            lookup.failure_reason = ""
+            node = lookup.get(memory_id)
+            if node is None:
+                dropped[lookup.failure_reason or "missing"] += 1
+                continue
+            try:
+                allowed, reason = visibility.check(node)
+                if not allowed:
+                    dropped[reason] += 1
+                elif not self.is_safe_for_model(node):
+                    dropped["unsafe"] += 1
+                else:
+                    nodes[memory_id] = node
+            except Exception:  # noqa: BLE001 - one uncertain candidate fails closed
+                dropped["lookup_error"] += 1
+        return nodes, dropped
+
+    def resolve_context_nodes(
+        self, memory_ids: Sequence[str], *, authorization: AuthorizationContext,
+    ) -> dict[str, Any]:
+        """Return only current committed, authorized and safe source nodes."""
+        nodes, _dropped = self._resolve_context_snapshot(memory_ids, authorization=authorization)
+        return nodes
+
+    def assemble_context(
+        self, candidates: Sequence[ContextCandidate], *,
+        authorization: AuthorizationContext,
+        runtime_filter: Callable[[Any], bool],
+        max_tokens: int,
+    ) -> ContextAssembly:
+        """Apply a host's pure predicate and the single final context renderer."""
+        context = self._require_authorization(authorization)
+        resolution_drops: Counter[str] = Counter()
+
+        def resolve(ids: Sequence[str]) -> Mapping[str, Any]:
+            nodes, dropped = self._resolve_context_snapshot(ids, authorization=context)
+            resolution_drops.update(dropped)
+            return nodes
+
+        assembled = _assemble_context(
+            candidates, resolve=resolve, allow=runtime_filter, max_tokens=max_tokens,
+            now=datetime.now(UTC), risk_registry=self._injection_risks,
+        )
+        # The plain Mapping resolver intentionally omits inaccessible nodes.
+        # Replace those generic leaf misses with their one precise reason;
+        # no rejected IDs, identities or bodies enter diagnostic output.
+        dropped = Counter(assembled.dropped)
+        dropped["missing"] -= sum(resolution_drops.values())
+        dropped.update(resolution_drops)
+        return replace(
+            assembled, dropped=MappingProxyType(dict(+dropped)),
+            truncated=assembled.truncated or bool(dropped["lineage_limit"]),
+        )
+
     def filter_and_wrap_for_context(
         self,
         results: list[SearchResult],
@@ -2116,23 +2317,13 @@ class MemplexService:
         max_tokens: int | None = None,
         authorization: AuthorizationContext | None = None,
     ) -> str | None:
-        """Filter injection-suspected results and wrap the rest for LLM context.
-
-        Wraps :meth:`IndirectInjectionGuard.filter_and_wrap` so adapters
-        (notably ``agent_runtime``) do not import the guard directly. Keeps
-        the read-path injection defence behind the service boundary.
-
-        The guard is handed the typed-node facade so Fact/Preference hits
-        (resolvable via the optional ``get_fact`` / ``get_preference``
-        store APIs) are wrapped for context instead of being dropped as
-        unresolvable ids.
-        """
+        """Compatibility entry: current sources replace every result summary."""
         context = self._require_authorization(authorization)
-        return IndirectInjectionGuard.filter_and_wrap(
-            results,
-            self._typed_lookup_for(context),
-            risk_registry=self._injection_risks,
-        )
+        budget = self._config.retrieval.default_max_tokens if max_tokens is None else max_tokens
+        return self.assemble_context(
+            [ContextCandidate(result.func_id, "retrieval") for result in results],
+            authorization=context, runtime_filter=lambda _node: True, max_tokens=budget,
+        ).context
 
     # ── Knowledge tiering: promotion + cross-agent sharing ───────────
 
@@ -2185,6 +2376,7 @@ class MemplexService:
         add = getattr(store, "add_fact", None)
         if callable(add) and getattr(node, "memory_type", "") == "fact":
             add(node)
+            self._invalidate_hot_references((memory_id,), context=context)
         else:
             add_fn = getattr(store, "add", None)
             if callable(add_fn):
@@ -2193,6 +2385,7 @@ class MemplexService:
                 add_fn(node, SourceDocument(
                     type="promotion", content="", source_type=node.source_type
                 ))
+                self._invalidate_hot_references((memory_id,), context=context)
         return {
             "memory_id": memory_id,
             "tier": tier,
@@ -2246,6 +2439,7 @@ class MemplexService:
         add = getattr(store, "add_fact", None)
         if callable(add) and getattr(node, "memory_type", "") == "fact":
             add(node)
+            self._invalidate_hot_references((memory_id,), context=context)
         return {"memory_id": memory_id, "granted_agents": grants}
 
     def improve(

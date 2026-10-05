@@ -18,6 +18,7 @@ adapters/            Host + transport boundary (one port per agent platform)
 service.py           MemplexService: orchestration facade over collaborators
 query_pipeline.py    QueryPipeline: 6-stage read-side query execution (service delegate)
 authorization.py     AuthorizationGate: tenant/workspace/user/session ACL ¹
+context.py           Current-source assembly and bounded candidate-only prefetch cache (leaf)
 serialization.py     Layer-neutral dataclass→JSON serializer (leaf) ¹
 temporal.py          Bi-temporal fact validity (supersede/as_of) ⁴
 improve.py           Proactive fact maintenance (dedupe/expire/reindex) ⁴
@@ -66,6 +67,7 @@ backup.py             Strict backup manifests + disaster-recovery data contracts
 capacity_chaos.py     G009 capacity/soak/chaos signed machine evidence
 compaction.py         CompactionPipeline: 5-stage memory compression
 config.py             Configuration load/validate (MEMPLEX_* env > config.yaml > defaults)
+context.py            Bounded source-ID context assembly; no adapters, service or storage imports
 core/                 Pure computation layer (CoreEngine, extractors, hooks)
 host_lifecycle.py     G008 host-contract digests (detailed below)
 improve.py            Proactive fact maintenance (dedupe/expire/reindex) ⁴
@@ -137,6 +139,202 @@ monkeypatch `service.store` are honoured.
 authorization context and store, then builds a fresh pipeline per call from
 its **current** attributes — tests that monkeypatch `service._detect_scope`
 or `service._retriever` keep working unchanged.
+
+`service.assemble_context()` resolves candidate IDs through the scoped committed
+reader and the canonical authorization gate, including current source lineage.
+The request-local iterative evaluator memoizes completed ACL verdicts and failure
+reasons, sharing one canonical own-node policy with ordinary gate callers.
+`context.py` receives that snapshot plus a pure runtime predicate, projects only
+current text, reuses the injection guard against the same snapshot, and budgets
+the complete wrapped string. Candidate and additional lineage reads are each
+bounded to 500 unique IDs. PostgreSQL raw context reads project the actual SQL
+identity columns and payload in one scoped query; ordinary raw CRUD keeps its
+payload-only shape. Failed resolution never restores a cached summary;
+internal diagnostics contain reason counts only.
+
+Working memory remains disabled by default. Scoped hot references hold IDs,
+TTL, pin and insertion order only; the legacy standalone string container does
+not supply runtime context. Pin suspends only hot-candidate TTL expiration;
+unpin restarts TTL from the current time. Pin cannot bypass authorization,
+source deletion/revocation, Fact validity, safety filtering, capacity or the
+final budget. Legacy entries and references share `max_entries`; if every
+entry is pinned at capacity, a new reference is rejected without undoing the
+successful durable write.
+
+The runtime collects scoped hot IDs (bounded by `inject_limit`) followed by
+ordinary retrieval IDs, preserving retrieval provenance for duplicate IDs.
+The combined candidate sequence is capped at 500 and enters this final boundary
+once for live recall. Legacy namespace migration runs through the controlled
+read path before assembly; the namespace/domain callback itself never writes.
+Legacy working-memory strings are not model context. Private ranked candidate
+collection is separate from public `search_memories`: only retrieval order and
+scores survive into public results. Public search always uses final assembly,
+regardless of `explain`; the leaf returns frozen `ContextFragment` projections
+alongside the aggregate `ContextAssembly`. Each fragment's current name, domain,
+source type and complete protective wrapper come from the same accepted source
+snapshot and budget decision. Rejected sources never enter fragments or public
+trace IDs. No extra source lookup, old-summary fallback or wrapper parsing is
+used to rebuild public results.
+
+MCP `memory_search` retains its existing response fields and adds
+`token_budget_scope: "wrapped_memory_fragments_only"`. The `summary` field now
+contains the complete current protective wrapper rather than an unwrapped
+retrieval/compiled-page summary; names/domains are current source fields (a
+missing current name can remain empty). Result `est_tokens` estimates that
+complete fragment. Top-level `tokens_used` estimates all accepted fragments
+joined with two newlines, including wrappers and separators. `total` counts
+accepted unique IDs. The requested memory budget does **not** cap the surrounding
+serialized JSON transport envelope, query/trace diagnostics, or repeated result
+metadata. Their additional size must be budgeted by the host; actual serialized
+text overhead is measured separately in the MCP regression evidence. No count is
+claimed to be a model tokenizer count.
+
+The advertised generic CLI `query` recall command uses the same assembly and
+`project_context_results` / public-trace projection as runtime search. CLI
+identity remains the trusted adapter-established context; no host identity or
+namespace is invented. CLI `top_k` is capped at the existing 500-candidate
+ceiling before calling the raw producer. Retrieval order and scores are
+unchanged. JSON and human
+output retain whole accepted fragments and the existing fields (CLI `scope`
+remains the result domain), plus `token_budget_scope`. CLI current recall uses
+the existing upper model ceiling of 32000; `--max-tokens 0` returns empty
+context, matching the shared assembler, not unlimited model context. Ranked
+candidate collection does not spend this budget on old summaries; it is applied
+once to current complete fragments. Runtime candidate collection follows the
+same single-budget rule; its existing candidate/result caps remain. More
+candidates can reach bounded final resolution when stale summaries would have
+spent the budget early; earlier measurements do not quantify this final cost.
+Raw `service.query(max_tokens=0)` retains its
+unlimited candidate-producer meaning.
+
+MCP structured reads (`memory_get`, `memory_facts`, `memory_observations`,
+`memory_pending_reviews`, and request-bound scope preview) resolve candidate IDs
+through current committed canonical tenant/own/source-lineage ACL and safety,
+then apply the existing pure host restriction. The actual accepted objects,
+never earlier resident/list payloads, supply serialized memory fields.
+Search-to-detail `memory_get` is current recall and suppresses expired Facts;
+not-found responses do not echo rejected IDs. Explicit `as_of` /
+`include_invalidated` Fact history and pending-review inspection keep their
+intentional temporal semantics; they never bypass commitment or authorization.
+Pending batches are neutral. Storage failures never fall back to resident
+bodies; Observation discovery preserves a neutral backend-error response.
+Collection discovery and result limits are bounded at 1000 candidates;
+committed resolution retains the 500 candidate / 500 extra source bound per
+batch. Preview projects only accepted current nodes before counts and samples.
+Unbound operator `scope_preview` preserves its existing inspection behavior.
+The CLI scope-preview example in getting-started is operator inspection; no
+CLI scope-preview invocation is generated by the agent assets or packaged
+skills. The agent-integration scope-preview promise refers to the MCP route.
+
+Generic Python service query, HTTP `GET /memories`, and `corpus_recall` remain
+ranked candidate/inspection producers, not finalized model context. The HTTP
+route exposes raw `QueryResult` and the corpus CLI exposes canonical-corpus
+source-path diagnostics. Their documented callers do not establish another
+advertised model-consumption route. A model consumer must use current assembly
+or the advertised CLI/runtime/MCP recall boundary; raw results must not be
+claimed to have its final temporal, wrapper or public-trace guarantees.
+
+`RecalledContext.total` counts actually injected unique IDs. `tokens_used` and
+`est_tokens` are the same character estimate of the complete wrapped string:
+`len(context) // 4 + 1` for nonempty context, otherwise zero. This is not a model
+tokenizer. No filtered placeholder can bypass the final budget.
+
+Runtime stamping restores only previously proven hot references whose controlled
+annotation succeeded and whose scoped committed identity can be read again.
+An active deferred batch publishes nothing speculative; after commit ordinary
+retrieval works, but no hot reference is published by a batch-finalization
+callback. A later successful write can publish references normally.
+
+Explicit `AuthorizationContext` objects are retained without projecting a
+missing or transport-generic agent onto the selected host. Such callers must
+supply correctly host-bound authorization for session-restricted access.
+The trusted environment registry still resolves wildcard credentials onto the
+selected host. Explicit local-development remains development-only; a
+`local-process-*` tenant never acquires that compatibility identity.
+Each `MemplexService` owns a `ContextCandidateCache`: at most 64 FIFO entries,
+each a tuple of at most 500 `ContextCandidate` ID/origin pairs. It retains no
+rendered `RecalledContext`, `ContextAssembly.fragments`, body or ACL copy.
+Replacing a key preserves its original FIFO age; `pop` consumes it. The frozen
+`ContextCacheKey` preserves the actual namespace, tenant, subject, workspace,
+agent, session and normalized query, including absent/empty optional identities.
+Input traversal is bounded before locking; the lock protects only local cache
+operations and is never held during source I/O or assembly. Historic rendered
+or otherwise incompatible entries are misses. Older duck-typed service objects
+receive the same service-local cache from runtime initialization, never a global
+fallback; real services always construct it themselves.
+
+Automatic recall checks `auto_recall` before popping. A hit retains
+`source="prefetch"` but revalidates current scoped working-memory references
+(TTL, pin, capacity and current inject limit), filters stale hot provenance, then
+uses the same current-source assembly as live recall. A valid retrieval origin
+for the same ID remains eligible. Explicit prefetch immediately renders current
+output while caching only candidates. Successful local mutations invalidate
+matching candidate entries after backend mutation calls return; a failed sibling
+cannot undo successful-prefix invalidation. Direct backend failures do not clear
+unchanged entries. A successful staged call in a deferred batch may conservatively
+evict candidates even if outer finalization later fails: this costs an extra
+retrieval, never proves a commit, and never permits staged text in context.
+No transaction-finalization callback is added. There is no cross-service
+broadcast: current source resolution is the correctness boundary.
+The legacy `zero_latency_prefetch` capability key/value/default remains for host
+compatibility; it means candidate-prefetch enablement and makes no zero-latency
+or no-validation guarantee. Full M1 backend/host acceptance remains separate.
+
+#### Lite current-source read cost and backend evidence
+
+Lite's Observation lookup is a derived, first-ID-wins resident map rebuilt at
+both existing publication points: detached pair load/recovery and successful
+local commit. Source resolution preserves Function → Fact → Preference →
+Observation → raw-paragraph precedence. Every final read still holds the writer
+lock, refuses an active deferred batch and refreshes the authoritative pair
+before consulting the map. Local/peer JSON and rw commits, inbound sync,
+clear/restore and recovery after failed finalization all use those publication
+boundaries. The map is not persisted and is never independent commit proof.
+The ordinary Observation getter retains its historical resident scan while a
+batch is pending; final context remains empty during that batch.
+
+Stable committed reads and lazy lineage/getter lookups no longer scan the whole
+Observation table per candidate. This costs O(number of Observations) extra
+resident references and one O(number of Observations) map rebuild per published
+state, including successful rw delta writes. Ordinary retrieval also records access
+counts through an existing durable write, so it pays this publication cost;
+prefetch preparation pays it too, while a consume hit only revalidates.
+Peer refresh still performs the
+existing full authoritative reload; lexical retrieval and other existing
+whole-corpus work are not made O(candidate count) by this change. Candidate and
+lineage limits remain 500 each. Counted-work tests measure actual visited rows
+rather than disguising full-table scans as bounded requested-ID counts.
+
+Ordinary authorization before hot publication, query ranking, namespace
+filtering and model assembly now reuses the same iterative lineage evaluator.
+For canonical ID-equal source graphs, each evaluation memoizes completed ACL
+verdicts, so shared ancestry takes graph work rather than expanding every path,
+and valid in-bound chains do not depend on Python recursion depth. Separate
+pipeline gates still perform separate evaluations; this is not a single-pass
+whole-query claim. Memos are evaluation-local and never survive a later call.
+The own-node ACL, source declarations, default scoped typed lookup, identity-less
+local-development early success and explicit-lookup behavior remain unchanged;
+no ancestor safety or expiry policy is added. Legacy custom/noncanonical lookup
+results with aliases or missing IDs retain the prior path-sensitive recursive
+fallback in either default or explicit lookup mode, including its depth/work
+limits. Strict final committed readers continue to reject mismatched IDs with
+no such fallback and retain the separate 500-candidate/+500-lineage limits.
+
+The local synthetic cost evidence uses identical fixed inputs with model,
+embedding and network execution disabled, reports monotonic p50/p95/p99,
+read/resolve/scan operations and RSS, and separates prefetch preparation from
+hit latency. It also measures publication-map rebuilding and full writes
+separately. These warm, instrumented local samples are not a production latency
+SLA or a model-quality/SOTA comparison.
+
+Event-ordered two-service regression cases start live/prefetch recall only after
+peer replacement or deletion returns, with an authorized owner positive control.
+JSON and rw share this contract; real PostgreSQL cases use the existing isolated
+function/migration fixtures and separate application/migration identities. Merely
+collecting those cases cannot satisfy the mandatory real PostgreSQL+pgvector
+gate. Four-host cases exercise Codex, Claude Code, OpenClaw and Hermes shared
+runtime output, not an actual installation certificate. The seven-file G008
+contract set is unchanged; runtime byte changes still invalidate old proofs.
 
 Adapters report the SSE subscriber count through the public
 `memplex.service.register_sse_subscriber_count_provider(fn)` registration

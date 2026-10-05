@@ -11,7 +11,7 @@ import fnmatch
 import logging
 import os
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -839,18 +839,27 @@ def scope_preview(
     *,
     limit: int = 10,
     scan_limit: int = 1_000,
+    authorization: Any = None,
+    resolve_nodes: Callable[[Sequence[str]], list[Any]] | None = None,
 ) -> dict[str, Any]:
-    """Count and sample a bounded window without computing a corpus total."""
+    """Count/sample a bounded window; MCP supplies current request resolution.
+
+    Unbound operator callers retain their existing inspection semantics.
+    Host metadata matching is a narrowing filter, never authorization.
+    """
 
     selected_limit = min(100, max(0, int(limit)))
     selected_scan_limit = min(1_000, max(1, int(scan_limit)))
 
     try:
-        funcs = service.store.list_functions(limit=selected_scan_limit)
+        store = service._store_for(authorization) if authorization is not None else service.store
+        funcs = store.list_functions(limit=selected_scan_limit)
+        if resolve_nodes is not None:
+            funcs = resolve_nodes([func.id for func in funcs])
     except Exception as exc:  # noqa: BLE001 - best-effort fallback value
         return {
             "status": "error",
-            "error": str(exc),
+            "error": "Memory preview unavailable" if resolve_nodes is not None else str(exc),
             "namespace_filter": namespace_filter,
         }
 

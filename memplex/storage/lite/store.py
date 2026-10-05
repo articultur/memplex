@@ -25,7 +25,7 @@ import sqlite3
 import tarfile
 import tempfile
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -48,6 +48,7 @@ from memplex.models import (
     Function,
     GraphData,
     GraphEdge,
+    MemoryNode,
     MergeResult,
     Observation,
     Preference,
@@ -682,6 +683,7 @@ class LiteMemoryStore:
         self._edges: list[GraphEdge] = []
         self._edges_by_node: dict[str, dict[str, list[GraphEdge]]] = {}
         self._observations: list[Observation] = []
+        self._observations_by_id: dict[str, Observation] = {}
         self._facts: dict[str, Fact] = {}
         self._preferences: dict[str, Preference] = {}
         # ADR-013 Stage 2 raw-text authoritative layer: verbatim
@@ -1367,9 +1369,13 @@ class LiteMemoryStore:
     @_with_writer_lock
     def get_observation(self, observation_id: str) -> Observation | None:
         self._refresh_for_read()
-        return copy.deepcopy(
-            next((item for item in self._observations if item.id == observation_id), None)
-        )
+        # Ordinary getters retain their established resident semantics during
+        # a deferred batch. Final context reads exclude that batch entirely.
+        if self._commit_defer_depth > 0:
+            return copy.deepcopy(
+                next((item for item in self._observations if item.id == observation_id), None)
+            )
+        return copy.deepcopy(self._observations_by_id.get(observation_id))
 
     @_with_writer_lock
     def delete_fact(self, fact_id: str) -> None:
@@ -1878,6 +1884,27 @@ class LiteMemoryStore:
         self._refresh_for_read()
         return copy.deepcopy(self._functions.get(func_id))
 
+    @_with_writer_lock
+    def read_context_nodes(
+        self, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryNode | dict[str, Any]]:
+        """Resolve committed sources without disturbing an in-flight batch."""
+        if self._commit_defer_depth > 0:
+            return {}
+        self._refresh_for_read()
+        nodes: dict[str, MemoryNode | dict[str, Any]] = {}
+        for memory_id in dict.fromkeys(memory_ids):
+            node = (
+                self._functions.get(memory_id)
+                or self._facts.get(memory_id)
+                or self._preferences.get(memory_id)
+                or self._observations_by_id.get(memory_id)
+                or self._paragraphs.get(memory_id)
+            )
+            if node is not None:
+                nodes[memory_id] = copy.deepcopy(node)
+        return nodes
+
     def _index_edge(self, edge: GraphEdge) -> None:
         node_ids = (edge.source,) if edge.source == edge.target else (edge.source, edge.target)
         for node_id in node_ids:
@@ -2335,16 +2362,31 @@ class LiteMemoryStore:
         the seeding fast path: per-write cost drops from O(state) to
         O(delta) plus one amortized commit.  An exception propagates after
         the best-effort final commit, so the consistent prefix of the batch
-        survives (the commit's own failure recovery republishes the last
-        durable pair and its error replaces the original).
+        survives when finalization succeeds. Failed finalization invalidates
+        cached commit proof so the next read recovers authoritative state;
+        its error replaces the original body error.
         """
         self._commit_defer_depth += 1
         try:
             yield
         finally:
-            self._commit_defer_depth -= 1
-            if self._commit_defer_depth == 0:
-                self._commit_current_state()
+            # Keep the last batch transition and its durable publication in
+            # the same lock scope as context reads. Otherwise depth reaches
+            # zero while pending resident nodes are still uncommitted.
+            with self._durability.writer_lock():
+                self._commit_defer_depth -= 1
+                if self._commit_defer_depth == 0:
+                    try:
+                        self._commit_current_state()
+                    except BaseException:
+                        # Validation/serialization may fail before the commit
+                        # helper's recovery blocks. Never let speculative
+                        # residents survive a freshness short-circuit, and
+                        # never restore a stale base after an ambiguous write.
+                        self._pair_fingerprint = None
+                        self._committed_pair = None
+                        self._committed_record = None
+                        raise
 
     def _raw_memory(self) -> dict[str, Any]:
         """Serialize the complete resident state, never a partial sidecar."""
@@ -2921,6 +2963,7 @@ class LiteMemoryStore:
         self._functions = loaded_functions
         self._name_index = loaded_name_index
         self._observations = loaded_observations
+        self._rebuild_observation_index()
         self._facts = loaded_facts
         self._preferences = loaded_preferences
         # ADR-013 Stage 2: raw paragraphs ride the same publish boundary;
@@ -2992,6 +3035,19 @@ class LiteMemoryStore:
         self._pair_fingerprint = tuple(stats)
 
 
+    def _rebuild_observation_index(self) -> None:
+        """Derive a first-ID-wins lookup at an existing publication boundary.
+
+        This is a resident accelerator, not commit proof. Both fresh loads and
+        successful local publication rebuild it under the existing writer lock;
+        failed finalization invalidates freshness and forces an authoritative
+        reload before it can be used. Rebuilding costs O(observations) per
+        publication; repeated stable context/lineage reads then avoid scans.
+        """
+        self._observations_by_id = {}
+        for observation in self._observations:
+            self._observations_by_id.setdefault(observation.id, observation)
+
     def _publish_committed_locally(self, committed: LitePair) -> None:
         """Bind commit results without re-decoding the freshly written pair.
 
@@ -3002,6 +3058,7 @@ class LiteMemoryStore:
         per write.  Only the commit metadata and caches need updating.
         """
         self._rebuild_edge_index()
+        self._rebuild_observation_index()
         # The index keeps a reference to the functions dict; the resident
         # dict identity is unchanged, but keep the rebind for parity with
         # ``_publish_pair``.

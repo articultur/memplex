@@ -365,6 +365,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/compaction.py",
         "memplex/temporal.py",
         "memplex/working_memory.py",
+        "memplex/context.py",
         "memplex/sleep_time.py",
         "memplex/improve.py",
         "memplex/consolidation.py",
@@ -567,3 +568,13 @@ def test_release_documentation_uses_a_zip_compatible_source_date_epoch() -> None
     text = _text(RELEASE_DOCS)
     assert 'epoch="$(git show -s --format=%ct HEAD)"' in text
     assert "--source-date-epoch 0" not in text
+
+
+def test_context_assembler_is_a_typed_adapter_free_leaf() -> None:
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    contracts = metadata["tool"]["importlinter"]["contracts"]
+    domain = next(item for item in contracts if item["name"] == "Domain and storage layers never import host adapters")
+    assert "memplex.context" in domain["source_modules"]
+    context = next(item for item in contracts if item["source_modules"] == ["memplex.context"])
+    assert context["forbidden_modules"] == ["memplex.service", "memplex.storage", "memplex.adapters"]
+    assert "memplex/context.py" in metadata["tool"]["mypy"]["files"]

@@ -37,8 +37,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from functools import wraps
 from hashlib import sha256
@@ -57,6 +59,7 @@ from memplex.models import (
     Function,
     GraphData,
     GraphEdge,
+    MemoryNode,
     MergeResult,
     Observation,
     Preference,
@@ -1697,6 +1700,76 @@ class PostgresMemoryStore:
             return None
         data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         return _func_from_json(data)
+
+    def _read_context_paragraph(self, para_id: str) -> dict[str, Any] | None:
+        """Read a coherent raw body and its actual SQL identity for context.
+
+        ``get_paragraph`` intentionally retains its payload-only CRUD shape.
+        This committed projection reads body and ACL columns together, and
+        never promotes payload claims or the caller's identity to row proof.
+        """
+        context = self._authorization_context()
+        with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
+            cur.execute(
+                "SELECT id, data, tenant_id, owner_subject, workspace, visibility, "
+                "source_agent, source_session FROM memplex_paragraphs WHERE id = %s AND "
+                + _acl_scope_sql("memplex_paragraphs"),
+                (para_id,),
+            )
+            row = cur.fetchone()
+        if row is None or len(row) != 8:
+            return None
+        row_id, payload, tenant, owner, workspace, visibility, agent, session = row
+        if not isinstance(row_id, str) or not row_id or row_id != para_id:
+            return None
+        # Every identity column is TEXT NOT NULL in 0007. An invalid
+        # SQL row must not fall into the identity-less Lite compatibility
+        # path or acquire the raw view's default workspace visibility.
+        if any(not isinstance(value, str)
+               for value in (tenant, owner, workspace, visibility, agent, session)):
+            return None
+        if not tenant.strip() or not visibility.strip():
+            return None
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        node = dict(payload)
+        # Persisted raw payloads carry no canonical ACL or source type.
+        # Clear all identity fallbacks, including grants and provenance, so
+        # contradictory or missing SQL claims cannot be supplied by JSON.
+        node.update(
+            id=row_id, tenant_id=tenant, owner=owner, owner_subject=owner,
+            owner_subject_id=owner, workspace_id=workspace, visibility=visibility,
+            origin_session=session, provenance={"agent_id": agent} if agent else {},
+            namespace={}, source_type=SourceType.WIKI,
+        )
+        return node
+
+    def read_context_nodes(
+        self, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryNode | dict[str, Any]]:
+        """Read through committed typed queries in the current request scope.
+
+        ``authorized(context)`` installs immutable scope around this entire
+        call; each getter retains its existing transaction-local ACL checks.
+        """
+        self._authorization_context()
+        getters = [self.get, self.get_fact, self.get_preference, self.get_observation]
+        paragraph_getter = getattr(self, "_read_context_paragraph", None)
+        if callable(paragraph_getter):
+            getters.append(paragraph_getter)
+        nodes: dict[str, MemoryNode | dict[str, Any]] = {}
+        for memory_id in dict.fromkeys(memory_ids):
+            for getter in getters:
+                node = getter(memory_id)
+                if node is not None:
+                    nodes[memory_id] = deepcopy(node)
+                    break
+        return nodes
 
     def get_neighbors(
         self,
