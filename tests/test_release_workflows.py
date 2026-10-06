@@ -513,6 +513,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
     for required_test in (
         "tests/test_ci_postgres_contract.py",
         "tests/test_postgres_integration.py",
+        "tests/test_capture_recall_postgres.py",
         "tests/test_postgres_backup_integration.py",
         "tests/test_sync_postgres_integration.py",
         "tests/test_sync_repository_contract.py",

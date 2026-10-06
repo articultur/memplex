@@ -46,6 +46,11 @@ from memplex.authorization import (
     _SnapshotAuthorization,
     _TypedNodeLookup,
 )
+from memplex.capture_identity import (
+    capture_scopes_match,
+    capture_source_hint,
+    scope_captured_data,
+)
 from memplex.compaction import CompactionPipeline
 from memplex.config import MemplexConfig, load_config, validate_deployment_contract
 from memplex.context import (
@@ -1290,6 +1295,10 @@ class MemplexService:
         ):
             source.content = self._augment_with_facts(source.content)
 
+        capture = source.type == "observation"
+        if capture:
+            source = replace(source, type=capture_source_hint(context))
+
         # 1. CoreEngine: full extraction pipeline.  PostgreSQL graph-edge
         # detection reads existing memories, so it receives the same scoped
         # facade as persistence instead of consulting the shared base store.
@@ -1300,6 +1309,8 @@ class MemplexService:
         # Identity must be bound before any typed-node store write, graph
         # merge, or background work observes an extracted memory.
         self._bind_extracted_identity(extracted, context, visibility=visibility)
+        if capture:
+            scope_captured_data(extracted)
 
         # 1b. Scan all extracted typed nodes before any persistence path.
         self.scan_nodes_before_persistence(
@@ -1509,7 +1520,10 @@ class MemplexService:
         for new_fact in facts:
             if not getattr(new_fact, "valid_from", None):
                 new_fact.valid_from = temporal.now_iso()
-            superseded = temporal.supersede_contradicted(new_fact, existing)
+            superseded = temporal.supersede_contradicted(
+                new_fact,
+                (old_fact for old_fact in existing if capture_scopes_match(new_fact, old_fact)),
+            )
             for old_fact in superseded:
                 try:
                     store.add_fact(old_fact)

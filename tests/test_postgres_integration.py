@@ -9314,39 +9314,107 @@ def test_context_read_nodes_keeps_request_principal(pg_dsn, pgvector_available, 
         resources.close()
 
 
-def _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, mutation):
-    """Real-PG final output after a completed write with distinct app/admin roles."""
-    from copy import deepcopy
+def _write_context_peer_node(service, owner, identifier, query, text, node_type):
+    from memplex.auth import bind_node_identity
 
-    from memplex.auth import AuthorizationContext, Principal, bind_node_identity
+    if node_type == "fact":
+        node = Fact(id=identifier, name=identifier, subject=query, predicate="is", object_=text)
+        bind_node_identity(node, owner)
+        service._store_for(owner).add_fact(node)
+    else:
+        node = Function(id=identifier, name=f"{query} {identifier}", action=[FieldValue(desc=text)])
+        bind_node_identity(node, owner)
+        service._store_for(owner).add(node, SourceDocument(type="test"))
+
+
+def _mutate_context_peer(peer, owner, reader, node_type, mutation):
+    from memplex.auth import bind_node_identity
+    from memplex.temporal import supersede_contradicted
+
+    scoped = peer._store_for(owner)
+    if mutation == "delete":
+        peer.delete("peer-target", authorization=owner)
+        assert peer.get("peer-target", authorization=owner) is None
+    elif node_type == "function":
+        replace_function_action_for_context_test(scoped, owner, "peer-target", "CURRENT-PEER-TEXT")
+    else:
+        target = scoped.get_fact("peer-target")
+        assert target is not None
+        if mutation == "update":
+            target.object_ = "CURRENT-PEER-TEXT"
+        elif mutation == "revoke":
+            target.visibility = "session"
+        else:
+            assert mutation == "supersede"
+            successor = Fact(
+                id="peer-successor", subject=target.subject, predicate=target.predicate,
+                object_="SUCCESSOR-PEER-TEXT", valid_from=datetime.now(UTC).isoformat(),
+            )
+            bind_node_identity(successor, owner)
+            assert supersede_contradicted(successor, [target], now=successor.valid_from) == [target]
+            scoped.add_fact(successor)
+            assert scoped.get_fact(successor.id).object_ == "SUCCESSOR-PEER-TEXT"
+        scoped.add_fact(target)
+        committed = scoped.get_fact(target.id)
+        assert committed is not None
+        assert committed.object_ == target.object_
+        assert committed.invalid_at == target.invalid_at
+        assert committed.visibility == target.visibility
+        if mutation == "revoke":
+            assert peer._store_for(reader).get_fact(target.id) is None
+
+
+def _assert_context_after_completed_peer_mutation(
+    migration_dsn, pgvector_available, path, mutation, node_type, monkeypatch,
+):
+    """Mutate committed PG rows after genuine retrieval, before final assembly."""
+    from copy import deepcopy
 
     assert pgvector_available, "this contract requires the real pgvector test environment"
     cfg, role = _production_service_config(migration_dsn)
-    cfg.working_memory.enabled = True
+    cfg.working_memory.enabled = node_type == "function"
+    cfg.embedding.model = "tfidf"
     first = peer = None
-    owner = AuthorizationContext(Principal(tenant_id="context-tenant", subject_id="alice"), workspace_id="workspace", agent_id="codex", session_id="session")
+    owner = _authorization(
+        tenant="context-tenant", subject="alice", workspace="workspace", agent="codex", session="session",
+    )
+    reader = _authorization(
+        tenant="context-tenant", subject="alice", workspace="workspace", agent="codex", session="reader-session",
+    )
     query = "database transaction evidence"
     try:
+        assert _admin_query(
+            cfg.storage.path,
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        ) == [(False, False)]
         first = MemplexService(config=cfg)
         peer = MemplexService(config=deepcopy(cfg))
+        if node_type == "fact":
+            assert first._working_memory is None
         for identifier, text in (("peer-target", "OLD-PEER-TEXT"), ("peer-control", "OWNER-POSITIVE-CONTROL")):
-            node = Function(id=identifier, name=f"{query} {identifier}", action=[FieldValue(desc=text)])
-            bind_node_identity(node, owner)
-            first._store_for(owner).add(node, SourceDocument(type="test"))
-        runtime = AgentMemoryRuntime(service=first, authorization=owner)
+            _write_context_peer_node(first, owner, identifier, query, text, node_type)
+        runtime = AgentMemoryRuntime(service=first, authorization=reader)
+        assert "OLD-PEER-TEXT" in runtime.before_prompt(query).context
+
+        def mutate():
+            _mutate_context_peer(peer, owner, reader, node_type, mutation)
+
         if path == "prefetch":
             assert "OLD-PEER-TEXT" in runtime.prefetch(query).context
+            run_completed_peer_mutation(mutate)
         else:
-            assert "OLD-PEER-TEXT" in runtime.before_prompt(query).context
-        def mutate():
-            if mutation == "update":
-                replace_function_action_for_context_test(
-                    peer._store_for(owner), owner, "peer-target", "CURRENT-PEER-TEXT",
-                )
-            else:
-                peer.delete("peer-target", authorization=owner)
+            real_collect = runtime._collect_context_candidates
 
-        run_completed_peer_mutation(mutate)
+            def collect_then_commit(text):
+                candidates = real_collect(text)
+                assert {candidate.memory_id for candidate in candidates} == {"peer-target", "peer-control"}
+                assert all(candidate.origin == "retrieval" for candidate in candidates)
+                # The real store has already returned the old candidate. The
+                # peer transaction completes before authoritative assembly.
+                run_completed_peer_mutation(mutate)
+                return candidates
+
+            monkeypatch.setattr(runtime, "_collect_context_candidates", collect_then_commit)
         result = runtime.before_prompt(query)
         assert result.source == path
         assert "OWNER-POSITIVE-CONTROL" in result.context
@@ -9361,11 +9429,27 @@ def _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_availa
         _drop_unprivileged_role(migration_dsn, role)
 
 
+@pytest.mark.parametrize("node_type", ["function", "fact"])
 @pytest.mark.parametrize("path", ["live", "prefetch"])
-def test_context_after_completed_peer_update(migration_dsn, pgvector_available, path):
-    _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, "update")
+def test_context_after_completed_peer_update(migration_dsn, pgvector_available, path, node_type, monkeypatch):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, "update", node_type, monkeypatch,
+    )
 
 
+@pytest.mark.parametrize("node_type", ["function", "fact"])
 @pytest.mark.parametrize("path", ["live", "prefetch"])
-def test_context_after_completed_peer_delete(migration_dsn, pgvector_available, path):
-    _assert_context_after_completed_peer_mutation(migration_dsn, pgvector_available, path, "delete")
+def test_context_after_completed_peer_delete(migration_dsn, pgvector_available, path, node_type, monkeypatch):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, "delete", node_type, monkeypatch,
+    )
+
+
+@pytest.mark.parametrize("mutation", ["supersede", "revoke"])
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_fact_context_after_completed_peer_validity_change(
+    migration_dsn, pgvector_available, path, mutation, monkeypatch,
+):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, mutation, "fact", monkeypatch,
+    )
