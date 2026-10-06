@@ -6,9 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from memplex.auth import AuthorizationContext, Principal, local_development_context
+from memplex.auth import (
+    AuthorizationContext,
+    Principal,
+    bind_node_identity,
+    local_development_context,
+)
 from memplex.config import MemplexConfig
 from memplex.context import ContextCandidate
+from memplex.models import Fact
 from memplex.service import MemplexService
 from memplex.storage.postgres import PostgresMemoryStore
 
@@ -19,7 +25,7 @@ def pg_raw_source(monkeypatch, tmp_path):
     state = {
         "payload": {"raw_text": "CURRENT-PG-RAW", "trust_tier": 2, "source": "source.md#1"},
         "identity": ("raw", "tenant", "alice", "workspace", "user", "agent", "session"),
-        "queries": [], "contexts": [], "absent": False,
+        "queries": [], "contexts": [], "absent": False, "context_historical": False,
     }
 
     class Cursor:
@@ -33,7 +39,7 @@ def pg_raw_source(monkeypatch, tmp_path):
             if "SELECT data FROM" in sql:
                 return (deepcopy(state["payload"]),)
             row_id, *identity = state["identity"]
-            return (row_id, deepcopy(state["payload"]), *identity)
+            return (row_id, deepcopy(state["payload"]), *identity, state["context_historical"])
 
     @contextmanager
     def transaction(_binder, authorization):
@@ -140,3 +146,46 @@ def test_fix1_pg_malformed_sql_columns_are_not_local_compatibility_identity(pg_r
     identity[position] = value
     state["identity"] = tuple(identity)
     assert _assemble(service, local_development_context()).context == ""
+
+
+def test_pg_historical_raw_snapshot_remains_readable_without_current_body(pg_raw_source):
+    service, store, context, state = pg_raw_source
+    state["context_historical"] = True
+    state["payload"]["context_historical"] = False
+    snapshot = store.authorized(context).read_context_nodes(["raw"])["raw"]
+    assert snapshot["raw_text"] == "CURRENT-PG-RAW"
+    assert snapshot["context_historical"] is True
+    assert store.authorized(context).get_paragraph("raw") == state["payload"]
+    assert "raw" in service.resolve_context_nodes(["raw"], authorization=context)
+    assembled = _assemble(service, context)
+    assert assembled.context == ""
+    assert assembled.memory_ids == ()
+    assert assembled.dropped["empty"] == 1
+
+
+def test_pg_historical_raw_source_still_authorizes_derived_lineage(pg_raw_source, monkeypatch):
+    service, store, context, state = pg_raw_source
+    state["context_historical"] = True
+    derived = Fact(id="derived", subject="Related policy", predicate="is", object_="STILL-CURRENT")
+    bind_node_identity(derived, context)
+    derived.namespace.update(memplex_source_refs="raw", memplex_derivation="test")
+    monkeypatch.setattr(store, "get_fact", lambda node_id: deepcopy(derived) if node_id == derived.id else None)
+    assert derived.id in service.resolve_context_nodes([derived.id], authorization=context)
+    assembled = service.assemble_context(
+        [ContextCandidate(derived.id, "retrieval"), ContextCandidate("raw", "retrieval")],
+        authorization=context, runtime_filter=lambda _node: True, max_tokens=4096,
+    )
+    assert assembled.memory_ids == (derived.id,)
+    assert "STILL-CURRENT" in assembled.context
+    assert "CURRENT-PG-RAW" not in assembled.context
+    assert store.authorized(context).read_context_nodes(["raw"])["raw"]["context_historical"] is True
+
+
+@pytest.mark.parametrize("historical", [None, 0, 1, "false", "true", {}, []])
+def test_pg_malformed_historical_sql_flag_fails_closed(pg_raw_source, historical):
+    service, store, context, state = pg_raw_source
+    state["context_historical"] = historical
+    state["payload"]["context_historical"] = False
+    assert store.authorized(context).read_context_nodes(["raw"]) == {}
+    assert _assemble(service, context).context == ""
+    assert store.authorized(context).get_paragraph("raw") == state["payload"]
