@@ -16,6 +16,7 @@ adapters/            Host + transport boundary (one port per agent platform)
   codex_plugin / claude_skill / openclaw_plugin / hermes_memory_provider
   agent_runtime.py     Shared recall/capture runtime used by every host
 service.py           MemplexService: orchestration facade over collaborators
+capture_identity.py  Capture-only canonical scope keys, typed rekeying and raw-source identity
 query_pipeline.py    QueryPipeline: 6-stage read-side query execution (service delegate)
 authorization.py     AuthorizationGate: tenant/workspace/user/session ACL ¹
 context.py           Current-source assembly and bounded candidate-only prefetch cache (leaf)
@@ -52,6 +53,29 @@ host_lifecycle.py    G008 host-contract digests (see below)
 
 `¹ ² ³ ⁴` mark the split groups (⁴ = post-S-wave leaf modules) described under [Split modules](#split-modules-and-their-re-export-contracts).
 
+### Captured conversation identity
+
+New conversation captures extract user and assistant paragraphs separately in
+one write. Host identity and provenance remain trusted fields; they are not
+prepended as text for the rule-based fact extractor. The structured Observation
+is retained independently, and model-facing reads remain low-trust and subject
+to current-source authorization.
+
+`capture_identity.py` gives new typed captures versioned scoped IDs. User scope
+uses tenant/owner, workspace scope additionally uses workspace, and session
+scope also uses host/session. Function physical IDs and normalized-name keys
+add the complete writer identity, because PostgreSQL Function merges retain
+the original writer columns. Their opaque keys preserve display names. Raw
+paragraph source hints include the complete writer identity, including session,
+to avoid reusing another writer's immutable PostgreSQL raw-row ACL columns.
+
+When either Fact is a new capture, supersession requires complete matching
+canonical scope, including corrections through ordinary writes. Compaction
+partitions new captured Functions by scope before exact or semantic matching;
+unmarked Functions keep their existing behavior in a separate partition.
+Incomplete captured scope is isolated, and editable namespace metadata cannot
+disable these guards. Existing data is not migrated or re-extracted.
+
 ### Top-level quick reference
 
 One line per top-level module (`ls memplex/*.py memplex/*/`); the layer map
@@ -65,6 +89,7 @@ auth.py               Authenticated identity primitives for the service boundary
 authorization.py      AuthorizationGate: tenant/workspace/user/session ACL ¹
 backup.py             Strict backup manifests + disaster-recovery data contracts
 capacity_chaos.py     G009 capacity/soak/chaos signed machine evidence
+capture_identity.py  Capture identity shared by foreground writes and compaction partitioning
 compaction.py         CompactionPipeline: 5-stage memory compression
 config.py             Configuration load/validate (MEMPLEX_* env > config.yaml > defaults)
 context.py            Bounded source-ID context assembly; no adapters, service or storage imports

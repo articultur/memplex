@@ -437,7 +437,8 @@ def test_legacy_typed_migration_failure_redacts_search_explanation(
     token = "legacy-explanation-failure-token"
     writer.after_response(
         user_message=f"I prefer {token} responses.",
-        assistant_message="Captured.",
+        # Seed only the denied legacy Preference, with no independent reply memory.
+        assistant_message="",
     )
     stored = service.store.list_preferences(owner="alice")[0]
     stored.namespace = {}

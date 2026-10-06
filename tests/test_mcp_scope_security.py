@@ -395,7 +395,8 @@ def test_mcp_explain_redacts_legacy_record_when_migration_fails(
     token = "mcp-legacy-explanation-failure-token"
     server._agent_runtime({}).after_response(
         f"I prefer {token} responses.",
-        "Captured.",
+        # Seed only the denied legacy Preference, with no independent reply memory.
+        "",
     )
     stored = server._service.store.list_preferences(owner="alice")[0]
     stored.namespace = {}

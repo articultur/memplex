@@ -596,17 +596,10 @@ class AgentMemoryRuntime:
             logger.debug("capture_turn: consecutive identical turn dropped")
             return
         self._last_capture_key = capture_key
-        body = (
-            "Observation from agent conversation.\n"
-            f"Agent: {payload['agent']}\n"
-            f"User ID: {payload['user_id']}\n"
-            f"Session ID: {payload['session_id']}\n"
-            f"Project Path: {payload['project_path']}\n"
-            f"Storage Namespace: {self._storage_namespace()}\n"
-            f"User: {payload['user']}\n"
-            f"Assistant: {payload['assistant']}\n"
-            f"Metadata: {json.dumps(payload['metadata'], ensure_ascii=False, sort_keys=True)}"
-        )
+        # Extract each speaker's content as its own paragraph. Transport
+        # identity belongs to the trusted write boundary, not the first
+        # sentence that a rule-based Fact extractor will interpret.
+        body = f"{payload['user']}\n\n{payload['assistant']}"
         self.write_text(body, source_type="observation", visibility=visibility)
         self._capture_observation(payload)
 

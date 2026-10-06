@@ -21,6 +21,7 @@ import hashlib
 import logging
 from enum import Enum
 
+from memplex.capture_identity import capture_scope, is_captured
 from memplex.models import DedupResult, Memory
 from memplex.retrieval.embedding import EmbeddingService
 
@@ -85,19 +86,40 @@ class MemoryDeduplicator:
         self._exact_removed = 0
         self._semantic_removed = 0
 
-        if self.strategy in (DedupStrategy.EXACT, DedupStrategy.BOTH):
-            memories = self._exact_dedup(memories)
+        deduplicated: list[Memory] = []
+        for group in self._capture_partitions(memories):
+            if self.strategy in (DedupStrategy.EXACT, DedupStrategy.BOTH):
+                group = self._exact_dedup(group)
 
-        if self.strategy in (DedupStrategy.SEMANTIC, DedupStrategy.BOTH):
-            memories = self._semantic_dedup(memories)
+            if len(group) > 1 and self.strategy in (DedupStrategy.SEMANTIC, DedupStrategy.BOTH):
+                group = self._semantic_dedup(group)
+            deduplicated.extend(group)
 
         return DedupResult(
             original_count=self._original_count,
-            final_count=len(memories),
+            final_count=len(deduplicated),
             exact_removed=self._exact_removed,
             semantic_removed=self._semantic_removed,
-            deduplicated=memories,
+            deduplicated=deduplicated,
         )
+
+    @staticmethod
+    def _capture_partitions(memories: list[Memory]) -> list[list[Memory]]:
+        """Keep capture scopes disjoint throughout exact and semantic passes.
+
+        Unmarked memories retain their legacy behavior in one partition. A
+        capture with incomplete identity gets its own partition, and ordinary
+        memories cannot form a semantic bridge between capture scopes.
+        """
+        partitions: dict[tuple[str, ...], list[Memory]] = {}
+        for index, memory in enumerate(memories):
+            if not is_captured(memory):
+                key = ("legacy",)
+            else:
+                scope = capture_scope(memory)
+                key = ("captured", *scope) if scope is not None else ("isolated", str(index))
+            partitions.setdefault(key, []).append(memory)
+        return list(partitions.values())
 
     # ── Exact dedup ─────────────────────────────────────────────────
 
