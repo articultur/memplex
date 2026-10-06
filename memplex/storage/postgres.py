@@ -260,6 +260,37 @@ def _func_from_json(d: dict) -> Function:
     return Function.from_dict(d)
 
 
+def _fact_search_result(fid: str, data: dict[str, Any], score: float) -> SearchResult | None:
+    """Project one typed Fact candidate without letting corrupt rows poison a leg."""
+    if data.get("memory_type", "fact") != "fact":
+        return None
+    try:
+        fact = Fact.from_dict(data)
+    except (TypeError, ValueError):
+        return None
+    parts = (fact.subject, fact.predicate, fact.object_)
+    if not all(isinstance(value, str) for value in (fact.name, *parts)):
+        return None
+    if not all(value is None or isinstance(value, str) for value in (fact.domain, fact.origin_session)):
+        return None
+    if not all(value is None or isinstance(value, (str, datetime)) for value in (fact.created_at, fact.updated_at)):
+        return None
+    if not isinstance(fact.source_type, SourceType):
+        return None
+    body = " ".join(part for part in parts if part).strip()
+    return SearchResult(
+        func_id=fid,
+        name=fact.name,
+        domain=fact.domain or "",
+        relevance_score=score,
+        summary=body or fact.name,
+        source_type=fact.source_type,
+        created_at=fact.created_at,
+        updated_at=fact.updated_at,
+        origin=fact.origin_session or "",
+    )
+
+
 def _obs_to_json(obs: Observation) -> dict:
     """Flatten an Observation into a JSONB-safe dict via the model's standard
     serializer (mirrors the lite backend). ``to_dict()`` covers every base
@@ -1559,21 +1590,55 @@ class PostgresMemoryStore:
     def vector_search(self, text: str, top_k: int = 5) -> list[SearchResult]:
         """Hybrid search: tsvector full-text + optional pgvector cosine.
 
-        When pgvector is enabled and an embedder is configured, runs both a
-        tsvector and a vector-cosine query and merges them with Reciprocal
-        Rank Fusion (RRF). Otherwise degrades to tsvector-only.
+        Functions and Facts share a bounded lexical leg. The optional
+        pgvector leg searches only Functions; Reciprocal Rank Fusion (RRF)
+        merges the two legs. Current-state authorization still belongs to
+        the service/runtime before any candidate reaches model context.
         """
+        if top_k <= 0:
+            return []
         # --- tsvector leg (always runs) ---
         cur = self._execute(
             f"""
-            SELECT id, data, ts_rank(search_tsv, plainto_tsquery('simple', %s)) AS score
-            FROM memplex_functions
-            WHERE {_acl_scope_sql()}
-              AND search_tsv @@ plainto_tsquery('simple', %s)
-            ORDER BY score DESC
+            WITH query AS (SELECT plainto_tsquery('simple', %s) AS terms)
+            SELECT id, data, score, row_kind FROM (
+                (
+                    SELECT f.id, f.data, ts_rank(f.search_tsv, query.terms) AS score,
+                           'function' AS row_kind
+                    FROM memplex_functions f CROSS JOIN query
+                    WHERE {_acl_scope_sql('f')}
+                      AND f.search_tsv @@ query.terms
+                    ORDER BY score DESC, f.id
+                    LIMIT %s
+                )
+                UNION ALL
+                (
+                    SELECT fact.id, fact.data,
+                           ts_rank(lexical.search_tsv, query.terms) AS score,
+                           'fact' AS row_kind
+                    FROM memplex_facts fact CROSS JOIN query
+                    CROSS JOIN LATERAL (
+                        SELECT to_tsvector('simple', COALESCE(
+                            NULLIF(btrim(concat_ws(' ',
+                                fact.data->>'subject', fact.data->>'predicate',
+                                COALESCE(fact.data->>'object', fact.data->>'object_')
+                            )), ''), fact.data->>'name', ''
+                        )) AS search_tsv
+                    ) lexical
+                    WHERE {_acl_scope_sql('fact')}
+                      AND lexical.search_tsv @@ query.terms
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memplex_functions shadow
+                          WHERE shadow.id = fact.id AND {_acl_scope_sql('shadow')}
+                      )
+                    ORDER BY score DESC, fact.id
+                    LIMIT %s
+                )
+            ) lexical_matches
+            ORDER BY score DESC, id
             LIMIT %s
             """,
-            (text, text, top_k * 2),
+            (text, top_k * 2, top_k * 2, top_k * 2),
             commit=False,
         )
         tsv_rows = cur.fetchall()
@@ -1608,31 +1673,39 @@ class PostgresMemoryStore:
     @staticmethod
     def _rrf_merge(tsv_rows: Any, vec_rows: Any, top_k: Any, k: int = 60) -> list[SearchResult]:
         """Reciprocal Rank Fusion of the two result legs."""
+        if top_k <= 0:
+            return []
         scores: dict = {}
         meta: dict = {}
         for rank, row in enumerate(tsv_rows):
             fid = row[0]
             scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
-            meta[fid] = row[1]
+            meta[fid] = (row[1], row[3] if len(row) > 3 else None)
         for rank, row in enumerate(vec_rows):
             fid = row[0]
             scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
             if fid not in meta:
-                meta[fid] = row[1]
-        ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+                meta[fid] = (row[1], "function")
+        ordered = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         results = []
         for fid, score in ordered:
-            data = meta[fid]
+            data, row_kind = meta[fid]
             data = data if isinstance(data, dict) else json.loads(data)
-            results.append(
-                SearchResult(
+            if (row_kind or data.get("memory_type")) == "fact":
+                result = _fact_search_result(fid, data, score)
+                if result is None:
+                    continue
+            else:
+                result = SearchResult(
                     func_id=fid,
                     name=data.get("name", ""),
                     domain=data.get("domain", ""),
                     relevance_score=score,
                     summary=data.get("trigger_text", "") or data.get("name", ""),
                 )
-            )
+            results.append(result)
+            if len(results) == top_k:
+                break
         return results
 
     def fts_search(self, text: str, top_k: int = 10) -> list[SearchResult]:

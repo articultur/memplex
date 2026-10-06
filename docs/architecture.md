@@ -76,6 +76,15 @@ unmarked Functions keep their existing behavior in a separate partition.
 Incomplete captured scope is isolated, and editable namespace metadata cannot
 disable these guards. Existing data is not migrated or re-extracted.
 
+PostgreSQL cold retrieval combines Functions and Facts in its lexical search
+leg, with explicit per-table ACL predicates and forced RLS. Fact text uses
+subject, predicate and object; final assembly still re-reads committed sources
+and enforces current visibility, validity and injection filtering. The vector
+leg remains Function-only. No raw-paragraph, Observation or Preference fallback
+is added. Fact lexical vectors are computed at query time without a schema
+change: candidate/result limits do not bound the underlying database scan cost,
+and large-corpus latency has not been established by the correctness tests.
+
 ### Top-level quick reference
 
 One line per top-level module (`ls memplex/*.py memplex/*/`); the layer map
