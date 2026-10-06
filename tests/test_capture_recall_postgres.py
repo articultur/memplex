@@ -22,6 +22,7 @@ from memplex.models import (
     SourceDocument,
 )
 from memplex.service import MemplexService
+from memplex.storage.migrations import ApplicationAclContract
 from memplex.storage.migrations.runner import PostgresMigrationRunner, VectorCapabilityRequest
 from tests.test_postgres_integration import (
     _admin_execute,
@@ -95,6 +96,7 @@ def capture_service_factory(pg_function_dsn, monkeypatch):
             if vector_dim:
                 PostgresMigrationRunner(pg_function_dsn).ensure_vector_capability(
                     VectorCapabilityRequest(dim=vector_dim, policy="required"), "production",
+                    application_acl=ApplicationAclContract(role),
                 )
                 _grant_vector_type_usage(pg_function_dsn, role)
             monkeypatch.setenv("MEMPLEX_PGVECTOR_DIM", str(vector_dim))
