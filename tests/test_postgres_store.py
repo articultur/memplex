@@ -116,6 +116,197 @@ def test_func_from_json_bad_source_type_falls_back_to_wiki():
     assert restored.source_type == SourceType.WIKI
 
 
+def test_role_update_patches_locked_canonical_and_records_one_transaction():
+    node = _sample_func()
+    node.action.append(FieldValue("second current step"))
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    commits_before = connection.commits
+
+    def mark_before_persist(current):
+        assert current.action[0].desc == "replacement step"
+        current.attributes["checked"] = "yes"
+
+    current, old_value = store.update_function_role(
+        node.id, "action", "replacement step", before_persist=mark_before_persist,
+    )
+    assert old_value == "call auth()"
+    assert [(value.desc, value.status) for value in current.action] == [
+        ("replacement step", "active"), ("call auth()", "deprecated"),
+        ("second current step", "deprecated"),
+    ]
+    assert current.trigger == node.trigger
+    assert current.version == node.version + 1
+    writes = connection._cursor.executed
+    lock_index = next(i for i, (query, _) in enumerate(writes) if "pg_advisory_xact_lock" in query)
+    lookup_index = next(i for i, (query, _) in enumerate(writes) if "FOR UPDATE" in query)
+    upserts = [(query, params) for query, params in writes if "INSERT INTO memplex_functions" in query]
+    assert lock_index < lookup_index
+    assert len(upserts) == 1
+    payload = json.loads(upserts[0][1][1])
+    assert payload["action_text"] == "replacement step"
+    assert payload["attributes"]["checked"] == "yes"
+    assert len([query for query, _ in writes if "INSERT INTO memplex_changelog" in query]) == 1
+    assert connection.commits == commits_before + 1
+
+
+def test_role_update_callback_failure_rolls_back_without_business_writes():
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    commits_before = connection.commits
+    rollbacks_before = connection.rollbacks
+
+    def reject(_current):
+        raise OSError("speculative scan failed")
+
+    with pytest.raises(OSError, match="speculative scan failed"):
+        store.update_function_role(node.id, "action", "new value", before_persist=reject)
+    assert not any("INSERT INTO memplex_functions" in query for query, _ in connection._cursor.executed)
+    assert not any("INSERT INTO memplex_changelog" in query for query, _ in connection._cursor.executed)
+    assert connection.commits == commits_before
+    assert connection.rollbacks == rollbacks_before + 1
+
+
+def test_role_update_missing_row_is_rejected_without_insert():
+    from memplex.storage.postgres import PostgresWriteRejected
+
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = None
+    connection._cursor.executed.clear()
+    with pytest.raises(PostgresWriteRejected):
+        store.update_function_role("missing", "action", "new value")
+    assert not any("INSERT INTO" in query for query, _ in connection._cursor.executed)
+
+
+@pytest.mark.parametrize("dim", [0, 4])
+def test_role_update_failed_vector_refresh_clears_only_existing_vector_column(dim):
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool(dim=dim))
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    store.update_function_role(node.id, "action", "new value")
+    upsert = next(query for query, _ in connection._cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert ("embedding = NULL" in upsert) is (dim > 0)
+
+
+@pytest.mark.parametrize("column_exists", [False, True])
+def test_role_update_disabled_vector_policy_checks_persisted_column(monkeypatch, column_exists):
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool(dim=0))
+    connection = store._pool_manager._pool.connection
+    cursor = connection._cursor
+    cursor._fetchone_val = (node.id, _func_to_json(node))
+    cursor.executed.clear()
+    real_fetchone = cursor.fetchone
+
+    def fetchone():
+        statement = cursor.executed[-1][0]
+        if "pg_catalog.pg_attribute" in statement and "attname = 'embedding'" in statement:
+            return (column_exists,)
+        return real_fetchone()
+
+    monkeypatch.setattr(cursor, "fetchone", fetchone)
+    store.update_function_role(node.id, "action", "new value")
+    catalog_reads = [query for query, _ in cursor.executed if "pg_catalog.pg_attribute" in query]
+    assert len(catalog_reads) == 1
+    upsert = next(query for query, _ in cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert ("embedding = NULL" in upsert) is column_exists
+
+
+@pytest.mark.parametrize("visibility", ["workspace", "user", "session"])
+def test_role_update_preserves_scoped_identity_contract(visibility):
+    from memplex.auth import bind_node_identity
+
+    creator = _authorization()
+    writer = _authorization(subject="bob") if visibility == "workspace" else creator
+    node = _sample_func()
+    bind_node_identity(node, creator, visibility=visibility)
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    identity = store._row_identity_values(creator, node)
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node), *identity)
+    connection._cursor.executed.clear()
+    current, _ = store.authorized(writer).update_function_role(node.id, "action", "new value")
+    expected = writer if visibility == "workspace" else creator
+    assert current.owner_subject_id == expected.principal.subject_id
+    assert current.provenance["authentication_id"] == expected.principal.authentication_id
+    assert current.visibility == visibility
+    upsert = next(params for query, params in connection._cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert upsert[3:] == store._row_identity_values(expected, current)
+
+
+@pytest.mark.parametrize("role", ["condition", "benefit"])
+def test_role_update_search_projection_indexes_current_condition_and_benefit(role):
+    node = _sample_func()
+    setattr(node, role, [FieldValue("obsolete qualifier")])
+    node.update_role(role, "current qualifier")
+    payload = _func_to_json(node)
+    search_text = payload["trigger_text"] + " " + payload["action_text"]
+    assert "current qualifier" in search_text
+    assert "obsolete qualifier" not in search_text
+
+    class RecordingEmbedder:
+        def embed(self, text):
+            assert "current qualifier" in text
+            assert "obsolete qualifier" not in text
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = PostgresMemoryStore(
+        dsn="dbname=fake", ready_pool=_test_ready_pool(dim=4), embedder=RecordingEmbedder(),
+    )
+    assert store._embed_text(node) == "[1.0, 0.0, 0.0, 0.0]"
+
+
+def test_context_paragraph_marks_only_visible_edited_function_sources():
+    from memplex.storage.postgres import _acl_scope_sql
+
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = None
+    connection._cursor.executed.clear()
+    assert store._read_context_paragraph("raw-id") is None
+    statement, parameters = next(
+        (query, params) for query, params in connection._cursor.executed
+        if "FROM memplex_paragraphs" in query
+    )
+    assert parameters == ("raw-id",)
+    assert _acl_scope_sql("memplex_paragraphs") in statement
+    assert "EXISTS" in statement
+    assert "NOT EXISTS" not in statement
+    assert "AS context_historical" in statement
+    assert "FROM memplex_functions current_function" in statement
+    assert _acl_scope_sql("current_function") in statement
+    assert "current_function.tenant_id = memplex_paragraphs.tenant_id" in statement
+    assert "current_function.data->'source_paragraphs' ? memplex_paragraphs.id" in statement
+    assert "memplex_role_updates" in statement
+
+    connection._cursor.executed.clear()
+    assert store.get_paragraph("raw-id") is None
+    historical_query = next(query for query, _ in connection._cursor.executed if "FROM memplex_paragraphs" in query)
+    assert "memplex_role_updates" not in historical_query
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_context_paragraph_history_flag_comes_from_sql_not_payload(historical):
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (
+        "raw-id", {"raw_text": "unchanged evidence", "context_historical": not historical},
+        "tenant-a", "alice", "workspace", "user", "agent", "session", historical,
+    )
+    node = store._read_context_paragraph("raw-id")
+    assert node is not None
+    assert node["raw_text"] == "unchanged evidence"
+    assert node["context_historical"] is historical
+
+
 # ── Mock-connection fixture ──────────────────────────────────────────
 
 

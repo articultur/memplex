@@ -140,6 +140,7 @@ def build_functions_from_paragraphs(
             ],
             source_type=source.source_type,
             content_hash=hashlib.sha256(para.raw_text.encode()).hexdigest(),
+            attributes={"memplex_name_from_content": "false" if para.section else "true"},
         )
         functions.append(func)
 

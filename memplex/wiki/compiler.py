@@ -614,7 +614,8 @@ class WikiCompiler:
 
     @staticmethod
     def _field_section(heading: str, values: list[FieldValue]) -> list[str]:
-        """Build markdown lines for a FieldValue list."""
+        """Build the current field section without altering retained history."""
+        values = [value for value in values if value.status == "active"]
         if not values:
             return []
         lines: list[str] = [f"## {heading}"]
@@ -642,8 +643,8 @@ class WikiCompiler:
                 score += 0.8
             if func.domain and query_lower in func.domain.lower():
                 score += 0.4
-            for fv in func.trigger + func.action + func.benefit:
-                if query_lower in fv.desc.lower():
+            for fv in func.trigger + func.condition + func.action + func.benefit:
+                if fv.status == "active" and query_lower in fv.desc.lower():
                     score += 0.3
                     break
             if score > 0:
@@ -653,7 +654,7 @@ class WikiCompiler:
                         name=func.name,
                         domain=func.domain or "",
                         relevance_score=min(score, 1.0),
-                        summary="; ".join(fv.desc for fv in func.action[:2]),
+                        summary="; ".join([fv.desc for fv in func.action if fv.status == "active"][:2]),
                         source_type=SourceType.WIKI,
                         created_at=func.created_at,
                         updated_at=func.updated_at,

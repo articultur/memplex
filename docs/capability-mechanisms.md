@@ -48,11 +48,11 @@ Observation. It carries tenant, owner, workspace, visibility, provenance,
 version, timestamps, namespace, and knowledge-tier data. Each concrete type
 adds its own payload; Fact additionally carries its business-time interval.
 
-- Implementation: [`MemoryNode` fields](../memplex/models/memory.py#L42-L73),
-  [`Function`](../memplex/models/memory.py#L154-L169),
-  [`Fact`](../memplex/models/memory.py#L255-L270),
-  [`Preference`](../memplex/models/memory.py#L315-L347), and
-  [`Observation`](../memplex/models/memory.py#L351-L390)
+- Implementation: [`MemoryNode` fields](../memplex/models/memory.py#L58-L89),
+  [`Function`](../memplex/models/memory.py#L185-L201),
+  [`Fact`](../memplex/models/memory.py#L352-L377),
+  [`Preference`](../memplex/models/memory.py#L411-L442), and
+  [`Observation`](../memplex/models/memory.py#L447-L486)
 - Contract tests: [type hierarchy and factory](../tests/test_models.py#L372-L407)
 - Limit: model and serialization coverage does not alone prove every backend
   preserves every field under failure and migration conditions.
@@ -113,7 +113,7 @@ Memplex learned or changed the row. A contradictory fact supersedes rather than
 deletes the previous row, and `list_facts(as_of=...)` exposes the retained
 point-in-time history.
 
-- Implementation: [Fact interval fields](../memplex/models/memory.py#L255-L270),
+- Implementation: [Fact interval fields](../memplex/models/memory.py#L352-L377),
   [interval filtering and supersession](../memplex/temporal.py#L39-L98),
   [service write-path supersession](../memplex/service.py#L1450-L1483), and
   [`as_of` filtering](../memplex/service.py#L1641-L1646)

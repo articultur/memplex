@@ -1802,41 +1802,28 @@ class MemplexService:
                 success=False,
                 error="Unknown role",
             )
-        values = getattr(func, role)
-
-        if values:
-            old_value = values[0].desc
-
-        from memplex.models import FieldValue
-
-        values.insert(
-            0,
-            FieldValue(
-                desc=new_value,
-                sources=["manual"],
-                source_method="manual",
-                weight=1.0,
-            ),
-        )
-
-        # Injection scan on the manually-supplied value, mirroring the
-        # write() path. update_memory accepts caller text that becomes LLM
-        # context on recall, so it must not bypass the injection defence.
-        # Suspected payloads flag the Function (read path drops it) rather
-        # than rejecting the update -- legitimate co-located edits must
-        # not be silently lost.
-        self.scan_nodes_before_persistence([func])
-
-        # Lite uses explicit replacement so a detached snapshot is never
-        # accidentally routed through the name-merge semantics.
-        from memplex.models import SourceDocument as SD
+        def prepare(current: Function) -> None:
+            # Recheck the locked row. A speculative failed edit must not
+            # publish a process-wide risk marker for the unchanged memory.
+            if not self._is_node_visible(current, context):
+                raise MemoryNotFoundError("Memory not found")
+            if IndirectInjectionGuard.is_suspected(current):
+                current.attributes["memplex_injection_suspected"] = "true"
 
         store = self._store_for(context)
-        replace = getattr(store, "replace_function", None)
-        if callable(replace):
-            replace(func)
+        update = getattr(store, "update_function_role", None)
+        if callable(update):
+            func, old_value = update(memory_id, role, new_value, before_persist=prepare)
         else:
-            store.add(func, SD(type="manual_update", source_type=SourceType.WIKI))
+            # Compatibility for third-party stores without atomic role edits.
+            old_value = func.update_role(role, new_value)
+            prepare(func)
+            replace_function = getattr(store, "replace_function", None)
+            if callable(replace_function):
+                replace_function(func)
+            else:
+                store.add(func, SourceDocument(type="manual_update", source_type=SourceType.WIKI))
+        self.scan_nodes_before_persistence([func])
         self._invalidate_hot_references((memory_id,), context=context)
 
         return UpdateResult(

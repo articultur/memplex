@@ -1717,6 +1717,15 @@ class LiteMemoryStore:
         """
         self._vector_index.set_embedder(embedder)
 
+    def _historical_source_paragraphs(self) -> set[str]:
+        """Raw evidence survives edits but is no longer a current answer body."""
+        return {
+            source_id
+            for func in self._functions.values()
+            if func.attributes.get("memplex_role_updates")
+            for source_id in func.source_paragraphs
+        }
+
     def _semantic_documents(self) -> list[tuple[str, str]]:
         """Document projection shared by the vector and sparse legs."""
         documents: list[tuple[str, str]] = [
@@ -1733,8 +1742,9 @@ class LiteMemoryStore:
         # under mixed fusion; the default fallback keeps them out of the
         # ranked pool (top-8 dilution evidence) and fills slots later.
         if self._paragraph_fusion_mode() == "mixed":
+            historical = self._historical_source_paragraphs()
             for row in self._paragraphs.values():
-                if not row.get("premise_superseded"):
+                if not row.get("premise_superseded") and row["id"] not in historical:
                     documents.append((row["id"], row["raw_text"]))
         return documents
 
@@ -1893,6 +1903,9 @@ class LiteMemoryStore:
             return {}
         self._refresh_for_read()
         nodes: dict[str, MemoryNode | dict[str, Any]] = {}
+        historical = self._historical_source_paragraphs() if any(
+            memory_id in self._paragraphs for memory_id in memory_ids
+        ) else set()
         for memory_id in dict.fromkeys(memory_ids):
             node = (
                 self._functions.get(memory_id)
@@ -1902,7 +1915,12 @@ class LiteMemoryStore:
                 or self._paragraphs.get(memory_id)
             )
             if node is not None:
-                nodes[memory_id] = copy.deepcopy(node)
+                snapshot = copy.deepcopy(node)
+                if isinstance(snapshot, dict) and memory_id in historical:
+                    # Current-body eligibility is separate from source
+                    # existence/ACL: dependent nodes still resolve lineage.
+                    snapshot["context_historical"] = True
+                nodes[memory_id] = snapshot
         return nodes
 
     def _index_edge(self, edge: GraphEdge) -> None:
@@ -2182,6 +2200,22 @@ class LiteMemoryStore:
                 *((node, SyncNodeType.OBSERVATION, SyncOperation.TOMBSTONE) for node in observations),
             ],
         )
+
+    @_with_writer_lock
+    def update_function_role(
+        self, memory_id: str, role: str, new_value: str, *,
+        before_persist: Callable[[Function], None] | None = None,
+    ) -> tuple[Function, str | None]:
+        """Edit the locked current row, retaining concurrent unrelated fields."""
+        self._reload_for_mutation()
+        if memory_id not in self._functions:
+            raise KeyError(memory_id)
+        func = copy.deepcopy(self._functions[memory_id])
+        old_value = func.update_role(role, new_value)
+        if before_persist is not None:
+            before_persist(func)
+        self.replace_function(func)
+        return copy.deepcopy(func), old_value
 
     @_with_writer_lock
     def replace_function(self, func: Function) -> None:
@@ -3179,10 +3213,11 @@ class LiteMemoryStore:
         paragraphs (stamped by the premise-resolution maintenance pass)
         are excluded from the pool.
         """
+        historical = self._historical_source_paragraphs()
         pool = {
             pid: row
             for pid, row in self._paragraphs.items()
-            if not row.get("premise_superseded")
+            if not row.get("premise_superseded") and pid not in historical
         }
         if not pool:
             return []
@@ -3317,12 +3352,8 @@ class LiteMemoryStore:
     @staticmethod
     def _function_to_search_text(func: Function) -> str:
         parts = [func.name, func.domain or ""]
-        for fv in func.trigger:
-            parts.append(fv.desc)
-        for fv in func.action:
-            parts.append(fv.desc)
-        for fv in func.benefit:
-            parts.append(fv.desc)
+        for role in (func.trigger, func.condition, func.action, func.benefit):
+            parts.extend(fv.desc for fv in role if fv.status == "active")
         return " ".join(parts)
 
     @staticmethod
