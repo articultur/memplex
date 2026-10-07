@@ -1,0 +1,48 @@
+{
+  "expected_questions": 100,
+  "recorded_questions": 100,
+  "status": "blocked",
+  "systems": {
+    "bm25": {
+      "completed": 100,
+      "failed": 0,
+      "recall_denominator": 94,
+      "abstention_excluded": 6,
+      "recall@5": 0.9423758865248227,
+      "complete@5": 0.8723404255319149,
+      "mean_returned_word_tokens@5": 10760.38,
+      "recall@10": 0.9558510638297872,
+      "complete@10": 0.9148936170212766,
+      "mean_returned_word_tokens@10": 21107.06,
+      "ingest_ms_p50": 27.59799000023122,
+      "ingest_ms_p95": 46.54215699974884,
+      "query_ms_p50": 0.34414749984534865,
+      "query_ms_p95": 0.8263310000984347,
+      "storage_bytes_p50": 297063.5,
+      "storage_bytes_p95": 311802,
+      "errors": {}
+    },
+    "memplex": {
+      "completed": 0,
+      "failed": 100,
+      "recall_denominator": 0,
+      "abstention_excluded": 0,
+      "recall@5": null,
+      "complete@5": null,
+      "mean_returned_word_tokens@5": null,
+      "recall@10": null,
+      "complete@10": null,
+      "mean_returned_word_tokens@10": null,
+      "ingest_ms_p50": null,
+      "ingest_ms_p95": null,
+      "query_ms_p50": null,
+      "query_ms_p95": null,
+      "storage_bytes_p50": null,
+      "storage_bytes_p95": null,
+      "errors": {
+        "LiteMemoryStore merge contains duplicate Function id": 100
+      }
+    }
+  },
+  "claim": "offline retrieval pilot, not answer accuracy or SOTA"
+}
