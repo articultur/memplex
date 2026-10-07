@@ -187,11 +187,16 @@ class Suite:
     def __init__(self, root, model):
         self.memory, self.model = Memory(root), model
         self.cases = []
-        self.markers = {label: "MX" + label + "-" + secrets.token_hex(6).upper()
+        self.markers = {label: "MX" + ("JUNIPER" if label == "PRIVATE" else label) +
+                        "-" + secrets.token_hex(6).upper()
                         for label in ("OLD", "NEW", "FUNCTIONOLD", "FUNCTIONNEW", "PRIVATE", "BOB")}
 
     def capture(self, text, scope=DEFAULT_SCOPE, visibility="workspace"):
-        answer = self.model.complete("capture", "Acknowledge this synthetic memory with only ACK:\n" + text)
+        answer = self.model.complete(
+            "capture", "The host application will store this fictional test fixture; "
+            "you only acknowledge receipt. It contains no real secrets or credentials. "
+            "Reply with only ACK:\n" + text,
+        )
         if answer.strip() != "ACK":
             raise RunError("capture_ack_format")
         return self.memory.call([("memory_turn_end", {
@@ -266,8 +271,8 @@ class Suite:
 
     def scope_cases(self):
         m = self.markers
-        private_question = "What is the Juniper session routing code?"
-        self.capture(f"The Juniper session routing code is {m['PRIVATE']}.", visibility="session")
+        private_question = "What is the Juniper display label?"
+        self.capture(f"The Juniper display label is {m['PRIVATE']}.", visibility="session")
         self.case("session_owner", *self.read(private_question), m["PRIVATE"])
         for name, scope, question in (
             ("isolate_session", Scope(session="other"), private_question),
