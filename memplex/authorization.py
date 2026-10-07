@@ -67,6 +67,17 @@ class _TypedNodeLookup:
         # MemoryNode instances; resolve them from the raw store so the
         # ACL filter keeps raw-layer retrieval hits instead of silently
         # dropping them as unresolvable ids.
+        reader = getattr(self._store, "read_context_nodes", None)
+        if callable(reader):
+            # Resolve PostgreSQL raw lineage through its committed, scoped
+            # projection. Never replace absent ACL fields with caller identity.
+            try:
+                row = reader((node_id,)).get(node_id)
+                if isinstance(row, dict) and row.get("id") == node_id:
+                    return _RawParagraphView(row)
+                return None
+            except Exception:  # noqa: BLE001 - failed committed source reads fail closed
+                return None
         paragraphs = getattr(self._store, "_paragraphs", None)
         if isinstance(paragraphs, dict):
             row = paragraphs.get(node_id)
@@ -417,14 +428,18 @@ class AuthorizationGate:
         that is deleted, revoked, or no longer visible hides the derived
         record entirely (fail-closed).
         """
+        from memplex.factual_lineage import factual_sources_match
+
         source_ids = self._source_ids(node)
+        lookup = source_lookup or self.typed_lookup_for(context).get
+        if not factual_sources_match(node, lookup):
+            return False
         if not source_ids:
             return True
         node_id = str(getattr(node, "id", "") or "")
         if node_id in _source_path:
             return False
         source_path = _source_path | {node_id}
-        lookup = source_lookup or self.typed_lookup_for(context).get
         visibility = _SnapshotAuthorization(
             self, context, lookup, lambda: "lookup_error",
             _legacy_source_path=source_path,
@@ -570,6 +585,11 @@ class _SnapshotAuthorization:
                 if sources is None:
                     if not self._gate._is_node_in_scope(current, self._context):
                         complete(current_id, (False, "denied"))
+                        continue
+                    from memplex.factual_lineage import factual_sources_match
+
+                    if not factual_sources_match(current, self._lookup):
+                        complete(current_id, (False, "source_changed"))
                         continue
                     sources = self._gate._source_ids(current)
                     if self._legacy_identityless and self._gate.identity_value(

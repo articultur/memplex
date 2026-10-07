@@ -1341,7 +1341,8 @@ class PostgresMemoryStore:
             )
 
     def persist_paragraphs(
-        self, paragraphs: list, *, trust_tier: int, source_hint: str
+        self, paragraphs: list, *, trust_tier: int, source_hint: str,
+        authorization: AuthorizationContext | None = None, visibility: str = "workspace",
     ) -> None:
         """ADR-013 Stage 2 raw layer on PostgreSQL (B3): upsert verbatim
         paragraphs into ``memplex_paragraphs``.
@@ -1356,6 +1357,8 @@ class PostgresMemoryStore:
         from memplex.models.paragraph import persisted_paragraph_id
 
         context = self._authorization_context()
+        if authorization is not None and authorization != context:
+            raise PermissionError("paragraph identity must match the scoped store")
         now = datetime.now(UTC)
         with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
             for para in paragraphs:
@@ -1365,7 +1368,7 @@ class PostgresMemoryStore:
                 row_id = persisted_paragraph_id(
                     source_hint, getattr(para, "id", ""), raw_text
                 )
-                identity = self._row_identity_values(context)
+                identity = self._row_identity_values(context, visibility=visibility)
                 cur.execute(
                     """
                     INSERT INTO memplex_paragraphs

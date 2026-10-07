@@ -599,8 +599,19 @@ class AgentMemoryRuntime:
         # Extract each speaker's content as its own paragraph. Transport
         # identity belongs to the trusted write boundary, not the first
         # sentence that a rule-based Fact extractor will interpret.
-        body = f"{payload['user']}\n\n{payload['assistant']}"
-        self.write_text(body, source_type="observation", visibility=visibility)
+        if self.service._config.llm.factual_capture:
+            # Trusted role/time stay outside natural-language evidence. A model
+            # cannot promote assistant speculation to a user-authored assertion.
+            for role in ("user", "assistant"):
+                if payload[role]:
+                    self.write_text(
+                        payload[role], source_type="observation", visibility=visibility,
+                        reference_datetime=datetime.fromisoformat(payload["observed_at"]),
+                        author_role=role,
+                    )
+        else:
+            body = f"{payload['user']}\n\n{payload['assistant']}"
+            self.write_text(body, source_type="observation", visibility=visibility)
         self._capture_observation(payload)
 
     def write_text(
@@ -609,6 +620,8 @@ class AgentMemoryRuntime:
         *,
         source_type: str = "text",
         visibility: str = DEFAULT_MEMORY_VISIBILITY,
+        reference_datetime: datetime | None = None,
+        author_role: str | None = None,
     ) -> ExtractedData:
         """Write text through the runtime's identity and visibility boundary."""
 
@@ -619,6 +632,8 @@ class AgentMemoryRuntime:
             source_type=source_type,
             visibility=selected_visibility,
             authorization=self.authorization_context,
+            reference_datetime=reference_datetime,
+            author_role=author_role,
         )
         self._stamp_captured_memories(
             result.functions + result.facts + result.preferences,

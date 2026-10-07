@@ -1,6 +1,7 @@
 """Source types: SourceType, SourceDocument."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
@@ -21,3 +22,7 @@ class SourceDocument:
     url: str | None = None
     vision: dict | None = None
     source_type: SourceType = SourceType.WIKI
+
+    # Trusted caller metadata; never accepted from model-generated payloads.
+    reference_datetime: datetime | None = None
+    author_role: str | None = None

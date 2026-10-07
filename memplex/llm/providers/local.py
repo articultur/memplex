@@ -110,3 +110,17 @@ class LocalProvider:
     async def complete_json(self, prompt: str) -> dict:
         """Complete and parse response as JSON."""
         return await self._raw_complete_json(prompt)
+
+    async def complete_factual_json(self, prompt: str, *, timeout_seconds: float) -> dict:
+        """Capture-only strict JSON transport; explicit deadline and no SDK retries."""
+        client = self._client.with_options(timeout=timeout_seconds, max_retries=0)
+        response = await client.chat.completions.create(
+            model=self._model, max_tokens=self._max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.choices[0].message.content or ""
+        from memplex.llm.factual_capture import MAX_PAYLOAD_CHARS
+
+        if len(text) > MAX_PAYLOAD_CHARS:
+            raise ValueError("factual capture response exceeds limit")
+        return json.loads(text)

@@ -696,7 +696,9 @@ class MemplexService:
         )
 
         kind = getattr(source, "type", "text") or "text"
-        if kind == "url":
+        if source.author_role == "assistant":
+            tier = 1
+        elif kind == "url":
             tier = TRUST_TIER_EXTERNAL
         elif kind == "file":
             tier = TRUST_TIER_DEFAULT
@@ -1204,26 +1206,25 @@ class MemplexService:
     #  HyDE
     # ════════════════════════════════════════════════════════════════
 
-    def _augment_with_facts(self, content: str) -> str:
-        """Append retain()-style extracted facts to capture content (best-effort).
+    def _augment_with_facts(
+        self, extracted: ExtractedData, source: SourceDocument,
+        context: AuthorizationContext, *, store: Any, visibility: str,
+    ) -> tuple[str, ...]:
+        """Persist independent low-trust candidates after original evidence commits."""
+        from memplex.factual_capture import capture_derived_facts
 
-        Runs :meth:`LLMEnhancer.factualize` in a worker thread (same
-        isolation pattern as ``_compute_hyde_vector``); failures or empty
-        results leave *content* unchanged.
-        """
-        if self._llm is None:
-            return content
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                facts = pool.submit(
-                    asyncio.run, self._llm.factualize(content)
-                ).result(timeout=10.0)
-        except Exception as exc:  # noqa: BLE001 - logged degradation path
-            logger.debug("factual capture failed, keeping original content: %s", exc)
-            return content
-        if not facts:
-            return content
-        return content + "\n\nExtracted facts:\n" + "\n".join(f"- {fact}" for fact in facts)
+        derived, receipt = capture_derived_facts(
+            extracted, source, context, store=store, authorization=self._auth,
+            enhancer=self._llm, config=self._config.llm, visibility=visibility,
+        )
+        extracted.factual_capture = receipt
+        self.scan_nodes_before_persistence(derived)
+        ids = self._persist_typed_nodes(ExtractedData(facts=derived), store=store, supersede=False)
+        extracted.facts.extend(derived)
+        receipt["accepted"] = len(ids)
+        if len(ids) != len(derived):
+            receipt["status"] = "persistence_failure"
+        return ids
 
     def _compute_hyde_vector(self, text: str) -> Vector | None:
         """Generate a HyDE (Hypothetical Document Embedding) vector.
@@ -1281,22 +1282,13 @@ class MemplexService:
         #    Claude Code hook runner which already stripped these.
         from memplex.privacy import strip_private_tags
 
-        if source.content:
-            source.content = strip_private_tags(source.content)
-
-        # 0b. retain()-style factual capture (opt-in): when a real LLM is
-        # available and ``llm.factual_capture`` is enabled, self-contained
-        # temporally-normalised facts are appended to the document content
-        # so the rule-based extractor stores them verbatim as typed nodes.
-        if (
-            source.content
-            and self._llm is not None
-            and self._config.llm.factual_capture
-        ):
-            source.content = self._augment_with_facts(source.content)
-
+        # SourceDocument belongs to the caller. Privacy stripping and source
+        # namespacing operate on a copy, and model output never enters it.
+        source = replace(source, content=strip_private_tags(source.content) if source.content else source.content)
+        factual_capture = self._config.llm.factual_capture
+        original_source = source
         capture = source.type == "observation"
-        if capture:
+        if capture and not factual_capture:
             source = replace(source, type=capture_source_hint(context))
 
         # 1. CoreEngine: full extraction pipeline.  PostgreSQL graph-edge
@@ -1304,12 +1296,20 @@ class MemplexService:
         # facade as persistence instead of consulting the shared base store.
         engine = self._engine if store is self.store else CoreEngine(store=store)
         extracted = engine.extract(source)
-        tier = self._bind_trust_tiers(extracted, source)
+        if factual_capture:
+            from memplex.factual_capture import scope_evidence
+
+            source = scope_evidence(extracted, source, context, visibility=visibility)
+        tier = self._bind_trust_tiers(extracted, original_source)
 
         # Identity must be bound before any typed-node store write, graph
         # merge, or background work observes an extracted memory.
         self._bind_extracted_identity(extracted, context, visibility=visibility)
-        if capture:
+        if factual_capture:
+            for node in [*extracted.functions, *extracted.facts, *extracted.preferences]:
+                node.provenance["author_role"] = source.author_role or "unknown"
+                node.provenance["capture_input"] = "factual_capture_v1"
+        if capture or factual_capture:
             scope_captured_data(extracted)
 
         # 1b. Scan all extracted typed nodes before any persistence path.
@@ -1322,7 +1322,9 @@ class MemplexService:
         #     "I prefer ...") were extracted and then silently dropped,
         #     making them unrecallable. Duck-typed: backends without the
         #     optional typed APIs skip with a debug trace.
-        persisted_ids = list(self._persist_typed_nodes(extracted, store=store))
+        persisted_ids = list(self._persist_typed_nodes(
+            extracted, store=store, supersede=source.author_role != "assistant",
+        ))
 
         # 1c2. ADR-013 Stage 2: persist the verbatim raw-text layer so
         #      source_paragraphs references resolve and retrieval has the
@@ -1334,10 +1336,12 @@ class MemplexService:
         ) not in {"0", "false", "False"}:
             persist_paragraphs = getattr(store, "persist_paragraphs", None)
             if callable(persist_paragraphs):
+                identity_options = {"authorization": context, "visibility": visibility} if factual_capture else {}
                 persist_paragraphs(
                     extracted.paragraphs,
                     trust_tier=tier,
                     source_hint=getattr(source, "type", "text") or "text",
+                    **identity_options,
                 )
                 from memplex.models.paragraph import persisted_paragraph_id
 
@@ -1362,6 +1366,11 @@ class MemplexService:
 
             # Invalidate graph builder cache so next write sees new data
             self._graph_builder.invalidate_cache()
+
+        if factual_capture:
+            persisted_ids.extend(self._augment_with_facts(
+                extracted, source, context, store=store, visibility=visibility,
+            ))
 
         # Hot candidates follow every foreground persistence phase. A scoped
         # committed read excludes failed nodes, unresolved merge aliases and
@@ -1400,7 +1409,7 @@ class MemplexService:
         return extracted
 
     def _persist_typed_nodes(
-        self, extracted: ExtractedData, *, store: Any = None,
+        self, extracted: ExtractedData, *, store: Any = None, supersede: bool = True,
     ) -> tuple[str, ...]:
         """Persist extracted Fact / Preference nodes through the store's
         optional typed APIs.
@@ -1430,7 +1439,7 @@ class MemplexService:
                     kind,
                 )
                 continue
-            if kind == "fact":
+            if kind == "fact" and supersede:
                 self._supersede_contradicted_facts_batch(nodes, store)
             for node in nodes:
                 try:
@@ -1522,7 +1531,9 @@ class MemplexService:
                 new_fact.valid_from = temporal.now_iso()
             superseded = temporal.supersede_contradicted(
                 new_fact,
-                (old_fact for old_fact in existing if capture_scopes_match(new_fact, old_fact)),
+                (old_fact for old_fact in existing if capture_scopes_match(new_fact, old_fact)
+                 and not (new_fact.provenance.get("capture_input") == "factual_capture_v1"
+                          and new_fact.object_ == old_fact.object_)),
             )
             for old_fact in superseded:
                 try:
@@ -1582,6 +1593,8 @@ class MemplexService:
         *,
         visibility: str = "workspace",
         authorization: AuthorizationContext | None = None,
+        reference_datetime: datetime | None = None,
+        author_role: str | None = None,
     ) -> ExtractedData:
         """Convenience: write raw text content.
 
@@ -1602,6 +1615,8 @@ class MemplexService:
             type=source_type,
             content=text,
             source_type=SourceType.WIKI,
+            reference_datetime=reference_datetime,
+            author_role=author_role,
         )
         return self.write(source, visibility=visibility, authorization=context)
 
@@ -1628,6 +1643,9 @@ class MemplexService:
         # because ``_require_authorization`` rejects absent credentials.
         if authorization is None and self._is_local_development_context(context):
             node = self._typed_lookup_for(context).get(memory_id)
+            if ((getattr(node, "provenance", {}) or {}).get("extraction") == "factual_capture_v1"
+                    and not self._is_node_visible(node, context)):
+                return None
         else:
             node = self._visible_node(memory_id, context)
         return node if node is None or self.is_safe_for_model(node) else None
@@ -1682,11 +1700,10 @@ class MemplexService:
             return []
         try:
             facts = list(list_fn(limit=limit))
-            visible = facts if (
-                authorization is None and self._is_local_development_context(context)
-            ) else [
-                fact for fact in facts if self._is_node_visible(fact, context)
-            ]
+            compatibility = authorization is None and self._is_local_development_context(context)
+            visible = [fact for fact in facts if (
+                compatibility and fact.provenance.get("extraction") != "factual_capture_v1"
+            ) or self._is_node_visible(fact, context)]
             safe = [fact for fact in visible if self.is_safe_for_model(fact)]
             if include_invalidated:
                 return safe
