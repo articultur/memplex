@@ -54,3 +54,25 @@ def factual_sources_match(node: Any, lookup: Callable[[str], Any]) -> bool:
     except Exception:  # noqa: BLE001 - uncertain or corrupt evidence fails closed
         return False
     return True
+
+
+def capture_audit_provenance(node: Any) -> dict[str, str]:
+    """Retain capture audit data, never caller identity or authentication claims.
+
+    PostgreSQL rebinds write identity even for nodes already bound by the
+    service. These fields describe inference and source evidence; they cannot
+    supply a tenant, principal, agent, session, grant, or trust boundary.
+    Unmarked legacy records keep the existing provenance-reset behavior.
+    """
+    provenance = getattr(node, "provenance", None)
+    if not isinstance(provenance, dict) or not (
+        provenance.get("extraction") == "factual_capture_v1"
+        or provenance.get("capture_input") == "factual_capture_v1"
+    ):
+        return {}
+    allowed = {
+        "extraction", "authority", "author_role", "reference_datetime",
+        "evidence", "source_snapshots", "capture_input",
+    }
+    return {key: value for key, value in provenance.items()
+            if key in allowed and type(value) is str}

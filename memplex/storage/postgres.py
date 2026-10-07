@@ -631,7 +631,8 @@ class PostgresMemoryStore:
         Legacy unscoped development calls retain their historical payload
         semantics, while the relational columns still receive the auditable
         local-development identity.  Authenticated store writes canonicalize
-        every identity and provenance field to the trusted context.  Ingress
+        every identity and authentication field to the trusted context. Capture
+        audit metadata survives this second bind without conferring authority. Ingress
         boundaries reject forged payload claims before reaching the store;
         canonicalization here also permits a workspace member to persist an
         update loaded from another member without preserving the prior owner.
@@ -642,12 +643,16 @@ class PostgresMemoryStore:
             # Validate session prerequisites before the first lookup or write;
             # relying on RLS alone is insufficient for bypass-RLS owners.
             self._row_identity_values(context, node, visibility=visibility)
+            from memplex.factual_lineage import capture_audit_provenance
+
+            capture_audit = capture_audit_provenance(node)
             bind_node_identity(
                 node,
                 context,
                 visibility=visibility,
                 reject_conflicts=False,
             )
+            node.provenance.update(capture_audit)
         return context
 
     @staticmethod
