@@ -208,6 +208,71 @@ class Function(MemoryNode):
         if not self.updated_at:
             self.updated_at = self.created_at
 
+    def _matches_content_name(self, body: list[str]) -> bool:
+        """Recognize a legacy raw-text title even when role grouping reordered it."""
+        if not self.name or len(self.name) > 50:
+            return False
+        if any(self.name == text[:50] for text in body):
+            return True
+        remaining = self.name
+        candidates = sorted((text for text in body if text), key=len, reverse=True)
+        while remaining:
+            match = next((text for text in candidates if remaining.startswith(text)), None)
+            if match is None:
+                # Only the extractor's full-length title may cut a sentence.
+                return len(self.name) == 50 and any(text.startswith(remaining) for text in candidates)
+            remaining = remaining[len(match):].lstrip()
+        return True
+
+    def update_role(self, role: str, new_value: str) -> str | None:
+        """Replace one current role while retaining its deprecated evidence.
+
+        Independent active values in other roles remain untouched. Content-
+        derived display names follow the new body; normalized identity, raw
+        source links and provenance are deliberately not rewritten.
+        """
+        from datetime import datetime
+
+        if role not in {"trigger", "condition", "action", "benefit"}:
+            raise ValueError("Unknown role")
+        if type(new_value) is not str:
+            raise TypeError("new_value must be a string")
+        values = getattr(self, role)
+        active = [value for value in values if value.status == "active"]
+        old_value = active[0].desc if active else None
+        body = [
+            value.desc
+            for field in (self.trigger, self.condition, self.action, self.benefit)
+            for value in field if value.status == "active"
+        ]
+        # Older records predate the explicit builder marker. Match only the
+        # known generated-title shape, retaining unrelated/custom headings.
+        name_origin = self.attributes.get("memplex_name_from_content")
+        content_name = name_origin == "true" or (
+            name_origin is None and self._matches_content_name(body)
+        )
+        for value in active:
+            value.status = "deprecated"
+        now = datetime.now(UTC)
+        values.insert(0, FieldValue(
+            desc=new_value, sources=["manual"], source_method="manual",
+            weight=1.0, created_at=now,
+        ))
+        if content_name:
+            self.attributes["memplex_name_from_content"] = "true"
+            self.name = " ".join(
+                value.desc
+                for field in (self.trigger, self.condition, self.action, self.benefit)
+                for value in field if value.status == "active"
+            )[:50]
+        previous_roles = self.attributes.get("memplex_role_updates", "")
+        roles = set(previous_roles.split(",")) if isinstance(previous_roles, str) else set()
+        roles = (roles | {role}) & {"trigger", "condition", "action", "benefit"}
+        self.attributes["memplex_role_updates"] = ",".join(sorted(roles))
+        self.version += 1
+        self.updated_at = now.isoformat()
+        return old_value
+
     def to_dict(self) -> dict[str, Any]:
         """Standard serialization covering every field.
 

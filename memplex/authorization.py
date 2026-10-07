@@ -88,6 +88,7 @@ class _RawParagraphView:
     """
 
     __slots__ = (
+        "context_historical",
         "id",
         "memory_type",
         "name",
@@ -121,6 +122,9 @@ class _RawParagraphView:
         self.namespace = dict(row.get("namespace") or {})
         self.trust_tier = int(row.get("trust_tier", 3))
         self.raw_text = row.get("raw_text", "")
+        # Transient read projection only; raw storage and ACL lineage remain
+        # intact when an explicit Function edit makes this body historical.
+        self.context_historical = bool(row.get("context_historical", False))
 
     def to_dict(self) -> dict[str, Any]:
         """Expose all projected fields to the existing bounded safety scan."""

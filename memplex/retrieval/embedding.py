@@ -559,20 +559,25 @@ class EmbeddingService:
 
         if strategy == EmbeddingStrategy.SEMANTIC:
             parts = [func.name, func.domain or ""]
-            if func.trigger:
-                parts.append(f"触发: {'; '.join(fv.desc for fv in func.trigger[:2])}")
-            if func.action:
-                parts.append(f"动作: {'; '.join(fv.desc for fv in func.action[:2])}")
+            triggers = [fv.desc for fv in func.trigger if fv.status == "active"][:2]
+            actions = [fv.desc for fv in func.action if fv.status == "active"][:2]
+            if triggers:
+                parts.append(f"触发: {'; '.join(triggers)}")
+            if actions:
+                parts.append(f"动作: {'; '.join(actions)}")
             return " ".join(parts)
 
         # FULL
         parts = [func.name, func.domain or ""]
         for fv in func.trigger:
-            parts.append(fv.desc)
+            if fv.status == "active":
+                parts.append(fv.desc)
         for fv in func.action:
-            parts.append(fv.desc)
+            if fv.status == "active":
+                parts.append(fv.desc)
         for fv in func.benefit:
-            parts.append(fv.desc)
+            if fv.status == "active":
+                parts.append(fv.desc)
         return " ".join(parts)
 
     def refresh(self, func_id: str) -> None:

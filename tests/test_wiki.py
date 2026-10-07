@@ -597,6 +597,82 @@ async def test_generate_entity_page_calls_llm():
     assert out == "wiki page text"
 
 
+def _function_with_role_history():
+    node = _func()
+    for role in ("trigger", "condition", "action", "benefit"):
+        setattr(node, role, [
+            FieldValue(f"OBSOLETE-{role}", status="deprecated"),
+            FieldValue(f"DISPUTED-{role}", status="disputed"),
+            FieldValue(f"CURRENT-{role}-ONE"),
+            FieldValue(f"CURRENT-{role}-TWO"),
+            FieldValue(f"CURRENT-{role}-THREE"),
+        ])
+    return node
+
+
+@pytest.mark.parametrize("kind", ["entity", "summary", "concept", "community"])
+async def test_wiki_generation_uses_current_values_before_prompt_limits(kind):
+    class RecordingLLM:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete(self, prompt):
+            self.prompts.append(prompt)
+            return "generated"
+
+        async def complete_json(self, prompt):
+            self.prompts.append(prompt)
+            return {"summary": "generated"}
+
+    llm = RecordingLLM()
+    generator = LLMWikiGenerator(llm_enhancer=_StubEnhancer(llm))
+    node = _function_with_role_history()
+    before = node.to_dict()
+    if kind == "entity":
+        await generator.generate_entity_page(node)
+    elif kind == "summary":
+        await generator.generate_summary([node])
+    elif kind == "concept":
+        await generator.generate_concept_page("auth", [node])
+    else:
+        await generator.generate_community_page([node], 1)
+    prompt, = llm.prompts
+    assert "OBSOLETE" not in prompt
+    assert "DISPUTED" not in prompt
+    assert "CURRENT-action-ONE" in prompt
+    assert ("CURRENT-action-TWO" in prompt) is (kind != "community")
+    assert ("CURRENT-action-THREE" in prompt) is (kind in {"entity", "summary"})
+    if kind == "entity":
+        for role in ("trigger", "condition", "benefit"):
+            assert f"CURRENT-{role}-ONE" in prompt
+    assert node.to_dict() == before
+
+
+def test_wiki_compilation_omits_inactive_history_without_mutating_it(tmp_path):
+    node = _function_with_role_history()
+    before = node.to_dict()
+    compiler = WikiCompiler(store=_StubStore([node]), wiki_dir=tmp_path)
+    page = compiler.compile_function(node)
+    assert "OBSOLETE" not in page.content
+    assert "DISPUTED" not in page.content
+    for role in ("trigger", "condition", "action", "benefit"):
+        assert f"CURRENT-{role}-ONE" in page.content
+        assert f"CURRENT-{role}-TWO" in page.content
+    assert node.to_dict() == before
+    assert compiler._field_section("Action", [FieldValue("old", status="deprecated")]) == []
+
+
+def test_wiki_fallback_search_uses_current_roles_and_filters_before_summary_limit(tmp_path):
+    node = _function_with_role_history()
+    compiler = WikiCompiler(store=_StubStore([node]), wiki_dir=tmp_path)
+    assert compiler.search("OBSOLETE") == []
+    assert compiler.search("DISPUTED") == []
+    for role in ("trigger", "condition", "action", "benefit"):
+        result, = compiler.search(f"CURRENT-{role}-ONE")
+        assert result.func_id == node.id
+        assert result.summary == "CURRENT-action-ONE; CURRENT-action-TWO"
+
+
 async def test_update_cross_references_injects_links_and_sep():
     llm = _StubLLM(json_result={"related": [{"id": "other_page", "reason": "related"}]})
     gen = LLMWikiGenerator(llm_enhancer=_StubEnhancer(llm))

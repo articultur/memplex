@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -217,8 +217,15 @@ def _func_to_json(func: Function) -> dict:
     tsvector column (``trigger_text`` / ``action_text`` are PG-only keys,
     ignored by :meth:`Function.from_dict`)."""
     d = func.to_dict()
-    d["trigger_text"] = " ".join(fv.desc for fv in func.trigger)
-    d["action_text"] = " ".join(fv.desc for fv in func.action)
+    # The frozen generated tsvector indexes these two derived JSON keys.
+    # Include qualifiers/results alongside their corresponding roles so all
+    # current fields remain searchable without rewriting the schema.
+    d["trigger_text"] = " ".join(
+        fv.desc for fv in (*func.trigger, *func.condition) if fv.status == "active"
+    )
+    d["action_text"] = " ".join(
+        fv.desc for fv in (*func.action, *func.benefit) if fv.status == "active"
+    )
     return d
 
 
@@ -754,7 +761,9 @@ class PostgresMemoryStore:
             return None
         try:
             text = f"{func.name} {func.domain or ''} " + " ".join(
-                fv.desc for fv in (func.trigger + func.action)
+                fv.desc
+                for role in (func.trigger, func.condition, func.action, func.benefit)
+                for fv in role if fv.status == "active"
             )
             vec = self._embedder.embed(text)
             if vec and len(vec) == self._vector_dim:
@@ -768,6 +777,8 @@ class PostgresMemoryStore:
         cur: Any,
         func: Function,
         relational_identity: tuple[str, str, str, str, str, str] | None = None,
+        *,
+        clear_failed_embedding: bool = False,
     ) -> None:
         """Upsert *func* using the caller-owned transaction cursor.
 
@@ -815,6 +826,23 @@ class PostgresMemoryStore:
             )
             self._require_returning(cur, (func.id,))
         else:
+            # An explicit edit must never keep the previous text's vector
+            # when regeneration fails. A disabled writer can still share a
+            # vector-enabled schema with another process, so consult the
+            # actual column rather than equating disabled policy with no
+            # column. Ordinary metadata/merge writes retain their behavior.
+            has_embedding_column = self._vector_dim > 0
+            if clear_failed_embedding and not has_embedding_column:
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute "
+                    "WHERE attrelid = 'memplex_functions'::regclass "
+                    "AND attname = 'embedding' AND attnum > 0 AND NOT attisdropped)"
+                )
+                column_row = cur.fetchone()
+                has_embedding_column = bool(column_row and column_row[0] is True)
+            clear_embedding_sql = (
+                "embedding = NULL," if clear_failed_embedding and has_embedding_column else ""
+            )
             cur.execute(
                 f"""
                 INSERT INTO memplex_functions
@@ -824,6 +852,7 @@ class PostgresMemoryStore:
                 ON CONFLICT (tenant_id, id) DO UPDATE SET
                     data = EXCLUDED.data,
                     updated_at = EXCLUDED.updated_at,
+                    {clear_embedding_sql}
                     owner_subject = EXCLUDED.owner_subject,
                     workspace = EXCLUDED.workspace,
                     visibility = EXCLUDED.visibility,
@@ -915,6 +944,40 @@ class PostgresMemoryStore:
                 else "Merged fields from source"
             )
             self._record_changelog(cur, node.id, event_type, description, source, node=node)
+
+    def update_function_role(
+        self,
+        memory_id: str,
+        role: str,
+        new_value: str,
+        *,
+        before_persist: Callable[[Function], None] | None = None,
+    ) -> tuple[Function, str | None]:
+        """Edit one role on the locked canonical row, retaining its history.
+
+        Patching the locked row rather than replacing a caller snapshot
+        preserves concurrent edits to other roles.  The Function, current
+        search projection, embedding and audit entry share one transaction.
+        """
+        context = self._authorization_context()
+        with self._function_write_transaction(context, "update_function_role") as cur:
+            locked = self._locked_function_by_id(cur, memory_id, context)
+            if locked is None:
+                raise PostgresWriteRejected(_PG_WRITE_NO_AUTHORIZED_ROW)
+            canonical, identity = locked
+            # Keep the existing shared-workspace writer-attribution contract.
+            # Private/session records retain the locked identity and grants.
+            if canonical.visibility == "workspace":
+                self._write_identity(canonical)
+                identity = self._row_identity_values(context, canonical)
+            old_value = canonical.update_role(role, new_value)
+            if before_persist is not None:
+                before_persist(canonical)
+            self._upsert_function(cur, canonical, identity, clear_failed_embedding=True)
+            self._record_changelog(
+                cur, canonical.id, "updated", f"Updated {role}", None, node=canonical,
+            )
+        return canonical, old_value
 
     @staticmethod
     def _is_unique_violation(exc: BaseException) -> bool:
@@ -1780,19 +1843,31 @@ class PostgresMemoryStore:
         ``get_paragraph`` intentionally retains its payload-only CRUD shape.
         This committed projection reads body and ACL columns together, and
         never promotes payload claims or the caller's identity to row proof.
+        Linked evidence stays available to lineage checks; a SQL-derived
+        historical flag prevents explicitly edited sources becoming current
+        model context, including cached raw IDs from another process.
         """
         context = self._authorization_context()
         with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
             cur.execute(
                 "SELECT id, data, tenant_id, owner_subject, workspace, visibility, "
-                "source_agent, source_session FROM memplex_paragraphs WHERE id = %s AND "
+                "source_agent, source_session, "
+                "EXISTS (SELECT 1 FROM memplex_functions current_function WHERE "
+                + _acl_scope_sql("current_function")
+                + " AND current_function.tenant_id = memplex_paragraphs.tenant_id"
+                + " AND jsonb_typeof(current_function.data->'source_paragraphs') = 'array'"
+                + " AND current_function.data->'source_paragraphs' ? memplex_paragraphs.id"
+                + " AND coalesce(current_function.data->'attributes'->>'memplex_role_updates', '') <> '')"
+                + " AS context_historical FROM memplex_paragraphs WHERE id = %s AND "
                 + _acl_scope_sql("memplex_paragraphs"),
                 (para_id,),
             )
             row = cur.fetchone()
-        if row is None or len(row) != 8:
+        if row is None or len(row) != 9:
             return None
-        row_id, payload, tenant, owner, workspace, visibility, agent, session = row
+        row_id, payload, tenant, owner, workspace, visibility, agent, session, historical = row
+        if type(historical) is not bool:
+            return None
         if not isinstance(row_id, str) or not row_id or row_id != para_id:
             return None
         # Every identity column is TEXT NOT NULL in 0007. An invalid
@@ -1818,7 +1893,7 @@ class PostgresMemoryStore:
             id=row_id, tenant_id=tenant, owner=owner, owner_subject=owner,
             owner_subject_id=owner, workspace_id=workspace, visibility=visibility,
             origin_session=session, provenance={"agent_id": agent} if agent else {},
-            namespace={}, source_type=SourceType.WIKI,
+            namespace={}, source_type=SourceType.WIKI, context_historical=historical,
         )
         return node
 

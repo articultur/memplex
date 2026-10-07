@@ -162,7 +162,7 @@ def current_node_text(node: Any) -> str:
         fields.extend(
             value.desc
             for role in (node.trigger, node.condition, node.action, node.benefit)
-            for value in role
+            for value in role if value.status == "active"
         )
         return _join_text(fields, "\n")
     if isinstance(node, Fact):
@@ -172,6 +172,8 @@ def current_node_text(node: Any) -> str:
     if isinstance(node, Observation):
         return _join_text([node.event, node.context]) or _join_text([node.name])
     if getattr(node, "memory_type", None) == "paragraph":
+        if getattr(node, "context_historical", False):
+            return ""
         return _join_text([node.raw_text])
     return ""
 
