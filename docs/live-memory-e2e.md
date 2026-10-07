@@ -8,7 +8,11 @@ secrets. It is separate from automatic pull-request CI.
 
 ## What a pass proves
 
-Four independent live capture turns produce assistant acknowledgments. The host
+Four independent live capture turns produce assistant acknowledgments. Capture
+prompts state that the fixture contains no real secrets or credentials and that
+the host application handles storage. The session-scoped fixture uses an
+ordinary fictional Juniper display label; session privacy is still enforced by
+MCP metadata and actual identities, never by wording in the label. The host
 then submits the actual user/assistant turns through `memory_turn_end`. Thirteen
 fresh live reader requests receive only a neutral question and the actual
 `memory_turn_begin` context. They never receive the expected answer, original
@@ -126,3 +130,19 @@ model refusal/truncation, transport failure, absent usage, timeout, incomplete
 case set, or offline test-double run is never a live pass. Offline tests run the
 real MCP subprocess and storage with a deterministic model-boundary double;
 they validate the harness, not GLM-5.3 behavior.
+
+
+### First live attempt (preserved)
+
+[Run 37588724909](https://github.com/articultur/memplex/actions/runs/37588724909)
+at commit `c001c83e25e92a24e31ef62575183a19e1fe4561` stopped after eight
+provider calls with `capture_ack_format`. The first five cases passed; call
+eight refused the fictional `MXPRIVATE-...` fixture before its
+`memory_turn_end` write. The remaining seven cases were not executed. This
+was not a complete pass or evidence of an isolation/deletion failure.
+Provider-reported usage was 756 input and 1,938 output tokens.
+
+The revised fixture uses `MXJUNIPER-...` and explicitly describes host-owned
+storage of nonsecret synthetic data. Exact ACK validation, ACL metadata,
+reader isolation, scoring, and workload limits are unchanged. A later run is
+separate evidence and does not change the original result.

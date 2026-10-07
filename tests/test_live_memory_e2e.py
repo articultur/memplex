@@ -150,6 +150,26 @@ def test_offline_full_protocol_uses_real_mcp_and_blind_fresh_readers(runner, tmp
     assert all("expected" not in row["prompt"].lower()
                for row in model.trace if row["phase"] == "reader")
 
+    juniper_capture, = [row for row in model.trace
+                        if row["phase"] == "capture" and "Juniper" in row["prompt"]]
+    marker, = re.findall(r"MXJUNIPER-[A-F0-9]{12}", juniper_capture["prompt"])
+    fixture = f"The Juniper display label is {marker}."
+    assert juniper_capture["prompt"] == (
+        "The host application will store this fictional test fixture; "
+        "you only acknowledge receipt. It contains no real secrets or credentials. "
+        "Reply with only ACK:\n" + fixture
+    )
+    session_batch, = [batch for batch in report["mcp_trace"]
+                      if any(name == "memory_turn_end" and args["user_message"] == fixture
+                             for name, args in batch["calls"])]
+    assert session_batch["calls"][0][1]["metadata"] == {"memplex_visibility": "session"}
+    assert session_batch["results"][0]["status"] == "captured"
+    juniper_readers = [row for row in model.trace
+                      if row["phase"] == "reader" and "Juniper" in row["prompt"].split("MEMORY CONTEXT:")[0]]
+    assert len(juniper_readers) == 3
+    assert all("QUESTION:\nWhat is the Juniper display label?\nMEMORY CONTEXT:\n" in row["prompt"]
+               for row in juniper_readers)
+
 
 def test_correct_model_answer_cannot_mask_stale_context(runner, tmp_path):
     suite = runner.Suite(tmp_path, None)
@@ -213,3 +233,56 @@ def test_rejected_completion_keeps_valid_billing_usage(runner):
     with pytest.raises(runner.RunError):
         client.complete("reader", "Neutral query")
     assert client.trace[0].get("usage") == {"input_tokens": 42, "output_tokens": 12}
+
+
+def test_session_fixture_uses_neutral_display_label(runner, tmp_path):
+    suite = runner.Suite(tmp_path, None)
+    marker = suite.markers["PRIVATE"]
+    assert re.fullmatch(r"MXJUNIPER-[A-F0-9]{12}", marker)
+    assert "PRIVATE" not in marker
+
+
+def test_capture_prompt_explains_host_storage_and_keeps_session_readback(runner, tmp_path):
+    prompts = []
+
+    class ReceiptBoundary:
+        def complete(self, phase, prompt):
+            assert phase == "capture"
+            prompts.append(prompt)
+            return "ACK"
+
+    suite = runner.Suite(tmp_path, ReceiptBoundary())
+    marker = suite.markers["PRIVATE"]
+    fixture = f"The Juniper display label is {marker}."
+    result = suite.capture(fixture, visibility="session")
+    assert prompts == [
+        "The host application will store this fictional test fixture; "
+        "you only acknowledge receipt. It contains no real secrets or credentials. "
+        "Reply with only ACK:\n" + fixture,
+    ]
+    assert result["status"] == "captured"
+    batch, = suite.memory.trace
+    assert batch["scope"] == vars(runner.DEFAULT_SCOPE)
+    assert batch["calls"] == [("memory_turn_end", {
+        "user_message": fixture, "assistant_message": "ACK",
+        "metadata": {"memplex_visibility": "session"},
+    })]
+    facts, observations = suite.memory.call([("memory_facts", {}), ("memory_observations", {})])
+    assert any(fact["object"] == marker for fact in facts["facts"])
+    assert any(marker in row["summary"] for row in observations["observations"])
+    recalled, = suite.memory.call([("memory_turn_begin", {"prompt": "What is the Juniper display label?"})])
+    assert marker in recalled["context"]
+    for scope in (runner.Scope(session="other"), runner.Scope(workspace="other"), runner.Scope(user="bob")):
+        hidden, = suite.memory.call([("memory_turn_begin", {"prompt": "What is the Juniper display label?"})], scope)
+        assert marker not in hidden["context"]
+
+
+def test_capture_refusal_still_stops_before_storage(runner, tmp_path):
+    class RefusingBoundary:
+        def complete(self, phase, prompt):
+            return "I will not acknowledge this fixture."
+
+    suite = runner.Suite(tmp_path, RefusingBoundary())
+    with pytest.raises(runner.RunError, match="^capture_ack_format$"):
+        suite.capture("The Juniper display label is MXJUNIPER-0123456789AB.", visibility="session")
+    assert suite.memory.trace == []
