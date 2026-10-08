@@ -493,9 +493,11 @@ class CoreEngine:
     ) -> list[Function]:
         """Use EntityAligner to merge duplicate Functions.
 
-        Functions whose id is in ``skip_ids`` (e.g. involved in a detected
-        conflict) are passed through unchanged and never merged.
+        Repeated occurrences of the same content identity are combined first.
+        Distinct identities in ``skip_ids`` (e.g. involved in a detected
+        conflict) remain separate and never undergo name-based merging.
         """
+        functions = self._coalesce_function_ids(functions)
         skip_ids = skip_ids or set()
         candidates = [f for f in functions if f.id not in skip_ids]
         if len(candidates) <= 1:
@@ -539,6 +541,25 @@ class CoreEngine:
 
         return result
 
+    def _coalesce_function_ids(self, functions: list[Function]) -> list[Function]:
+        """Combine source occurrences, never guess identity from a short ID.
+
+        The rule builder uses a truncated content digest for IDs. Require the
+        complete digest to match before merging evidence, and validate the
+        entire batch before mutating any Function. Opaque/vision IDs and hash
+        collisions retain fail-closed behavior rather than losing content.
+        """
+        groups: dict[str, list[Function]] = {}
+        for function in functions:
+            group = groups.setdefault(function.id, [])
+            if group and (
+                not re.fullmatch(r"[0-9a-f]{64}", function.content_hash or "")
+                or function.content_hash != group[0].content_hash
+            ):
+                raise ValueError("Extraction contains duplicate Function id without matching content hash")
+            group.append(function)
+        return [self._merge_function_fields(group) for group in groups.values()]
+
     def _merge_function_fields(self, functions: list[Function]) -> Function:
         """Merge FieldValues from multiple Functions into one."""
         if not functions:
@@ -548,11 +569,14 @@ class CoreEngine:
         for other in functions[1:]:
             # Merge each role field
             for role in ("trigger", "condition", "action", "benefit"):
-                existing_descs = {fv.desc for fv in getattr(canonical, role)}
+                existing_values = {fv.desc: fv for fv in getattr(canonical, role)}
                 for fv in getattr(other, role):
-                    if fv.desc not in existing_descs:
+                    if fv.desc not in existing_values:
                         getattr(canonical, role).append(fv)
-                        existing_descs.add(fv.desc)
+                        existing_values[fv.desc] = fv
+                    else:
+                        existing = existing_values[fv.desc]
+                        existing.sources = list(dict.fromkeys([*existing.sources, *fv.sources]))
 
             # Merge source_paragraphs
             for sp in other.source_paragraphs:
