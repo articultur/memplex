@@ -60,7 +60,7 @@ adds its own payload; Fact additionally carries its business-time interval.
 ## Capture write path
 
 Host runtimes call the service write boundary after a response. Ordinary
-`write()` strips explicit private blocks, optionally augments factual content,
+`write()` strips explicit private blocks from a copy of inline input,
 runs the extractor, binds authenticated identity before persistence, scans the
 extracted Function/Fact/Preference nodes, persists Fact and Preference nodes,
 then merges Functions and graph edges. Observation is not part of ordinary
@@ -80,6 +80,87 @@ remain best effort.
   Observation capture is a distinct authorized `add_observation()` path and
   its best-effort host hook failure handling must not be conflated with the
   ordinary Function/Fact/Preference write transaction.
+
+
+### Opt-in evidence-linked factual capture
+
+`llm.factual_capture` remains off by default. When enabled, the ordinary
+extractor first persists original paragraphs and rule-derived nodes. Separate
+model candidates never modify `SourceDocument.content`, its caller-owned hash,
+or the raw paragraph layer. File/URL acquisition still happens before evidence
+namespacing. The bounded model input excludes explicit private blocks.
+
+The internal `LLMEnhancer.factualize()` contract now takes `Evidence` objects
+and returns `FactualCaptureResult`, replacing its former list of generated
+sentences. Candidates contain `subject`, `predicate`, `object`, exact
+`evidence` paragraph IDs/quotes, and optional `valid_from`. Unknown fields,
+missing/nonmatching quotes, unsupported subjects/objects, conflicting same-slot
+candidates, excessive counts and oversized payloads invalidate the whole result.
+Quoted support establishes traceability, not semantic entailment: this is an
+inference contract, not proof of hallucination-free extraction or model quality.
+
+Accepted candidates become independent `Fact` rows, attributed
+`agent_inferred` at trust tier 1 and always rendered `trust=LOW`. They retain the
+original source type and role in metadata, real raw `source_paragraphs`, and
+raw-plus-typed derivation dependencies. They never supersede existing facts.
+Opt-in host capture separates user/assistant input and typed identities;
+assistant-authored rules cannot supersede user assertions. Exact repeated values
+on this opt-in path retain prior evidence. General semantic contradiction,
+out-of-order history reconciliation and automatic truth adjudication are outside
+this change.
+
+New raw rows receive actual write-boundary identity via optional
+`persist_paragraphs(authorization=..., visibility=...)` arguments. Lite stores
+these as optional validated JSON fields; legacy rows are neither adopted nor
+given caller identity on replay. PostgreSQL uses its existing scoped identity
+and ACL columns, rejects conflicting supplied authorization, and needs no schema
+migration. Raw IDs include full capture identity, visibility and speaker so
+replays cannot widen an earlier row. Both Lite persistence modes and current
+PostgreSQL readers must retain the new metadata.
+
+Each generated Fact pins semantic snapshots of its supporting rows. Direct
+reads, queries, hot candidates and prefetched contexts re-read current sources:
+deletion, ACL revocation, changed evidence, source expiration/supersession and
+source injection content withhold the derivation. The audit row remains stored.
+Read counters do not invalidate evidence. Older derivation types retain their
+existing lineage behavior. New or changed source content requires re-capture;
+this conservative rule does not re-infer the claim automatically.
+
+`SourceDocument.reference_datetime` / `write_text(reference_datetime=...)` is
+explicit caller metadata. The host uses the turn's actual `observed_at` for
+both speakers. An absent reference stays absent; no historical date is guessed
+from ingestion time. `valid_from` accepts only dates quoted explicitly, or
+`yesterday`/`today`/`tomorrow` grounded against the supplied reference. Day-level
+evidence becomes midnight UTC, not an invented time of day. Other relative-date
+arithmetic is unsupported. Record creation time remains separate.
+
+`ExtractedData.factual_capture` is an operational receipt. Status distinguishes
+`success`, valid empty `abstained`, `invalid`, `provider_failure`, `unavailable`,
+`timeout`, `source_unavailable`, and `persistence_failure`. It reports candidate
+and accepted counts plus provider-class attempt statuses. Invalid output can
+advance to the next configured provider; rule-only fallback is not a successful
+LLM extraction. Built-in capture transports require strict JSON, set a transport
+deadline and disable SDK retries; other completion APIs remain unchanged.
+
+The configured total extraction deadline defaults to 10 seconds (maximum 120),
+and candidate cap to 8 (maximum 64). A bounded daemon isolates even custom
+providers that block or swallow cancellation, with at most four outstanding
+calls. All storage remains on the foreground thread, so late model completion
+cannot write. Hard outer timeout may lose attempt details; in that case
+`attempts_complete=false` and `fallback_used=null`, never a false no-fallback
+claim. These receipts do not attest actual model identity, finish reason, token
+usage or billing. No paid/live model result is established by offline doubles.
+
+Implementation: [`factual_capture.py`](../memplex/factual_capture.py),
+[`llm/factual_capture.py`](../memplex/llm/factual_capture.py), and
+[`factual_lineage.py`](../memplex/factual_lineage.py). Regression contracts:
+[`test_factual_capture.py`](../tests/test_factual_capture.py),
+[`test_factual_capture_validation.py`](../tests/test_factual_capture_validation.py),
+[`test_factual_capture_lifecycle.py`](../tests/test_factual_capture_lifecycle.py),
+and the real-RLS cases in
+[`test_capture_recall_postgres.py`](../tests/test_capture_recall_postgres.py).
+The complete PostgreSQL/pgvector gate is required for this persistence change;
+offline or Lite tests are not a substitute.
 
 ## Recall retrieval path
 

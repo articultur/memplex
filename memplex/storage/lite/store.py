@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Final, cast
 
+from memplex.auth import AuthorizationContext, bind_node_identity
 from memplex.backup import (
     BackupArtifactWriter,
     BackupConfigurationError,
@@ -129,6 +130,8 @@ _PARAGRAPH_KEYS = {
     "premise_superseded",
     "observation_count",
     "last_observed_at",
+    "tenant_id", "owner_subject_id", "owner", "workspace_id", "visibility",
+    "origin_session", "provenance", "namespace",
 }
 # Every Nth commit pays the full double pre-durable decode audit even while
 # batching is not active, so a serializer regression cannot outlive an audit
@@ -440,6 +443,14 @@ def _validate_raw_paragraph(row: Any) -> dict:
         raise ValueError("invalid Lite paragraph id")
     if type(row.get("raw_text")) is not str:
         raise ValueError("invalid Lite paragraph raw_text")
+    for name in ("tenant_id", "owner_subject_id", "owner", "workspace_id", "visibility", "origin_session"):
+        if name in row and row[name] is not None and type(row[name]) is not str:
+            raise ValueError("invalid Lite paragraph identity")
+    for name in ("provenance", "namespace"):
+        if name in row and (type(row[name]) is not dict or any(
+            type(key) is not str or type(value) is not str for key, value in row[name].items()
+        )):
+            raise ValueError("invalid Lite paragraph provenance")
     row.setdefault("trust_tier", 3)
     row.setdefault("created_at", None)
     row.setdefault("source", "")
@@ -1176,7 +1187,8 @@ class LiteMemoryStore:
 
     @_with_writer_lock
     def persist_paragraphs(
-        self, paragraphs: list, *, trust_tier: int, source_hint: str
+        self, paragraphs: list, *, trust_tier: int, source_hint: str,
+        authorization: AuthorizationContext | None = None, visibility: str = "workspace",
     ) -> None:
         """Persist verbatim paragraphs into the raw layer (ADR-013 S2).
 
@@ -1190,6 +1202,15 @@ class LiteMemoryStore:
         :meth:`_enforce_tier2_paragraph_cap`).
         """
         self._reload_for_mutation()
+        identity: dict[str, Any] = {}
+        if authorization is not None:
+            # Only newly written rows gain actual write-boundary identity.
+            # Replay must never adopt or widen a legacy identity-less row.
+            bound = bind_node_identity(Fact(), authorization, visibility=visibility)
+            identity = {key: getattr(bound, key) for key in (
+                "tenant_id", "owner_subject_id", "owner", "workspace_id", "visibility",
+                "origin_session", "provenance", "namespace",
+            )}
         now = datetime.now(UTC).isoformat()
         for para in paragraphs:
             raw_text = (getattr(para, "raw_text", "") or "").strip()
@@ -1208,6 +1229,7 @@ class LiteMemoryStore:
                 existing["last_observed_at"] = now
                 continue
             self._paragraphs[row_id] = {
+                **identity,
                 "id": row_id,
                 "raw_text": raw_text,
                 "trust_tier": int(trust_tier),

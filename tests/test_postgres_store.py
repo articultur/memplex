@@ -5688,3 +5688,34 @@ def test_postgres_merge_field_values_enforces_max_values_per_field():
     merged = _merge_field_values(existing, incoming)
     assert len(merged) == Function.MAX_VALUES_PER_FIELD
     assert merged[-1].desc == f"existing-{Function.MAX_VALUES_PER_FIELD - 1}"
+
+
+@pytest.mark.parametrize("capture_kind", ["derived", "input"])
+def test_authorized_store_preserves_capture_audit_but_rebinds_identity(pg_store, capture_kind):
+    """Generated provenance must survive PG's second, authoritative identity bind."""
+    from memplex.models import Fact
+
+    store, conn = pg_store
+    capture = ({
+        "extraction": "factual_capture_v1", "authority": "agent_inferred",
+        "source_snapshots": '{"raw-source": "digest"}', "evidence": "[]",
+        "reference_datetime": "2026-10-07T12:00:00+00:00", "author_role": "user",
+    } if capture_kind == "derived" else {
+        "capture_input": "factual_capture_v1", "author_role": "assistant",
+    })
+    fact = Fact(id="capture-provenance", subject="database", predicate="is", object_="SQLite",
+                trust_tier=1, provenance={
+                    **capture, "agent_id": "forged-agent", "authentication_id": "forged-auth",
+                    "session_id": "forged-session", "request_id": "forged-request",
+                    "untrusted_extra": "discard",
+                })
+    context = _authorization()
+    store.authorized(context).add_fact(fact)
+    assert fact.provenance == {**capture, "agent_id": context.agent_id,
+                              "authentication_id": context.principal.authentication_id,
+                              "session_id": context.session_id, "request_id": context.request_id}
+    params = next(params for sql, params in conn._cursor.executed
+                  if "INSERT INTO memplex_facts" in sql)
+    stored = json.loads(params[1])
+    assert stored["provenance"] == fact.provenance
+    assert stored["trust_tier"] == 1

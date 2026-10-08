@@ -103,6 +103,8 @@ compaction.py         CompactionPipeline: 5-stage memory compression
 config.py             Configuration load/validate (MEMPLEX_* env > config.yaml > defaults)
 context.py            Bounded source-ID context assembly; no adapters, service or storage imports
 core/                 Pure computation layer (CoreEngine, extractors, hooks)
+factual_capture.py    Opt-in evidence namespace/materialization, committed raw + typed lineage
+factual_lineage.py    Factual-only semantic source snapshots and current-source safety
 host_lifecycle.py     G008 host-contract digests (detailed below)
 improve.py            Proactive fact maintenance (dedupe/expire/reindex) ⁴
 intent.py             Memory-type + query-scope intent heuristics (pure, dependency-free)
@@ -167,6 +169,17 @@ still works).
 single-purpose collaborators and keeps thin one-line wrappers for API
 stability. The gate resolves stores lazily via providers so tests that
 monkeypatch `service.store` are honoured.
+
+The opt-in factual write path delegates bounded validation/provider orchestration
+to `llm/factual_capture.py`, committed evidence materialization to
+`factual_capture.py`, and read-time semantic source checks to
+`factual_lineage.py`. Generated content cannot enter raw storage or supersede
+source assertions. The existing authorization evaluator applies the additional
+snapshot check only to `factual_capture_v1` derivations; both direct and context
+reads use the same check. Optional new Lite raw identity metadata and existing
+PostgreSQL ACL columns provide source proof without adopting legacy raw rows.
+See [the factual capture contract](capability-mechanisms.md#opt-in-evidence-linked-factual-capture)
+for outcomes, limits, dates, fallback and deadline semantics.
 
 `service.query()` itself delegates the six-stage read path to
 `query_pipeline.QueryPipeline`: the service resolves the request-scoped

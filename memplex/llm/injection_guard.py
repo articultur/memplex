@@ -166,6 +166,8 @@ class IndirectInjectionGuard:
                 else (func.source_type or "wiki")
             )
             trust = cls.TRUST_LEVELS.get(source_type_val, "LOW")
+            if (getattr(func, "provenance", {}) or {}).get("extraction") == "factual_capture_v1":
+                trust = "LOW"  # generated claims never inherit a source's authority
             summary = r.summary or func.name
             parts.append(
                 f"[MEMORY START | trust={trust} | id={r.func_id}]\n{summary}\n[MEMORY END]"
