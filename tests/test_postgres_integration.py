@@ -9715,6 +9715,7 @@ def test_function_role_update_disabled_writer_clears_vector_for_enabled_reader(p
 @pytest.mark.parametrize("authorized", [False, True], ids=["native-postgres", "authorized-postgres"])
 def test_ineligible_postgres_typed_batch_uses_individual_path(pg_dsn, monkeypatch, authorized):
     """Real PostgreSQL native/facade service dispatch retains individual typed APIs."""
+    from memplex.auth import local_development_context
     from memplex.models import ExtractedData
     from memplex.storage.lite.store import LiteMemoryStore
 
@@ -9726,7 +9727,11 @@ def test_ineligible_postgres_typed_batch_uses_individual_path(pg_dsn, monkeypatc
     config.llm.query_enhancement = False
     config.wiki.enabled = False
     service = MemplexService(config=config)
-    context = _authorization(tenant="typed-batch-tenant", subject="alice")
+    # Payload binding does not authorize native PostgreSQL operations. Match
+    # their local-development relational scope; only the facade supplies the
+    # custom authenticated scope. Readback still uses an authorized facade.
+    context = (_authorization(tenant="typed-batch-tenant", subject="alice")
+               if authorized else local_development_context())
     calls = []
     original_fact, original_preference = PostgresMemoryStore.add_fact, PostgresMemoryStore.add_preference
 
@@ -9763,6 +9768,6 @@ def test_ineligible_postgres_typed_batch_uses_individual_path(pg_dsn, monkeypatc
         assert all(fact.valid_from for fact in extracted.facts)
         assert len(reader.get_timeline("typed-fact-a")) == 1
         other = _authorization(tenant="another-tenant", subject="mallory")
-        assert service._store_for(other).read_context_nodes(["typed-fact-a", "typed-pref"]) == {}
+        assert service._store_for(other).read_context_nodes(["typed-fact-a", "typed-fact-b", "typed-pref"]) == {}
     finally:
         service.stop()
