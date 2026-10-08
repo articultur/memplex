@@ -32,6 +32,7 @@ llm/
   injection_guard.py  InjectionScanCounter + drop_injection_suspected ¹
 storage/
   base.py             MemoryStore interface
+  typed_batch.py      Optional Fact/Preference batch value objects and planner/runner callables; no service, adapter or concrete-backend imports
   lite/               Development JSON-pair backend — in-memory model + journaled JSON persistence, with a SQLite FTS5 sidecar for search (store, durability, sync_repository); production must use postgres. sqlite_v2.py adds the ADR-012 Phase A shadow writer (opt-in MEMPLEX_LITE_SQLITE_SHADOW=1): mirrors every durable commit into shadow_v2.sqlite3 next to the pair, log-only failures, gated by scripts/lite_v2_diff.py 100%-equal
   postgres.py         PostgreSQL business store (request-scoped ACL facade)
   postgres_sync.py    PostgreSQL sync repository
@@ -84,6 +85,71 @@ leg remains Function-only. No raw-paragraph, Observation or Preference fallback
 is added. Fact lexical vectors are computed at query time without a schema
 change: candidate/result limits do not bound the underlying database scan cost,
 and large-corpus latency has not been established by the correctness tests.
+
+### Optional Lite typed-write batching
+
+`storage/typed_batch.py` is a lightweight optional contract, not an addition to
+the required `MemoryStore` interface. Frozen dataclasses describe detached
+inputs, the generation/fact snapshot, ordered operations, per-operation
+rejections and verified commit results; their mutable model members still need
+deep copying. Input indices place Facts before Preferences. Supersession
+operations have no input index. The pure service planner preserves the existing
+`list_facts()` order and first-1000 candidate window, supersession rules and
+supersession-before-Fact-before-Preference operation order. Repeated IDs retain
+ordered upserts and every accepted operation's changelog event.
+
+The service selects the capability only for the exact native, unwrapped
+`LiteMemoryStore` class, with sync capture policy `off`, JSON authority, no
+active deferred scope, and no related instance-method replacement. Selection
+is checked again under the writer lock. PostgreSQL, sync wrappers, subclasses,
+unknown backends and sync-required Lite retain the individual-write path even
+if they advertise a similarly named method. Both SQLite authority modes
+(`MEMPLEX_LITE_SQLITE_AUTHORITY=read` and `rw`) are excluded: either can select
+SQLite authority. The ordinary post-commit SQLite shadow remains eligible
+because it does not replace JSON authority. `MEMPLEX_LITE_TYPED_BATCH=0`,
+`false` or `False` disables the capability; unset enables it when eligible.
+An unsupported result calls no planner and mutates no state before fallback.
+
+The public batch entry deep-copies the whole caller input before writer-queue
+admission. Failure to detach aborts that admission before queueing, planning
+or mutation; it is not replayed through individual writes. Under the existing
+single-writer lock, the admitted request reloads current authority, obtains a
+detached snapshot, runs the pure planner and validates the complete plan shape
+before staging. Content, event and serialization failures after admission are
+isolated per operation; accepted siblings retain their order. The store stages
+detached changed nodes and events in private containers and makes exactly one
+existing durable decision when any operation is accepted, or zero when all
+operations are rejected or the plan is empty.
+
+The crash/commit unit is this accepted typed stage, including its supersession
+operations and events, rather than the entire `service.write()` request. Raw
+paragraph and Function/graph phases keep their existing separate persistence
+boundaries. Evidence-linked factual capture still commits original raw evidence
+before deriving Facts. Hot references and cache invalidation use only confirmed
+committed IDs/current sources. The service retains the complete request-private
+plan and stable original Fact references to backfill planned `valid_from`
+timestamps, including rejected inputs and final-commit failures; successful-ID
+acknowledgements use detached planned IDs, not caller models that may change
+while queued.
+
+No staged success is acknowledged when final commit proof fails. Recovery
+consults current durable authority under the same writer lock; it never restores
+an old resident snapshot over a possibly committed target. Proof cleanup is
+writer-locked and owned by that request, so it cannot clear a later writer's
+proof. A journal rename followed by uncertain directory fsync can leave the
+complete old or new pair; the batch runner raises without automatic replay or
+a rollback claim. The service keeps its best-effort persistence behavior and
+acknowledges no typed IDs for that failed stage. Existing JSON formats, schemas, journal/hash/fsync protocol,
+identity binding, authorization and public response structures are unchanged.
+
+Direct `add_fact()` / `add_preference()` keep their signatures and individual
+durable-write guarantee outside an explicitly entered deferred scope. Deferred
+entry/exit transitions now share the writer lock, but the historic global
+deferred-depth concurrency limitations remain; this capability is ineligible
+while such a scope is active. It introduces no general transaction framework,
+SQLite/protocol redesign or expanded sync behavior. Correctness tests do not
+establish a latency improvement; real-PostgreSQL and performance acceptance are
+separate gates.
 
 ### Top-level quick reference
 

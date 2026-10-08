@@ -9710,3 +9710,59 @@ def test_function_role_update_disabled_writer_clears_vector_for_enabled_reader(p
         if disabled_resources is not None:
             disabled_resources.close()
         vector_resources.close()
+
+
+@pytest.mark.parametrize("authorized", [False, True], ids=["native-postgres", "authorized-postgres"])
+def test_ineligible_postgres_typed_batch_uses_individual_path(pg_dsn, monkeypatch, authorized):
+    """Real PostgreSQL native/facade service dispatch retains individual typed APIs."""
+    from memplex.models import ExtractedData
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    config = MemplexConfig()
+    config.storage.backend = "postgres"
+    config.storage.path = pg_dsn
+    config.embedding.model = "tfidf"
+    config.llm.provider = "rule-based"
+    config.llm.query_enhancement = False
+    config.wiki.enabled = False
+    service = MemplexService(config=config)
+    context = _authorization(tenant="typed-batch-tenant", subject="alice")
+    calls = []
+    original_fact, original_preference = PostgresMemoryStore.add_fact, PostgresMemoryStore.add_preference
+
+    def add_fact(store, node):
+        calls.append(("fact", node.id))
+        return original_fact(store, node)
+
+    def add_preference(store, node):
+        calls.append(("preference", node.id))
+        return original_preference(store, node)
+
+    def fail_batch(*_args):
+        pytest.fail("PostgreSQL dispatch invoked a native Lite runner")
+
+    monkeypatch.setattr(PostgresMemoryStore, "add_fact", add_fact)
+    monkeypatch.setattr(PostgresMemoryStore, "add_preference", add_preference)
+    monkeypatch.setattr(LiteMemoryStore, "run_typed_write_batch", fail_batch)
+    extracted = ExtractedData(
+        facts=[Fact(id="typed-fact-a", subject="database", predicate="is", object_="postgres"),
+               Fact(id="typed-fact-b", subject="cache", predicate="is", object_="redis")],
+        preferences=[Preference(id="typed-pref", aspect="theme", preference="dark")],
+    )
+    service._bind_extracted_identity(extracted, context)
+    store = service._store_for(context) if authorized else service.store
+    try:
+        assert service._persist_typed_nodes(extracted, store=store) == (
+            "typed-fact-a", "typed-fact-b", "typed-pref",
+        )
+        assert calls == [("fact", "typed-fact-a"), ("fact", "typed-fact-b"), ("preference", "typed-pref")]
+        reader = service._store_for(context)
+        assert set(reader.read_context_nodes(["typed-fact-a", "typed-fact-b", "typed-pref"])) == {
+            "typed-fact-a", "typed-fact-b", "typed-pref",
+        }
+        assert all(fact.valid_from for fact in extracted.facts)
+        assert len(reader.get_timeline("typed-fact-a")) == 1
+        other = _authorization(tenant="another-tenant", subject="mallory")
+        assert service._store_for(other).read_context_nodes(["typed-fact-a", "typed-pref"]) == {}
+    finally:
+        service.stop()
