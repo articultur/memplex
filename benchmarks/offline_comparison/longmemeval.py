@@ -9,6 +9,7 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -32,6 +33,17 @@ CONFIG = {'storage': 'lite', 'embedding': 'tfidf', 'provider': 'rule-based',
           'bm25_b': .75, 'token_measure': 'unicode-word-count',
           'background_worker': False, 'compaction': False,
           'ingest_granularity': 'one full session per public service.write call'}
+
+
+def recovery_module():
+    # Keep protocol-only imports stdlib-only, without importing benchmarks/__init__.
+    spec = importlib.util.spec_from_file_location('offline_recovery', Path(__file__).with_name('recovery.py'))
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+RECOVERY = recovery_module()
 
 
 def digest(value):
@@ -220,7 +232,7 @@ def offline_worker(input_path, output_path, bank):
     socket.getaddrinfo = deny
     public = json.loads(Path(input_path).read_text())
     result = run_memplex(public, Path(bank))
-    Path(output_path).write_text(json.dumps(result))
+    atomic_json(Path(output_path), result)
 
 
 def source_hash(root=ROOT):
@@ -260,17 +272,18 @@ def aggregate(records):
 
 def atomic_json(path, value):
     """Publish complete JSON only, retaining the prior version across interruption."""
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w') as output:
-        output.write(json.dumps(value, indent=2) + '\n')
-        output.flush()
-        os.fsync(output.fileno())
-    temporary.replace(path)
+    RECOVERY.atomic_json(path, value)
+
+
+def publish_records(path, records):
+    """Canonical JSONL is a checkpoint, never an interruptible append."""
+    RECOVERY.atomic_text(path, ''.join(json.dumps(record, sort_keys=True) + '\n' for record in records))
 
 
 def prepare_resume(out, receipt, manifest):
     receipt_path, records_path = out / 'receipt.json', out / 'records.jsonl'
-    if records_path.exists() and records_path.stat().st_size and not receipt_path.exists():
+    has_evidence = ((records_path.exists() and records_path.stat().st_size) or (out / 'attempts.json').exists())
+    if has_evidence and not receipt_path.exists():
         raise ValueError('Nonempty records lack their original receipt; refusing to certify them')
     if receipt_path.exists() and json.loads(receipt_path.read_text()) != receipt:
         raise ValueError('Resume receipt mismatch; use a separate output directory')
@@ -280,6 +293,13 @@ def prepare_resume(out, receipt, manifest):
         raise ValueError('Resume records contain duplicate or foreign question IDs')
     if any(not {'bm25', 'memplex', 'abstention', 'stratum'} <= r.keys() for r in records):
         raise ValueError('Resume record is incomplete')
+    for record in records:
+        RECOVERY.validate_product_result(record['bm25'])
+        RECOVERY.validate_product_result(record['memplex'], allow_timeout=True)
+    if receipt.get('recovery_protocol') == RECOVERY.PROTOCOL:
+        journal = RECOVERY.load_journal(out, digest(receipt))
+        if any(a['question_id'] not in manifest['pilot_ids'] for a in journal['attempts']):
+            raise ValueError('Attempt journal contains foreign question IDs')
     # Repair stale/missing summary even when no question remains to be processed.
     atomic_json(out / 'summary.json', aggregate(records))
     if not receipt_path.exists():
@@ -287,7 +307,7 @@ def prepare_resume(out, receipt, manifest):
     return records
 
 
-def child_run(public, timeout):
+def child_run(public, timeout, *, out, lock, receipt):
     with tempfile.TemporaryDirectory(prefix='memplex-offline-') as directory:
         temp = Path(directory)
         input_path, output_path = temp / 'input.json', temp / 'result.json'
@@ -295,32 +315,39 @@ def child_run(public, timeout):
         env = {'PATH': os.defpath, 'HOME': str(temp), 'PYTHONHASHSEED': '0', 'PYTHONPATH': str(ROOT),
                'MEMPLEX_STORAGE_BACKEND': 'lite', 'MEMPLEX_RAW_PARAGRAPH_LAYER': '1',
                'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'OMP_NUM_THREADS': '1'}
-        try:
-            process = subprocess.run([sys.executable, '-m', 'benchmarks.offline_comparison.longmemeval',
-                                      'worker', str(input_path), str(output_path), str(temp / 'bank')],
-                                     cwd=ROOT, env=env, capture_output=True, text=True, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
-            return {'status': 'timeout', 'error': f'Exceeded per-question {timeout}s budget'}
-        if process.returncode or not output_path.exists():
-            return {'status': 'error', 'phase': 'worker', 'error': process.stderr[-1500:]}
-        return json.loads(output_path.read_text())
+        command = [sys.executable, '-m', 'benchmarks.offline_comparison.longmemeval',
+                   'worker', str(input_path), str(output_path), str(temp / 'bank')]
+        return RECOVERY.run_attempt(out, lock, receipt, public['question_id'], command,
+                                    output_path, env, ROOT, timeout)
 
 
 def run(args):
+    if not getattr(args, 'run_id', None) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', args.run_id):
+        raise ValueError('A new explicit --run-id is required for recovery protocol 2')
+    if args.timeout <= 0:
+        raise ValueError('Per-question timeout must be positive')
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    with RECOVERY.RunLock(out) as lock:
+        return run_owned(args, out, lock)
+
+
+def run_owned(args, out, lock):
     rows = load_dataset(args.dataset)
     manifest = json.loads(Path(args.manifest).read_text())
     validate_manifest(manifest)
     if manifest != build_manifest(rows):
         raise ValueError('Frozen manifest differs from pinned protocol')
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     versions = {}
     for package in ('memplex', 'numpy', 'PyYAML', 'requests'):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = 'not installed'
-    receipt = {'dataset_sha256': DATASET_SHA256, 'manifest_sha256': digest(manifest), 'config': CONFIG,
+    receipt = {'run_id': args.run_id, 'recovery_protocol': RECOVERY.PROTOCOL,
+               'recovery_sha256': file_hash(RECOVERY.__file__),
+               'max_infrastructure_retries': RECOVERY.MAX_INFRA_RETRIES,
+               'dataset_sha256': DATASET_SHA256, 'manifest_sha256': digest(manifest), 'config': CONFIG,
                'product_source_sha256': source_hash(), 'harness_sha256': file_hash(__file__),
                'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                'python': platform.python_version(), 'platform': platform.platform(), 'dependencies': versions,
@@ -336,15 +363,15 @@ def run(args):
         row = lookup[qid]
         public = retriever_input(row)
         record = {'question_id': qid, 'stratum': stratum(row), 'abstention': qid.endswith('_abs'),
-                  'bm25': run_bm25(public), 'memplex': child_run(public, args.timeout)}
+                  'bm25': run_bm25(public),
+                  'memplex': child_run(public, args.timeout, out=out, lock=lock, receipt=digest(receipt))}
         gold = [] if record['abstention'] else row['answer_session_ids']
         for system in ('bm25', 'memplex'):
             if record[system]['status'] == 'complete':
                 record[system]['scores'] = {str(k): score_sessions(record[system]['ranked_session_ids'], gold, k) for k in (5, 10)}
-        with records_path.open('a') as output:
-            output.write(json.dumps(record, sort_keys=True) + '\n')
-            output.flush()
-            os.fsync(output.fileno())
+        RECOVERY.validate_product_result(record['bm25'])
+        RECOVERY.validate_product_result(record['memplex'], allow_timeout=True)
+        publish_records(records_path, [*records, record])
         records.append(record)
         atomic_json(out / 'summary.json', aggregate(records))
         print(f'{len(records)}/100 {qid} memplex={record["memplex"]["status"]}', flush=True)
@@ -362,6 +389,7 @@ def main():
     for option in ('dataset', 'manifest', 'out'):
         runner.add_argument(f'--{option}', required=True)
     runner.add_argument('--timeout', type=int, default=120)
+    runner.add_argument('--run-id', required=True)
     worker = commands.add_parser('worker')
     for option in ('input', 'output', 'bank'):
         worker.add_argument(option)
