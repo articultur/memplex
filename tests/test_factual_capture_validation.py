@@ -142,21 +142,154 @@ def test_raw_lineage_lookup_rejects_aliased_projection():
     assert _TypedNodeLookup(Store()).get("raw") is None
 
 
-def test_async_entry_point_is_bounded_when_provider_suppresses_cancellation():
-    import time
+@pytest.mark.parametrize("schedule", ["started", "delayed-start"])
+def test_async_entry_point_is_bounded_when_provider_suppresses_cancellation(monkeypatch, schedule):
+    from contextlib import suppress
+    from contextvars import ContextVar
+    from threading import Condition, Event, Thread, current_thread
+
+    from memplex.llm import factual_capture
+
+    budget, watchdog = 0.02, 5.0
+    provider_entered, provider_release, startup_release, caller_returned = (
+        Event(), Event(), Event(), Event()
+    )
+    if schedule == "started":
+        startup_release.set()
+    provider_state, cancellations, workers, outcomes, errors, waits, done_events, admissions, releases = (
+        [], [], [], [], [], [], [], [], []
+    )
+    cancelled = Condition()
+    owned_capture = ContextVar("test_factual_capture_owner", default=False)
+    capture_slots = factual_capture._CAPTURE_SLOTS
+    # Wait for one available permit during fixture setup, then restore it.
+    # The actual helper still performs its unchanged nonblocking admission.
+    assert capture_slots.acquire(timeout=watchdog), "fixture could not obtain one capture slot"
+    capture_slots.release()
+
+    class ObservedSlots:
+        def acquire(self, *args, **kwargs):
+            admitted = capture_slots.acquire(*args, **kwargs)
+            if owned_capture.get():
+                admissions.append((current_thread(), admitted))
+            return admitted
+
+        def release(self, *args, **kwargs):
+            capture_slots.release(*args, **kwargs)
+            if current_thread() in workers:
+                releases.append(current_thread())
 
     class Uncooperative:
         async def complete_json(self, prompt):
-            try:
-                await asyncio.sleep(0.3)
-            except asyncio.CancelledError:
-                await asyncio.sleep(0.2)
+            loop = asyncio.get_running_loop()
+            released = loop.create_future()
+            provider_state.append((loop, released, asyncio.current_task()))
+            provider_entered.set()
+            while not provider_release.is_set():
+                try:
+                    await asyncio.shield(released)
+                except asyncio.CancelledError:
+                    with cancelled:
+                        cancellations.append("suppressed")
+                        cancelled.notify_all()
             return {"facts": []}
-    enhancer = LLMEnhancer(Uncooperative(), LLMConfig(factual_capture_timeout_seconds=0.02))
-    start = time.monotonic()
-    outcome = asyncio.run(enhancer.factualize(EVIDENCE))
-    assert outcome.status == "timeout"
-    assert time.monotonic() - start < 0.15
+
+    class ObservedDone:
+        def __init__(self):
+            self.event = Event()
+            done_events.append(self.event)
+
+        def set(self):
+            self.event.set()
+
+        def wait(self, timeout):
+            if schedule == "started":
+                assert provider_entered.wait(watchdog), "provider did not enter before bounded wait"
+            waits.append(timeout)
+            # Observe the real helper's argument and delegate with that exact budget.
+            return self.event.wait(timeout)
+
+    def capture_done():
+        return ObservedDone() if owned_capture.get() else Event()
+
+    def capture_worker(*, target, **kwargs):
+        if not owned_capture.get():
+            return Thread(target=target, **kwargs)
+
+        def controlled_target():
+            startup_release.wait()
+            target()
+        worker = Thread(target=controlled_target, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(factual_capture, "Event", capture_done)
+    monkeypatch.setattr(factual_capture, "Thread", capture_worker)
+    monkeypatch.setattr(factual_capture, "_CAPTURE_SLOTS", ObservedSlots())
+    enhancer = LLMEnhancer(Uncooperative(), LLMConfig(factual_capture_timeout_seconds=budget))
+
+    def call_public_entry():
+        token = owned_capture.set(True)
+        try:
+            outcomes.append(asyncio.run(enhancer.factualize(EVIDENCE)))
+        except Exception as exc:  # noqa: BLE001 - preserve caller failures for foreground assertions
+            errors.append(exc)
+        finally:
+            owned_capture.reset(token)
+            caller_returned.set()
+
+    caller = Thread(target=call_public_entry, name="test-factual-capture-caller", daemon=True)
+    returned_outcomes = None
+    caller.start()
+    try:
+        assert caller_returned.wait(watchdog), "caller coupled its return to the unfinished worker"
+        assert not errors
+        assert waits == [budget], "bounded Event.wait must receive exactly 20 ms"
+        assert len(outcomes) == len(workers) == len(done_events) == 1
+        outcome, = outcomes
+        assert outcome.status == "timeout" and not outcome.attempts_complete
+        # Preserve timeout/liveness evidence before opening either cleanup gate.
+        returned_outcomes = tuple(outcomes)
+        assert workers[0].is_alive() and not done_events[0].is_set()
+        assert [admitted for _, admitted in admissions] == [True]
+        assert not releases, "unfinished owned worker released its actual capture slot"
+        if schedule == "delayed-start":
+            assert not provider_entered.is_set() and not provider_state
+            assert not startup_release.is_set()
+        else:
+            assert provider_entered.is_set() and not provider_release.is_set()
+            loop, _, task = provider_state[0]
+            # Repeated cancellations must not complete the gated provider.
+            for _ in range(2):
+                with cancelled:
+                    previous = len(cancellations)
+                    loop.call_soon_threadsafe(task.cancel)
+                    assert cancelled.wait_for(
+                        lambda previous=previous: len(cancellations) > previous, watchdog
+                    )
+                assert workers[0].is_alive() and not done_events[0].is_set()
+    finally:
+        startup_release.set()
+        entered = provider_entered.wait(watchdog)
+        provider_release.set()
+        if provider_state:
+            loop, released, _ = provider_state[0]
+
+            def release_provider():
+                if not released.done():
+                    released.set_result(None)
+            # A failed liveness assertion may mean the worker already closed its loop.
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(release_provider)
+        caller.join(watchdog)
+        for worker in workers:
+            worker.join(watchdog)
+        assert entered, "provider never entered, including during delayed-start cleanup"
+        assert not caller.is_alive(), "caller leaked after gate release"
+        assert workers and all(not worker.is_alive() for worker in workers), "capture worker leaked"
+        assert done_events and all(done.is_set() for done in done_events)
+        assert releases == workers, "owned worker did not release its actual capture slot"
+    assert tuple(outcomes) == returned_outcomes, "cleanup replaced the caller's timeout outcome"
 
 
 @pytest.mark.parametrize("name,value", [("TIMEOUT_SECONDS", "inf"), ("MAX_FACTS", "1000000")])
