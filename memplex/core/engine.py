@@ -615,8 +615,8 @@ class CoreEngine:
         edges = []
 
         if self._store is not None:
-            # Use store-aware GraphBuilder; reused across builds because its
-            # corpus caches self-invalidate on the store's pair fingerprint.
+            # Reuse the store-aware GraphBuilder; each build acquires a fresh,
+            # private Function snapshot through the original store/facade.
             try:
                 if self._graph_builder is None or self._graph_builder._store is not self._store:
                     self._graph_builder = GraphBuilder(store=self._store)

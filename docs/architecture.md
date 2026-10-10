@@ -54,6 +54,25 @@ host_lifecycle.py    G008 host-contract digests (see below)
 
 `¹ ² ³ ⁴` mark the split groups (⁴ = post-S-wave leaf modules) described under [Split modules](#split-modules-and-their-re-export-contracts).
 
+### Function snapshots for graph construction
+
+Each `GraphBuilder.process` call and each nonempty `build_from_batch` acquires
+one fresh `list_functions(limit=100000)` from its exact supplied store or
+authorized facade, preserving native order, default offset, and scope. The
+native synchronized read determines visibility: completed peer commits are
+refreshed at acquisition, and commits racing acquisition follow that backend's
+read boundary. Detached rows, name/domain indexes, embeddings, and batch state
+are private to the invocation; later commits affect the next build. No store
+lock is held across graph or embedding processing. Empty batches perform no
+read. An ordinary listing exception yields an empty invocation corpus without
+stale fallback or mid-build retry; processing errors still propagate.
+
+This preserves the ordinary listing contract, including the resident pending
+prefix in an active Lite `deferred_commit`. It adds neither committed-only
+reads nor mid-build ACL rechecks; later persistence authorization remains in
+force. Concurrent builds can retain separate corpora up to the existing cap;
+the reusable builder retains none after a public call.
+
 ### Captured conversation identity
 
 New conversation captures extract user and assistant paragraphs separately in
