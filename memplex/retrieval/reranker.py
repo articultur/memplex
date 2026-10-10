@@ -152,6 +152,9 @@ class Reranker:
         if not results:
             return []
 
+        # All time-dependent scores in this invocation share one reference.
+        reference_time = datetime.now(UTC)
+
         if query_vector is None:
             query_vector = self._embed_query_text(query)
 
@@ -191,14 +194,14 @@ class Reranker:
             semantic_score = cosine_similarity(query_vector, result_vector)
 
             # 3. Recency decay
-            recency_score = self._recency_decay(r.updated_at)
+            recency_score = self._recency_decay(r.updated_at, reference_time)
 
             # 4. Source authority
             source_weight = self._source_weight(r.source_type)
 
             # 5. Frequency (access count * recency of last access)
             func = node_map.get(r.func_id)
-            frequency_score = self._frequency_score(func) if func else 0.5
+            frequency_score = self._frequency_score(func, reference_time) if func else 0.5
 
             # 6. Confidence: extraction-quality score persisted on the node
             #    (Hindsight-style per-memory belief strength).
@@ -232,7 +235,9 @@ class Reranker:
             return embed_query(text)
         return self.embedder.embed(text)
 
-    def _recency_decay(self, updated_at: datetime | None | str) -> float:
+    def _recency_decay(
+        self, updated_at: datetime | None | str, reference_time: datetime | None = None
+    ) -> float:
         """Exponential time decay, range (0, 1], 0.5 at ``halflife * ln 2`` days.
 
         ``score = exp(-days_since_update / halflife)`` where the half-life is
@@ -247,9 +252,11 @@ class Reranker:
                 updated_at = datetime.fromisoformat(updated_at)
             except (ValueError, TypeError):
                 return 0.5
+        if reference_time is None:
+            reference_time = datetime.now(UTC)
         days_since = max(
             0.0,
-            (datetime.now(UTC) - _ensure_aware(updated_at)).total_seconds() / 86400.0,
+            (reference_time - _ensure_aware(updated_at)).total_seconds() / 86400.0,
         )
         return min(1.0, math.exp(-days_since / self.recency_halflife_days))
 
@@ -279,7 +286,7 @@ class Reranker:
         return self._SOURCE_WEIGHTS.get(source_type, 0.5)
 
     @staticmethod
-    def _frequency_score(func: Function) -> float:
+    def _frequency_score(func: Function, reference_time: datetime | None = None) -> float:
         """Access-frequency score combining count and recency.
 
         ``freq = log(1+count) / log(1+100)`` normalised to [0, 1].
@@ -308,7 +315,9 @@ class Reranker:
                 except (ValueError, TypeError):
                     last_accessed = None
             if last_accessed is not None:
-                days = max(0, (datetime.now(UTC) - _ensure_aware(last_accessed)).days)
+                if reference_time is None:
+                    reference_time = datetime.now(UTC)
+                days = max(0, (reference_time - _ensure_aware(last_accessed)).days)
                 recency = min(1.0, math.exp(-days / 60))
             else:
                 recency = 0.3

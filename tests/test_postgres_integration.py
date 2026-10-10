@@ -9710,3 +9710,125 @@ def test_function_role_update_disabled_writer_clears_vector_for_enabled_reader(p
         if disabled_resources is not None:
             disabled_resources.close()
         vector_resources.close()
+
+
+@pytest.mark.parametrize("authorized", [False, True], ids=["native-postgres", "authorized-postgres"])
+def test_ineligible_postgres_typed_batch_uses_individual_path(pg_dsn, monkeypatch, authorized):
+    """Real PostgreSQL native/facade service dispatch retains individual typed APIs."""
+    from memplex.auth import local_development_context
+    from memplex.models import ExtractedData
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    config = MemplexConfig()
+    config.storage.backend = "postgres"
+    config.storage.path = pg_dsn
+    config.embedding.model = "tfidf"
+    config.llm.provider = "rule-based"
+    config.llm.query_enhancement = False
+    config.wiki.enabled = False
+    service = MemplexService(config=config)
+    # Payload binding does not authorize native PostgreSQL operations. Match
+    # their local-development relational scope; only the facade supplies the
+    # custom authenticated scope. Readback still uses an authorized facade.
+    context = (_authorization(tenant="typed-batch-tenant", subject="alice")
+               if authorized else local_development_context())
+    calls = []
+    original_fact, original_preference = PostgresMemoryStore.add_fact, PostgresMemoryStore.add_preference
+
+    def add_fact(store, node):
+        calls.append(("fact", node.id))
+        return original_fact(store, node)
+
+    def add_preference(store, node):
+        calls.append(("preference", node.id))
+        return original_preference(store, node)
+
+    def fail_batch(*_args):
+        pytest.fail("PostgreSQL dispatch invoked a native Lite runner")
+
+    monkeypatch.setattr(PostgresMemoryStore, "add_fact", add_fact)
+    monkeypatch.setattr(PostgresMemoryStore, "add_preference", add_preference)
+    monkeypatch.setattr(LiteMemoryStore, "run_typed_write_batch", fail_batch)
+    extracted = ExtractedData(
+        facts=[Fact(id="typed-fact-a", subject="database", predicate="is", object_="postgres"),
+               Fact(id="typed-fact-b", subject="cache", predicate="is", object_="redis")],
+        preferences=[Preference(id="typed-pref", aspect="theme", preference="dark")],
+    )
+    service._bind_extracted_identity(extracted, context)
+    store = service._store_for(context) if authorized else service.store
+    try:
+        assert service._persist_typed_nodes(extracted, store=store) == (
+            "typed-fact-a", "typed-fact-b", "typed-pref",
+        )
+        assert calls == [("fact", "typed-fact-a"), ("fact", "typed-fact-b"), ("preference", "typed-pref")]
+        reader = service._store_for(context)
+        assert set(reader.read_context_nodes(["typed-fact-a", "typed-fact-b", "typed-pref"])) == {
+            "typed-fact-a", "typed-fact-b", "typed-pref",
+        }
+        assert all(fact.valid_from for fact in extracted.facts)
+        assert len(reader.get_timeline("typed-fact-a")) == 1
+        other = _authorization(tenant="another-tenant", subject="mallory")
+        assert service._store_for(other).read_context_nodes(["typed-fact-a", "typed-fact-b", "typed-pref"]) == {}
+    finally:
+        service.stop()
+
+
+def test_graph_snapshot_preserves_original_authorized_facades(store, monkeypatch):
+    """Fresh and concurrent graph reads retain each native session/owner scope."""
+    from memplex.processing.graph_builder import GraphBuilder
+
+    contexts = [
+        _authorization(tenant="graph-a", subject="alice", workspace="one", session="first"),
+        _authorization(tenant="graph-b", subject="alice", workspace="one", session="first"),
+        _authorization(tenant="graph-a", subject="bob", workspace="one", session="first"),
+        _authorization(tenant="graph-a", subject="alice", workspace="two", session="first"),
+        _authorization(tenant="graph-a", subject="alice", workspace="one", session="second"),
+    ]
+    facades = [store.authorized(context) for context in contexts]
+    builders = [GraphBuilder(facade) for facade in facades]
+    for index, facade in enumerate(facades):
+        node = _func(
+            f"graph-visible-{index}", "Shared Graph Target",
+            name_normalized=f"graph-visible-{index}", visibility="session",
+            updated_at=f"2026-10-10T01:00:0{index}+00:00",
+        )
+        facade.add(node, SRC)
+    query = _func("graph-query", "Query", cross_references=[{"target": "Shared Graph Target"}])
+
+    def targets(builder):
+        return [edge.target for edge in builder.process(query) if edge.edge_type == "REFERENCES"]
+
+    for index, builder in enumerate(builders):
+        assert targets(builder) == [f"graph-visible-{index}"]
+        assert targets(builder) == [f"graph-visible-{index}"]
+    gate = Barrier(len(builders), timeout=10)
+    original = store.list_functions
+    calls = []
+
+    def concurrent_listing(*args, **kwargs):
+        context = store._authorization_context()
+        gate.wait()
+        assert store._authorization_context() is context
+        rows = original(*args, **kwargs)
+        calls.append((context, args, kwargs))
+        return rows
+
+    monkeypatch.setattr(store, "list_functions", concurrent_listing)
+    with ThreadPoolExecutor(max_workers=len(builders)) as executor:
+        results = list(executor.map(targets, builders))
+    assert results == [[f"graph-visible-{index}"] for index in range(len(builders))]
+    assert len(calls) == len(builders)
+    assert all(sum(context == expected for context, _args, _kwargs in calls) == 1 for expected in contexts)
+    assert all(args == () and kwargs == {"limit": 100000} for _context, args, kwargs in calls)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("authorization no longer permits a native read")
+
+    monkeypatch.setattr(store, "list_functions", denied)
+    assert targets(builders[0]) == []
+    monkeypatch.setattr(store, "list_functions", original)
+    facades[0].delete("graph-visible-0")
+    replacement = _func("graph-replacement", "Shared Graph Target", visibility="session")
+    facades[0].add(replacement, SRC)
+    assert targets(builders[0]) == ["graph-replacement"]
+    assert targets(builders[1]) == ["graph-visible-1"]

@@ -26,6 +26,7 @@ import logging
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -102,6 +103,13 @@ from memplex.storage.pool import (
     PostgresStorageResources,
     PostgresSyncStorageResources,
 )
+from memplex.storage.typed_batch import (
+    TypedBatchInput,
+    TypedBatchRunner,
+    TypedBatchSnapshot,
+    TypedWriteOperation,
+    TypedWritePlan,
+)
 from memplex.sync_repository import SyncCapturePolicy
 from memplex.worker import BackgroundTask, BackgroundWorker
 
@@ -110,6 +118,65 @@ if TYPE_CHECKING:
     from memplex.sync_protocol import SyncDrainResult
 
 logger = logging.getLogger(__name__)
+
+
+def _supersession_candidates(new_fact: Fact, existing: Iterable[Fact]) -> Iterable[Fact]:
+    """Lazily apply the shared capture-specific supersession eligibility rule."""
+    return (
+        old_fact for old_fact in existing if capture_scopes_match(new_fact, old_fact)
+        and not (new_fact.provenance.get("capture_input") == "factual_capture_v1"
+                 and new_fact.object_ == old_fact.object_)
+    )
+
+
+def _plan_typed_writes(
+    snapshot: TypedBatchSnapshot, inputs: TypedBatchInput, *, supersede: bool,
+) -> TypedWritePlan:
+    """Plan detached writes in the legacy supersession/fact/preference order.
+
+    Only the supplied existing facts are candidates for supersession; new
+    inputs never supersede each other here. Generated ``valid_from`` values
+    are returned for later backfill without changing caller-owned nodes.
+    """
+    from memplex import temporal
+
+    facts = deepcopy(inputs.facts)
+    preferences = deepcopy(inputs.preferences)
+    operations: list[TypedWriteOperation] = []
+    fact_valid_from: list[tuple[int, str]] = []
+    if supersede:
+        existing = deepcopy(snapshot.facts)
+        for input_index, new_fact in enumerate(facts):
+            if not new_fact.valid_from:
+                new_fact.valid_from = temporal.now_iso()
+                fact_valid_from.append((input_index, new_fact.valid_from))
+            superseded = temporal.supersede_contradicted(
+                new_fact,
+                _supersession_candidates(new_fact, existing),
+            )
+            operations.extend(
+                TypedWriteOperation(node=old_fact, input_index=None, purpose="supersede")
+                for old_fact in superseded
+            )
+    operations.extend(
+        TypedWriteOperation(node=fact, input_index=index, purpose="input")
+        for index, fact in enumerate(facts)
+    )
+    operations.extend(
+        TypedWriteOperation(node=preference, input_index=index, purpose="input")
+        for index, preference in enumerate(preferences, start=len(facts))
+    )
+    return TypedWritePlan(operations=tuple(operations), fact_valid_from=tuple(fact_valid_from))
+
+
+def _typed_batch_runner(store: object) -> TypedBatchRunner | None:
+    """Select only the known native Lite implementation, never a facade."""
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    if type(store) is not LiteMemoryStore or not LiteMemoryStore._typed_batch_supported(store):
+        return None
+    return store.run_typed_write_batch
+
 
 # Optional callback registered by the HTTP adapter at startup so the
 # service health surface can report the SSE subscriber count without a
@@ -1411,17 +1478,63 @@ class MemplexService:
     def _persist_typed_nodes(
         self, extracted: ExtractedData, *, store: Any = None, supersede: bool = True,
     ) -> tuple[str, ...]:
-        """Persist extracted Fact / Preference nodes through the store's
-        optional typed APIs.
-
-        Duck-typed: when the backend does not implement ``add_fact`` /
-        ``add_preference`` the nodes are skipped with a debug log instead
-        of failing the write. Individual persistence failures are also
-        best-effort (debug-logged) so one bad node cannot lose the rest
-        of the extraction. Returned IDs acknowledge successful individual
-        store calls; hot publication separately verifies committed sources.
-        """
+        """Persist typed inputs in one native decision or the legacy item path."""
         store = self.store if store is None else store
+        runner = _typed_batch_runner(store)
+        if runner is None:
+            return self._persist_typed_nodes_individually(extracted, store=store, supersede=supersede)
+
+        # Preserve caller objects even if its mutable collection changes
+        # while the store's detached admission copy waits in the writer queue.
+        facts = tuple(extracted.facts)
+        completed_plan: TypedWritePlan | None = None
+        planner_error: Exception | None = None
+
+        def planner(snapshot: TypedBatchSnapshot, inputs: TypedBatchInput) -> TypedWritePlan:
+            nonlocal completed_plan, planner_error
+            try:
+                completed_plan = _plan_typed_writes(snapshot, inputs, supersede=supersede)
+            except Exception as exc:
+                planner_error = exc
+                raise
+            return completed_plan
+
+        try:
+            result = runner(TypedBatchInput(facts, tuple(extracted.preferences)), planner)
+        except Exception as exc:
+            if exc is planner_error:
+                raise
+            logger.debug("typed batch persistence failed: %s", exc)
+            return ()
+        finally:
+            # Storage supplements describe accepted inputs only. The completed
+            # request-private plan also preserves legacy timestamps on rejected
+            # facts or a final commit failure, back on the calling thread.
+            if completed_plan is not None:
+                for input_index, valid_from in completed_plan.fact_valid_from:
+                    facts[input_index].valid_from = valid_from
+
+        if not result.supported:
+            return self._persist_typed_nodes_individually(extracted, store=store, supersede=supersede)
+        if result.committed_generation is None or completed_plan is None:
+            return ()
+        # A caller can still mutate its models while the writer is queued.
+        # Resolve acknowledgements against detached, planned input identities.
+        input_ids = {
+            operation.input_index: operation.node.id for operation in completed_plan.operations
+            if operation.input_index is not None
+        }
+        persisted_ids = tuple(dict.fromkeys(
+            input_ids[index] for index in result.successful_input_indices if input_ids[index]
+        ))
+        for memory_id in (*persisted_ids, *result.committed_superseded_ids):
+            self._context_prefetch_cache.invalidate(memory_id)
+        return persisted_ids
+
+    def _persist_typed_nodes_individually(
+        self, extracted: ExtractedData, *, store: Any, supersede: bool,
+    ) -> tuple[str, ...]:
+        """Keep the optional, item-isolated single-write fallback unchanged."""
         persisted_ids: list[str] = []
         for kind, nodes, method_name in (
             ("fact", extracted.facts, "add_fact"),
@@ -1531,9 +1644,7 @@ class MemplexService:
                 new_fact.valid_from = temporal.now_iso()
             superseded = temporal.supersede_contradicted(
                 new_fact,
-                (old_fact for old_fact in existing if capture_scopes_match(new_fact, old_fact)
-                 and not (new_fact.provenance.get("capture_input") == "factual_capture_v1"
-                          and new_fact.object_ == old_fact.object_)),
+                _supersession_candidates(new_fact, existing),
             )
             for old_fact in superseded:
                 try:
