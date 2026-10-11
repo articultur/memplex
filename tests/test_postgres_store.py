@@ -5719,3 +5719,84 @@ def test_authorized_store_preserves_capture_audit_but_rebinds_identity(pg_store,
     stored = json.loads(params[1])
     assert stored["provenance"] == fact.provenance
     assert stored["trust_tier"] == 1
+
+
+@pytest.mark.parametrize("authorized", [False, True], ids=["native-postgres", "authorized-postgres"])
+@pytest.mark.parametrize("kind", ["fact", "preference"])
+def test_typed_postgres_fallback_binding_matches_relational_scope(pg_store, authorized, kind):
+    """Fallback fixtures must bind payloads and readers to the real writer scope."""
+    from memplex.auth import local_development_context
+    from memplex.models import ExtractedData, Fact, Preference
+    from memplex.service import MemplexService
+
+    store, conn = pg_store
+    context = (_authorization(tenant="typed-batch-tenant", subject="alice")
+               if authorized else local_development_context())
+    extracted = ExtractedData(
+        facts=[Fact(id="typed-fact", subject="database", predicate="is", object_="postgres")],
+        preferences=[Preference(id="typed-pref", aspect="theme", preference="dark")],
+    )
+    MemplexService._bind_extracted_identity(extracted, context)
+    node = extracted.facts[0] if kind == "fact" else extracted.preferences[0]
+    writer = store.authorized(context) if authorized else store
+    getattr(writer, f"add_{kind}")(node)
+
+    params = next(params for sql, params in conn._cursor.executed
+                  if f"INSERT INTO memplex_{kind}s" in sql)
+    expected_identity = (
+        ("typed-batch-tenant", "alice", "shared-workspace", "workspace", "http", "session-alice")
+        if authorized else
+        ("local", "local-development", "local-development", "workspace", "memplex", "local-development")
+    )
+    assert params[-6:] == expected_identity
+    payload = json.loads(params[1])
+    assert (payload["tenant_id"], payload["owner_subject_id"], payload["workspace_id"],
+            payload["visibility"], payload["provenance"]["agent_id"], payload["origin_session"]) == expected_identity
+    reader_context = store.authorized(context)._authorization_context()
+    assert params[-6:] == store._row_identity_values(reader_context, node)
+    assert store._authorization_context() == local_development_context()
+
+
+@pytest.mark.parametrize("kind", ["fact", "preference"])
+def test_typed_postgres_payload_claims_do_not_grant_native_authority(pg_store, kind):
+    """Custom model claims cannot replace native scope or survive a trusted rebind."""
+    from memplex.auth import local_development_context
+    from memplex.models import ExtractedData, Fact, Preference
+    from memplex.service import MemplexService
+
+    store, conn = pg_store
+    claimed_context = _authorization(tenant="typed-batch-tenant", subject="alice")
+    extracted = ExtractedData(
+        facts=[Fact(id="typed-fact", subject="database", predicate="is", object_="postgres")],
+        preferences=[Preference(id="typed-pref", aspect="theme", preference="dark")],
+    )
+    MemplexService._bind_extracted_identity(extracted, claimed_context)
+    node = extracted.facts[0] if kind == "fact" else extracted.preferences[0]
+    getattr(store, f"add_{kind}")(node)
+    native_params = next(params for sql, params in conn._cursor.executed
+                         if f"INSERT INTO memplex_{kind}s" in sql)
+    assert native_params[-6:] == (
+        "local", "local-development", "local-development", "workspace", "memplex", "local-development",
+    )
+    assert json.loads(native_params[1])["tenant_id"] == "typed-batch-tenant"
+    assert store.authorized(claimed_context)._authorization_context() != store._authorization_context()
+
+    # The real facade canonicalizes all caller-supplied identity to its trusted
+    # scope. This is deliberately an identity/SQL test, not fake PG readback.
+    trusted_context = _authorization(tenant="trusted-tenant", subject="bob")
+    conn._cursor.executed.clear()
+    getattr(store.authorized(trusted_context), f"add_{kind}")(node)
+    trusted_params = next(params for sql, params in conn._cursor.executed
+                          if f"INSERT INTO memplex_{kind}s" in sql)
+    assert trusted_params[-6:] == (
+        "trusted-tenant", "bob", "shared-workspace", "workspace", "http", "session-bob",
+    )
+    payload = json.loads(trusted_params[1])
+    assert payload["tenant_id"] == "trusted-tenant"
+    assert payload["owner_subject_id"] == "bob"
+    assert payload["namespace"]["memplex_tenant_id"] == "trusted-tenant"
+    assert payload["namespace"]["memplex_subject_id"] == "bob"
+    assert payload["provenance"]["authentication_id"] == "credential-bob"
+    assert payload["provenance"]["request_id"] == "request-bob"
+    assert payload["origin_session"] == "session-bob"
+    assert store._authorization_context() == local_development_context()

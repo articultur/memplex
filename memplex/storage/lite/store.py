@@ -28,6 +28,8 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
+from functools import wraps
+from itertools import islice
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -77,6 +79,16 @@ from memplex.storage.lite.durability import LiteDurability, LitePair, LiteStorag
 from memplex.storage.lite.search_index import SQLiteFTSIndex, local_bm25_search
 from memplex.storage.lite.sqlite_v2 import SQLiteAuthorityError
 from memplex.storage.lite.vector_index import VectorSearchIndex
+from memplex.storage.typed_batch import (
+    TypedBatchInput,
+    TypedBatchResult,
+    TypedBatchSnapshot,
+    TypedNode,
+    TypedWriteOperation,
+    TypedWritePlan,
+    TypedWritePlanner,
+    TypedWriteRejection,
+)
 from memplex.sync_protocol import (
     SyncApplyResult,
     SyncBatch,
@@ -204,6 +216,7 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
                     self._committed_record = None
                 raise
 
+    @wraps(method)
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         from memplex.storage.lite.single_writer import single_writer_enabled
 
@@ -229,8 +242,6 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
             return writer.submit(lambda: _locked_call(self, args, kwargs))
         return _locked_call(self, args, kwargs)
 
-    wrapped.__name__ = method.__name__
-    wrapped.__doc__ = method.__doc__
     return wrapped
 
 
@@ -1269,6 +1280,7 @@ class LiteMemoryStore:
         for row in tier2[: len(tier2) - cap]:
             self._paragraphs.pop(row["id"], None)
 
+    @_with_writer_lock
     def add_fact(self, fact: Fact) -> None:
         """Persist a Fact (upsert by id); records a changelog entry.
 
@@ -1334,6 +1346,175 @@ class LiteMemoryStore:
         self._commit_sync_changes(
             nodes=[(preference, SyncNodeType.PREFERENCE, SyncOperation.UPSERT)]
         )
+
+    def _typed_batch_supported(self) -> bool:
+        """Recognize only the unmodified, synchronous JSON-authoritative path."""
+        if type(self) is not LiteMemoryStore:
+            return False
+        related_methods = (
+            "run_typed_write_batch", "_run_typed_write_batch_locked",
+            "_typed_batch_supported", "_prepare_typed_write",
+            "add_fact", "add_preference", "list_facts", "read_context_nodes",
+            "_reload_for_mutation", "_refresh_for_read", "_commit_current_state",
+            "_commit_sync_changes", "_validate_resident_graph", "_raw_memory",
+            "_raw_changelog", "_decode_pair", "_decode_typed_collections",
+            "_publish_pair", "_publish_committed_locally", "_pair_files_unchanged",
+        )
+        return (
+            not any(name in self.__dict__ for name in related_methods)
+            and os.environ.get("MEMPLEX_LITE_TYPED_BATCH", "1") not in {"0", "false", "False"}
+            and os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") not in {"read", "rw"}
+            and self._sync_repository._capture_policy.mode == "off"
+            and self._commit_defer_depth == 0
+        )
+
+    def run_typed_write_batch(
+        self, inputs: TypedBatchInput, planner: TypedWritePlanner,
+    ) -> TypedBatchResult:
+        """Detach caller-owned inputs before synchronous writer-queue admission."""
+        if not LiteMemoryStore._typed_batch_supported(self):
+            return TypedBatchResult(False, None, None, (), (), (), ())
+        detached = copy.deepcopy(inputs)
+        # Recovery/proof invalidation belongs to the locked operation. Once
+        # it returns or raises, another writer may already own newer proof.
+        return self._run_typed_write_batch_locked(detached, planner)
+
+    def _prepare_typed_write(
+        self, operation: TypedWriteOperation, *, exists: bool,
+    ) -> tuple[TypedNode, ChangelogEvent]:
+        """Validate and detach one node and its event before either is staged."""
+        node = copy.deepcopy(operation.node)
+        if not isinstance(node, (Fact, Preference)):
+            raise TypeError("typed write requires a Fact or Preference")
+        now = datetime.now(UTC)
+        if not node.created_at:
+            node.created_at = now.isoformat()
+        if not node.updated_at:
+            node.updated_at = now.isoformat()
+        # Validate the model before its serializer can coerce list/dict fields,
+        # then the raw keys before canonical JSON can coerce mapping keys.
+        _validate_node_for_read(node)
+        raw = node.to_dict()
+        if isinstance(node, Fact):
+            _validate_raw_fact(raw, legacy=False)
+            fact = Fact.from_dict(json.loads(durability_module._canonical_json(raw)))
+            prepared: TypedNode = fact
+            label = fact.name or fact.subject
+            kind = "fact"
+        else:
+            _validate_raw_preference(raw, legacy=False)
+            prepared = Preference.from_dict(json.loads(durability_module._canonical_json(raw)))
+            label = prepared.name or prepared.aspect
+            kind = "preference"
+        _validate_node_for_read(prepared)
+        event_type = "updated" if exists else "created"
+        event = ChangelogEvent(
+            func_id=prepared.id,
+            timestamp=now,
+            event_type=event_type,
+            description=f"{event_type.capitalize()} {kind}: {label}",
+            source="",
+            actor="system",
+        )
+        event = ChangelogStore._deserialize_event(json.loads(durability_module._canonical_json(
+            ChangelogStore._serialize_event(event),
+        )))
+        return prepared, event
+
+    @_with_writer_lock
+    def _run_typed_write_batch_locked(
+        self, inputs: TypedBatchInput, planner: TypedWritePlanner,
+    ) -> TypedBatchResult:
+        """Plan, stage isolated operations, and publish once under one writer lock."""
+        if not LiteMemoryStore._typed_batch_supported(self):
+            return TypedBatchResult(False, None, None, (), (), (), ())
+        try:
+            self._reload_for_mutation()
+            snapshot = TypedBatchSnapshot(
+                self._generation, copy.deepcopy(tuple(islice(self._facts.values(), 1000))),
+            )
+            plan = planner(snapshot, inputs)
+            # Malformed plans are programming failures, never ordinary item
+            # rejections. Validate the complete shape before staging any item.
+            if type(plan) is not TypedWritePlan or type(plan.operations) is not tuple:
+                raise TypeError("invalid typed write plan")
+            input_count = len(inputs.facts) + len(inputs.preferences)
+            for operation in plan.operations:
+                if type(operation) is not TypedWriteOperation:
+                    raise TypeError("invalid typed write operation")
+                if operation.purpose == "input":
+                    if type(operation.input_index) is not int or not 0 <= operation.input_index < input_count:
+                        raise ValueError("invalid typed write input index")
+                elif (
+                    operation.purpose != "supersede" or operation.input_index is not None
+                    or not isinstance(operation.node, Fact)
+                ):
+                    raise ValueError("invalid typed write purpose")
+            if type(plan.fact_valid_from) is not tuple or any(
+                type(item) is not tuple or len(item) != 2
+                or type(item[0]) is not int or not 0 <= item[0] < len(inputs.facts)
+                or type(item[1]) is not str
+                for item in plan.fact_valid_from
+            ):
+                raise ValueError("invalid typed write timestamp supplements")
+            facts, preferences = self._facts.copy(), self._preferences.copy()
+            events = self._changelog._events.copy()
+            successful: list[int] = []
+            superseded: list[str] = []
+            rejected: list[TypedWriteRejection] = []
+            for operation_index, operation in enumerate(plan.operations):
+                node_id = getattr(operation.node, "id", None)
+                collection = facts if isinstance(operation.node, Fact) else preferences
+                try:
+                    node, event = self._prepare_typed_write(
+                        operation, exists=type(node_id) is str and node_id in collection,
+                    )
+                except Exception:  # noqa: BLE001 - isolate invalid items, never BaseException
+                    rejected.append(TypedWriteRejection(
+                        operation_index, operation.input_index,
+                        node_id if type(node_id) is str else "", "invalid_typed_write",
+                    ))
+                    continue
+                if isinstance(node, Fact):
+                    facts[node.id] = node
+                else:
+                    preferences[node.id] = node
+                events.append(event)
+                if operation.purpose == "input":
+                    successful.append(cast(int, operation.input_index))
+                else:
+                    superseded.append(node.id)
+            if not successful and not superseded:
+                return TypedBatchResult(True, None, None, (), (), tuple(rejected), ())
+            # Existing nodes/events are immutable here; changed nodes and every
+            # new event are detached. Publish each whole-state container once.
+            self._facts, self._preferences = facts, preferences
+            self._changelog._events = events
+            self._commit_current_state()
+            committed = self._committed_pair
+            if committed is None or committed.generation != snapshot.generation + 1:
+                raise LiteStorageIntegrityError("typed batch has no verified commit proof")
+            accepted = set(successful)
+            return TypedBatchResult(
+                True, committed.generation, committed.transaction_id,
+                tuple(successful), tuple(superseded), tuple(rejected),
+                tuple(item for item in plan.fact_valid_from if item[0] in accepted),
+            )
+        except BaseException:
+            # A final failure may precede or follow the journal decision.
+            # Reload authority while still holding the same writer lock; an
+            # old resident snapshot must never overwrite a committed target.
+            try:
+                if not self._durability._poisoned:
+                    self._publish_pair(self._durability._load_authoritative_locked())
+            except BaseException:  # noqa: BLE001 - preserve the original batch failure
+                logger.warning("typed batch authoritative recovery failed")
+            finally:
+                self._pair_fingerprint = None
+                self._committed_pair = None
+                self._committed_record = None
+                self._durability._last_commit_target_record = None
+            raise
 
     @_with_writer_lock
     def get_fact(self, fact_id: str) -> Fact | None:
@@ -2422,7 +2603,10 @@ class LiteMemoryStore:
         cached commit proof so the next read recovers authoritative state;
         its error replaces the original body error.
         """
-        self._commit_defer_depth += 1
+        # Serialize entry with active mutations, but release before yielding:
+        # a caller must never wait on the writer queue while holding this lock.
+        with self._durability.writer_lock():
+            self._commit_defer_depth += 1
         try:
             yield
         finally:

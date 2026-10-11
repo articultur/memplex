@@ -184,6 +184,7 @@ files = [
     "memplex/models/memory.py",
     "memplex/models/paragraph.py",
     "memplex/storage/base.py",
+    "memplex/storage/typed_batch.py",
     "memplex/storage/changelog.py",
     "memplex/storage/inbound.py",
     "memplex/storage/vector.py",

@@ -1814,3 +1814,63 @@ def test_e2e_typed_nodes_shared_between_two_nodes(server_client, tmp_path, monke
     assert node_b.local.get_fact("fact-1").object_ == "kafka"
     assert node_b.local.get_preference("pref-1") is not None
     assert any(o.id == "obs-1" for o in node_b.local.list_observations())
+
+
+def test_service_typed_write_keeps_sync_wrapper_local_before_push(tmp_path, monkeypatch):
+    """Forwarded native capability must not bypass real SyncableStore write-through."""
+    from memplex.core import CoreEngine
+    from memplex.models import ExtractedData
+
+    monkeypatch.delenv("MEMPLEX_REMOTE_URL", raising=False)
+    config = MemplexConfig()
+    config.storage.backend = "lite"
+    config.storage.path = str(tmp_path / "service")
+    config.llm.query_enhancement = False
+    service = MemplexService(config=config)
+    local = service.store
+    wrapper = SyncableStore(local, config=_active_config())
+    posted, queued = [], []
+
+    class CommittedHttp:
+        def post(self, url, json=None, **_kwargs):
+            nodes = [*json["facts"], *json["preferences"]]
+            for node in nodes:
+                committed = local.read_context_nodes([node["id"]])[node["id"]]
+                assert committed.id == node["id"]
+                assert committed.tenant_id == node["tenant_id"]
+                assert committed.owner_subject_id == node["owner_subject_id"]
+                if isinstance(committed, Fact):
+                    assert committed.object_ == node["object"]
+                else:
+                    assert committed.preference == node["preference"]
+            posted.append((url, json))
+            return type("Response", (), {"status_code": 200})()
+
+    original_enqueue = wrapper._enqueue_push
+
+    def enqueue(operation, *args):
+        payload = args[1]
+        queued.append([node["id"] for node in [*payload["facts"], *payload["preferences"]]])
+        return original_enqueue(operation, *args)
+
+    def fail_batch(*_args):
+        pytest.fail("sync wrapper forwarded native batch execution")
+
+    wrapper._http = CommittedHttp()
+    monkeypatch.setattr(wrapper, "_enqueue_push", enqueue)
+    monkeypatch.setattr(LiteMemoryStore, "run_typed_write_batch", fail_batch)
+    service.store = wrapper
+    monkeypatch.setattr(CoreEngine, "extract", lambda _engine, _source: ExtractedData(
+        facts=[_fact(fid="first"), _fact(fid="second", object_="redis")],
+        preferences=[_preference(fid="theme")],
+    ))
+    try:
+        service.write(SourceDocument(type="text", content="typed sync input"))
+        wrapper.flush_push()
+        assert queued == [["first"], ["second"], ["theme"]]
+        assert len(posted) == 3
+        assert wrapper._push_failures == 0
+        assert set(local.read_context_nodes(["first", "second", "theme"])) == {"first", "second", "theme"}
+        assert len(local.get_timeline("first")) == 1
+    finally:
+        service.stop()

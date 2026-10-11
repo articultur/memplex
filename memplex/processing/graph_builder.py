@@ -20,7 +20,6 @@ import logging
 from datetime import UTC, datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
-_NO_FINGERPRINT: Any = object()  # stores without a pair fingerprint never match this
 from memplex.models import (
     EdgeType,
     Function,
@@ -55,6 +54,10 @@ class GraphBuilder:
         SEMANTIC_SIMILAR edges are produced.
     """
 
+    # Initialized only on the private invocation owner, never shared by builds.
+    _funcs_cache: list[Function]
+    _id_by_name: dict[str, str]
+
     def __init__(
         self,
         store: MemoryStore,
@@ -73,7 +76,7 @@ class GraphBuilder:
         func: Function,
         existing_graph: GraphData | None = None,
     ) -> list[GraphEdge]:
-        """Detect and return edges for a single Function.
+        """Detect edges using one fresh, invocation-private stored corpus.
 
         Parameters
         ----------
@@ -84,6 +87,27 @@ class GraphBuilder:
             to look up neighbour nodes).  If ``None``, edges are
             computed from scratch.
         """
+        return self._snapshot_owner()._process(func, existing_graph)
+
+    def _snapshot_owner(self) -> GraphBuilder:
+        """Acquire once through the exact supplied store/facade.
+
+        Native listing detaches the ordered rows under its own synchronization;
+        processing and embeddings hold no store lock. All derived state belongs
+        to this private owner, including for overlapping or reentrant builds.
+        """
+        owner = GraphBuilder(self._store, self._config, self._embedding_service)
+        owner._graph_config = self._graph_config
+        owner._funcs_cache = owner._get_all_funcs()
+        owner._id_by_name = {}
+        for func in owner._funcs_cache:
+            owner._id_by_name.setdefault(func.name, func.id)
+        return owner
+
+    def _process(
+        self, func: Function, existing_graph: GraphData | None = None
+    ) -> list[GraphEdge]:
+        """Process one input with this invocation's already acquired corpus."""
         validate_domain(func.domain)
         edges: list[GraphEdge] = []
         existing_set = self._edge_set(existing_graph)
@@ -124,7 +148,7 @@ class GraphBuilder:
         # per Function (longest matched name first: a longer name is a more
         # specific reference), keeping corpus-wide term sharing from growing
         # the graph quadratically.
-        all_funcs = self._get_all_funcs()
+        all_funcs = self._funcs_cache
         action_text, trigger_text = self._name_reference_texts(func)
         max_depends = (
             self._graph_config.depends_on_max_edges if self._graph_config else 20
@@ -232,14 +256,18 @@ class GraphBuilder:
         """Build edges for a batch of Functions.
 
         The graph is built incrementally: each Function sees edges
-        from previously processed Functions in the same batch.
+        from previously processed Functions in the same batch. A nonempty
+        batch shares one fresh stored corpus; an empty batch performs no read.
         """
+        if not funcs:
+            return []
+        owner = self._snapshot_owner()
         all_edges: list[GraphEdge] = []
         accumulated_graph = GraphData(nodes=[], edges=[])
 
         for func in funcs:
             accumulated_graph.nodes.append(func)
-            new_edges = self.process(func, accumulated_graph)
+            new_edges = owner._process(func, accumulated_graph)
             all_edges.extend(new_edges)
             accumulated_graph.edges.extend(new_edges)
 
@@ -265,21 +293,17 @@ class GraphBuilder:
     ) -> list[tuple[str, frozenset[str]]]:
         """(func_id, lowered triggers) of same-domain conflict candidates.
 
-        Stored corpus entries come from a fingerprint-guarded grouped
-        index; batch-local nodes (not yet stored) join ad hoc.
+        Stored corpus entries come from this invocation's grouped index;
+        batch-local nodes (not yet stored) join ad hoc.
         """
-        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
-        if not hasattr(self, "_conflict_groups") or getattr(
-            self, "_conflict_groups_fingerprint", _NO_FINGERPRINT
-        ) != fingerprint:
+        if not hasattr(self, "_conflict_groups"):
             groups: dict[str, list[tuple[str, frozenset[str]]]] = {}
-            for func in self._get_all_funcs():
+            for func in self._funcs_cache:
                 if func.domain:
                     groups.setdefault(func.domain, []).append(
                         (func.id, frozenset(fv.desc.lower() for fv in func.trigger))
                     )
             self._conflict_groups = groups
-            self._conflict_groups_fingerprint = fingerprint
         candidates = [
             (fid, triggers)
             for fid, triggers in self._conflict_groups.get(domain, ())
@@ -431,51 +455,31 @@ class GraphBuilder:
         return {(e.source, e.target, e.edge_type) for e in graph.edges}
 
     def _resolve_by_name(self, name: str) -> str | None:
-        """Look up a Function ID by its name via the store."""
+        """Return the first exact name match in native snapshot order."""
         try:
-            funcs = self._store.list_functions(limit=100000)
-            for f in funcs:
-                if f.name == name:
-                    return f.id
-        except Exception:
-            logger.debug("graph name lookup failed for %r", name, exc_info=True)
-        return None
+            return self._id_by_name.get(name)
+        except TypeError:
+            # Malformed, unhashable reference targets historically had no match.
+            return None
 
     def _get_all_funcs(self) -> list[Function]:
-        """Retrieve all stored Functions (cached per build batch).
-
-        The cache is guarded by the store's pair fingerprint when the store
-        exposes one (lite backend): publishing a new pair — local or peer —
-        invalidates it, so a long-lived builder never scans a stale corpus.
-        Stores without a fingerprint keep the historical per-build fetch.
-        """
-        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
-        if not hasattr(self, "_funcs_cache") or fingerprint != getattr(
-            self, "_funcs_fingerprint", _NO_FINGERPRINT
-        ):
-            try:
-                self._funcs_cache = self._store.list_functions(limit=100000)
-                self._funcs_fingerprint = fingerprint
-            except Exception:  # noqa: BLE001 - broad catch with explicit fallback handling
-                self._funcs_cache = []
-                self._funcs_fingerprint = fingerprint
-        return self._funcs_cache
+        """Attempt one native read; ordinary failure means an empty snapshot."""
+        try:
+            return self._store.list_functions(limit=100000)
+        except Exception:
+            logger.debug("graph Function snapshot acquisition failed", exc_info=True)
+            return []
 
     def _lowered_name_entries(self) -> list[tuple[str, str]]:
-        """(func_id, lowered_name) pairs for the DEPENDS_ON scan, cached."""
-        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
-        if not hasattr(self, "_name_entries") or getattr(
-            self, "_name_entries_fingerprint", _NO_FINGERPRINT
-        ) != fingerprint:
+        """Invocation-local (func_id, lowered_name) DEPENDS_ON candidates."""
+        if not hasattr(self, "_name_entries"):
             self._name_entries = [
-                (func.id, func.name.lower()) for func in self._get_all_funcs() if func.name
+                (func.id, func.name.lower()) for func in self._funcs_cache if func.name
             ]
-            self._name_entries_fingerprint = fingerprint
         return self._name_entries
 
     def _func_name_by_id(self, funcs: list[Function], func_id: str) -> str:
-        """Resolve a function name by id in O(1) via a fingerprint-guarded
-        index.
+        """Resolve a function name by id via an invocation-local index.
 
         The historical linear scan over *funcs* cost O(N) per DEPENDS_ON
         match (up to ``depends_on_max_edges`` scans per added function) --
@@ -483,14 +487,10 @@ class GraphBuilder:
         batch-local nodes not yet in the stored corpus; only those pay a
         scan of the passed list.
         """
-        fingerprint = getattr(self._store, "_pair_fingerprint", _NO_FINGERPRINT)
         index = getattr(self, "_name_by_id", None)
-        if index is None or getattr(
-            self, "_name_by_id_fingerprint", _NO_FINGERPRINT
-        ) != fingerprint:
+        if index is None:
             index = {f.id: f.name for f in funcs}
             self._name_by_id = index
-            self._name_by_id_fingerprint = fingerprint
         name = index.get(func_id)
         if name is not None:
             return name
@@ -503,7 +503,7 @@ class GraphBuilder:
         return action_text, trigger_text
 
     def invalidate_cache(self) -> None:
-        """Clear the internal function list and embedding caches."""
+        """Clear legacy caches; public builds always acquire their own snapshot."""
         if hasattr(self, "_funcs_cache"):
             del self._funcs_cache
         if hasattr(self, "_embedding_cache"):

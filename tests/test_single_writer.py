@@ -153,3 +153,87 @@ def test_store_mutations_through_queue_with_concurrent_reader(tmp_path):
         assert any("Writer 2 record 14" in r["raw_text"] for r in paragraphs.values())
     finally:
         svc.stop()
+
+
+@pytest.mark.parametrize("queue_flag", ["1", "0"], ids=["queue-on", "queue-off"])
+def test_fact_write_uses_writer_boundary_and_is_durable_on_return(tmp_path, monkeypatch, queue_flag):
+    """Removing add_fact's decorator loses its execution and lock boundary."""
+    from memplex.models import Fact
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    monkeypatch.setenv("MEMPLEX_LITE_SINGLE_WRITER", queue_flag)
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+    path = tmp_path / "memory.json"
+    store = LiteMemoryStore(path)
+    reloaded = None
+    calls = []
+    original_reload = store._reload_for_mutation
+
+    def observe_reload(*, force=False):
+        calls.append((threading.get_ident(), getattr(store._durability._local, "depth", 0)))
+        original_reload(force=force)
+
+    monkeypatch.setattr(store, "_reload_for_mutation", observe_reload)
+    caller_ident = threading.get_ident()
+    try:
+        store.add_fact(Fact(id="durable-fact", subject="alice", predicate="likes", object_="tea"))
+        assert len(calls) == 1
+        execution_ident, lock_depth = calls[0]
+        assert lock_depth > 0, "Fact reload ran outside the writer lock"
+        if queue_flag == "1":
+            writer = store._durability._single_writer
+            assert execution_ident == writer._writer_ident
+            assert execution_ident != caller_ident
+        else:
+            assert execution_ident == caller_ident
+            assert getattr(store._durability, "_single_writer", None) is None
+        reloaded = LiteMemoryStore(path)
+        assert reloaded.get_fact("durable-fact").object_ == "tea"
+    finally:
+        for memory in (store, reloaded):
+            if memory is not None:
+                writer = getattr(memory._durability, "_single_writer", None)
+                if writer is not None:
+                    writer.close()
+
+
+def test_fact_write_reenters_existing_writer_queue_under_lock(tmp_path, monkeypatch):
+    """A decorated Fact write must run inline when its writer already owns the lock."""
+    from memplex.models import Fact
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    monkeypatch.setenv("MEMPLEX_LITE_SINGLE_WRITER", "1")
+    monkeypatch.setenv("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+    store = LiteMemoryStore(tmp_path / "memory.json")
+    writer = SingleWriterQueue()
+    monkeypatch.setattr(store._durability, "_single_writer", writer, raising=False)
+    finished = threading.Event()
+    errors = []
+
+    def write_under_lock():
+        with store._durability.writer_lock():
+            store.add_fact(Fact(id="reentrant-fact", subject="alice", predicate="likes", object_="tea"))
+            return store.get_fact("reentrant-fact").object_
+
+    results = []
+
+    def submit():
+        try:
+            results.append(writer.submit(write_under_lock))
+        except BaseException as exc:  # noqa: BLE001 - surfaced on the test thread
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=submit, daemon=True)
+    caller.start()
+    try:
+        assert finished.wait(5), "Fact write deadlocked while reentering the writer queue"
+        caller.join(5)
+        assert not caller.is_alive()
+        assert not errors, f"Reentrant Fact write errors: {errors}"
+        assert results == ["tea"]
+    finally:
+        # A failed bounded deadlock assertion must not block again in close.
+        if finished.is_set():
+            writer.close()

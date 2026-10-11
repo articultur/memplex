@@ -203,3 +203,58 @@ def test_equal_speaker_text_preserves_both_original_assertions(tmp_path):
         assert all(f.invalid_at is None for f in originals)
     finally:
         svc.stop()
+
+
+def test_derived_facts_read_committed_originals(tmp_path, monkeypatch):
+    """Derivation sees the committed original typed and raw evidence phases."""
+    from memplex.models import ExtractedData, Fact, Paragraph
+    from memplex.models.paragraph import persisted_paragraph_id
+
+    monkeypatch.delenv("MEMPLEX_LITE_TYPED_BATCH", raising=False)
+    monkeypatch.delenv("MEMPLEX_LITE_SQLITE_AUTHORITY", raising=False)
+    text = "Alice uses PostgreSQL. Bob uses SQLite."
+    raw_id = persisted_paragraph_id("text", "raw", text)
+    observed = []
+    svc = service(tmp_path)
+    commits = []
+    original_commit = svc.store._durability.commit_locked
+
+    def commit(base, target, **kwargs):
+        commits.append(target)
+        return original_commit(base, target, **kwargs)
+
+    def payload(prompt):
+        original_facts = svc.store.list_facts()
+        assert len(original_facts) == 2
+        assert all(fact.valid_from for fact in original_facts)
+        evidence_id = prompt["evidence"][0]["paragraph_id"]
+        rows = svc.store.read_context_nodes([evidence_id, *(fact.id for fact in original_facts)])
+        assert len(rows) == 3
+        assert rows[evidence_id]["raw_text"] == text
+        assert svc.store.generation == 2
+        observed.append(evidence_id)
+        return payload_for(prompt)
+
+    monkeypatch.setattr(svc.store._durability, "commit_locked", commit)
+    monkeypatch.setattr(svc._engine, "extract", lambda _source: ExtractedData(
+        facts=[
+            Fact(id="original-alice", subject="Alice", predicate="uses", object_="PostgreSQL", source_paragraphs=[raw_id]),
+            Fact(id="original-bob", subject="Bob", predicate="uses", object_="SQLite", source_paragraphs=[raw_id]),
+        ],
+        paragraphs=[Paragraph(id="raw", source="text", section="1", raw_text=text)],
+    ))
+    svc._llm.llm = FakeProvider(payload)
+    try:
+        result = svc.write(SourceDocument(type="text", content=text))
+        assert len(observed) == 1
+        assert len(commits) == 3
+        assert [len(target.memory["facts"]) for target in commits] == [2, 2, 4]
+        assert [len(target.memory.get("paragraphs", [])) for target in commits] == [0, 1, 1]
+        assert result.factual_capture["status"] == "success"
+        assert result.factual_capture["accepted"] == 2
+        derived = [fact for fact in result.facts if fact.provenance.get("extraction") == "factual_capture_v1"]
+        assert len(derived) == 2
+        assert all(fact.valid_from is None for fact in derived)
+        assert all(svc.store.get_fact(fact.id) is not None for fact in derived)
+    finally:
+        svc.stop()

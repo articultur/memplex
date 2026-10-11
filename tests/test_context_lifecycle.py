@@ -919,3 +919,29 @@ def test_context_ordinary_lineage_is_iterative(service, monkeypatch, shape, size
     # within each pass shared ancestry is evaluated once, not once per path.
     assert visits["own_acl"] <= 4 * size + 4, dict(visits)
     assert visits["source_lookup"] <= 4 * size + 4, dict(visits)
+
+
+def test_failed_batch_keeps_existing_hot_source_and_cache(service, monkeypatch):
+    """A failed batch cannot replace committed same-ID text or clear its cache."""
+    from memplex.context import ContextCacheKey, ContextCandidate
+
+    _write(service, monkeypatch, ExtractedData(preferences=[
+        Preference(id="existing", aspect="theme", preference="old committed text"),
+    ]))
+    key = ContextCacheKey("storage", "tenant::one", "alice", "workspace", "codex", "session", "theme")
+    service._context_prefetch_cache.put(key, [ContextCandidate("existing", "hot")])
+
+    def fail_commit(*_args, **_kwargs):
+        raise OSError("batch commit failure")
+
+    from memplex.storage.lite.store import LiteMemoryStore
+
+    monkeypatch.setattr(LiteMemoryStore, "_commit_current_state", fail_commit)
+    _write(service, monkeypatch, ExtractedData(preferences=[
+        Preference(id="existing", aspect="theme", preference="failed new text"),
+        Preference(id="new", aspect="font", preference="failed new source"),
+    ]))
+    assert _refs(service) == ("existing",)
+    assert service.store.read_context_nodes(["existing"])["existing"].preference == "old committed text"
+    assert service.store.read_context_nodes(["new"]) == {}
+    assert service._context_prefetch_cache.pop(key) == (ContextCandidate("existing", "hot"),)

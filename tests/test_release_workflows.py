@@ -390,6 +390,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/models/memory.py",
         "memplex/models/paragraph.py",
         "memplex/storage/base.py",
+        "memplex/storage/typed_batch.py",
         "memplex/storage/changelog.py",
         "memplex/storage/inbound.py",
         "memplex/storage/vector.py",
