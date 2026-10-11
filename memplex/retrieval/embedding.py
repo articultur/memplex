@@ -134,6 +134,9 @@ class _SimpleTFIDFEmbedder:
         import math
 
         for w, count in tf.items():
+            # Transform-only texts have no coordinate for unknown terms.
+            if not update_stats and w not in self._vocab:
+                continue
             idx = self._vocab.get(w, -1) % self.dimension
             idf = self._doc_count / (self._idf.get(w, 1) + 1)
             vec[idx] = (count / len(words)) * math.log(idf + 1)
