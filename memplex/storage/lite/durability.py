@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.source_contract import SourceBusyError
 from memplex.sync_protocol import (
@@ -35,6 +35,9 @@ from memplex.sync_protocol import (
 from memplex.sync_protocol import (
     _require_uuid as _require_uuid_strict,
 )
+
+if TYPE_CHECKING:
+    from memplex.storage.lite.single_writer import SingleWriterQueue
 
 _FORMAT_VERSION = 2
 _PAIR_RECORD_KEYS = {
@@ -152,6 +155,7 @@ _JOURNAL_KEYS = {
 _JOURNAL_TARGET_KEYS = {"memory", "changelog", "generation", "transaction_id"}
 _LOCKS: dict[Path, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
+_SOURCE_DEFERRED: dict[tuple[int, Path], int] = {}
 
 
 class LiteStorageIntegrityError(RuntimeError):
@@ -643,6 +647,42 @@ def _validated_pair_record(value: Any, *, label: str) -> dict[str, Any]:
     }
 
 
+def _validate_source_transition(base: dict[str, Any], target: dict[str, Any]) -> None:
+    """Reject stale V3 state before either commit or journal recovery writes."""
+    from memplex.source_codec import decode_ledger
+    from memplex.source_contract import SourceState
+
+    old = decode_ledger(base["source_validity"])
+    new = decode_ledger(target["source_validity"])
+    previous, current = old.authority, new.authority
+    if (current.scope != previous.scope or current.contract_version != previous.contract_version
+            or current.commit_seq < previous.commit_seq
+            or current.policy.revision < previous.policy.revision
+            or (previous.state is SourceState.DELETED and current.state is not SourceState.DELETED)
+            or (current.policy.revision == previous.policy.revision and current.policy != previous.policy)
+            or (current.commit_seq == previous.commit_seq and new != old)):
+        raise LiteStorageIntegrityError("regressive Lite V3 authority transition")
+    for key, before in old.sources.items():
+        after = new.sources.get(key)
+        if after is None:
+            raise LiteStorageIntegrityError("Lite V3 source head cannot be removed")
+        if after == before:
+            continue
+        if after.last_commit_seq <= previous.commit_seq:
+            raise LiteStorageIntegrityError("stale Lite V3 source transition")
+        old_token, new_token = before.ref.token, after.ref.token
+        if new_token.incarnation != old_token.incarnation:
+            if (before.state is not SourceState.DELETED or after.state is not SourceState.LIVE
+                    or new_token.content_revision != 1 or new_token.auth_revision != 1):
+                raise LiteStorageIntegrityError("invalid Lite V3 source recreation")
+        elif (before.state is SourceState.DELETED
+                or new_token.content_revision < old_token.content_revision
+                or new_token.auth_revision < old_token.auth_revision
+                or ((after.state != before.state or after.ref.semantic_digest != before.ref.semantic_digest)
+                    and new_token.content_revision <= old_token.content_revision)):
+            raise LiteStorageIntegrityError("regressive Lite V3 source transition")
+
+
 def _validate_transition(base: LitePair, target: LitePair) -> None:
     if type(base.memory) is not dict or type(base.changelog) is not list:
         raise LiteStorageIntegrityError("invalid Lite base pair")
@@ -660,6 +700,8 @@ def _validate_transition(base: LitePair, target: LitePair) -> None:
                 or ledger.sources or ledger.targets or ledger.publications
                 or ledger.authority.commit_seq != 1):
             raise LiteStorageIntegrityError("Lite V3 requires an empty new bank")
+    if base.memory.get("schema_version") == 3:
+        _validate_source_transition(base.memory, target.memory)
     base_generation = _require_generation(base.generation, label="base")
     target_generation = _require_generation(target.generation, label="target")
     base_transaction = _require_transaction_id(base.transaction_id, label="base")
@@ -703,6 +745,8 @@ def _replace_and_fsync(path: Path, value: Any) -> None:
 
 class LiteDurability:
     """Own the pair envelope, process lock, flock, and recovery protocol."""
+
+    _single_writer: SingleWriterQueue
 
     def __init__(
         self,
@@ -773,6 +817,54 @@ class LiteDurability:
                 finally:
                     self._local.depth = 0
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _mark_source_deferred(self, delta: int, *, owner_pid: int) -> None:
+        """Release only the registration owned by the process that entered it."""
+        if owner_pid != os.getpid():
+            return
+        key = (owner_pid, self._memory_path)
+        depth = _SOURCE_DEFERRED.get(key, 0) + delta
+        if depth < 0:
+            raise LiteStorageIntegrityError("unbalanced local deferred source scope")
+        if depth:
+            _SOURCE_DEFERRED[key] = depth
+        else:
+            _SOURCE_DEFERRED.pop(key, None)
+
+    @contextmanager
+    def writer_lock_until(self, deadline_ns: int) -> Iterator[None]:
+        """Acquire the ordinary process/flock pair before a monotonic deadline."""
+        if (type(deadline_ns) is not int or self._poisoned
+                or getattr(self._local, "depth", False)):
+            raise SourceBusyError()
+        remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+        lock = _process_lock_for(self._memory_path)
+        if remaining <= 0 or not lock.acquire(timeout=remaining):
+            raise SourceBusyError()
+        try:
+            _check_read_deadline(deadline_ns)
+            if _SOURCE_DEFERRED.get((os.getpid(), self._memory_path), 0):
+                raise SourceBusyError()
+            fcntl = _load_fcntl()
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            _check_read_deadline(deadline_ns)
+            with self._lock_path.open("a+b") as handle:
+                while True:
+                    _check_read_deadline(deadline_ns)
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(min(0.001, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
+                try:
+                    _check_read_deadline(deadline_ns)
+                    self._local.depth = 1
+                    yield
+                finally:
+                    self._local.depth = 0
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock.release()
 
     def _envelopes(
         self,
@@ -1067,6 +1159,7 @@ class LiteDurability:
         base_verified: bool = False,
         base_record: dict[str, Any] | None = None,
         target_validated: bool = False,
+        deadline_ns: int | None = None,
     ) -> LitePair:
         # ``base_verified`` is only passed by callers holding this flock
         # continuously since ``base`` was observed (fingerprint-checked), so
@@ -1076,26 +1169,32 @@ class LiteDurability:
         # only together with ``base_verified``.  ``target_validated`` marks
         # that the caller already ran this instance's semantic validator on
         # the identical target payload, so the third full decode is skipped.
+        _check_read_deadline(deadline_ns)
         if not base_verified:
-            current = self._load_authoritative_locked()
+            current = self._load_authoritative_locked(deadline_ns=deadline_ns)
             if current != base:
                 raise LiteStorageIntegrityError("Lite authoritative state changed before commit")
         _validate_memory_payload(
-            base.memory, allow_legacy_missing_schema=base.transaction_id == "legacy"
+            base.memory, allow_legacy_missing_schema=base.transaction_id == "legacy",
+            deadline_ns=deadline_ns,
         )
-        _validate_memory_payload(target.memory)
+        _validate_memory_payload(target.memory, deadline_ns=deadline_ns)
         _validate_transition(base, target)
         if not target_validated:
             self._validate_semantics(target)
+        _check_read_deadline(deadline_ns)
         # The canonical encodes below reject NaN/Infinity before any file is
         # written; computing them once keeps the failure ahead of the journal
         # while avoiding a second full encode per payload.
         target_memory_digest = _digest(target.memory)
+        _check_read_deadline(deadline_ns)
         target_changelog_digest = _digest(target.changelog)
+        _check_read_deadline(deadline_ns)
         memory_doc, changelog_doc = self._envelopes(
             target,
             memory_digest=target_memory_digest,
             changelog_digest=target_changelog_digest,
+            deadline_ns=deadline_ns,
         )
         target_record = _pair_record(
             target,
@@ -1111,9 +1210,13 @@ class LiteDurability:
             "target_record": target_record,
         }
         self.before_journal_durable_publish()
+        _check_read_deadline(deadline_ns)
         tmp = _write_and_fsync(self._journal_path, journal)
         renamed = False
         try:
+            # Cancellation is safe until the durable decision starts. Once
+            # renamed, finish/recover this decision without a timeout escape.
+            _check_read_deadline(deadline_ns)
             os.replace(tmp, self._journal_path)
             renamed = True
             _fsync_dir(self._journal_path.parent)

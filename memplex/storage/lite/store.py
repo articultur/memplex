@@ -782,7 +782,7 @@ class LiteMemoryStore:
             return None
         adapter = getattr(self, "_source_version_adapter", None)
         if adapter is None:
-            adapter = LiteSourceVersionStore(self._durability)
+            adapter = LiteSourceVersionStore(self._durability, owner=self)
             self._source_version_adapter = adapter
         return adapter
 
@@ -2619,7 +2619,9 @@ class LiteMemoryStore:
         # Serialize entry with active mutations, but release before yielding:
         # a caller must never wait on the writer queue while holding this lock.
         with self._durability.writer_lock():
+            source_scope_owner = os.getpid()
             self._commit_defer_depth += 1
+            self._durability._mark_source_deferred(1, owner_pid=source_scope_owner)
         try:
             yield
         finally:
@@ -2628,6 +2630,7 @@ class LiteMemoryStore:
             # zero while pending resident nodes are still uncommitted.
             with self._durability.writer_lock():
                 self._commit_defer_depth -= 1
+                self._durability._mark_source_deferred(-1, owner_pid=source_scope_owner)
                 if self._commit_defer_depth == 0:
                     try:
                         self._commit_current_state()
@@ -2733,7 +2736,11 @@ class LiteMemoryStore:
                     # resident never saw; fold them in by id (local
                     # mutations win) or this commit would silently drop
                     # the peer's writes.
-                    self._fold_missing_from_base(base.memory)
+                    # A V3 ledger is a versioned decision, never an additive
+                    # resident merge. The transition validator rejects stale
+                    # source state before any durable journal can be published.
+                    if base.memory.get("schema_version") != 3:
+                        self._fold_missing_from_base(base.memory)
                 target = LitePair(
                     memory=self._raw_memory(),
                     changelog=self._raw_changelog(),

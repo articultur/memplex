@@ -1,6 +1,6 @@
-"""Lite V3 authority ledger and protected read-only source sessions.
+"""Lite V3 authority ledger, source CAS, and protected source sessions.
 
-This adapter has no source/publication writers. Physical payload locators bind
+Publication writers remain disabled. Physical payload locators bind
 row identity and ACL fields before raw IDs are projected to logical handles.
 """
 from __future__ import annotations
@@ -13,11 +13,17 @@ import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from memplex.auth import AuthorizationContext
 from memplex.source_codec import (
+    _NAMESPACE_IDENTITY_FIELDS,
+    _PROVENANCE_IDENTITY_FIELDS,
+    _ROOT_IDENTITY_FIELDS,
+    _canonical,
+    _project,
     decode_envelope,
     decode_ledger,
     encode_envelope,
@@ -27,9 +33,11 @@ from memplex.source_codec import (
 )
 from memplex.source_contract import (
     CARRIER_KEY,
+    MAX_REVISION,
     PUBLICATION_PREFIX,
     AuthorityScope,
     AuthorityState,
+    ExpectedAbsent,
     PolicySnapshot,
     PublicationReceipt,
     PublicationRecord,
@@ -45,12 +53,17 @@ from memplex.source_contract import (
     SourceKind,
     SourceLedger,
     SourceMutation,
+    SourceOperation,
     SourceReceipt,
+    SourceRef,
     SourceSnapshot,
     SourceState,
+    SourceToken,
     TargetHead,
     TargetToken,
+    ValidationLimits,
 )
+from memplex.source_validation import finalize_at, validate_sources
 from memplex.storage.lite.durability import (
     LiteDurability,
     LitePair,
@@ -58,9 +71,8 @@ from memplex.storage.lite.durability import (
     _canonical_json,
     _check_read_deadline,
     _empty_sync_state,
-    _load_fcntl,
-    _process_lock_for,
 )
+from memplex.storage.lite.single_writer import SingleWriterQueue, single_writer_enabled
 from memplex.storage.source_versions import (
     _RESOURCE_ISSUER,
     SourceAdmission,
@@ -69,6 +81,9 @@ from memplex.storage.source_versions import (
     SourceValidationHooks,
     _check_admission,
 )
+
+if TYPE_CHECKING:
+    from memplex.storage.lite.store import LiteMemoryStore
 
 _COLLECTIONS = {SourceKind.RAW_PARAGRAPH: "paragraphs", SourceKind.FUNCTION: "functions",
                 SourceKind.FACT: "facts", SourceKind.PREFERENCE: "preferences",
@@ -285,39 +300,114 @@ class _LiteReadSession:
 @contextmanager
 def _read_lock(durability: LiteDurability, deadline_ns: int) -> Iterator[None]:
     """Bound lock acquisition, sharing the normal writer's process/flock locks."""
-    remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
-    if remaining <= 0 or durability._poisoned or getattr(durability._local, "depth", False):
-        raise SourceBusyError()
-    lock = _process_lock_for(durability._memory_path)
-    if not lock.acquire(timeout=remaining):
-        raise SourceBusyError()
-    fcntl = _load_fcntl()
-    try:
-        with durability._lock_path.open("a+b") as handle:
-            while True:
-                if time.monotonic_ns() >= deadline_ns:
-                    raise SourceBusyError()
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    time.sleep(min(0.001, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
-            try:
-                durability._local.depth = 1
-                yield
-            finally:
-                durability._local.depth = 0
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        lock.release()
+    with durability.writer_lock_until(deadline_ns):
+        yield
+
+
+def _advance(revision: int) -> int:
+    if revision >= MAX_REVISION:
+        raise SourceIntegrityError(RejectionCode.QUARANTINED)
+    return revision + 1
+
+
+def _acl_projection(payload: Mapping[str, object]) -> str:
+    identity = {key: payload[key] for key in _ROOT_IDENTITY_FIELDS - {"id"} if key in payload}
+    for container, fields in (("namespace", _NAMESPACE_IDENTITY_FIELDS),
+                              ("provenance", _PROVENANCE_IDENTITY_FIELDS)):
+        values = payload.get(container, {})
+        if isinstance(values, Mapping):
+            identity[container] = {key: values[key] for key in fields if key in values}
+    return _canonical(identity)
+
+
+def _compare_source(current: SourceSnapshot | None, command: SourceMutation) -> None:
+    if current is None:
+        if command.expected is not ExpectedAbsent.ABSENT:
+            raise SourceContractError(RejectionCode.MISSING)
+        return
+    head = current.head
+    if command.expected is ExpectedAbsent.ABSENT:
+        raise SourceContractError(RejectionCode.DELETED if head.state is SourceState.DELETED
+                                  else RejectionCode.SOURCE_CHANGED)
+    expected, actual = command.expected, head.ref.token
+    if (expected.incarnation != actual.incarnation
+            or expected.content_revision != actual.content_revision):
+        raise SourceContractError(RejectionCode.SOURCE_CHANGED)
+    if expected.auth_revision != actual.auth_revision:
+        raise SourceContractError(RejectionCode.AUTH_CHANGED)
+    wanted = SourceState.DELETED if command.operation is SourceOperation.RECREATE else SourceState.LIVE
+    if head.state is not wanted:
+        raise SourceContractError(RejectionCode.DELETED if head.state is SourceState.DELETED
+                                  else RejectionCode.QUARANTINED)
+    if head.source_class is not command.source_class:
+        raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+
+
+def _mutation_head(command: SourceMutation, current: SourceSnapshot | None,
+                   payload: Mapping[str, object] | None, commit_seq: int) -> SourceHead:
+    if command.operation is SourceOperation.DELETE:
+        assert current is not None
+        token = replace(current.head.ref.token,
+                        content_revision=_advance(current.head.ref.token.content_revision))
+        return SourceHead(replace(current.head.ref, token=token), SourceState.DELETED,
+                          command.source_class, "", commit_seq, {}, ())
+    assert payload is not None
+    locator = _payload_locator(command.key, payload)
+    canonical = {**payload, "id": command.key.logical_id}
+    digest = semantic_digest(canonical, input_context=command.input_context, root_refs=command.root_refs)
+    if current is None or command.operation is SourceOperation.RECREATE:
+        token = SourceToken(str(uuid.uuid4()), 1, 1)
+    else:
+        content_changed = (_canonical(_project(current.payload, output=False))
+                           != _canonical(_project(canonical, output=False))
+                           or current.head.input_context != command.input_context
+                           or current.head.root_refs != command.root_refs
+                           or json.loads(current.head.payload_locator)["id"] != payload["id"])
+        auth_changed = _acl_projection(current.payload) != _acl_projection(payload)
+        old = current.head.ref.token
+        token = SourceToken(old.incarnation,
+                            _advance(old.content_revision) if content_changed else old.content_revision,
+                            _advance(old.auth_revision) if auth_changed else old.auth_revision)
+    ref = SourceRef(command.key, token, 1, digest)
+    return SourceHead(ref, SourceState.LIVE, command.source_class, locator, commit_seq,
+                      command.input_context, command.root_refs)
+
+
+def _source_target(base: LitePair, ledger: SourceLedger, command: SourceMutation,
+                   current: SourceSnapshot | None, head: SourceHead,
+                   payload: Mapping[str, object] | None) -> LitePair:
+    memory = copy.deepcopy(base.memory)
+    collection = _COLLECTIONS[command.key.kind]
+    if current is not None and current.head.state is not SourceState.DELETED:
+        physical_id = json.loads(current.head.payload_locator)["id"]
+        memory[collection] = [row for row in memory[collection] if row["id"] != physical_id]
+    if payload is not None:
+        memory.setdefault(collection, []).append(dict(payload))
+    if command.operation is SourceOperation.DELETE:
+        memory["edges"] = [edge for edge in memory["edges"]
+                           if command.key.logical_id not in {edge["source"], edge["target"]}]
+    authority = replace(ledger.authority, commit_seq=head.last_commit_seq)
+    memory["source_validity"] = encode_ledger(replace(ledger, authority=authority,
+                                                    sources={**ledger.sources, command.key: head}))
+    changelog = copy.deepcopy(base.changelog)
+    changelog.append({"func_id": command.key.logical_id, "timestamp": datetime.now(UTC).isoformat(),
+                      "event_type": command.operation.value, "description": "Source " + command.operation.value,
+                      "source": "", "actor": "source-validity-v1"})
+    return LitePair(memory, changelog, base.generation + 1, uuid.uuid4().hex)
 
 
 class LiteSourceVersionStore:
-    """Read-only internal adapter. Source and publication writers remain disabled."""
+    """Internal source transactions; publication and runtime activation stay disabled."""
 
-    def __init__(self, durability: LiteDurability) -> None:
+    def __init__(self, durability: LiteDurability, *, owner: LiteMemoryStore | None = None) -> None:
         if type(durability) is not LiteDurability:
             raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if owner is not None:
+            from memplex.storage.lite.store import LiteMemoryStore
+
+            if type(owner) is not LiteMemoryStore or owner._durability is not durability:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        self._owner = owner
         self._durability = durability
         self._hooks: SourceValidationHooks | None = None
         self._scope: AuthorityScope | None = None
@@ -351,7 +441,9 @@ class LiteSourceVersionStore:
             memory.update(schema_version=3, source_validity=encode_ledger(SourceLedger(authority, {}, {}, {})))
             memory.setdefault("paragraphs", [])
             target = LitePair(memory, [], 1, uuid.uuid4().hex)
-            self._durability.commit_locked(base, target, base_verified=True)
+            committed = self._durability.commit_locked(base, target, base_verified=True)
+            if self._owner is not None:
+                self._owner._publish_pair(committed)
         self._install_hooks(admission._hooks, scope=scope, issuer=_RESOURCE_ISSUER)
         return authority
 
@@ -380,7 +472,95 @@ class LiteSourceVersionStore:
 
     def mutate_source(self, authorization: AuthorizationContext, command: SourceMutation, *,
                       deadline_ns: int) -> SourceReceipt:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if (self._hooks is None or self._owner is None or type(authorization) is not AuthorizationContext
+                or type(command) is not SourceMutation or type(deadline_ns) is not int
+                or os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+                or self._owner._sync_repository._capture_policy.mode != "off"):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if (command.source_class not in {SourceClass.DIRECT_INPUT, SourceClass.CAPTURED_INPUT}
+                or command.key.logical_id.startswith(PUBLICATION_PREFIX)):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+        if single_writer_enabled():
+            writer = getattr(self._durability, "_single_writer", None)
+            if writer is None:
+                writer = SingleWriterQueue()
+                self._durability._single_writer = writer
+            return writer.submit_until(lambda: self._mutate_locked(authorization, command, deadline_ns), deadline_ns)
+        return self._mutate_locked(authorization, command, deadline_ns)
+
+    def _check_source_inputs(self, session: _LiteReadSession, authorization: AuthorizationContext,
+                             command: SourceMutation, deadline_ns: int) -> None:
+        assert self._hooks is not None
+        if (command.source_class is SourceClass.CAPTURED_INPUT
+                and command.key.kind is not SourceKind.RAW_PARAGRAPH
+                and (command.key.kind not in {SourceKind.FUNCTION, SourceKind.FACT, SourceKind.PREFERENCE}
+                     or not command.root_refs
+                     or any(ref.key.kind is not SourceKind.RAW_PARAGRAPH for ref in command.root_refs))):
+            raise SourceContractError(RejectionCode.INVALID_UPSTREAM)
+        roots = [ref.key.logical_id for ref in command.root_refs]
+        result = validate_sources(session, roots, authorization=authorization,
+                                  own_acl=self._hooks.own_acl, safe_for_model=self._hooks.safe_for_model,
+                                  limits=ValidationLimits(max_nodes_per_root=127, max_depth=15,
+                                                          max_unique_reads=4999),
+                                  deadline_ns=deadline_ns, allow_captured_inputs=True)
+        if result.rejected:
+            raise SourceContractError(next(iter(result.rejected.values())))
+        # The new source is one additional root above every declared input.
+        # Validate dependencies without forbidding revocation of this source's
+        # own safety/lifecycle state; a dependency back to it is still a cycle.
+        if command.key in result.sources:
+            raise SourceContractError(RejectionCode.CYCLE)
+        if len(result.sources) > 127:
+            raise SourceContractError(RejectionCode.BUDGET_EXHAUSTED)
+        for ref in command.root_refs:
+            snapshot = result.accepted.get(ref.key.logical_id)
+            if snapshot is None or snapshot.head.ref != ref:
+                raise SourceContractError(RejectionCode.SOURCE_CHANGED)
+        if len(finalize_at(result, at=session.utc_now()).accepted) != len(result.accepted):
+            raise SourceContractError(RejectionCode.EXPIRED)
+
+    def _mutate_locked(self, authorization: AuthorizationContext, command: SourceMutation,
+                       deadline_ns: int) -> SourceReceipt:
+        assert self._hooks is not None and self._owner is not None
+        with self._durability.writer_lock_until(deadline_ns):
+            base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
+            if base.memory.get("schema_version") != 3:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            session = _LiteReadSession(base, deadline_ns)
+            try:
+                ledger = session._ledger
+                scope = ledger.authority.scope
+                if (scope != self._scope or ledger.authority.state is not SourceState.LIVE
+                        or (command.key.authority_id, command.key.tenant_id, command.key.workspace_id)
+                        != (scope.authority_id, scope.tenant_id, scope.workspace_id)
+                        or authorization.principal.tenant_id != scope.tenant_id
+                        or authorization.workspace_id != scope.workspace_id):
+                    raise SourceContractError(RejectionCode.DENIED)
+                if any(key.logical_id == command.key.logical_id and key != command.key for key in ledger.sources):
+                    raise SourceContractError(RejectionCode.MALFORMED)
+                current = session.source(command.key)
+                if (current is not None and current.head.state is SourceState.LIVE
+                        and not self._hooks.own_acl(current, authorization)):
+                    raise SourceContractError(RejectionCode.DENIED)
+                _compare_source(current, command)
+                payload = None if command.payload is None else json.loads(_canonical(command.payload))
+                head = _mutation_head(command, current, payload, _advance(ledger.authority.commit_seq))
+                if payload is not None:
+                    if not self._hooks.own_acl(SourceSnapshot(head, payload), authorization):
+                        raise SourceContractError(RejectionCode.DENIED)
+                    self._check_source_inputs(session, authorization, command, deadline_ns)
+                target = _source_target(base, ledger, command, current, head, payload)
+                _check_read_deadline(deadline_ns)
+                committed = self._durability.commit_locked(base, target, base_verified=True, deadline_ns=deadline_ns)
+                self._owner._publish_pair(committed)
+                return SourceReceipt(head.ref, head.state, head.last_commit_seq)
+            except BaseException:
+                self._owner._pair_fingerprint = None
+                self._owner._committed_pair = None
+                self._owner._committed_record = None
+                raise
+            finally:
+                session._active = False
 
     def publish_if_current(self, authorization: AuthorizationContext, command: PublishCommand, *,
                            deadline_ns: int) -> PublicationReceipt:

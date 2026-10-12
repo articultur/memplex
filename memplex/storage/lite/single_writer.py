@@ -18,8 +18,11 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
+
+from memplex.source_contract import SourceBusyError
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,42 @@ class SingleWriterQueue:
     def drain(self, timeout: float | None = None) -> None:
         """Wait for queued jobs to finish; the queue stays usable."""
         self._queue.join()
+
+    def submit_until(self, fn: Callable[[], Any], deadline_ns: int) -> Any:
+        """Cancel queued work atomically; a started job owns its final outcome.
+
+        The operation must check this same deadline before its durable
+        decision. After it starts we await its result, so a timeout cannot
+        report failure while a background job subsequently publishes.
+        """
+        if type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns:
+            raise SourceBusyError()
+        if threading.get_ident() == self._writer_ident:
+            return fn()
+        self._ensure_thread()
+        state_lock = threading.Lock()
+        started = canceled = False
+
+        def run() -> Any:
+            nonlocal started
+            with state_lock:
+                if canceled or time.monotonic_ns() >= deadline_ns:
+                    raise SourceBusyError()
+                started = True
+            return fn()
+
+        job = _Job(run)
+        self._queue.put(job)
+        remaining = max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+        if not job.done.wait(remaining):
+            with state_lock:
+                if not started:
+                    canceled = True
+                    raise SourceBusyError()
+            job.done.wait()
+        if job.error is not None:
+            raise job.error
+        return job.result
 
     def close(self, drain: bool = True) -> None:
         """Stop the writer; queued jobs finish first when *drain*.
