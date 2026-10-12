@@ -487,14 +487,15 @@ def test_two_processes_follow_actual_lock_order(tmp_path, mode, scenario, first)
     _run_bounded(tmp_path, _process_matrix, mode, scenario, first)
 
 
-def _stalled_diagnostic_peer(root, mode, ready, start, attempted, acquired, release, blocked, owned_group):
+def _stalled_diagnostic_peer(root, mode, ready, start, attempted, acquired, release, blocked, waiting, owned_group):
     if owned_group:
         os.setsid()
 
     def stalled_operation(store, _root, _scenario, _role):
         def stalled_planner(snapshot, inputs):
-            blocked.set()
-            threading.Event().wait()
+            with waiting:
+                blocked.set()
+                waiting.wait_for(lambda: False)
             return literal_plan(snapshot, inputs)
 
         store.run_typed_write_batch(TypedBatchInput((make_fact("stalled"),), ()), stalled_planner)
@@ -503,23 +504,36 @@ def _stalled_diagnostic_peer(root, mode, ready, start, attempted, acquired, rele
     _peer_process(root, mode, "add", "peer", ready, start, attempted, acquired, release)
 
 
+@contextmanager
+def _diagnostic_wait_handoff(blocked, waiting, *, clock=time.monotonic):
+    deadline = clock() + _WAIT
+    assert blocked.wait(_WAIT), "Diagnostic peer never reached its stuck planner"
+    assert waiting.acquire(timeout=max(0, deadline - clock())), "Diagnostic peer did not enter its wait"
+    try:
+        yield
+    finally:
+        waiting.release()
+
+
 @pytest.mark.parametrize("mode", ["1", "0"], ids=["queue-on", "queue-off"])
 @pytest.mark.parametrize("owned_group", [False, True], ids=["individual-cleanup", "group-cleanup"])
 def test_peer_cleanup_preserves_stacks_before_diagnostic_deadline(tmp_path, mode, owned_group):
     context = multiprocessing.get_context("spawn")
     ready, start, attempted, acquired, release, blocked = (context.Event() for _ in range(6))
+    waiting = context.Condition()
     process = context.Process(
         target=_stalled_diagnostic_peer,
-        args=(str(tmp_path), mode, ready, start, attempted, acquired, release, blocked, owned_group),
+        args=(str(tmp_path), mode, ready, start, attempted, acquired, release, blocked, waiting, owned_group),
     )
     process.start()
     try:
         assert ready.wait(_WAIT), "Diagnostic peer did not open"
         start.set()
         release.set()
-        assert blocked.wait(_WAIT), "Diagnostic peer never reached its stuck planner"
-        # No sleeps: cleanup is deliberately immediate, before the scheduled dump.
-        _stop_process(process, owned_group=owned_group)
+        # Acquiring the child's condition proves its wait released the lock.
+        # Retain our lock through SIGTERM so the callback cannot resume.
+        with _diagnostic_wait_handoff(blocked, waiting):
+            _stop_process(process, owned_group=owned_group)
         assert not process.is_alive(), "Diagnostic cleanup exceeded existing bounds"
         evidence = (tmp_path / "peer-stacks.log").read_text(encoding="utf-8")
         assert "stalled_planner" in evidence, evidence
@@ -529,3 +543,88 @@ def test_peer_cleanup_preserves_stacks_before_diagnostic_deadline(tmp_path, mode
     finally:
         _stop_process(process, owned_group=owned_group)
         process.close()
+
+
+def test_diagnostic_handoff_waits_for_wait_entry_and_holds_through_cleanup():
+    waiting = threading.Condition()
+    blocked, gate, attempted = (threading.Event() for _ in range(3))
+    cleanup_entered, cleanup_release, planner_finished = (threading.Event() for _ in range(3))
+    errors = []
+
+    class ObservedCondition:
+        def acquire(self, **kwargs):
+            attempted.set()
+            return waiting.acquire(**kwargs)
+
+        def release(self):
+            waiting.release()
+
+    def planner():
+        with waiting:
+            blocked.set()
+            assert gate.wait(_WAIT), "Pre-wait gate was never released"
+            assert waiting.wait(_WAIT), "Cleanup never notified the controlled waiter"
+        planner_finished.set()
+
+    def cleanup():
+        with _diagnostic_wait_handoff(blocked, ObservedCondition()):
+            waiting.notify_all()
+            cleanup_entered.set()
+            assert cleanup_release.wait(_WAIT), "Controlled cleanup was never released"
+
+    workers = [threading.Thread(
+        target=_thread_target,
+        args=(operation, {}, errors, name, threading.Event()),
+        name=name, daemon=True,
+    ) for operation, name in [(planner, "diagnostic-planner"), (cleanup, "diagnostic-cleanup")]]
+    try:
+        for worker in workers:
+            worker.start()
+        assert attempted.wait(_WAIT), "Parent never attempted the wait-entry handoff"
+        assert not cleanup_entered.is_set(), "Readiness alone allowed premature cleanup"
+        gate.set()
+        assert cleanup_entered.wait(_WAIT), "Actual wait entry did not release the parent"
+        assert not planner_finished.is_set(), "Planner resumed before cleanup released its lock"
+    finally:
+        gate.set()
+        cleanup_release.set()
+        assert waiting.acquire(timeout=_WAIT), "Controlled wait lock did not release"
+        try:
+            waiting.notify_all()
+        finally:
+            waiting.release()
+        _join_threads(workers, errors)
+    assert planner_finished.is_set()
+
+
+@pytest.mark.parametrize("failure", ["readiness", "handoff", "cleanup"])
+def test_diagnostic_handoff_failure_keeps_deadline_and_lock_ownership(failure):
+    waits, acquisitions, releases = [], [], []
+
+    class Blocked:
+        def wait(self, timeout):
+            waits.append(timeout)
+            return failure != "readiness"
+
+    class Waiting:
+        def acquire(self, *, timeout):
+            acquisitions.append(timeout)
+            return failure != "handoff"
+
+        def release(self):
+            releases.append(True)
+
+    expected = {
+        "readiness": "never reached its stuck planner",
+        "handoff": "did not enter its wait",
+        "cleanup": "controlled cleanup failure",
+    }
+    clock = iter([100, 103]).__next__
+    with (
+        pytest.raises(AssertionError, match=expected[failure]),
+        _diagnostic_wait_handoff(Blocked(), Waiting(), clock=clock),
+    ):
+        raise AssertionError("controlled cleanup failure")
+    assert waits == [_WAIT]
+    assert acquisitions == ([] if failure == "readiness" else [_WAIT - 3])
+    assert releases == ([True] if failure == "cleanup" else [])
