@@ -31,6 +31,8 @@ from memplex.storage.migrations._constants import (
     _MANAGED_TABLES,
     _MAX_VECTOR_DIM,
     _SEARCH_TSV_GENERATION_DIGEST,
+    _SOURCE_CAPABILITY,
+    _SOURCE_TABLES,
     _SYNC_FUNCTIONS,
     _SYNC_TABLES,
     _TASK_TABLES,
@@ -603,6 +605,7 @@ from memplex.storage.migrations.catalogue_checks import (
     _is_background_tasks_current_variant,
     _is_edge_integrity_current_variant,
     _is_reliable_sync_current_variant,
+    _is_source_validity_current_variant,
     _legacy_base_columns,
     _legacy_vector_dimension,
     _managed_table_catalogue_matches,
@@ -625,6 +628,7 @@ from memplex.storage.migrations.catalogue_checks import (
     _required_core_indexes,
     _reserved_domain_id_check_matches,
     _search_tsv_matches,
+    _source_validity_catalogue_matches,
     _sync_function_digest,
     _sync_table_catalogue_matches,
     _sync_table_signature,
@@ -668,6 +672,7 @@ def schema_fingerprint(
         )
     has_reliable_sync = _reliable_sync_catalogue_matches(tables, snapshot)
     has_background_tasks = _background_tasks_catalogue_matches(tables)
+    has_source_validity = _source_validity_catalogue_matches(tables)
     # v5 deliberately adds capture triggers to the existing business tables.
     # Earlier catalogue classifiers require no user triggers, so present a
     # trigger-free copy only while recognising the immutable G003 core.
@@ -714,7 +719,10 @@ def schema_fingerprint(
         and feedback is not None
         and _matches_current_feedback(feedback)
         and capabilities is not None
-        and _matches_capabilities(capabilities, snapshot["capabilities"], vector_dim=vector_dim)
+        and _matches_capabilities(
+            capabilities, snapshot["capabilities"], vector_dim=vector_dim,
+            source_validity=has_source_validity,
+        )
     ):
         current = True
     else:
@@ -729,6 +737,11 @@ def schema_fingerprint(
             return SchemaFingerprint("unknown", digest, "unknown")
     elif any(name in tables for name in _TASK_TABLES):
         return SchemaFingerprint("unknown", digest, "unknown")
+    if has_source_validity:
+        if not has_background_tasks:
+            return SchemaFingerprint("unknown", digest, "unknown")
+    elif any(name in tables for name in _SOURCE_TABLES):
+        return SchemaFingerprint("unknown", digest, "unknown")
     features = SchemaVariantFeatures(
         layout=layout,
         feedback_v1=feedback_v1,
@@ -736,6 +749,7 @@ def schema_fingerprint(
         has_edge_integrity=has_edge_integrity and current,
         has_reliable_sync=has_reliable_sync,
         has_background_tasks=has_background_tasks,
+        has_source_validity=has_source_validity,
         vector_dim=vector_dim,
     )
     variant = features.display_name()
@@ -1307,11 +1321,12 @@ class PostgresMigrationRunner:
             capabilities = tuple((str(name), str(digest)) for name, digest in cur.fetchall())
             expected_digest = _vector_parameter_digest(request.dim)
             features = fingerprint.features
+            source_capabilities = (_SOURCE_CAPABILITY,) if features and features.has_source_validity else ()
             if (
                 features is not None
                 and features.current
                 and features.vector_dim == request.dim
-                and capabilities == (("pgvector_embedding", expected_digest),)
+                and capabilities == (("pgvector_embedding", expected_digest), *source_capabilities)
             ):
                 return VectorCapabilityStatus(
                     state="ready",
@@ -1324,7 +1339,7 @@ class PostgresMigrationRunner:
                 and features is not None
                 and features.current
                 and features.vector_dim is None
-                and capabilities == ()
+                and capabilities == source_capabilities
             ):
                 return VectorCapabilityStatus(state="degraded", dim=request.dim)
             raise MigrationIntegrityError("PostgreSQL vector capability is not ready")

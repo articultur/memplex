@@ -18,6 +18,7 @@ from memplex.storage.migrations._constants import (
     _CAPABILITIES_TABLE,
     _LEDGER_TABLE,
     _MANAGED_TABLES,
+    _SOURCE_TABLES,
     _SYNC_FUNCTIONS,
     ApplicationAclContract,
     IngressAclContract,
@@ -44,6 +45,8 @@ def _verify_application_acl(
         raise TypeError("application ACL contract must be exact ApplicationAclContract")
     application_role = contract.role
     tables = _APPLICATION_ACL
+    if any(tables[name] != frozenset({"SELECT", "INSERT", "UPDATE"}) for name in _SOURCE_TABLES):
+        raise AssertionError("source ledger ACL must preserve tombstones and audit rows")
     if tuple(tables) != _APPLICATION_ACL_TABLES:
         raise AssertionError("application ACL matrix must track application tables")
     cur.execute(

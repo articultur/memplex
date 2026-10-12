@@ -390,6 +390,9 @@ class _MockCursor:
         if self.executed and "SELECT table_name, has_table_privilege" in self.executed[-1][0]:
             return [
                 ("memplex_background_tasks", True),
+                ("memplex_derivation_records", True),
+                ("memplex_source_authorities", True),
+                ("memplex_source_heads", True),
                 ("memplex_sync_batches", True),
                 ("memplex_sync_cursors", True),
                 ("memplex_sync_deliveries", True),

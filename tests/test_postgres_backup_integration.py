@@ -377,6 +377,9 @@ def _grant_application_acl_contract(pg_dsn: str, role: str) -> None:
                 "memplex_sync_entity_versions",
                 "memplex_sync_targets",
                 "memplex_sync_stream_state",
+                "memplex_source_authorities",
+                "memplex_source_heads",
+                "memplex_derivation_records",
             ):
                 cursor.execute(
                     pg_sql.SQL("GRANT SELECT, INSERT, UPDATE ON {} TO {}").format(

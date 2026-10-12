@@ -16,6 +16,7 @@ from memplex.storage.migrations._constants import (
     _CAPABILITIES_TABLE,
     _KNOWN_MEMPLEX_RELATION_KINDS,
     _MANAGED_TABLES,
+    _SOURCE_TABLES,
     _SYNC_FUNCTIONS,
 )
 from memplex.storage.migrations.catalogue_checks import _normalise_sql
@@ -395,8 +396,10 @@ def _snapshot_table(
         (str(trigger_name), int(trigger_type), str(enabled), int(function_oid), str(arguments))
         for trigger_name, trigger_type, enabled, function_oid, arguments in cur.fetchall()
     )
+    source_unique = _read_source_unique_constraints(cur, str(name)) if name in _SOURCE_TABLES else ()
     return {
         "rls": bool(rls),
+        "source_unique_constraints": source_unique,
         "force_rls": bool(force_rls),
         "owner_is_current_user": bool(owner_is_current_user),
         "acl_is_default": bool(acl_is_default),
@@ -694,3 +697,25 @@ def _catalog_snapshot(cur: Any) -> dict[str, Any]:
         "sync_functions": sync_functions,
     }
 
+
+
+def _read_source_unique_constraints(cur: Any, name: str) -> tuple:
+    """Inspect the immediate unique constraints used by V1 scope and public IDs."""
+    cur.execute(
+        """
+        SELECT con.conname, ARRAY(
+            SELECT attribute.attname
+            FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+            JOIN pg_catalog.pg_attribute AS attribute
+              ON attribute.attrelid=con.conrelid AND attribute.attnum=key.attnum
+            ORDER BY key.ordinality
+        ), con.condeferrable, con.condeferred, con.convalidated,
+           con.conislocal, con.coninhcount, idx.indisvalid, idx.indisready, idx.indimmediate
+        FROM pg_catalog.pg_constraint AS con
+        JOIN pg_catalog.pg_index AS idx ON idx.indexrelid=con.conindid
+        WHERE con.conrelid=%s::regclass AND con.contype='u'
+        ORDER BY con.conname
+        """,
+        (name,),
+    )
+    return tuple((str(key), tuple(columns), *flags) for key, columns, *flags in cur.fetchall())

@@ -27,6 +27,14 @@ from memplex.storage.migrations._constants import (
     _LEGACY_CORE_TABLES,
     _MAX_VECTOR_DIM,
     _SEARCH_TSV_GENERATION_DIGEST,
+    _SOURCE_CAPABILITY,
+    _SOURCE_CHECK_EXPRESSIONS,
+    _SOURCE_COLUMNS,
+    _SOURCE_INDEX_KEYS,
+    _SOURCE_POLICY_EXPRESSIONS,
+    _SOURCE_PRIMARY_KEYS,
+    _SOURCE_TABLES,
+    _SOURCE_UNIQUE_KEYS,
     _SYNC_FUNCTIONS,
     _SYNC_TABLES,
     _TASK_TABLES,
@@ -893,13 +901,16 @@ def _matches_runtime_feedback_v1(table: dict[str, Any]) -> bool:
 
 
 def _matches_capabilities(
-    table: dict[str, Any], rows: tuple[tuple[str, str], ...] | None, *, vector_dim: int | None
+    table: dict[str, Any], rows: tuple[tuple[str, str], ...] | None, *, vector_dim: int | None,
+    source_validity: bool = False,
 ) -> bool:
     expected_rows = (
         ()
         if vector_dim is None
         else (("pgvector_embedding", sha256(f"pgvector:{vector_dim}".encode("ascii")).hexdigest()),)
     )
+    if source_validity:
+        expected_rows = (*expected_rows, _SOURCE_CAPABILITY)
     return (
         _has_sequential_attnums(table)
         and _managed_table_catalogue_matches(table)
@@ -1204,7 +1215,8 @@ def _is_reliable_sync_current_variant(variant: str) -> bool:
 
 
 def _is_background_tasks_current_variant(variant: str) -> bool:
-    return variant.endswith("_background_tasks_v6") or "_background_tasks_v6_vector_" in variant
+    base_variant = variant.replace("_source_validity_v1", "", 1)
+    return base_variant.endswith("_background_tasks_v6") or "_background_tasks_v6_vector_" in base_variant
 
 
 def _allowed_adoption_baselines(current_variant: str) -> frozenset[str]:
@@ -1213,6 +1225,8 @@ def _allowed_adoption_baselines(current_variant: str) -> frozenset[str]:
     A final runtime feedback layout cannot show whether feedback already existed
     before 0003, so only its two documented runtime ancestors are accepted.
     """
+    if "_source_validity_v1" in current_variant:
+        return _allowed_adoption_baselines(current_variant.replace("_source_validity_v1", "", 1))
     if "_background_tasks_v6_vector_" in current_variant:
         return _allowed_adoption_baselines(
             current_variant.replace("_background_tasks_v6_vector_", "_vector_", 1)
@@ -1259,3 +1273,147 @@ def _allowed_adoption_baselines(current_variant: str) -> frozenset[str]:
             f"post_g002_runtime_v1_current_vector_{dimension}",
         }
     )
+
+
+def _source_sql(value: str | None) -> object:
+    """Compare parsed SQL tokens without folding quoted literals or precedence.
+
+    PostgreSQL flattens associative AND/OR groups while deparsing expressions.
+    Only that transformation and redundant outer parentheses are normalized;
+    function arguments, operators, casts and every literal remain explicit.
+    """
+    tokens = re.findall(
+        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|[A-Za-z_][A-Za-z_0-9]*|[0-9]+|"
+        r"->>|#>>|->|#>|::|<>|<=|>=|\?&|\?\||\S",
+        value or "",
+    )
+    stack: list[list[Any]] = [[]]
+    for token in tokens:
+        if token == "(":
+            stack.append([])
+        elif token == ")":
+            if len(stack) == 1:
+                return ("invalid", value)
+            child = stack.pop()
+            stack[-1].append(child)
+        else:
+            stack[-1].append(token if token.startswith(("'", '\"')) else token.lower())
+    if len(stack) != 1:
+        return ("invalid", value)
+    return _source_sql_group(stack[0])
+
+
+def _source_sql_group(tokens: list[Any]) -> object:
+    while len(tokens) == 1 and isinstance(tokens[0], list):
+        tokens = tokens[0]
+    for operator in ("or", "and"):
+        parts: list[list[Any]] = [[]]
+        case_depth = 0
+        for token in tokens:
+            if token == "case":
+                case_depth += 1
+            elif token == "end":
+                case_depth -= 1
+            if token == operator and case_depth == 0:
+                parts.append([])
+            else:
+                parts[-1].append(token)
+        if len(parts) > 1:
+            operands: list[object] = []
+            for part in parts:
+                value = _source_sql_group(part)
+                if isinstance(value, tuple) and value[0] == operator:
+                    operands.extend(value[1:])
+                else:
+                    operands.append(value)
+            return (operator, *operands)
+    return ("expression", *(('group', _source_sql_group(t)) if isinstance(t, list) else t for t in tokens))
+
+
+def _source_indexes_match(name: str, table: dict[str, Any]) -> bool:
+    expected = _SOURCE_INDEX_KEYS[name]
+    if {row[0] for row in table["indexes"]} != set(expected):
+        return False
+    for row in table["indexes"]:
+        index, unique, method, valid, keys_count, total_count, keys, included, definition, predicate, owner, acl, persistence, partition = row
+        expected_keys, expected_predicate = expected[index]
+        expected_definition = (
+            f"CREATE UNIQUE INDEX {index} ON {name} USING btree ({', '.join(expected_keys)})"
+        )
+        if expected_predicate:
+            expected_definition += " WHERE " + expected_predicate[1:-1]
+        if not (
+            unique and method == "btree" and valid and owner and acl
+            and persistence == "p" and partition
+            and keys_count == total_count == len(expected_keys) and not included
+            and tuple(_source_sql(key) for key in keys) == tuple(_source_sql(key) for key in expected_keys)
+            and _source_sql(predicate) == _source_sql(expected_predicate)
+            and _source_sql(definition) == _source_sql(expected_definition)
+        ):
+            return False
+    return True
+
+
+def _source_constraints_match(name: str, table: dict[str, Any]) -> bool:
+    checks = _SOURCE_CHECK_EXPRESSIONS[name]
+    expected_constraints = {("p", f"{name}_pkey"), *(("c", key) for key in checks)}
+    expected_constraints.update(("u", key) for key in _SOURCE_UNIQUE_KEYS[name])
+    if name != "memplex_source_authorities":
+        expected_constraints.add(("f", f"{name}_authority_fk"))
+    if {(kind, key) for kind, key, _definition in table["constraints"]} != expected_constraints:
+        return False
+    if len(table["checks"]) != len(checks):
+        return False
+    for key, expression, valid, deferrable, deferred, no_inherit, local, inherited in table["checks"]:
+        if not (
+            key in checks and valid and not deferrable and not deferred
+            and not no_inherit and local and inherited == 0
+            and _source_sql(expression) == _source_sql(checks[key])
+        ):
+            return False
+    expected_unique = tuple(
+        (key, columns, False, False, True, True, 0, True, True, True)
+        for key, columns in sorted(_SOURCE_UNIQUE_KEYS[name].items())
+    )
+    if table.get("source_unique_constraints") != expected_unique:
+        return False
+    if name == "memplex_source_authorities":
+        return not table["foreign_keys"]
+    if len(table["foreign_keys"]) != 1:
+        return False
+    key, columns, _schema, oid, relation, target, update, delete, match, deferrable, deferred, valid, local = table["foreign_keys"][0]
+    return (
+        key == f"{name}_authority_fk" and columns == ("authority_id", "tenant_id", "workspace")
+        and oid > 0 and relation == "memplex_source_authorities" and target == columns
+        and (update, delete, match) == ("a", "a", "s")
+        and not deferrable and not deferred and valid and local
+    )
+
+
+def _source_validity_catalogue_matches(tables: dict[str, Any]) -> bool:
+    """Require the entire v1 source ledger; partial or drifted schemas fail closed."""
+    for name in _SOURCE_TABLES:
+        table = tables.get(name)
+        if table is None or not (
+            _has_sequential_attnums(table) and _managed_table_catalogue_matches(table)
+            and _column_shape(table) == _SOURCE_COLUMNS[name]
+            and _defaults_match(table, {}) and not any(table["identities"].values())
+            and table["primary_key"] == _SOURCE_PRIMARY_KEYS[name]
+            and table["rls"] and table["force_rls"]
+            and _source_constraints_match(name, table) and _source_indexes_match(name, table)
+            and len(table["policies"]) == 1
+        ):
+            return False
+        policy, command, permissive, roles, using, check = table["policies"][0]
+        expected_using, expected_check = _SOURCE_POLICY_EXPRESSIONS[name]
+        if not (
+            (policy, command, permissive, roles) == (f"{name}_scope", "*", True, (0,))
+            and _source_sql(using) == _source_sql(expected_using)
+            and _source_sql(check) == _source_sql(expected_check)
+        ):
+            return False
+    return True
+
+
+def _is_source_validity_current_variant(variant: str) -> bool:
+    return variant.endswith("_source_validity_v1") or "_source_validity_v1_vector_" in variant
