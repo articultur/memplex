@@ -144,6 +144,9 @@ files = [
     # Layer-neutral serializer + the authorization ACL gate + the frozen
     # sync ingress validator: fully-typed leaf modules admitted to the gate.
     "memplex/serialization.py",
+    "memplex/source_contract.py",
+    "memplex/source_codec.py",
+    "memplex/source_validation.py",
     "memplex/authorization.py",
     "memplex/sync_ingress.py",
     "memplex/sync_repository.py",
@@ -273,6 +276,8 @@ files = [
     "memplex/storage/feedback.py",
     "memplex/storage/lite/__init__.py",
     "memplex/storage/lite/durability.py",
+    "memplex/storage/lite/source_versions.py",
+    "memplex/storage/source_versions.py",
     "memplex/storage/lite/sync_repository.py",
     "memplex/storage/migrations/__init__.py",
     "memplex/storage/migrations/_constants.py",
@@ -392,6 +397,9 @@ source_modules = [
     "memplex.backup",
     "memplex.query_explainer",
     "memplex.serialization",
+    "memplex.source_contract",
+    "memplex.source_codec",
+    "memplex.source_validation",
     # Top-level leaf modules verified adapter-free (direct + indirect).
     # memplex.__main__ is the CLI entry shim and therefore stays out.
     "memplex.auth",
@@ -457,6 +465,19 @@ name = "Context assembly stays a storage-independent leaf"
 type = "forbidden"
 source_modules = ["memplex.context"]
 forbidden_modules = ["memplex.service", "memplex.storage", "memplex.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "Source validity contracts stay pure leaves"
+type = "forbidden"
+source_modules = ["memplex.source_contract", "memplex.source_codec", "memplex.source_validation"]
+forbidden_modules = ["memplex.service", "memplex.storage", "memplex.adapters"]
+ignore_imports = ["memplex.source_validation -> memplex.storage.source_versions"]
+
+[[tool.importlinter.contracts]]
+name = "Source protocols cannot import concrete backends"
+type = "forbidden"
+source_modules = ["memplex.storage.source_versions"]
+forbidden_modules = ["memplex.service", "memplex.storage.lite", "memplex.storage.postgres", "memplex.adapters"]
 
 [tool.ruff.lint]
 # C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.

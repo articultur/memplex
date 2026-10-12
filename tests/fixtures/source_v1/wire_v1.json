@@ -1,0 +1,68 @@
+{
+  "canonical_envelope": "{\"algorithm_version\":\"factual_capture/source-validity-v1\",\"alternative_support_groups\":[],\"authority_id\":\"11111111-1111-4111-8111-111111111111\",\"authorization_dependencies\":[{\"digest_version\":1,\"key\":{\"authority_id\":\"11111111-1111-4111-8111-111111111111\",\"kind\":\"raw_paragraph\",\"logical_id\":\"raw_来源\",\"tenant_id\":\"t1\",\"workspace_id\":\"w1\"},\"semantic_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"token\":{\"auth_revision\":1,\"content_revision\":1,\"incarnation\":\"22222222-2222-4222-8222-222222222222\"}}],\"contract_version\":1,\"derivation_key\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"output_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"output_digest_version\":1,\"policy_revision\":1,\"producer\":\"factual_capture\",\"publication_id\":\"fact_derived_v1_33333333333343338333333333333333\",\"required_premises\":[{\"digest_version\":1,\"key\":{\"authority_id\":\"11111111-1111-4111-8111-111111111111\",\"kind\":\"raw_paragraph\",\"logical_id\":\"raw_来源\",\"tenant_id\":\"t1\",\"workspace_id\":\"w1\"},\"semantic_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"token\":{\"auth_revision\":1,\"content_revision\":1,\"incarnation\":\"22222222-2222-4222-8222-222222222222\"}}],\"target_generation\":1,\"target_incarnation\":\"44444444-4444-4444-8444-444444444444\"}",
+  "digest_payload": {
+    "future_business": {
+      "enabled": true,
+      "v": null
+    },
+    "object": " 原文 café 🫘 ",
+    "source_paragraphs": [
+      "raw_来源"
+    ],
+    "trust_tier": 1,
+    "valid_until": "2026-10-12T00:00:00Z"
+  },
+  "envelope": {
+    "algorithm_version": "factual_capture/source-validity-v1",
+    "alternative_support_groups": [],
+    "authority_id": "11111111-1111-4111-8111-111111111111",
+    "authorization_dependencies": [
+      {
+        "digest_version": 1,
+        "key": {
+          "authority_id": "11111111-1111-4111-8111-111111111111",
+          "kind": "raw_paragraph",
+          "logical_id": "raw_来源",
+          "tenant_id": "t1",
+          "workspace_id": "w1"
+        },
+        "semantic_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token": {
+          "auth_revision": 1,
+          "content_revision": 1,
+          "incarnation": "22222222-2222-4222-8222-222222222222"
+        }
+      }
+    ],
+    "contract_version": 1,
+    "derivation_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "output_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "output_digest_version": 1,
+    "policy_revision": 1,
+    "producer": "factual_capture",
+    "publication_id": "fact_derived_v1_33333333333343338333333333333333",
+    "required_premises": [
+      {
+        "digest_version": 1,
+        "key": {
+          "authority_id": "11111111-1111-4111-8111-111111111111",
+          "kind": "raw_paragraph",
+          "logical_id": "raw_来源",
+          "tenant_id": "t1",
+          "workspace_id": "w1"
+        },
+        "semantic_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token": {
+          "auth_revision": 1,
+          "content_revision": 1,
+          "incarnation": "22222222-2222-4222-8222-222222222222"
+        }
+      }
+    ],
+    "target_generation": 1,
+    "target_incarnation": "44444444-4444-4444-8444-444444444444"
+  },
+  "envelope_sha256": "038bc4fafb1ecd4d4ac0974c1fe8929ae7baa364aa7c63423b0175ceb28dd97e",
+  "output_sha256": "8f44b3826c4debff18aea9e444e5086ee6e9fc72d6396f41ca4017cb1561cc1f",
+  "semantic_sha256": "485db13b06163ab04cb7a0e272ae8b6b3979d001638dd0700b60430e3f4fdac8"
+}

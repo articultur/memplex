@@ -79,6 +79,7 @@ from memplex.storage.lite.durability import LiteDurability, LitePair, LiteStorag
 from memplex.storage.lite.search_index import SQLiteFTSIndex, local_bm25_search
 from memplex.storage.lite.sqlite_v2 import SQLiteAuthorityError
 from memplex.storage.lite.vector_index import VectorSearchIndex
+from memplex.storage.source_versions import SourceVersionStore
 from memplex.storage.typed_batch import (
     TypedBatchInput,
     TypedBatchResult,
@@ -772,6 +773,18 @@ class LiteMemoryStore:
             consumer_ttl_seconds=sync_consumer_ttl_seconds,
             retention_min_seconds=sync_retention_min_seconds,
         )
+
+    def source_versions(self) -> SourceVersionStore | None:
+        """Expose only this exact audited JSON adapter; no wrapper inheritance."""
+        from memplex.storage.lite.source_versions import LiteSourceVersionStore
+
+        if type(self) is not LiteMemoryStore or os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", ""):
+            return None
+        adapter = getattr(self, "_source_version_adapter", None)
+        if adapter is None:
+            adapter = LiteSourceVersionStore(self._durability)
+            self._source_version_adapter = adapter
+        return adapter
 
     def _require_development_backup(self) -> None:
         if self._deployment_profile != "development":
@@ -2630,7 +2643,7 @@ class LiteMemoryStore:
 
     def _raw_memory(self) -> dict[str, Any]:
         """Serialize the complete resident state, never a partial sidecar."""
-        return {
+        memory = {
             "schema_version": 2,
             "functions": [f.to_dict() for f in self._functions.values()],
             "edges": [_serialize_edge(e) for e in self._edges],
@@ -2644,6 +2657,12 @@ class LiteMemoryStore:
             "paragraphs": [dict(row) for row in self._paragraphs.values()],
             "sync": copy.deepcopy(self._sync_state),
         }
+
+        pair = self._committed_pair
+        if pair is not None and pair.memory.get("schema_version") == 3:
+            memory["schema_version"] = 3
+            memory["source_validity"] = copy.deepcopy(pair.memory["source_validity"])
+        return memory
 
     def _raw_changelog(self) -> list[dict[str, Any]]:
         return [self._changelog._serialize_event(event) for event in self._changelog.snapshot()]
@@ -2979,6 +2998,8 @@ class LiteMemoryStore:
                 # decode that guards all normal publication has succeeded.
                 decoded = self._decode_pair(pair)
                 schema_version = pair.memory.get("schema_version")
+                if schema_version == 3:
+                    raise LiteStorageIntegrityError("Lite V3 requires a trusted source read session")
                 needs_inbound_cursor_upgrade = (
                     schema_version == 2
                     and type(pair.memory.get("sync")) is dict

@@ -355,6 +355,9 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/storage/postgres_tasks.py",
         "memplex/task_repository.py",
         "memplex/serialization.py",
+        "memplex/source_contract.py",
+        "memplex/source_codec.py",
+        "memplex/source_validation.py",
         "memplex/authorization.py",
         "memplex/sync_ingress.py",
         "memplex/sync_repository.py",
@@ -467,6 +470,8 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/storage/feedback.py",
         "memplex/storage/lite/__init__.py",
         "memplex/storage/lite/durability.py",
+        "memplex/storage/lite/source_versions.py",
+        "memplex/storage/source_versions.py",
         "memplex/storage/lite/sync_repository.py",
         "memplex/storage/migrations/__init__.py",
         "memplex/storage/migrations/_constants.py",
@@ -580,3 +585,11 @@ def test_context_assembler_is_a_typed_adapter_free_leaf() -> None:
     context = next(item for item in contracts if item["source_modules"] == ["memplex.context"])
     assert context["forbidden_modules"] == ["memplex.service", "memplex.storage", "memplex.adapters"]
     assert "memplex/context.py" in metadata["tool"]["mypy"]["files"]
+
+
+def test_ci_acquires_exact_old_source_validity_reader() -> None:
+    steps = _workflow(CI)["jobs"]["test"]["steps"]
+    acquire = next(step for step in steps if step.get("name") == "Acquire fixed source-validity compatibility reader")
+    assert "git fetch --no-tags --depth=1 origin 826335024c0b67b1b25fdb477596bf08ddeb7dad" in acquire["run"]
+    assert "7fd32f681a1a2cc9044823b672aaacfa96e63ef6" in acquire["run"]
+    assert steps.index(acquire) < next(i for i, step in enumerate(steps) if step.get("name") == "Test")

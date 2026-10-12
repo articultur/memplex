@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from memplex.source_contract import SourceBusyError
 from memplex.sync_protocol import (
     SyncBatchResult,
     SyncEntityKey,
@@ -54,6 +56,7 @@ _MEMORY_V2_KEYS = {
     "paragraphs",
     "sync",
 }
+_MEMORY_V3_KEYS = _MEMORY_V2_KEYS | {"source_validity"}
 _MEMORY_OPTIONAL_COLLECTION_KEYS = {"observations", "facts", "preferences", "paragraphs"}
 _MEMORY_V1_REQUIRED_KEYS = {"schema_version", "functions", "edges"}
 _MEMORY_V1_ALLOWED_KEYS = _MEMORY_V1_REQUIRED_KEYS | _MEMORY_OPTIONAL_COLLECTION_KEYS
@@ -551,8 +554,14 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
     )
 
 
+def _check_read_deadline(deadline_ns: int | None) -> None:
+    """Cooperative bound; individual filesystem/JSON operations cannot be interrupted."""
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        raise SourceBusyError()
+
+
 def _require_format_version(value: Any, *, label: str) -> None:
-    if type(value) is not int or value != _FORMAT_VERSION:
+    if type(value) is not int or value not in {_FORMAT_VERSION, 3}:
         raise LiteStorageIntegrityError(f"unsupported or invalid Lite {label} format_version")
 
 
@@ -561,10 +570,12 @@ def _require_exact_keys(value: Any, keys: set[str], *, label: str) -> None:
         raise LiteStorageIntegrityError(f"invalid Lite {label} schema")
 
 
-def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool = False) -> None:
-    """Accept only the frozen v2 shape or the narrow historical v1 shapes."""
+def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool = False,
+                             deadline_ns: int | None = None) -> None:
+    """Accept explicit V3, frozen V2, or the narrow historical V1 shapes."""
     if type(memory) is not dict:
         raise LiteStorageIntegrityError("invalid Lite memory payload")
+    _check_read_deadline(deadline_ns)
     keys = set(memory)
     if "schema_version" not in memory:
         # Pre-schema raw files may contain only the historic typed collections;
@@ -577,7 +588,11 @@ def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool =
             raise LiteStorageIntegrityError("missing or unknown Lite memory payload schema")
     else:
         schema_version = memory["schema_version"]
-        if type(schema_version) is int and schema_version == 2:
+        if type(schema_version) is int and schema_version == 3:
+            if keys != _MEMORY_V3_KEYS:
+                raise LiteStorageIntegrityError("invalid Lite V3 memory payload schema")
+            _validate_sync_state(memory["sync"], label="memory")
+        elif type(schema_version) is int and schema_version == 2:
             # v2 tolerates optional collections absent from older pairs
             # (facts/preferences were mid-series additions; paragraphs
             # is the ADR-013 Stage 2 raw layer): required keys must all
@@ -593,12 +608,17 @@ def _validate_memory_payload(memory: Any, *, allow_legacy_missing_schema: bool =
             raise LiteStorageIntegrityError("unsupported or invalid Lite memory payload schema")
     collection_names = (
         keys & _MEMORY_V2_KEYS - {"schema_version", "sync"}
-        if memory.get("schema_version") == 2
+        if memory.get("schema_version") in {2, 3}
         else {"functions", "edges"} | (keys & _MEMORY_OPTIONAL_COLLECTION_KEYS)
     )
     for name in collection_names:
+        _check_read_deadline(deadline_ns)
         if type(memory[name]) is not list:
             raise LiteStorageIntegrityError(f"invalid Lite memory payload collection: {name}")
+    from memplex.storage.lite.source_versions import validate_source_memory
+
+    validate_source_memory(memory, deadline_ns=deadline_ns)
+    _check_read_deadline(deadline_ns)
 
 
 def _require_digest(value: Any, *, label: str) -> str:
@@ -628,6 +648,18 @@ def _validate_transition(base: LitePair, target: LitePair) -> None:
         raise LiteStorageIntegrityError("invalid Lite base pair")
     if type(target.memory) is not dict or type(target.changelog) is not list:
         raise LiteStorageIntegrityError("invalid Lite target pair")
+    if base.memory.get("schema_version") == 3 and target.memory.get("schema_version") != 3:
+        raise LiteStorageIntegrityError("Lite V3 cannot downgrade")
+    if base.memory.get("schema_version") != 3 and target.memory.get("schema_version") == 3:
+        from memplex.source_codec import decode_ledger
+
+        ledger = decode_ledger(target.memory["source_validity"])
+        if (base.generation != 0 or base.transaction_id != "empty" or base.changelog
+                or any(base.memory.get(name) for name in _MEMORY_OPTIONAL_COLLECTION_KEYS | {"functions", "edges"})
+                or base.memory.get("sync") != _empty_sync_state()
+                or ledger.sources or ledger.targets or ledger.publications
+                or ledger.authority.commit_seq != 1):
+            raise LiteStorageIntegrityError("Lite V3 requires an empty new bank")
     base_generation = _require_generation(base.generation, label="base")
     target_generation = _require_generation(target.generation, label="target")
     base_transaction = _require_transaction_id(base.transaction_id, label="base")
@@ -748,16 +780,20 @@ class LiteDurability:
         *,
         memory_digest: str | None = None,
         changelog_digest: str | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         _validate_memory_payload(
-            pair.memory, allow_legacy_missing_schema=pair.transaction_id == "legacy"
+            pair.memory, allow_legacy_missing_schema=pair.transaction_id == "legacy",
+            deadline_ns=deadline_ns
         )
         memory_digest = memory_digest if memory_digest is not None else _digest(pair.memory)
+        _check_read_deadline(deadline_ns)
         changelog_digest = (
             changelog_digest if changelog_digest is not None else _digest(pair.changelog)
         )
+        _check_read_deadline(deadline_ns)
         common = {
-            "format_version": _FORMAT_VERSION,
+            "format_version": 3 if pair.memory.get("schema_version") == 3 else _FORMAT_VERSION,
             "generation": pair.generation,
             "transaction_id": pair.transaction_id,
         }
@@ -773,15 +809,25 @@ class LiteDurability:
         except (OSError, ValueError, TypeError) as exc:
             raise LiteStorageIntegrityError(f"invalid Lite persistence file: {path.name}") from exc
 
-    def _decode_pair(self, memory_doc: Any, changelog_doc: Any) -> LitePair:
+    def _read_budgeted(self, path: Path, deadline_ns: int | None) -> Any:
+        _check_read_deadline(deadline_ns)
+        document = self._read(path)
+        _check_read_deadline(deadline_ns)
+        return document
+
+    def _decode_pair(self, memory_doc: Any, changelog_doc: Any, *,
+                     deadline_ns: int | None = None) -> LitePair:
         # Legacy is accepted only as an exact *pair*, allowing an atomic first
         # upgrade.  A legacy memory file without changelog is ambiguous.
+        _check_read_deadline(deadline_ns)
         memory_is_envelope = isinstance(memory_doc, dict) and "format_version" in memory_doc
         changelog_is_envelope = isinstance(changelog_doc, dict) and "format_version" in changelog_doc
         if not memory_is_envelope and not changelog_is_envelope:
             if type(changelog_doc) is not list:
                 raise LiteStorageIntegrityError("legacy Lite pair has invalid shape")
-            _validate_memory_payload(memory_doc, allow_legacy_missing_schema=True)
+            _validate_memory_payload(memory_doc, allow_legacy_missing_schema=True, deadline_ns=deadline_ns)
+            if memory_doc.get("schema_version") == 3:
+                raise LiteStorageIntegrityError("V3 requires explicit pair envelopes")
             return LitePair(copy.deepcopy(memory_doc), copy.deepcopy(changelog_doc), 0, "legacy")
         if not memory_is_envelope or not changelog_is_envelope:
             raise LiteStorageIntegrityError("Lite pair generation mismatch without journal")
@@ -796,26 +842,36 @@ class LiteDurability:
             changelog_tx = _require_transaction_id(changelog_doc["transaction_id"], label="changelog envelope")
             if memory_generation != changelog_generation or memory_tx != changelog_tx:
                 raise LiteStorageIntegrityError("Lite pair generation mismatch without journal")
-            if memory_doc["peer_digest"] != _digest(changelog_doc["payload"]) or changelog_doc["peer_digest"] != _digest(memory_doc["payload"]):
+            changelog_digest = _digest(changelog_doc["payload"])
+            _check_read_deadline(deadline_ns)
+            memory_digest = _digest(memory_doc["payload"])
+            _check_read_deadline(deadline_ns)
+            if memory_doc["peer_digest"] != changelog_digest or changelog_doc["peer_digest"] != memory_digest:
                 raise LiteStorageIntegrityError("Lite pair cross-digest mismatch without journal")
             if type(changelog_doc["payload"]) is not list:
                 raise TypeError("payload")
-            _validate_memory_payload(memory_doc["payload"])
+            _validate_memory_payload(memory_doc["payload"], deadline_ns=deadline_ns)
+            expected_format = 3 if memory_doc["payload"].get("schema_version") == 3 else 2
+            if memory_doc["format_version"] != expected_format or changelog_doc["format_version"] != expected_format:
+                raise LiteStorageIntegrityError("Lite pair format/schema mismatch")
             return LitePair(
                 copy.deepcopy(memory_doc["payload"]),
                 copy.deepcopy(changelog_doc["payload"]),
                 memory_generation,
                 memory_tx,
             )
+        except SourceBusyError:
+            raise
         except LiteStorageIntegrityError:
             raise
         except (KeyError, TypeError, ValueError) as exc:
             raise LiteStorageIntegrityError("invalid Lite pair envelope") from exc
 
-    def _recover_locked(self) -> None:
+    def _recover_locked(self, *, deadline_ns: int | None = None) -> None:
+        _check_read_deadline(deadline_ns)
         if not self._journal_path.exists():
             return
-        journal = self._read(self._journal_path)
+        journal = self._read_budgeted(self._journal_path, deadline_ns)
         try:
             _require_exact_keys(journal, _JOURNAL_KEYS, label="durable journal")
             _require_format_version(journal["format_version"], label="journal")
@@ -829,11 +885,15 @@ class LiteDurability:
             )
             if type(pair.changelog) is not list:
                 raise TypeError("journal target payload")
-            _validate_memory_payload(pair.memory)
+            _validate_memory_payload(pair.memory, deadline_ns=deadline_ns)
+            if journal["format_version"] != (3 if pair.memory.get("schema_version") == 3 else 2):
+                raise LiteStorageIntegrityError("Lite journal format/schema mismatch")
             expected = _validated_pair_record(journal["target_record"], label="journal target")
             if _canonical_json(expected) != _canonical_json(_pair_record(pair)):
                 raise ValueError("digest")
             base_record = _validated_pair_record(journal["base_record"], label="journal base")
+        except SourceBusyError:
+            raise
         except (KeyError, TypeError, ValueError, LiteStorageIntegrityError) as exc:
             raise LiteStorageIntegrityError("invalid Lite durable journal") from exc
         try:
@@ -843,6 +903,8 @@ class LiteDurability:
                 generation=_require_generation(base_record["generation"], label="journal base"),
                 transaction_id=_require_transaction_id(base_record["transaction_id"], label="journal base"),
             )
+        except SourceBusyError:
+            raise
         except (KeyError, TypeError, ValueError, LiteStorageIntegrityError) as exc:
             raise LiteStorageIntegrityError("invalid Lite durable journal") from exc
         if _canonical_json(_pair_record(base_pair)) != _canonical_json(base_record):
@@ -850,7 +912,8 @@ class LiteDurability:
         if type(base_pair.changelog) is not list:
             raise LiteStorageIntegrityError("invalid Lite durable journal")
         _validate_memory_payload(
-            base_pair.memory, allow_legacy_missing_schema=base_pair.transaction_id == "legacy"
+            base_pair.memory, allow_legacy_missing_schema=base_pair.transaction_id == "legacy",
+            deadline_ns=deadline_ns
         )
         try:
             _validate_transition(base_pair, pair)
@@ -859,10 +922,13 @@ class LiteDurability:
         # Both journal records are authority candidates; never forward a
         # target across a semantically corrupt base side merely because the
         # target itself decodes.
+        _check_read_deadline(deadline_ns)
         self._validate_semantics(base_pair)
+        _check_read_deadline(deadline_ns)
         self._validate_semantics(pair)
-        base_memory, base_changelog = self._envelopes(base_pair)
-        memory_doc, changelog_doc = self._envelopes(pair)
+        _check_read_deadline(deadline_ns)
+        base_memory, base_changelog = self._envelopes(base_pair, deadline_ns=deadline_ns)
+        memory_doc, changelog_doc = self._envelopes(pair, deadline_ns=deadline_ns)
         # A journal may only complete its own four side combinations:
         # base/base, target/base, base/target, target/target.  We compare
         # each side even when the other is corrupt so an unrelated document
@@ -879,28 +945,45 @@ class LiteDurability:
         changelog_exists = self._changelog_path.exists()
         initial_empty = base_record["transaction_id"] == "empty" and base_record["generation"] == 0
         if memory_exists:
-            if not _matches(self._read(self._memory_path), base_memory, memory_doc, journal.get("base_memory")):
+            if not _matches(self._read_budgeted(self._memory_path, deadline_ns), base_memory, memory_doc, journal.get("base_memory")):
                 raise LiteStorageIntegrityError("stale or foreign Lite journal cannot overwrite pair")
         elif not initial_empty:
             raise LiteStorageIntegrityError("stale or foreign Lite journal cannot overwrite pair")
         if changelog_exists:
-            if not _matches(self._read(self._changelog_path), base_changelog, changelog_doc, journal.get("base_changelog")):
+            if not _matches(self._read_budgeted(self._changelog_path, deadline_ns), base_changelog, changelog_doc, journal.get("base_changelog")):
                 raise LiteStorageIntegrityError("stale or foreign Lite journal cannot overwrite pair")
         elif not initial_empty:
             raise LiteStorageIntegrityError("stale or foreign Lite journal cannot overwrite pair")
+        # An interrupted recovery retains its already-durable journal. Each
+        # replacement is idempotent; timeout never reverses the commit decision.
+        _check_read_deadline(deadline_ns)
         _replace_and_fsync(self._memory_path, memory_doc)
+        _check_read_deadline(deadline_ns)
         _replace_and_fsync(self._changelog_path, changelog_doc)
+        _check_read_deadline(deadline_ns)
         _fsync_dir(self._memory_path.parent)
+        _check_read_deadline(deadline_ns)
         self._journal_path.unlink(missing_ok=True)
         _fsync_dir(self._memory_path.parent)
+        _check_read_deadline(deadline_ns)
 
-    def _load_authoritative_locked(self) -> LitePair:
+    def _load_authoritative_locked(self, *, deadline_ns: int | None = None) -> LitePair:
         # Phase-B read-authority: under read or rw authority, when the
         # SQLite store can reconstruct a complete pair it wins; any miss
         # (absent/empty/unreadable store) falls back to the JSON pair
         # path unchanged. The reconstructed payload runs through the
         # identical validation below.
+        _check_read_deadline(deadline_ns)
         authority_mode = os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+        if authority_mode:
+            # The durable journal is the decision even before either pair
+            # envelope exists. Never let a V2 SQLite candidate bypass it.
+            for path in (self._journal_path, self._memory_path, self._changelog_path):
+                _check_read_deadline(deadline_ns)
+                if path.exists():
+                    document = self._read_budgeted(path, deadline_ns)
+                    if isinstance(document, dict) and document.get("format_version") == 3:
+                        raise LiteStorageIntegrityError("Lite V3 cannot use SQLite authority")
         if authority_mode in {"read", "rw"}:
             from memplex.storage.lite.sqlite_v2 import read_authoritative_pair
 
@@ -908,11 +991,12 @@ class LiteDurability:
                 self._memory_path.parent / "shadow_v2.sqlite3",
                 fail_closed=(authority_mode == "rw"),
             )
+            _check_read_deadline(deadline_ns)
             if candidate is not None:
                 # Reader payload is the raw (non-envelope) shape; the
                 # legacy branch validates it and yields generation 0,
                 # which the SQLite meta generation then overrides.
-                pair = self._decode_pair(candidate["memory"], candidate["changelog"])
+                pair = self._decode_pair(candidate["memory"], candidate["changelog"], deadline_ns=deadline_ns)
                 if pair.generation != candidate["generation"]:
                     pair = LitePair(
                         pair.memory,
@@ -920,9 +1004,12 @@ class LiteDurability:
                         candidate["generation"],
                         "sqlite-authority",
                     )
+                _check_read_deadline(deadline_ns)
                 self._validate_semantics(pair)
+                _check_read_deadline(deadline_ns)
                 return pair
-        self._recover_locked()
+        self._recover_locked(deadline_ns=deadline_ns)
+        _check_read_deadline(deadline_ns)
         memory_exists, changelog_exists = self._memory_path.exists(), self._changelog_path.exists()
         if not memory_exists and not changelog_exists:
             return LitePair(
@@ -941,8 +1028,12 @@ class LiteDurability:
             )
         if memory_exists != changelog_exists:
             raise LiteStorageIntegrityError("Lite memory/changelog pair is incomplete without journal")
-        pair = self._decode_pair(self._read(self._memory_path), self._read(self._changelog_path))
+        memory_doc = self._read_budgeted(self._memory_path, deadline_ns)
+        changelog_doc = self._read_budgeted(self._changelog_path, deadline_ns)
+        pair = self._decode_pair(memory_doc, changelog_doc, deadline_ns=deadline_ns)
+        _check_read_deadline(deadline_ns)
         self._validate_semantics(pair)
+        _check_read_deadline(deadline_ns)
         return pair
 
     def load_authoritative(self) -> LitePair:
@@ -1012,7 +1103,7 @@ class LiteDurability:
             changelog_digest=target_changelog_digest,
         )
         journal = {
-            "format_version": _FORMAT_VERSION,
+            "format_version": 3 if target.memory.get("schema_version") == 3 else _FORMAT_VERSION,
             "base_record": base_record if (base_verified and base_record is not None) else _pair_record(base),
             "base_memory": base.memory,
             "base_changelog": base.changelog,

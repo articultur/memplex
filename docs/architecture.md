@@ -596,3 +596,33 @@ and signature equality against the `SyncRepository` Protocol in CI.
   service container. The CI job deliberately runs a curated contract slice
   (see `tests/test_release_workflows.py` for the pinned list); the deep
   387-test suite is the pre-release local gate.
+
+### Source validity V1 format boundary (default off)
+
+`source_contract` and `source_codec` retain immutable DTOs and pure wire codecs.
+`source_validation` references the canonical `storage/source_versions` protocol
+only under TYPE_CHECKING, so its runtime imports do not initialize storage.
+This single annotation edge is the import-contract exception; the protocol module is itself
+forbidden from importing concrete storage or service/adapters.
+
+`storage/lite/source_versions` owns the V3 ledger reconciliation and detached
+read session. The ledger lives in the existing atomic memory/changelog pair,
+not a sidecar. Its opaque locator binds persisted row ID, kind, authority
+scope and ACL fields before canonical raw-ID projection. This digest is an
+integrity binding inside the protected ledger, not an authentication credential.
+Both later source writers and readers must use that same projection; ACL
+changes must update the binding with the auth revision independently of the
+content revision. Only resource-issued, exact-instance empty-bank admission
+can initialize V3. Ordinary Lite startup rejects V3; the internal reader also
+requires trusted hooks and an expected scope. Source/publication writes and
+production V1 activation remain unsupported in this stage.
+
+V3 admission refuses pre-existing `shadow_v2.sqlite3` authority artifacts while
+allowing rebuildable query caches. SQLite selection checks both pair sides and
+the durable journal before using its V2 candidate. Protected JSON reads carry a
+single monotonic deadline through I/O and per-row/per-head reconciliation.
+Already-started filesystem, JSON/ledger codec or digest operations cannot be
+interrupted; expiry is observed before the next work unit. Interrupted recovery
+retains the committed journal and resumes idempotently; it does not undo its
+durable decision. Sessions build bounded lookup indexes over the validated pair
+and project requested sources on demand rather than reconciling the bank twice.

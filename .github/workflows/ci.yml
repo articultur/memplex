@@ -54,6 +54,10 @@ jobs:
         run: uv run lint-imports
       - name: Type-check PostgreSQL lifecycle boundary
         run: uv run mypy
+      - name: Acquire fixed source-validity compatibility reader
+        run: |
+          git fetch --no-tags --depth=1 origin 826335024c0b67b1b25fdb477596bf08ddeb7dad
+          test "$(git rev-parse 826335024c0b67b1b25fdb477596bf08ddeb7dad^{tree})" = "7fd32f681a1a2cc9044823b672aaacfa96e63ef6"
       - name: Test
         env:
           # The install-matrix test discovers interpreters; on Linux images

@@ -25,10 +25,15 @@ from memplex.models import (
     SearchResult,
     SourceDocument,
 )
+from memplex.storage.source_versions import SourceVersionStore
 
 
 class MemoryStore(ABC):
     """Pure data access layer -- CRUD + basic retrieval, no orchestration."""
+
+    def source_versions(self) -> SourceVersionStore | None:
+        """Optional internal authority capability; legacy backends have none."""
+        return None
 
     # ── Write operations ────────────────────────────────────────────
 

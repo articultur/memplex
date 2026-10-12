@@ -15,7 +15,7 @@ overwrite one another.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from memplex.auth import (
@@ -28,6 +28,7 @@ from memplex.models.source import SourceType
 
 if TYPE_CHECKING:
     from memplex.models import ExtractedData, SearchResult
+    from memplex.source_contract import SourceSnapshot
     from memplex.storage.feedback import FeedbackStore
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,91 @@ class _RawParagraphView:
     def to_dict(self) -> dict[str, Any]:
         """Expose all projected fields to the existing bounded safety scan."""
         return {field: getattr(self, field) for field in self.__slots__}
+
+
+def _own_node_visible(node: Any, context: AuthorizationContext, helpers: Any) -> bool:
+    """One rules implementation; the legacy gate retains overridable helpers."""
+    tenant_id = helpers.identity_value(node, "tenant_id", "memplex_tenant_id")
+    if tenant_id is None:
+        return helpers.is_local_development_context(context)
+    if tenant_id != context.principal.tenant_id:
+        return False
+
+    namespace = getattr(node, "namespace", {}) or {}
+    if not isinstance(namespace, dict):
+        namespace = {}
+    visibility = getattr(node, "visibility", None) or namespace.get("memplex_visibility")
+    visibility = str(visibility or "workspace").strip().lower()
+    subject_id = helpers.identity_value(node, "owner_subject_id", "memplex_subject_id")
+    if subject_id is None:
+        owner = getattr(node, "owner", None)
+        subject_id = str(owner).strip() if owner is not None and str(owner).strip() else None
+    workspace_id = helpers.identity_value(node, "workspace_id", "memplex_workspace_id")
+
+    if visibility == "user":
+        if subject_id == context.principal.subject_id:
+            allowed = True
+        else:
+            # Cross-agent grant (service.share_with): the owner
+            # explicitly shared this node with the calling agent,
+            # overriding the user-private default within the tenant.
+            allowed = helpers._agent_has_grant(node, context)
+    elif visibility == "workspace":
+        allowed = bool(workspace_id and context.workspace_id) and workspace_id == context.workspace_id
+    elif visibility == "session":
+        provenance = getattr(node, "provenance", {}) or {}
+        if not isinstance(provenance, dict):
+            provenance = {}
+        source_agent = (
+            provenance.get("agent_id")
+            or namespace.get("memplex_source_agent")
+            or namespace.get("memplex_agent")
+        )
+        source_session = getattr(node, "origin_session", None)
+        allowed = (
+            all((
+                workspace_id, context.workspace_id,
+                subject_id, context.principal.subject_id,
+                source_session, context.session_id,
+                source_agent, context.agent_id,
+            ))
+            and workspace_id == context.workspace_id
+            and subject_id == context.principal.subject_id
+            and source_session == context.session_id
+            and source_agent == context.agent_id
+        )
+    else:
+        allowed = False
+    return allowed
+
+
+def is_own_node_visible(node: Any, context: AuthorizationContext) -> bool:
+    """Apply only the existing own-node ACL without store or lineage reads."""
+    return _own_node_visible(node, context, AuthorizationGate)
+
+
+def source_authorization_node(snapshot: SourceSnapshot) -> Any:
+    """Detach a snapshot into the existing ACL/safety model without identity fill."""
+    from memplex.models import Fact, Function, Observation, Preference
+    from memplex.source_contract import SourceKind
+
+    def detach(value: object) -> Any:
+        if isinstance(value, Mapping):
+            return {key: detach(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [detach(item) for item in value]
+        return value
+
+    payload = detach(snapshot.payload)
+    if snapshot.head.ref.key.kind is SourceKind.RAW_PARAGRAPH:
+        return _RawParagraphView(payload)
+    models: dict[SourceKind, Any] = {
+        SourceKind.FUNCTION: Function,
+        SourceKind.FACT: Fact,
+        SourceKind.PREFERENCE: Preference,
+        SourceKind.OBSERVATION: Observation,
+    }
+    return models[snapshot.head.ref.key.kind].from_dict(payload)
 
 
 class AuthorizationGate:
@@ -284,58 +370,7 @@ class AuthorizationGate:
 
     def _is_node_in_scope(self, node: Any, context: AuthorizationContext) -> bool:
         """Single own-node ACL decision, shared by both lineage evaluators."""
-        tenant_id = self.identity_value(node, "tenant_id", "memplex_tenant_id")
-        if tenant_id is None:
-            return self.is_local_development_context(context)
-        if tenant_id != context.principal.tenant_id:
-            return False
-
-        namespace = getattr(node, "namespace", {}) or {}
-        if not isinstance(namespace, dict):
-            namespace = {}
-        visibility = getattr(node, "visibility", None) or namespace.get("memplex_visibility")
-        visibility = str(visibility or "workspace").strip().lower()
-        subject_id = self.identity_value(node, "owner_subject_id", "memplex_subject_id")
-        if subject_id is None:
-            owner = getattr(node, "owner", None)
-            subject_id = str(owner).strip() if owner is not None and str(owner).strip() else None
-        workspace_id = self.identity_value(node, "workspace_id", "memplex_workspace_id")
-
-        if visibility == "user":
-            if subject_id == context.principal.subject_id:
-                allowed = True
-            else:
-                # Cross-agent grant (service.share_with): the owner
-                # explicitly shared this node with the calling agent,
-                # overriding the user-private default within the tenant.
-                allowed = self._agent_has_grant(node, context)
-        elif visibility == "workspace":
-            allowed = bool(workspace_id and context.workspace_id) and workspace_id == context.workspace_id
-        elif visibility == "session":
-            provenance = getattr(node, "provenance", {}) or {}
-            if not isinstance(provenance, dict):
-                provenance = {}
-            source_agent = (
-                provenance.get("agent_id")
-                or namespace.get("memplex_source_agent")
-                or namespace.get("memplex_agent")
-            )
-            source_session = getattr(node, "origin_session", None)
-            allowed = (
-                all((
-                    workspace_id, context.workspace_id,
-                    subject_id, context.principal.subject_id,
-                    source_session, context.session_id,
-                    source_agent, context.agent_id,
-                ))
-                and workspace_id == context.workspace_id
-                and subject_id == context.principal.subject_id
-                and source_session == context.session_id
-                and source_agent == context.agent_id
-            )
-        else:
-            allowed = False
-        return allowed
+        return _own_node_visible(node, context, self)
 
     # ── Derived-record ACL lineage (ADR: derived never wider than sources) ──
 
