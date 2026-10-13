@@ -1,6 +1,6 @@
 """Lite V3 authority ledger, source CAS, and protected source sessions.
 
-Publication writers remain disabled. Physical payload locators bind
+Physical payload locators bind
 row identity and ACL fields before raw IDs are projected to logical handles.
 """
 from __future__ import annotations
@@ -79,7 +79,14 @@ from memplex.storage.source_versions import (
     SourceCapability,
     SourceReadSession,
     SourceValidationHooks,
+    _admit_publication,
     _check_admission,
+    _check_publication_inputs,
+    _make_publication,
+    _publication_replay,
+    _publication_request_digest,
+    _publication_tombstone,
+    validate_publish_command,
 )
 
 if TYPE_CHECKING:
@@ -397,7 +404,7 @@ def _source_target(base: LitePair, ledger: SourceLedger, command: SourceMutation
 
 
 class LiteSourceVersionStore:
-    """Internal source transactions; publication and runtime activation stay disabled."""
+    """Internal source and publication transactions; runtime activation stays disabled."""
 
     def __init__(self, durability: LiteDurability, *, owner: LiteMemoryStore | None = None) -> None:
         if type(durability) is not LiteDurability:
@@ -562,14 +569,151 @@ class LiteSourceVersionStore:
             finally:
                 session._active = False
 
+    def _publication_preflight(self, authorization: AuthorizationContext, deadline_ns: int) -> None:
+        if (type(self) is not LiteSourceVersionStore or self._hooks is None or self._owner is None
+                or self._scope is None or type(authorization) is not AuthorizationContext
+                or type(deadline_ns) is not int or os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "")
+                or self._owner._sync_repository._capture_policy.mode != "off"):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        _check_read_deadline(deadline_ns)
+
     def publish_if_current(self, authorization: AuthorizationContext, command: PublishCommand, *,
                            deadline_ns: int) -> PublicationReceipt:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
-
-    def delete_target(self, authorization: AuthorizationContext, derivation_key: str,
-                      expected: TargetToken, *, deadline_ns: int) -> TargetHead:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        return self._publish(authorization, command, deadline_ns, None)
 
     def recreate_target(self, authorization: AuthorizationContext, command: PublishCommand,
                         expected_deleted: TargetToken, *, deadline_ns: int) -> PublicationReceipt:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if type(expected_deleted) is not TargetToken:
+            raise SourceContractError(RejectionCode.MALFORMED)
+        return self._publish(authorization, command, deadline_ns, expected_deleted)
+
+    def _publish(self, authorization: AuthorizationContext, command: PublishCommand,
+                 deadline_ns: int, expected_deleted: TargetToken | None) -> PublicationReceipt:
+        self._publication_preflight(authorization, deadline_ns)
+        if single_writer_enabled():
+            writer = getattr(self._durability, "_single_writer", None)
+            if writer is None:
+                writer = SingleWriterQueue()
+                self._durability._single_writer = writer
+            return writer.submit_until(lambda: self._publish_locked(authorization, command, deadline_ns,
+                                                                    expected_deleted), deadline_ns)
+        return self._publish_locked(authorization, command, deadline_ns, expected_deleted)
+
+    def _publish_locked(self, authorization: AuthorizationContext, command: PublishCommand,
+                        deadline_ns: int, expected_deleted: TargetToken | None) -> PublicationReceipt:
+        assert self._hooks is not None and self._owner is not None and self._scope is not None
+        with self._durability.writer_lock_until(deadline_ns):
+            base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
+            if base.memory.get("schema_version") != 3:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            session = _LiteReadSession(base, deadline_ns)
+            try:
+                authority = _admit_publication(session, authorization, self._scope)
+                validate_publish_command(command)
+                digest = _publication_request_digest(command, authorization, expected_deleted)
+                records = [r for r in session._ledger.publications.values() if r.request_id == command.request_id]
+                if len(records) > 1:
+                    raise SourceIntegrityError()
+                replay = _publication_replay(records[0] if records else None, digest)
+                if replay is not None:
+                    session._check()
+                    return replay
+                current = session.target(command.derivation_key)
+                target, record, snapshot = _make_publication(command, authority, authorization, current,
+                                                            digest, expected_deleted)
+                old = None
+                if current is not None and current.state is SourceState.LIVE:
+                    key = session.resolve_id(current.token.current_publication)
+                    if key is None:
+                        raise SourceIntegrityError()
+                    old = session.source(key)
+                    if old is None or not self._hooks.own_acl(old, authorization):
+                        raise SourceContractError(RejectionCode.DENIED)
+                result = _check_publication_inputs(session, authorization, self._hooks, target, record, snapshot, deadline_ns)
+                if not finalize_at(result, at=session.utc_now()).accepted:
+                    raise SourceContractError(RejectionCode.EXPIRED)
+                head = replace(snapshot.head, payload_locator=_payload_locator(snapshot.head.ref.key, json.loads(_canonical(snapshot.payload))))
+                snapshot = SourceSnapshot(head, snapshot.payload)
+                pair = _publication_pair(base, session._ledger, target, record, snapshot, old)
+                committed = self._durability.commit_locked(base, pair, base_verified=True, deadline_ns=deadline_ns)
+                self._owner._publish_pair(committed)
+                return PublicationReceipt(record.publication_id, target.token, record.commit_seq, False)
+            except BaseException:
+                self._owner._pair_fingerprint = None
+                self._owner._committed_pair = None
+                self._owner._committed_record = None
+                raise
+            finally:
+                session._active = False
+
+    def delete_target(self, authorization: AuthorizationContext, derivation_key: str,
+                      expected: TargetToken, *, deadline_ns: int) -> TargetHead:
+        self._publication_preflight(authorization, deadline_ns)
+        if type(expected) is not TargetToken:
+            raise SourceContractError(RejectionCode.MALFORMED)
+        if single_writer_enabled():
+            writer = getattr(self._durability, "_single_writer", None)
+            if writer is None:
+                writer = SingleWriterQueue()
+                self._durability._single_writer = writer
+            return writer.submit_until(lambda: self._delete_locked(authorization, derivation_key, expected,
+                                                                   deadline_ns), deadline_ns)
+        return self._delete_locked(authorization, derivation_key, expected, deadline_ns)
+
+    def _delete_locked(self, authorization: AuthorizationContext, derivation_key: str,
+                       expected: TargetToken, deadline_ns: int) -> TargetHead:
+        assert self._owner is not None and self._hooks is not None and self._scope is not None
+        with self._durability.writer_lock_until(deadline_ns):
+            base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
+            if base.memory.get("schema_version") != 3:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            session = _LiteReadSession(base, deadline_ns)
+            try:
+                authority = _admit_publication(session, authorization, self._scope)
+                current = session.target(derivation_key)
+                if current is None or current.state is not SourceState.LIVE or current.token != expected:
+                    raise SourceContractError(RejectionCode.PUBLICATION_CONFLICT)
+                key = session.resolve_id(expected.current_publication)
+                old = session.source(key) if key is not None else None
+                if old is None:
+                    raise SourceIntegrityError()
+                if not self._hooks.own_acl(old, authorization):
+                    raise SourceContractError(RejectionCode.DENIED)
+                target = replace(current, token=replace(expected, generation=_advance(expected.generation)),
+                                 state=SourceState.DELETED, last_commit_seq=_advance(authority.commit_seq))
+                pair = _publication_pair(base, session._ledger, target, None, None, old)
+                committed = self._durability.commit_locked(base, pair, base_verified=True, deadline_ns=deadline_ns)
+                self._owner._publish_pair(committed)
+                return target
+            except BaseException:
+                self._owner._pair_fingerprint = None
+                self._owner._committed_pair = None
+                self._owner._committed_record = None
+                raise
+            finally:
+                session._active = False
+
+
+def _publication_pair(base: LitePair, ledger: SourceLedger, target: TargetHead,
+                      record: PublicationRecord | None, snapshot: SourceSnapshot | None,
+                      old: SourceSnapshot | None) -> LitePair:
+    memory = copy.deepcopy(base.memory)
+    sources, publications = dict(ledger.sources), dict(ledger.publications)
+    if old is not None:
+        key = old.head.ref.key
+        sources[key] = _publication_tombstone(old, target.last_commit_seq)
+        memory["facts"] = [row for row in memory["facts"] if row["id"] != key.logical_id]
+        memory["edges"] = [edge for edge in memory["edges"] if key.logical_id not in {edge["source"], edge["target"]}]
+        publications[key.logical_id] = replace(publications[key.logical_id], state=(
+            PublicationState.DELETED if target.state is SourceState.DELETED else PublicationState.SUPERSEDED))
+    if snapshot is not None and record is not None:
+        if snapshot.head.ref.key in sources:
+            raise SourceIntegrityError()
+        sources[snapshot.head.ref.key] = snapshot.head
+        publications[record.publication_id] = record
+        memory.setdefault("facts", []).append(json.loads(_canonical(snapshot.payload)))
+    memory["source_validity"] = encode_ledger(replace(
+        ledger, authority=replace(ledger.authority, commit_seq=target.last_commit_seq), sources=sources,
+        targets={**ledger.targets, target.derivation_key: target}, publications=publications))
+    # Changelog and historical records retain no publication body, title or quote.
+    return LitePair(memory, copy.deepcopy(base.changelog), base.generation + 1, uuid.uuid4().hex)

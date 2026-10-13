@@ -1,7 +1,7 @@
 """Internal PostgreSQL source fence/CAS. Deployment and legacy routing stay off.
 
 Only source-aware transactions participate in this intermediate lock protocol.
-Resource-issued admission/hooks are mandatory; publication belongs to Task 7.
+Resource-issued admission/hooks are mandatory; publication shares the same transaction fence.
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ from memplex.source_contract import (
     PolicySnapshot,
     PublicationReceipt,
     PublicationRecord,
+    PublicationState,
     PublishCommand,
     RejectionCode,
     SourceBusyError,
@@ -67,6 +68,13 @@ from memplex.storage.source_versions import (
     SourceAdmission,
     SourceReadSession,
     SourceValidationHooks,
+    _admit_publication,
+    _check_publication_inputs,
+    _make_publication,
+    _publication_replay,
+    _publication_request_digest,
+    _publication_tombstone,
+    validate_publish_command,
 )
 
 if TYPE_CHECKING:
@@ -531,13 +539,131 @@ class PostgresSourceVersionStore:
         _integrity(session._cursor.fetchone() == (head.last_commit_seq,))
 
     def publish_if_current(self, authorization: AuthorizationContext, command: PublishCommand, *, deadline_ns: int) -> PublicationReceipt:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
-
-    def delete_target(self, authorization: AuthorizationContext, derivation_key: str, expected: TargetToken, *, deadline_ns: int) -> TargetHead:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        return self._publish(authorization, command, deadline_ns, None)
 
     def recreate_target(self, authorization: AuthorizationContext, command: PublishCommand, expected_deleted: TargetToken, *, deadline_ns: int) -> PublicationReceipt:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if type(expected_deleted) is not TargetToken:
+            raise SourceContractError(RejectionCode.MALFORMED)
+        return self._publish(authorization, command, deadline_ns, expected_deleted)
+
+    def _publication_request(self, session: _PostgresReadSession, request_id: str) -> PublicationRecord | None:
+        session._execute("SELECT record_key FROM memplex_derivation_records WHERE authority_id=%s "
+                         f"AND record_kind='publication' AND data->>'request_id'=%s AND {_scope_sql()}",
+                         (session._scope.authority_id, request_id))
+        rows = session._cursor.fetchall()
+        _integrity(len(rows) <= 1)
+        return session.publication(rows[0][0]) if rows else None
+
+    def _publish(self, authorization: AuthorizationContext, command: PublishCommand,
+                 deadline_ns: int, expected_deleted: TargetToken | None) -> PublicationReceipt:
+        with self._transaction(authorization, deadline_ns, shared=False) as session:
+            assert self._scope is not None and self._hooks is not None
+            authority = _admit_publication(session, authorization, self._scope)
+            validate_publish_command(command)
+            digest = _publication_request_digest(command, authorization, expected_deleted)
+            replay = _publication_replay(self._publication_request(session, command.request_id), digest)
+            if replay is not None:
+                receipt = replay
+            else:
+                current = session.target(command.derivation_key)
+                target, record, snapshot = _make_publication(command, authority, authorization, current, digest, expected_deleted)
+                old, old_record = None, None
+                if current is not None and current.state is SourceState.LIVE:
+                    key = session.resolve_id(current.token.current_publication)
+                    old = session.source(key) if key is not None else None
+                    old_record = session.publication(current.token.current_publication)
+                    _integrity(old is not None and old_record is not None
+                               and old_record.state is PublicationState.ACTIVE and old_record.target_token == current.token)
+                    assert old is not None
+                    if not self._hooks.own_acl(old, authorization):
+                        raise SourceContractError(RejectionCode.DENIED)
+                result = _check_publication_inputs(session, authorization, self._hooks, target, record, snapshot, deadline_ns)
+                # Publication uses one final authoritative validation time;
+                # subsequent operations only persist this already checked view.
+                session._execute("SELECT clock_timestamp()")
+                at = session._cursor.fetchone()[0]
+                if not finalize_at(result, at=at).accepted:
+                    raise SourceContractError(RejectionCode.EXPIRED)
+                if old is not None and old_record is not None:
+                    self._retire_publication(session, authorization, old, old_record, target.last_commit_seq, PublicationState.SUPERSEDED)
+                self._write_publication(session, authorization, target, record, snapshot, current is None)
+                receipt = PublicationReceipt(record.publication_id, target.token, record.commit_seq, False)
+        return receipt
+
+    def _store_record(self, session: _PostgresReadSession, kind: str, key: str,
+                      record: TargetHead | PublicationRecord, identity: tuple[object, ...], *, insert: bool = False) -> None:
+        from memplex.source_codec import _wire
+
+        data = _canonical({"contract_version": 1, **cast(dict[str, object], _wire(record))})
+        if insert:
+            session._execute("INSERT INTO memplex_derivation_records "
+                             f"(authority_id,record_kind,record_key,data,{_IDENTITY_COLUMNS}) "
+                             "VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s) RETURNING record_key",
+                             (session._scope.authority_id, kind, key, data, *identity))
+        else:
+            session._execute("UPDATE memplex_derivation_records SET data=%s::jsonb,tenant_id=%s,owner_subject=%s,"
+                             "workspace=%s,visibility=%s,source_agent=%s,source_session=%s "
+                             f"WHERE authority_id=%s AND record_kind=%s AND record_key=%s AND {_scope_sql()} RETURNING record_key",
+                             (data, *identity, session._scope.authority_id, kind, key))
+        _integrity(session._cursor.fetchone() == (key,))
+
+    def _retire_publication(self, session: _PostgresReadSession, authorization: AuthorizationContext, old: SourceSnapshot,
+                            record: PublicationRecord, commit_seq: int, state: PublicationState) -> tuple[object, ...]:
+        head = _publication_tombstone(old, commit_seq)
+        previous = _identity(old.payload)
+        # Retain the historical read audience, binding this mutation to its
+        # admitted writer. The body-free DTO is not a human-creator audit.
+        identity = (previous[0], authorization.principal.subject_id, previous[2], previous[3],
+                    authorization.agent_id, authorization.session_id)
+        session._execute(f"DELETE FROM memplex_facts WHERE id=%s AND {_scope_sql()} RETURNING id", (record.publication_id,))
+        _integrity(session._cursor.fetchone() == (record.publication_id,))
+        session._execute("UPDATE memplex_source_heads SET state='deleted',payload_locator='',head_data=%s::jsonb,"
+                         "content_revision=%s,last_commit_seq=%s,owner_subject=%s,source_agent=%s,source_session=%s "
+                         f"WHERE authority_id=%s AND kind='fact' AND logical_id=%s AND {_scope_sql()} RETURNING logical_id",
+                         (_canonical({"input_context": {}, "root_refs": ()}), head.ref.token.content_revision,
+                          commit_seq, identity[1], identity[4], identity[5], session._scope.authority_id, record.publication_id))
+        _integrity(session._cursor.fetchone() == (record.publication_id,))
+        self._store_record(session, "publication", record.publication_id, replace(record, state=state), identity)
+        return identity
+
+    def _write_publication(self, session: _PostgresReadSession, authorization: AuthorizationContext,
+                           target: TargetHead, record: PublicationRecord, snapshot: SourceSnapshot, new_target: bool) -> None:
+        payload = json.loads(_canonical(snapshot.payload))
+        payload.update(agent_id=authorization.agent_id, session_id=authorization.session_id)
+        head = replace(snapshot.head, payload_locator=_locator(snapshot.head.ref.key, payload))
+        command = SourceMutation(head.ref.key, ExpectedAbsent.ABSENT, SourceOperation.CREATE,
+                                 payload, SourceClass.DERIVED_V1, {}, ())
+        self._write_source(session, authorization, command, None, head, payload)
+        self._store_record(session, "publication", record.publication_id, record, _identity(payload), insert=True)
+        self._store_record(session, "target", target.derivation_key, target, _identity(payload), insert=new_target)
+
+    def delete_target(self, authorization: AuthorizationContext, derivation_key: str, expected: TargetToken, *, deadline_ns: int) -> TargetHead:
+        if type(expected) is not TargetToken:
+            raise SourceContractError(RejectionCode.MALFORMED)
+        with self._transaction(authorization, deadline_ns, shared=False) as session:
+            assert self._scope is not None and self._hooks is not None
+            authority = _admit_publication(session, authorization, self._scope)
+            current = session.target(derivation_key)
+            if current is None or current.state is not SourceState.LIVE or current.token != expected:
+                raise SourceContractError(RejectionCode.PUBLICATION_CONFLICT)
+            key = session.resolve_id(expected.current_publication)
+            old = session.source(key) if key is not None else None
+            record = session.publication(expected.current_publication)
+            _integrity(old is not None and record is not None and record.state is PublicationState.ACTIVE
+                       and record.target_token == expected)
+            assert old is not None and record is not None
+            if not self._hooks.own_acl(old, authorization):
+                raise SourceContractError(RejectionCode.DENIED)
+            target = replace(current, token=replace(expected, generation=_advance(expected.generation)),
+                             state=SourceState.DELETED, last_commit_seq=_advance(authority.commit_seq))
+            identity = self._retire_publication(session, authorization, old, record, target.last_commit_seq, PublicationState.DELETED)
+            self._store_record(session, "target", derivation_key, target, identity)
+            session._execute("UPDATE memplex_source_authorities SET commit_seq=%s WHERE authority_id=%s "
+                             "AND tenant_id=%s AND workspace=%s AND commit_seq=%s RETURNING commit_seq",
+                             (target.last_commit_seq, self._scope.authority_id, self._scope.tenant_id,
+                              self._scope.workspace_id, authority.commit_seq))
+            _integrity(session._cursor.fetchone() == (target.last_commit_seq,))
+        return target
 
 
 class _AuthorizedPostgresSources:

@@ -656,6 +656,9 @@ class PostgresMemoryStore:
         canonicalization here also permits a workspace member to persist an
         update loaded from another member without preserving the prior owner.
         """
+        from memplex.storage.source_versions import reject_reserved_publication
+
+        reject_reserved_publication(getattr(node, "id", None), getattr(node, "namespace", None))
         context = self._authorization_context()
         if _POSTGRES_SCOPE.get() is not None:
             visibility = str(getattr(node, "visibility", None) or "workspace").strip().lower()

@@ -1093,11 +1093,14 @@ class LiteMemoryStore:
                 raise
 
     def _add_unlocked(self, func: Function, source: SourceDocument) -> None:
+        from memplex.storage.source_versions import reject_reserved_publication
+
         self._reload_for_mutation()
         func, source = copy.deepcopy(func), copy.deepcopy(source)
         self._validate_resident_graph()
         if not isinstance(func, Function):
             raise ValueError(_ONLY_FUNCTION_NODES.format(backend="LiteMemoryStore"))  # noqa: TRY004 - exact-type check is deliberate (blocks bool/int equivalence and subclass bypass)
+        reject_reserved_publication(func.id, func.namespace)
         # Dataclasses are mutable: revalidate here so a caller cannot mutate
         # an otherwise valid Function into GraphBuilder's virtual namespace.
         validate_func_id(func.id)
@@ -1199,6 +1202,9 @@ class LiteMemoryStore:
 
     @_with_writer_lock
     def add_observation(self, observation: Observation) -> None:
+        from memplex.storage.source_versions import reject_reserved_publication
+
+        reject_reserved_publication(observation.id, observation.namespace)
         self._reload_for_mutation()
         observation = copy.deepcopy(observation)
         self._validate_resident_graph()
@@ -1301,6 +1307,9 @@ class LiteMemoryStore:
         is preserved -- only a missing one is filled with now, matching
         the Function write path.
         """
+        from memplex.storage.source_versions import reject_reserved_publication
+
+        reject_reserved_publication(fact.id, fact.namespace)
         self._reload_for_mutation()
         fact = copy.deepcopy(fact)
         self._validate_resident_graph()
@@ -1333,6 +1342,9 @@ class LiteMemoryStore:
         is preserved -- only a missing one is filled with now, matching
         the Function write path.
         """
+        from memplex.storage.source_versions import reject_reserved_publication
+
+        reject_reserved_publication(preference.id, preference.namespace)
         self._reload_for_mutation()
         preference = copy.deepcopy(preference)
         self._validate_resident_graph()
@@ -1396,9 +1408,12 @@ class LiteMemoryStore:
         self, operation: TypedWriteOperation, *, exists: bool,
     ) -> tuple[TypedNode, ChangelogEvent]:
         """Validate and detach one node and its event before either is staged."""
+        from memplex.storage.source_versions import reject_reserved_publication
+
         node = copy.deepcopy(operation.node)
         if not isinstance(node, (Fact, Preference)):
             raise TypeError("typed write requires a Fact or Preference")
+        reject_reserved_publication(node.id, node.namespace)
         now = datetime.now(UTC)
         if not node.created_at:
             node.created_at = now.isoformat()
