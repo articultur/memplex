@@ -1074,8 +1074,6 @@ def test_sync_resources_init_race_with_close_converges_to_closed(monkeypatch) ->
 @pytest.fixture
 def fixed_ingress_backend(monkeypatch):
     """Real resource/manager protocol with a driver double, not a native SQL proof."""
-    import psycopg2.pool
-
     from memplex.storage.pool import PostgresSyncStorageResources
 
     target = PostgresTargetIdentity("sync-db", "public", "127.0.0.1", 5432)
@@ -1166,7 +1164,13 @@ def fixed_ingress_backend(monkeypatch):
             for connection in self.connections:
                 connection.closed = True
 
-    monkeypatch.setattr(psycopg2.pool, "ThreadedConnectionPool", DriverPool)
+    original_init = _pool_module.PostgresPoolManager.__init__
+
+    def initialize_manager(manager, dsn, **kwargs):
+        kwargs["pool"] = DriverPool(kwargs.get("min_connections", 1), kwargs.get("max_connections", 8), dsn)
+        original_init(manager, dsn, **kwargs)
+
+    monkeypatch.setattr(_pool_module.PostgresPoolManager, "__init__", initialize_manager)
     # The separately tested catalogue/ACL readiness is modeled by the runners.
     monkeypatch.setattr(_pool_module.PostgresPoolManager, "verify_application_access", lambda *args, **kwargs: None)
     resources = PostgresSyncStorageResources("postgresql://app", "postgresql://migration", "postgresql://inbound")
@@ -1340,3 +1344,37 @@ def test_fixed_ingress_revoked_before_claim_spends_without_borrow(fixed_ingress_
     assert transaction._ingress_admission._transaction is None
     assert transaction._ingress_admission._connection is None
     assert [connection.calls for connection in driver.connections] == before
+
+
+def test_fixed_ingress_fixture_needs_no_optional_driver(monkeypatch):
+    """Construction and the real admission path work with driver imports denied."""
+    import builtins
+    import sys
+
+    original_import = builtins.__import__
+    original_init = _pool_module.PostgresPoolManager.__init__
+    original_verify = _pool_module.PostgresPoolManager.verify_application_access
+
+    def without_driver(name, *args, **kwargs):
+        if name == "psycopg2" or name.startswith("psycopg2."):
+            raise ModuleNotFoundError("optional psycopg2 unavailable at fixture boundary", name=name)
+        return original_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as local:
+        local.setattr(builtins, "__import__", without_driver)
+        for name in tuple(sys.modules):
+            if name == "psycopg2" or name.startswith("psycopg2."):
+                local.setitem(sys.modules, name, None)
+        with pytest.raises(ModuleNotFoundError, match="optional psycopg2 unavailable"):
+            __import__("psycopg2.pool")
+        fixture = fixed_ingress_backend.__wrapped__(local)
+        backend = next(fixture)
+        try:
+            assert type(backend[0]._inbound_manager) is _pool_module.PostgresPoolManager
+            test_ready_execute_only_ingress_uses_fixed_operation_without_relation_probe(backend)
+        finally:
+            fixture.close()
+        assert all(connection.closed for connection in backend[1].connections)
+    assert builtins.__import__ is original_import
+    assert _pool_module.PostgresPoolManager.__init__ is original_init
+    assert _pool_module.PostgresPoolManager.verify_application_access is original_verify

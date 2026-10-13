@@ -1070,7 +1070,7 @@ _SYNC_FUNCTION_DEFINITION_DIGESTS: Final[dict[str, str]] = {
 
 
 _SOURCE_INGRESS_FUNCTION_DEFINITION_DIGESTS: Final[dict[str, str]] = {
-    "memplex_sync_capture_before": "ca54d2f1500740e0552c94dc80d35a10a3d8bff745606d5e0a76ee4b7437741c",
+    "memplex_sync_capture_before": "eaaa9530b669cde866d474aac4bb69807f580c06a73955a967d39cff20bfca22",
     "memplex_sync_apply_inbound": "95823b9dd0f182216412d07a04ed6086c98c1fedc01e8a152f13340fbe758828",
 }
 

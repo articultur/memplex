@@ -33,7 +33,7 @@ BEGIN
         END IF;
         descriptor := NULLIF(current_setting('memplex.sync_inbound_event', true), '')::jsonb;
         IF descriptor IS NULL OR descriptor->>'node_type' IS DISTINCT FROM TG_ARGV[0]
-           OR descriptor->>'operation' IS DISTINCT FROM CASE WHEN TG_OP = 'DELETE' THEN 'tombstone' ELSE 'upsert' END
+           OR descriptor->>'operation' IS DISTINCT FROM (CASE WHEN TG_OP = 'DELETE' THEN 'tombstone' ELSE 'upsert' END)
            OR TG_ARGV[0] NOT IN ('function','fact','preference','observation','edge')
            OR (TG_ARGV[0] = 'edge' AND TG_OP = 'DELETE' AND pg_trigger_depth() <> 1) THEN
             RAISE EXCEPTION 'memplex sync inbound operation is not signed' USING ERRCODE = '42501';

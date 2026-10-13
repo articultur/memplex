@@ -1844,6 +1844,7 @@ def test_recognised_pre_g002_catalogue_upgrades_atomically(migration_dsn):
         (6, "executed"),
         (7, "executed"),
         (8, "executed"),
+        (9, "executed"),
     ]
     conn = psycopg2.connect(migration_dsn)
     try:
@@ -1872,7 +1873,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8, 9]
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
     result = runner.apply()
@@ -1887,6 +1888,7 @@ def test_recognised_post_g002_catalogue_adopts_then_applies_integrity(migration_
         (6, "executed"),
         (7, "executed"),
         (8, "executed"),
+        (9, "executed"),
     ]
     assert _migration_table_exists(migration_dsn, "feedback")
 
@@ -1912,9 +1914,9 @@ def test_v3_catalogue_upgrades_to_v4_with_function_and_virtual_edge_targets(migr
 
     plan = PostgresMigrationRunner(migration_dsn).plan()
     assert plan.current_version == 3
-    assert [migration.version for migration in plan.pending] == [4, 5, 6, 7, 8]
+    assert [migration.version for migration in plan.pending] == [4, 5, 6, 7, 8, 9]
     assert PostgresMigrationRunner(migration_dsn).apply().state == "ready"
-    assert _ledger_rows(migration_dsn)[-1] == (8, "executed")
+    assert _ledger_rows(migration_dsn)[-1] == (9, "executed")
     assert _admin_query(
         migration_dsn,
         "SELECT edge_type, target_function FROM memplex_edges ORDER BY edge_type",
@@ -1934,6 +1936,7 @@ def test_v4_upgrades_atomically_to_reliable_sync_v5(migration_dsn):
         (6, "executed"),
         (7, "executed"),
         (8, "executed"),
+        (9, "executed"),
     ]
     assert _admin_query(
         migration_dsn,
@@ -4428,7 +4431,7 @@ def test_0004_runner_reads_hidden_typed_domains_with_python_runtime_semantics(mi
             ("memplex_edges", True),
             ("memplex_functions", True),
         ]
-        assert _ledger_rows(migration_dsn)[-1] == (8, "executed")
+        assert _ledger_rows(migration_dsn)[-1] == (9, "executed")
     finally:
         _restore_v3_catalogue_owner_and_drop_role(migration_dsn, role, original_owner)
 
@@ -4791,6 +4794,7 @@ def test_two_runners_converge_to_one_contiguous_ledger(migration_dsn):
         (6, "executed"),
         (7, "executed"),
         (8, "executed"),
+        (9, "executed"),
     ]
 
 
@@ -4813,6 +4817,7 @@ def test_second_apply_preserves_catalogue_ledger_modes_and_applied_at(migration_
         (6, "executed"),
         (7, "executed"),
         (8, "executed"),
+        (9, "executed"),
     ]
 
 
@@ -5008,7 +5013,7 @@ def test_exact_runtime_v1_catalogue_is_a_known_upgrade_baseline(migration_dsn, w
     runner = PostgresMigrationRunner(migration_dsn)
     plan = runner.plan()
     assert plan.current_version == 2
-    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8]
+    assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8, 9]
     assert runner.status() == plan
     assert runner.apply(dry_run=True) == plan
     assert runner.apply().state == "ready"
@@ -5137,7 +5142,7 @@ def test_runner_confines_a_quoted_target_schema_before_reading_ledger(pg_dsn):
         runner = PostgresMigrationRunner(pg_dsn, connection_factory=target_then_source_factory)
         plan = runner.plan()
         assert plan.current_version == 2
-        assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8]
+        assert [migration.version for migration in plan.pending] == [3, 4, 5, 6, 7, 8, 9]
         assert runner.apply().state == "ready"
         assert _migration_ledger_digest(pg_dsn, source_factory) == source_before
         assert PostgresMigrationRunner(pg_dsn, connection_factory=source_factory).status().state == "ready"
@@ -9863,6 +9868,24 @@ def guarded_ingress(request, migration_dsn):
     suffix = uuid.uuid4().hex[:12]
     schema, owner, ingress = f"ingress_v9_{suffix}", f"ingress_owner_{suffix}", f"ingress_login_{suffix}"
     ordinary = request.param == "ordinary_owner"
+    created_schema = created_owner = created_ingress = False
+
+    def cleanup():
+        errors = []
+        for created, drop, name in (
+            (created_schema, _drop_schema, schema),
+            (created_ingress, _drop_unprivileged_role, ingress),
+            (created_owner, _drop_unprivileged_role, owner),
+        ):
+            if created:
+                try:
+                    drop(migration_dsn, name)
+                except BaseException as exc:  # noqa: BLE001 - attempt every owned cleanup and report all failures
+                    errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup("guarded ingress fixture cleanup failed", errors)
+
+    request.addfinalizer(cleanup)
     admin = psycopg2.connect(migration_dsn)
     try:
         with admin.cursor() as cursor:
@@ -9872,19 +9895,23 @@ def guarded_ingress(request, migration_dsn):
             else:
                 cursor.execute(pg_sql.SQL("CREATE SCHEMA {}").format(pg_sql.Identifier(schema)))
         admin.commit()
+        created_schema, created_owner = True, ordinary
     finally:
         admin.close()
     admin_dsn = psycopg2.extensions.make_dsn(migration_dsn, options=f"-csearch_path={schema}")
     owner_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=owner) if ordinary else admin_dsn
-    def cleanup():
-        _drop_schema(migration_dsn, schema)
-        _drop_unprivileged_role(migration_dsn, ingress)
-        if ordinary:
-            _drop_unprivileged_role(migration_dsn, owner)
-    request.addfinalizer(cleanup)
     origin = "remote-guard"
     scope = SyncScope("tenant-source", "subject-source", "workspace-source", "user", "agent-source", "session-source")
     assert PostgresMigrationRunner(owner_dsn).apply().current_version == 9
+    # Own the role before provisioning so a later helper failure cannot leak it.
+    ingress_admin = psycopg2.connect(admin_dsn)
+    try:
+        with ingress_admin.cursor() as cursor:
+            cursor.execute(pg_sql.SQL("CREATE ROLE {} LOGIN").format(pg_sql.Identifier(ingress)))
+        ingress_admin.commit()
+        created_ingress = True
+    finally:
+        ingress_admin.close()
     _provision_ingress_role(admin_dsn, ingress, origin)
     ingress_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=ingress)
 
@@ -10227,3 +10254,89 @@ def test_v9_private_ingress_cannot_lend_its_physical_admission(guarded_ingress, 
     finally:
         resources.close()
         _drop_unprivileged_role(h.admin, app_role)
+
+
+@pytest.mark.parametrize("ordinary, stage, cleanup_faults", [
+    (True, "before_commit", ()),
+    (True, "before_ingress", ()),
+    (False, "before_ingress", ()),
+    (True, "before_ingress", ("schema",)),
+    (True, "ingress_provision", ()),
+    (True, "ingress_committed", ()),
+    (True, "ready", ()),
+    (False, "ready", ()),
+    (True, "ready", ("schema",)),
+    (True, "ready", ("ingress",)),
+    (True, "ready", ("schema", "ingress", "owner")),
+])
+def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordinary, stage, cleanup_faults):
+    """Exercise fixture setup/finalization faults without a database service."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    suffix = "0123456789ab"
+    schema, owner, ingress = f"ingress_v9_{suffix}", f"ingress_owner_{suffix}", f"ingress_login_{suffix}"
+    created, cleaned, finalizers = set(), [], []
+    primary = RuntimeError(f"setup failed at {stage}")
+    cleanup_errors = {kind: RuntimeError(f"cleanup failed for {kind}") for kind in cleanup_faults}
+    names = {schema: "schema", owner: "owner", ingress: "ingress"}
+    admin = MagicMock()
+    ingress_admin = MagicMock()
+    ingress_admin.commit.side_effect = lambda: created.add(ingress)
+
+    def commit():
+        if stage == "before_commit":
+            raise primary
+        created.add(schema)
+        if ordinary:
+            created.add(owner)
+
+    def apply():
+        if stage == "before_ingress":
+            raise primary
+        return SimpleNamespace(current_version=9)
+
+    def provision(_dsn, role, _origin):
+        assert role == ingress
+        if stage == "ingress_provision":
+            raise primary
+        created.add(role)
+        if stage == "ingress_committed":
+            raise primary
+
+    def drop(_dsn, name):
+        assert name in created, f"cleanup attempted an uncreated resource: {name}"
+        cleaned.append(name)
+        if names[name] in cleanup_errors:
+            raise cleanup_errors[names[name]]
+
+    admin.commit.side_effect = commit
+    monkeypatch.setattr(uuid, "uuid4", lambda: SimpleNamespace(hex=suffix))
+    monkeypatch.setattr(psycopg2, "connect", MagicMock(side_effect=[admin, ingress_admin]))
+    monkeypatch.setattr(__import__(__name__, fromlist=["PostgresMigrationRunner"]),
+                        "PostgresMigrationRunner", lambda _dsn: SimpleNamespace(apply=apply))
+    monkeypatch.setattr(__import__(__name__, fromlist=["_provision_ingress_role"]), "_provision_ingress_role", provision)
+    monkeypatch.setattr(__import__(__name__, fromlist=["_drop_schema"]), "_drop_schema", drop)
+    monkeypatch.setattr(__import__(__name__, fromlist=["_drop_unprivileged_role"]), "_drop_unprivileged_role", drop)
+    request = SimpleNamespace(param="ordinary_owner" if ordinary else "bypass_owner", addfinalizer=finalizers.append)
+    if stage == "ready":
+        result = guarded_ingress.__wrapped__(request, "dbname=fixture_control")
+        assert result.ingress_role == ingress
+        assert result.ordinary is ordinary
+    else:
+        with pytest.raises(RuntimeError) as failure:
+            guarded_ingress.__wrapped__(request, "dbname=fixture_control")
+        assert failure.value is primary
+    admin.close.assert_called_once()
+    assert len(finalizers) == 1
+    if cleanup_errors:
+        with pytest.raises(BaseExceptionGroup) as failures:
+            finalizers[0]()
+        assert failures.value.exceptions == tuple(cleanup_errors.values())
+    else:
+        finalizers[0]()
+    assert set(cleaned) == created
+    assert len(cleaned) == len(created)
+    assert cleaned == [name for name in (schema, ingress, owner) if name in created]
+    if stage != "ready":
+        assert failure.value is primary

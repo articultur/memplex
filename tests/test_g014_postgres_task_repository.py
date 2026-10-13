@@ -44,8 +44,8 @@ def _task(task_id: str, *, max_retries: int = 1) -> TaskInfo:
 
 def test_0006_is_packaged_and_catalogue_verified(pg_function_dsn: str) -> None:
     assert [(item.version, item.name) for item in discover_migrations()][-1] == (
-        8,
-        "source_validity",
+        9,
+        "source_ingress_guard",
     )
 
     runner = PostgresMigrationRunner(pg_function_dsn)
