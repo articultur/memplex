@@ -9912,7 +9912,7 @@ def guarded_ingress(request, migration_dsn):
         created_ingress = True
     finally:
         ingress_admin.close()
-    _provision_ingress_role(admin_dsn, ingress, origin)
+    _provision_ingress_role(owner_dsn, ingress, origin)
     ingress_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=ingress)
 
     def event(number, *, node="node", kind=SyncNodeType.FACT, operation=SyncOperation.UPSERT,
@@ -10272,10 +10272,13 @@ def test_v9_private_ingress_cannot_lend_its_physical_admission(guarded_ingress, 
 def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordinary, stage, cleanup_faults):
     """Exercise fixture setup/finalization faults without a database service."""
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, call
 
     suffix = "0123456789ab"
     schema, owner, ingress = f"ingress_v9_{suffix}", f"ingress_owner_{suffix}", f"ingress_login_{suffix}"
+    migration_dsn = "dbname=fixture_control user=fixture_admin"
+    admin_dsn = psycopg2.extensions.make_dsn(migration_dsn, options=f"-csearch_path={schema}")
+    owner_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=owner) if ordinary else admin_dsn
     created, cleaned, finalizers = set(), [], []
     primary = RuntimeError(f"setup failed at {stage}")
     cleanup_errors = {kind: RuntimeError(f"cleanup failed for {kind}") for kind in cleanup_faults}
@@ -10283,6 +10286,7 @@ def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordi
     admin = MagicMock()
     ingress_admin = MagicMock()
     ingress_admin.commit.side_effect = lambda: created.add(ingress)
+    connect = MagicMock(side_effect=[admin, ingress_admin])
 
     def commit():
         if stage == "before_commit":
@@ -10297,6 +10301,13 @@ def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordi
         return SimpleNamespace(current_version=9)
 
     def provision(_dsn, role, _origin):
+        assert _dsn == owner_dsn
+        assert connect.call_args_list == [call(migration_dsn), call(admin_dsn)]
+        assert ingress in created
+        ingress_admin.commit.assert_called_once()
+        ingress_admin.cursor.return_value.__enter__.return_value.execute.assert_called_once_with(
+            pg_sql.SQL("CREATE ROLE {} LOGIN").format(pg_sql.Identifier(ingress)),
+        )
         assert role == ingress
         if stage == "ingress_provision":
             raise primary
@@ -10312,7 +10323,7 @@ def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordi
 
     admin.commit.side_effect = commit
     monkeypatch.setattr(uuid, "uuid4", lambda: SimpleNamespace(hex=suffix))
-    monkeypatch.setattr(psycopg2, "connect", MagicMock(side_effect=[admin, ingress_admin]))
+    monkeypatch.setattr(psycopg2, "connect", connect)
     monkeypatch.setattr(__import__(__name__, fromlist=["PostgresMigrationRunner"]),
                         "PostgresMigrationRunner", lambda _dsn: SimpleNamespace(apply=apply))
     monkeypatch.setattr(__import__(__name__, fromlist=["_provision_ingress_role"]), "_provision_ingress_role", provision)
@@ -10320,12 +10331,12 @@ def test_guarded_ingress_fixture_cleans_only_created_resources(monkeypatch, ordi
     monkeypatch.setattr(__import__(__name__, fromlist=["_drop_unprivileged_role"]), "_drop_unprivileged_role", drop)
     request = SimpleNamespace(param="ordinary_owner" if ordinary else "bypass_owner", addfinalizer=finalizers.append)
     if stage == "ready":
-        result = guarded_ingress.__wrapped__(request, "dbname=fixture_control")
+        result = guarded_ingress.__wrapped__(request, migration_dsn)
         assert result.ingress_role == ingress
         assert result.ordinary is ordinary
     else:
         with pytest.raises(RuntimeError) as failure:
-            guarded_ingress.__wrapped__(request, "dbname=fixture_control")
+            guarded_ingress.__wrapped__(request, migration_dsn)
         assert failure.value is primary
     admin.close.assert_called_once()
     assert len(finalizers) == 1
