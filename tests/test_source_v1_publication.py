@@ -433,9 +433,19 @@ def test_success_is_one_committed_decision(publication_backend, monkeypatch):
     if h.kind == "lite":
         assert decisions == [1]
     else:
-        assert sum(item[0] == "commit" for item in h.trace) == 1
-        writes = [item for item in h.trace if item[0] == "start" and item[2].startswith(("INSERT", "UPDATE"))]
-        assert writes and len({item[1] for item in writes}) == 1
+        import re
+
+        # The real deadline cursor prefixes the statement in the same message.
+        # Anchor to that fixed prefix; quoted/commented DML is not a write.
+        dml = re.compile(r"^(?:SET LOCAL lock_timeout = '\d+ms'; "
+                         r"SET LOCAL statement_timeout = '\d+ms'; )?\s*(?:INSERT|UPDATE|DELETE)\s")
+        commits = [(index, item) for index, item in enumerate(h.trace) if item[0] == "commit"]
+        assert len(commits) == 1
+        writes = [item for item in h.trace if item[0] == "start" and dml.match(item[2])]
+        finished = [(index, item) for index, item in enumerate(h.trace) if item[0] == "finish" and dml.match(item[2])]
+        assert writes and [item[1:] for item in writes] == [item[1:] for _, item in finished]
+        assert {item[1] for item in h.trace} == {commits[0][1][1]}
+        assert all(index < commits[0][0] for index, _ in finished)
     with _fence(h.backend) as session:
         assert session.publication(receipt.publication_id).commit_seq == receipt.commit_seq
         assert session.target(command.derivation_key).token == receipt.target
