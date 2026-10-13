@@ -8,6 +8,7 @@ catalogue and negotiated optional vector capability.
 from __future__ import annotations
 
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +17,15 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from importlib import import_module
 from threading import Condition, RLock
 from typing import Any, Literal, Self
 from uuid import uuid4
+
+try:
+    _SourceDriverPool = import_module("psycopg2.pool").ThreadedConnectionPool
+except ImportError:
+    _SourceDriverPool = object
 
 from memplex.auth import AuthorizationContext
 from memplex.storage.migrations import (
@@ -369,6 +376,224 @@ class PooledReadCursor:
                 raise cleanup_error
 
 
+def _remaining_transaction_ms(deadline_ns: int) -> int:
+    """Never turn a sub-millisecond or expired budget into PG's zero timeout."""
+    from memplex.source_contract import SourceBusyError
+
+    remaining = (deadline_ns - time.monotonic_ns()) // 1_000_000
+    if remaining < 1:
+        raise SourceBusyError()
+    return min(remaining, 2**31 - 1)
+
+
+class _SourcePoolFault(RuntimeError):
+    """An explicitly provisioned source pool lost its fixed inventory."""
+
+
+_SOURCE_POOL_ISSUER = object()
+
+
+def _source_connection_healthy(connection: Any, *, idle: bool = False) -> bool:
+    if connection.closed:
+        return False
+    status = connection.get_transaction_status()
+    # Psycopg's local libpq status access performs no query or reconnect.
+    return status == 0 if idle else status != 4
+
+
+class _FixedSourcePool(_SourceDriverPool):  # type: ignore[valid-type,misc]  # optional pinned runtime base
+    """Pinned driver accounting with a permanently closed connector boundary.
+
+    Only explicit source resources construct this pool. Ordinary borrowers of
+    that resource share its fixed inventory; ordinary legacy pools are separate.
+    """
+
+    def __init__(self, capacity: int, dsn: str, *, issuer: object) -> None:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        if issuer is not _SOURCE_POOL_ISSUER or _SourceDriverPool is object:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if import_module("psycopg2").__version__.split()[0] != "2.9.12":
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        self._source_capacity = capacity
+        self._source_provisioning = True
+        self._source_faulted = False
+        try:
+            super().__init__(capacity, capacity, dsn)
+        except BaseException as primary:
+            cleanup_error: BaseException | None = None
+            for connection in getattr(self, "_pool", []):
+                try:
+                    connection.close()
+                except BaseException as exc:  # noqa: BLE001 - preserve partial-provisioning cleanup failure
+                    cleanup_error = cleanup_error or exc
+            if cleanup_error is not None:
+                raise cleanup_error from primary
+            raise
+        finally:
+            self._source_provisioning = False
+
+    def _connect(self, key: Any = None) -> Any:
+        if not self._source_provisioning:
+            raise _SourcePoolFault("source pool cannot create replacement connections")
+        return super()._connect(key)
+
+    def _assert_inventory(self, *, quiescent: bool = False) -> None:
+        connections = self._pool + list(self._used.values())
+        if (self.closed or self._source_faulted
+                or self.minconn != self._source_capacity or self.maxconn != self._source_capacity
+                or len(connections) != self._source_capacity
+                or len({id(connection) for connection in connections}) != self._source_capacity
+                or self._rused != {id(connection): key for key, connection in self._used.items()}
+                or (quiescent and self._used)
+                or any(not _source_connection_healthy(connection) for connection in connections)
+                or any(not _source_connection_healthy(connection, idle=True) for connection in self._pool)):
+            raise _SourcePoolFault("source pool inventory is unavailable or inconsistent")
+
+    def _getconn(self, key: Any = None) -> Any:
+        from memplex.source_contract import SourceBusyError
+
+        self._assert_inventory()
+        if not self._pool and key not in self._used:
+            raise SourceBusyError()
+        return super()._getconn(key)
+
+    def _getconn_before(self, deadline_ns: int) -> Any:
+        from memplex.source_contract import SourceBusyError
+
+        if not self._lock.acquire(timeout=_remaining_transaction_ms(deadline_ns) / 1000):
+            raise SourceBusyError()
+        try:
+            _remaining_transaction_ms(deadline_ns)
+            return self._getconn()
+        finally:
+            self._lock.release()
+
+    def putconn(self, conn: Any = None, key: Any = None, close: bool = False) -> None:
+        # The manager owns rollback. Never perform connector/rollback/close I/O
+        # under the driver lock, including the abnormal return path.
+        discard = False
+        with self._lock:
+            actual_key = self._rused.get(id(conn)) if key is None else key
+            if (self.closed or actual_key not in self._used
+                    or self._used[actual_key] is not conn or self._rused.get(id(conn)) != actual_key):
+                raise _SourcePoolFault("source pool return ownership mismatch")
+            discard = close or not _source_connection_healthy(conn, idle=True)
+            del self._used[actual_key]
+            del self._rused[id(conn)]
+            if discard:
+                self._source_faulted = True
+            else:
+                self._pool.append(conn)
+        if discard:
+            conn.close()
+            raise _SourcePoolFault("source pool connection was lost or returned without cleanup")
+
+
+def _new_source_ready_pool(capacity: int, dsn: str) -> _FixedSourcePool:
+    return _FixedSourcePool(capacity, dsn, issuer=_SOURCE_POOL_ISSUER)
+
+
+def _require_source_pool(manager: PostgresPoolManager, *, quiescent: bool = False) -> _FixedSourcePool:
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    pool = manager._pool
+    if type(pool) is not _FixedSourcePool:
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    with manager._condition:
+        if (manager.min_connections != pool._source_capacity or manager.max_connections != pool._source_capacity
+                or not manager._accepting_business_leases()
+                or (quiescent and (manager._lease_records or manager._checked_out or manager._returning
+                                   or manager._waiting_borrowers or manager._borrow_queue))):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if quiescent:
+            with pool._lock:
+                pool._assert_inventory(quiescent=True)
+    return pool
+
+
+class _SourceDeadlineCursor:
+    """Unnamed, non-streaming source cursor with one-message timeout setup."""
+
+    def __init__(self, cursor: Any, deadline_ns: int) -> None:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        self._cursor, self._deadline_ns = cursor, deadline_ns
+        if getattr(cursor, "name", None) is not None:
+            cursor.close()
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+
+    def execute(self, query: Any, parameters: Any = None) -> Any:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        remaining = _remaining_transaction_ms(self._deadline_ns)
+        prefix = f"SET LOCAL lock_timeout = '{remaining}ms'; SET LOCAL statement_timeout = '{remaining}ms'; "
+        if type(query) is str:
+            statement = prefix + query
+        else:
+            sql = import_module("psycopg2.sql")
+            if not isinstance(query, sql.Composable):
+                raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+            statement = sql.SQL(prefix) + query
+        result = self._cursor.execute(statement, parameters)
+        _remaining_transaction_ms(self._deadline_ns)
+        return result
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def fetchall(self) -> Any:
+        return self._cursor.fetchall()
+
+    def close(self) -> None:
+        self._cursor.close()
+
+    @property
+    def connection(self) -> Any:
+        return self._cursor.connection
+
+    @property
+    def rowcount(self) -> Any:
+        return self._cursor.rowcount
+
+    @property
+    def description(self) -> Any:
+        return self._cursor.description
+
+
+def _recoverable_source_budget(error: BaseException, connection: Any, deadline_ns: int | None) -> bool:
+    from memplex.source_contract import SourceBusyError
+
+    return (deadline_ns is not None
+            and (isinstance(error, SourceBusyError) or getattr(error, "pgcode", None) in {"55P03", "57014"})
+            and _source_connection_healthy(connection))
+
+
+def _source_transaction_setup(
+    connection: Any, deadline_ns: int, *, manager: PostgresPoolManager | None = None
+) -> None:
+    """Source-aware setup precedes even target/principal metadata queries."""
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    if getattr(connection, "autocommit", None) is not False:
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    cursor = _SourceDeadlineCursor(connection.cursor(), deadline_ns)
+    primary_error: BaseException | None = None
+    try:
+        cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            cursor.close()
+        except BaseException as exc:
+            if manager is not None:
+                manager._mark_fault(exc)
+            if primary_error is None:
+                raise
+
+
 class _BorrowCapacityReservation:
     """Exception-safe hand-off from FIFO capacity to a business lease.
 
@@ -378,14 +603,15 @@ class _BorrowCapacityReservation:
     exceptions strand later borrowers.
     """
 
-    def __init__(self, manager: PostgresPoolManager) -> None:
+    def __init__(self, manager: PostgresPoolManager, deadline_ns: int | None = None) -> None:
         self._manager = manager
+        self._deadline_ns = deadline_ns
         self._token = object()
         self._connection: Any | None = None
 
     def __enter__(self) -> Self:
         try:
-            self._manager._reserve_capacity(self._token)
+            self._manager._reserve_capacity(self._token, deadline_ns=self._deadline_ns)
             return self
         except BaseException:
             self._manager.release(self._token)
@@ -435,13 +661,23 @@ class _BorrowCapacityReservation:
         """Acquire and validate one connection under this reservation."""
         connection: Any | None = None
         try:
-            connection = self._manager._pool.getconn()
+            connection = (self._manager._pool.getconn() if self._deadline_ns is None else
+                          _require_source_pool(self._manager)._getconn_before(self._deadline_ns))
             self._connection = connection
             self._manager._attach_borrowed_connection(self._token, connection)
-            self._manager._verify_borrowed_connection_target(connection)
+            if self._deadline_ns is not None:
+                _source_transaction_setup(connection, self._deadline_ns, manager=self._manager)
+            if self._deadline_ns is None:
+                self._manager._verify_borrowed_connection_target(connection)
+            else:
+                self._manager._verify_borrowed_connection_target(connection, deadline_ns=self._deadline_ns)
+            if self._deadline_ns is not None:
+                _remaining_transaction_ms(self._deadline_ns)
             self._manager._register_checked_out(self._token, connection)
             return connection
-        except BaseException:
+        except BaseException as failure:
+            if isinstance(failure, _SourcePoolFault):
+                self._manager._mark_fault(failure)
             # The local connection exists before record attachment.  Keep two
             # independent manager releases so a trace/cancellation at either
             # call boundary cannot replace the borrow primary or strand it.
@@ -497,10 +733,12 @@ class _TransactionContext:
     """Explicit transaction context with an exception-safe enter hand-off."""
 
     def __init__(
-        self, manager: PostgresPoolManager, bind_scope: BindScope, context: AuthorizationContext
+        self, manager: PostgresPoolManager, bind_scope: BindScope, context: AuthorizationContext,
+        deadline_ns: int | None = None,
     ) -> None:
         self._manager = manager
         self._bind_scope = bind_scope
+        self._deadline_ns = deadline_ns
         self._context = context
         self._reservation_context: Any | None = None
         self._reservation: _BorrowCapacityReservation | None = None
@@ -514,12 +752,15 @@ class _TransactionContext:
         connection: Any | None = None
         cursor: Any | None = None
         try:
-            reservation_context = self._manager._borrow_capacity_reservation()
+            reservation_context = (self._manager._borrow_capacity_reservation()
+                                   if self._deadline_ns is None else
+                                   self._manager._borrow_capacity_reservation(self._deadline_ns))
             reservation = reservation_context.__enter__()
             self._reservation_context = reservation_context
             self._reservation = reservation
             connection = reservation.borrow()
-            cursor = connection.cursor()
+            cursor = (connection.cursor() if self._deadline_ns is None else
+                      _SourceDeadlineCursor(connection.cursor(), self._deadline_ns))
             self._connection = connection
             self._cursor = cursor
             self._bind_scope(cursor, self._context)
@@ -828,7 +1069,7 @@ class PostgresPoolManager:
             raise failure
         return True
 
-    def _verify_borrowed_connection_target(self, connection: Any) -> None:
+    def _verify_borrowed_connection_target(self, connection: Any, *, deadline_ns: int | None = None) -> None:
         """Verify this exact business lease before scope binding or store SQL."""
         expected_key = self._expected_target_key
         principal = self._expected_application_principal
@@ -838,7 +1079,8 @@ class PostgresPoolManager:
         primary_error: BaseException | None = None
         cleanup_error: BaseException | None = None
         try:
-            cursor = connection.cursor()
+            cursor = (connection.cursor() if deadline_ns is None else
+                      _SourceDeadlineCursor(connection.cursor(), deadline_ns))
             if expected_key is not None:
                 actual_target = inspect_postgres_connection_target(connection, cursor)
                 if _target_key(actual_target) != expected_key:
@@ -868,7 +1110,8 @@ class PostgresPoolManager:
                     )
         except BaseException as exc:
             primary_error = exc
-            self._mark_fault(exc)
+            if not _recoverable_source_budget(exc, connection, deadline_ns):
+                self._mark_fault(exc)
             raise
         finally:
             if cursor is not None:
@@ -881,9 +1124,9 @@ class PostgresPoolManager:
                 raise cleanup_error
 
     @contextmanager
-    def _borrow_capacity_reservation(self) -> Iterator[_BorrowCapacityReservation]:
+    def _borrow_capacity_reservation(self, deadline_ns: int | None = None) -> Iterator[_BorrowCapacityReservation]:
         """Own pre-publication capacity until a caller explicitly publishes."""
-        with _BorrowCapacityReservation(self) as reservation:
+        with _BorrowCapacityReservation(self, deadline_ns) as reservation:
             yield reservation
 
     def _notify_locked(self, *, suppress: bool = False) -> None:
@@ -895,13 +1138,14 @@ class PostgresPoolManager:
             if not suppress:
                 raise
 
-    def _reserve_capacity(self, token: object) -> None:
+    def _reserve_capacity(self, token: object, *, deadline_ns: int | None = None) -> None:
         """Enter the authoritative FIFO state machine at RESERVED."""
         try:
             with self._condition:
                 self._lease_records[token] = _LeaseRecord(_LeaseState.QUEUED)
                 self._borrow_queue.append(token)
                 while True:
+                    remaining = None if deadline_ns is None else _remaining_transaction_ms(deadline_ns) / 1000
                     if self._closed or self._close_requested or self._fault is not None:
                         raise RuntimeError("PostgreSQL pool is closed")
                     if (
@@ -915,7 +1159,7 @@ class PostgresPoolManager:
                         self._waiting_borrowers += 1
                         self._notify_locked()
                         return
-                    self._condition.wait()
+                    self._condition.wait(timeout=remaining)
         except BaseException:
             self.release(token)
             raise
@@ -1120,9 +1364,11 @@ class PostgresPoolManager:
             raise return_error
 
     def transaction(
-        self, bind_scope: BindScope, context: AuthorizationContext
+        self, bind_scope: BindScope, context: AuthorizationContext, *, deadline_ns: int | None = None
     ) -> _TransactionContext:
-        return _TransactionContext(self, bind_scope, context)
+        if deadline_ns is not None and type(deadline_ns) is not int:
+            raise TypeError("transaction deadline must be an exact int")
+        return _TransactionContext(self, bind_scope, context, deadline_ns)
 
     def _cleanup_reservation_local_resources(
         self,

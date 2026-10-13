@@ -44,7 +44,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from functools import wraps
 from hashlib import sha256
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from memplex.auth import (
     AuthorizationContext,
@@ -92,6 +92,9 @@ from memplex.sync_protocol import (
     SyncVersion,
 )
 from memplex.sync_repository import SyncCapturePolicy
+
+if TYPE_CHECKING:
+    from memplex.storage.postgres_sources import PostgresSourceVersionStore
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +193,14 @@ class _AuthorizedPostgresStore:
     def __init__(self, store: PostgresMemoryStore, context: AuthorizationContext) -> None:
         self._store = store
         self._context = context
+
+    def source_versions(self) -> Any:
+        from memplex.storage.postgres_sources import _AuthorizedPostgresSources
+
+        if type(self) is not _AuthorizedPostgresStore or type(self._store) is not PostgresMemoryStore:
+            return None
+        backend = self._store.source_versions()
+        return None if backend is None else _AuthorizedPostgresSources(backend, self._context)
 
     def __getattr__(self, name: str) -> Any:
         target = getattr(self._store, name)
@@ -337,6 +348,8 @@ class PostgresMemoryStore:
     degrades to tsvector-only.
     """
 
+    _source_version_adapter: PostgresSourceVersionStore
+
     def __init__(
         self,
         dsn: str,
@@ -392,6 +405,12 @@ class PostgresMemoryStore:
                 consumer_ttl_seconds=sync_consumer_ttl_seconds,
                 retention_min_seconds=sync_retention_min_seconds,
             )
+
+    def source_versions(self) -> Any:
+        """Only a resource-admitted exact adapter has this internal capability."""
+        if type(self) is not PostgresMemoryStore:
+            return None
+        return getattr(self, "_source_version_adapter", None)
 
     def authorized(self, context: AuthorizationContext) -> _AuthorizedPostgresStore:
         """Return a request-scoped facade bound to trusted identity.

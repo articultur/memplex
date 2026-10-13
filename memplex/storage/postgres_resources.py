@@ -78,6 +78,7 @@ class PostgresStorageResources:
         self.dsn = dsn
         self.migration_dsn = dsn if migration_dsn is None else migration_dsn
         self._pool_factory = pool_factory
+        self._source_capacity: int | None = None
         self._expected_target = expected_target
         self._ingress_acl = ingress_acl
         self._condition = Condition(RLock())
@@ -92,6 +93,51 @@ class PostgresStorageResources:
         self._close_error: BaseException | None = None
         self._close_in_progress = False
         self.vector_capability_status: VectorCapabilityStatus | None = None
+
+    @classmethod
+    def _for_source_validity(
+        cls, dsn: str, *, issuer: object, capacity: int = 8,
+        migration_dsn: str | None = None, expected_target: PostgresTargetIdentity | None = None,
+    ) -> PostgresStorageResources:
+        """Trusted construction intent only; readiness and admission remain required."""
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.source_versions import _RESOURCE_ISSUER
+
+        if (cls is not PostgresStorageResources or issuer is not _RESOURCE_ISSUER
+                or type(capacity) is not int or not 1 <= capacity <= 8):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        resource = cls(dsn, migration_dsn=migration_dsn, expected_target=expected_target)
+        resource._source_capacity = capacity
+        return resource
+
+    def _install_source_versions(self, store: Any, scope: Any, hooks: Any, *, issuer: object) -> Any:
+        """Internal wiring only; ordinary construction never admits a V1 domain."""
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.postgres import PostgresMemoryStore
+        from memplex.storage.postgres_sources import PostgresSourceVersionStore
+        from memplex.storage.source_versions import _RESOURCE_ISSUER, _issue_admission
+
+        if (issuer is not _RESOURCE_ISSUER or type(self) is not PostgresStorageResources
+                or type(store) is not PostgresMemoryStore):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        manager = store._pool_manager
+        # Reservations cannot cross this quiescent installation boundary.
+        # Take the manager before Resources, matching fault-callback ownership.
+        with manager._condition, self._condition:
+            if (self._source_capacity is None or self._state is not ResourceState.READY
+                    or manager is not self._pool_manager or store._ready_pool is not self.ready_pool
+                    or store.source_versions() is not None):
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            try:
+                _pool._require_source_pool(manager, quiescent=True)
+            except _pool._SourcePoolFault as exc:
+                manager._mark_fault(exc)
+                raise
+            adapter = PostgresSourceVersionStore(store, resource=self)
+            adapter._install_hooks(hooks, scope=scope, issuer=issuer)
+            admission = _issue_admission(self, scope, hooks, issuer=issuer)
+            store._source_version_adapter = adapter
+            return admission
 
     @property
     def state(self) -> str:
@@ -418,8 +464,13 @@ class PostgresStorageResources:
             )
             effective_dim = self._validate_status(request, profile, status)
             kwargs: dict[str, Any] = {}
-            if self._pool_factory is not None:
-                raw_pool = self._pool_factory(1, 8, self.dsn)
+            if self._source_capacity is not None:
+                raw_pool = _pool._new_source_ready_pool(self._source_capacity, self.dsn)
+                kwargs["min_connections"] = self._source_capacity
+                kwargs["max_connections"] = self._source_capacity
+            else:
+                raw_pool = self._pool_factory(1, 8, self.dsn) if self._pool_factory is not None else None
+            if raw_pool is not None:
                 with self._condition:
                     self._staged_raw_pool = raw_pool
                     if self._state is not ResourceState.INITIALIZING:

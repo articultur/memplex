@@ -139,6 +139,7 @@ dev = [
 # bounded.
 files = [
     "memplex/storage/postgres_resources.py",
+    "memplex/storage/postgres_sources.py",
     "memplex/storage/postgres_tasks.py",
     "memplex/task_repository.py",
     # Layer-neutral serializer + the authorization ACL gate + the frozen
@@ -477,7 +478,7 @@ ignore_imports = ["memplex.source_validation -> memplex.storage.source_versions"
 name = "Source protocols cannot import concrete backends"
 type = "forbidden"
 source_modules = ["memplex.storage.source_versions"]
-forbidden_modules = ["memplex.service", "memplex.storage.lite", "memplex.storage.postgres", "memplex.adapters"]
+forbidden_modules = ["memplex.service", "memplex.storage.lite", "memplex.storage.postgres", "memplex.storage.postgres_sources", "memplex.adapters"]
 
 [tool.ruff.lint]
 # C901 (mccabe) rides on top of the default rule set as a complexity freeze-gate.
