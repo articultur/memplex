@@ -686,18 +686,70 @@ def test_source_transaction_rejects_autocommit_before_lock(protocol_backend):
     pool.connection.autocommit = False
 
 
+def _all_kind_command(kind):
+    from memplex.models import Fact, Function, Observation, Preference
+    from memplex.source_contract import SourceKind
+
+    name = "source_" + kind
+    identity = {
+        "tenant_id": CONTEXT.principal.tenant_id, "workspace_id": CONTEXT.workspace_id,
+        "owner_subject_id": CONTEXT.principal.subject_id, "owner": CONTEXT.principal.subject_id,
+        "visibility": "workspace", "origin_session": CONTEXT.session_id,
+    }
+    payload = {"id": name, "raw_text": "raw input", "trust_tier": 1, **identity} if kind == "raw_paragraph" else {
+        "function": Function, "fact": Fact, "preference": Preference, "observation": Observation,
+    }[kind](id=name, name="source", **identity).to_dict()
+    payload.update(agent_id=CONTEXT.agent_id, session_id=CONTEXT.session_id)
+    return replace(_command(kind=SourceKind(kind), name=name), payload=payload)
+
+
+@pytest.mark.parametrize("kind", ["raw_paragraph", "function", "fact", "preference", "observation"])
+def test_all_kind_fixture_passes_authenticated_payload_binding(kind):
+    from memplex.storage.postgres_sources import _bound_payload
+
+    command = _all_kind_command(kind)
+    payload = _bound_payload(command, CONTEXT)
+    assert payload is not None
+    expected = {
+        "tenant_id": CONTEXT.principal.tenant_id, "workspace_id": CONTEXT.workspace_id,
+        "owner_subject_id": CONTEXT.principal.subject_id, "owner": CONTEXT.principal.subject_id,
+        "visibility": "workspace", "agent_id": CONTEXT.agent_id, "session_id": CONTEXT.session_id,
+        "origin_session": CONTEXT.session_id,
+    }
+    assert {field: command.payload[field] for field in expected} == expected
+    assert {field: payload[field] for field in expected} == expected
+    assert payload["namespace"] == {
+        "memplex_tenant_id": CONTEXT.principal.tenant_id,
+        "memplex_workspace_id": CONTEXT.workspace_id,
+        "memplex_subject_id": CONTEXT.principal.subject_id,
+    }
+    assert payload["provenance"]["authentication_id"] == CONTEXT.principal.authentication_id
+    assert payload["provenance"]["agent_id"] == CONTEXT.agent_id
+    assert payload["provenance"]["session_id"] == CONTEXT.session_id
+    assert payload["provenance"]["request_id"] == CONTEXT.request_id
+
+
+@pytest.mark.parametrize("kind", ["raw_paragraph", "function", "fact", "preference", "observation"])
+@pytest.mark.parametrize("visibility", [None, "public"])
+def test_all_kind_payload_binding_rejects_explicit_invalid_visibility(kind, visibility):
+    from memplex.storage.postgres_sources import _bound_payload
+
+    command = _all_kind_command(kind)
+    command = replace(command, payload={**command.payload, "visibility": visibility})
+    with pytest.raises(SourceContractError) as caught:
+        _bound_payload(command, CONTEXT)
+    assert caught.value.code == "denied"
+    assert command.payload["visibility"] == visibility
+
+
 @pytest.mark.parametrize("kind", ["raw_paragraph", "function", "fact", "preference", "observation"])
 @NATIVE
 def test_native_all_source_kinds_roundtrip_and_atomic_delete(source_backend, kind):
-    from memplex.models import Fact, Function, Observation, Preference
-    from memplex.source_contract import SourceKind, SourceOperation
+    from memplex.source_contract import SourceOperation
 
     _, backend, _, _, _, _ = source_backend
-    name = "source_" + kind
-    payload = {"id": name, "raw_text": "raw input", "trust_tier": 1} if kind == "raw_paragraph" else {
-        "function": Function, "fact": Fact, "preference": Preference, "observation": Observation,
-    }[kind](id=name, name="source").to_dict()
-    command = replace(_command(kind=SourceKind(kind), name=name), payload=payload)
+    command = _all_kind_command(kind)
+    name, payload = command.key.logical_id, command.payload
     receipt = _mutate(backend, command)
     with _fence(backend) as session:
         snapshot = session.source(receipt.ref.key)
