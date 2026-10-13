@@ -36,6 +36,17 @@ class InboundSyncExecutor:
             raise TypeError("authority_check must be callable")
         self._make_transaction = self._resolve_transaction(transaction)
         self._authority_check = authority_check
+        self._ingress_authority: Any | None = None
+
+    @classmethod
+    def _for_resource(cls, authority: Any) -> InboundSyncExecutor:
+        from memplex.storage.pool import _IngressOperationAuthority
+
+        if type(authority) is not _IngressOperationAuthority:
+            raise TypeError("invalid ingress resource authority")
+        executor = cls(lambda: None)
+        executor._ingress_authority = authority
+        return executor
 
     @staticmethod
     def _resolve_transaction(transaction: _TransactionFactory | Any) -> _TransactionFactory:
@@ -54,7 +65,13 @@ class InboundSyncExecutor:
         if self._authority_check is not None:
             self._authority_check()
 
-        with self._make_transaction() as (_, cursor):
+        if self._ingress_authority is not None:
+            from memplex.storage.pool import _inbound_transaction
+
+            transaction = _inbound_transaction(self._ingress_authority, batch)
+        else:
+            transaction = self._make_transaction()
+        with transaction as (_, cursor):
             cursor.execute(
                 "SELECT memplex_sync_apply_inbound(%s,%s)",
                 (batch.canonical_bytes, batch.request_digest),

@@ -372,8 +372,8 @@ class _SyncTestPoolManager:
         **_kwargs,
     ) -> None:
         self.dsn = dsn
-        self.expected_target = expected_target
-        self.expected_application_principal = expected_application_principal
+        self.expected_target = self._expected_target = expected_target
+        self.expected_application_principal = self._expected_application_principal = expected_application_principal
         self.transaction_calls = 0
         self._on_closed = _kwargs.get("on_closed")
         self._on_fault = _kwargs.get("on_fault")
@@ -1069,3 +1069,274 @@ def test_sync_resources_init_race_with_close_converges_to_closed(monkeypatch) ->
     assert not worker.is_alive()
     assert len(errors) == 1
     assert resources.state == "CLOSED"
+
+
+@pytest.fixture
+def fixed_ingress_backend(monkeypatch):
+    """Real resource/manager protocol with a driver double, not a native SQL proof."""
+    import psycopg2.pool
+
+    from memplex.storage.pool import PostgresSyncStorageResources
+
+    target = PostgresTargetIdentity("sync-db", "public", "127.0.0.1", 5432)
+    _install_runner_sequence(monkeypatch, list(_make_sync_ready_runners(target)))
+    pools = []
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+            self.row = None
+            self.closed = False
+
+        def execute(self, sql, parameters=()):
+            connection = self.connection
+            connection.calls.append((sql, parameters))
+            connection.status = 2
+            if sql == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED":
+                connection.isolation = "read committed"
+            elif "pg_catalog.current_database()" in sql:
+                self.row = ("sync-db", "public", "127.0.0.1", 5432)
+            elif sql == "SELECT current_user, session_user":
+                self.row = (connection.role, connection.role)
+            elif "SELECT current_user, session_user" in sql:
+                self.row = (connection.role, connection.role, False, False)
+            elif "FROM memplex_source_authorities" in sql:
+                raise PermissionError("execute-only ingress cannot select source authorities")
+            elif sql == "SELECT memplex_sync_apply_inbound(%s,%s)":
+                assert connection.isolation == "read committed"
+                self.row = connection.result
+            else:
+                raise AssertionError(f"unexpected protocol SQL: {sql}")
+
+        def fetchone(self):
+            return self.row
+
+        def close(self):
+            self.closed = True
+
+    class Connection:
+        autocommit = False
+        closed = False
+
+        def __init__(self, role):
+            self.role = role
+            self.status = 0
+            self.isolation = "repeatable read"
+            self.calls = []
+            self.cursors = []
+            self.commits = self.rollbacks = 0
+            self.result = ({"accepted": 1, "duplicate": 0, "conflict": 0, "receipts": [
+                {"event_id": _batch().events[0].event_id, "outcome": "accepted", "stream_seq": 1},
+            ]},)
+
+        def get_transaction_status(self):
+            return self.status
+
+        def cursor(self):
+            cursor = Cursor(self)
+            self.cursors.append(cursor)
+            return cursor
+
+        def commit(self):
+            self.commits += 1
+            self.status = 0
+            self.isolation = "repeatable read"
+
+        def rollback(self):
+            self.rollbacks += 1
+            self.status = 0
+            self.isolation = "repeatable read"
+
+    class DriverPool:
+        def __init__(self, minimum, maximum, dsn):
+            self.connections = [Connection("principal" if "inbound" in dsn else "app") for _ in range(2)]
+            self.available = list(self.connections)
+            self.put_calls = []
+            pools.append(self)
+
+        def getconn(self):
+            return self.available.pop()
+
+        def putconn(self, connection):
+            assert connection not in self.available
+            self.put_calls.append(connection)
+            self.available.append(connection)
+
+        def closeall(self):
+            for connection in self.connections:
+                connection.closed = True
+
+    monkeypatch.setattr(psycopg2.pool, "ThreadedConnectionPool", DriverPool)
+    # The separately tested catalogue/ACL readiness is modeled by the runners.
+    monkeypatch.setattr(_pool_module.PostgresPoolManager, "verify_application_access", lambda *args, **kwargs: None)
+    resources = PostgresSyncStorageResources("postgresql://app", "postgresql://migration", "postgresql://inbound")
+    resources.ensure_ready(VectorCapabilityRequest(0, "disabled"), "development")
+    driver = pools[-1]
+    for connection in driver.connections:
+        connection.calls.clear()
+    try:
+        yield resources, driver
+    finally:
+        resources.close()
+
+
+def test_ready_execute_only_ingress_uses_fixed_operation_without_relation_probe(fixed_ingress_backend):
+    resources, driver = fixed_ingress_backend
+    batch = validate_ingress_batch(*_sample_raw())
+    result = resources.executor.apply(batch)
+    assert result.receipts[0].outcome == "accepted"
+    calls = next(connection.calls for connection in driver.connections if connection.calls)
+    assert calls[0][0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert not any("FROM memplex_source_authorities" in sql for sql, _ in calls)
+    assert calls[-1] == ("SELECT memplex_sync_apply_inbound(%s,%s)", (batch.canonical_bytes, batch.request_digest))
+    assert resources._inbound_manager.business_lease_count == 0
+    assert all(connection.status == 0 for connection in driver.connections)
+
+
+@pytest.mark.parametrize("interruption", [None, ValueError, KeyboardInterrupt, SystemExit, BaseException])
+def test_fixed_ingress_capability_is_spent_and_never_inherited(fixed_ingress_backend, interruption):
+    import pickle
+    from contextlib import nullcontext
+
+    from memplex.auth import local_development_context
+    from memplex.storage.pool import _inbound_transaction
+
+    resources, driver = fixed_ingress_backend
+    manager = resources._inbound_manager
+    batch = validate_ingress_batch(*_sample_raw())
+    transaction = _inbound_transaction(resources._ingress_authority, batch)
+    capability = transaction._ingress_admission
+    with pytest.raises(TypeError):
+        pickle.dumps(capability)
+    outer = nullcontext() if interruption is None else pytest.raises(interruption)
+    with outer, transaction as (connection, cursor):
+        assert capability._consumed and capability._transaction is None and capability._connection is None
+        assert not hasattr(cursor, "connection") and not hasattr(cursor, "executemany")
+        with pytest.raises(RuntimeError, match="bound operation"):
+            cursor.execute("UPDATE memplex_facts SET data='{}'")
+        with pytest.raises(RuntimeError, match="bound operation"):
+            cursor.execute("SELECT memplex_sync_apply_inbound(%s,%s)", (b"other", batch.request_digest))
+        with pytest.raises(PermissionError, match="execute-only"), manager.transaction(lambda *args: None, local_development_context()):
+            pytest.fail("ordinary nested transaction inherited ingress admission")
+        other = next(item for item in driver.connections if item is not connection)
+        assert any("FROM memplex_source_authorities" in sql for sql, _ in other.calls)
+        cursor.execute("SELECT memplex_sync_apply_inbound(%s,%s)", (batch.canonical_bytes, batch.request_digest))
+        assert cursor.fetchone()[0]["accepted"] == 1
+        with pytest.raises(RuntimeError):
+            cursor.fetchone()
+        with pytest.raises(RuntimeError):
+            cursor.execute("SELECT memplex_sync_apply_inbound(%s,%s)", (batch.canonical_bytes, batch.request_digest))
+        if interruption is not None:
+            raise interruption("cancel the fixed operation")
+    assert manager.business_lease_count == 0
+    assert all(item.status == 0 for item in driver.connections)
+    assert all(cursor.closed for item in driver.connections for cursor in item.cursors)
+    with pytest.raises(RuntimeError, match="invalid ingress"), transaction:
+        pytest.fail("spent transaction reentered")
+    with pytest.raises(PermissionError), manager.transaction(lambda *args: None, local_development_context()):
+        pytest.fail("ordinary post-exit transaction inherited ingress admission")
+    assert not any(sql.startswith("UPDATE ") for item in driver.connections for sql, _ in item.calls)
+
+
+@pytest.mark.parametrize("mismatch", ["transaction", "connection", "cursor", "resource", "manager"])
+def test_ingress_admission_binds_actual_transaction_and_connection(fixed_ingress_backend, mismatch):
+    from memplex.storage.pool import _inbound_transaction
+
+    resources, driver = fixed_ingress_backend
+    batch = validate_ingress_batch(*_sample_raw())
+    transaction = _inbound_transaction(resources._ingress_authority, batch)
+    other = _inbound_transaction(resources._ingress_authority, batch)
+    capability = transaction._ingress_admission
+    capability.claim(transaction)
+    connection = driver.connections[0]
+    cursor = connection.cursor()
+    transaction._connection, transaction._cursor = connection, cursor
+    capability._connection = connection
+    authority = resources._ingress_authority
+    saved_manager = resources._inbound_manager
+    if mismatch == "resource":
+        resources._ingress_authority = object()
+    if mismatch == "manager":
+        resources._inbound_manager = object()
+    try:
+        with pytest.raises(RuntimeError, match="ingress"):
+            capability.consume(other if mismatch == "transaction" else transaction,
+                               driver.connections[1] if mismatch == "connection" else connection,
+                               connection.cursor() if mismatch == "cursor" else cursor)
+        assert capability._consumed and capability._transaction is None and capability._connection is None
+        with pytest.raises(RuntimeError):
+            capability.consume(transaction, connection, cursor)
+    finally:
+        resources._ingress_authority = authority
+        resources._inbound_manager = saved_manager
+        cursor.close()
+
+
+@pytest.mark.parametrize("interruption", [ValueError, KeyboardInterrupt, SystemExit])
+def test_fixed_ingress_setup_cancel_spends_ticket_and_returns_lease(fixed_ingress_backend, monkeypatch, interruption):
+    from memplex.storage.pool import _inbound_transaction
+
+    resources, driver = fixed_ingress_backend
+    transaction = _inbound_transaction(resources._ingress_authority, validate_ingress_batch(*_sample_raw()))
+    connection = driver.available[-1]
+    make_cursor = connection.cursor
+    def failing_cursor():
+        cursor = make_cursor()
+        execute = cursor.execute
+        def failing_execute(sql, parameters=()):
+            if sql == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED":
+                raise interruption("setup cancelled")
+            return execute(sql, parameters)
+        cursor.execute = failing_execute
+        return cursor
+    monkeypatch.setattr(connection, "cursor", failing_cursor)
+    with pytest.raises(interruption), transaction:
+        pytest.fail("cancelled setup entered")
+    capability = transaction._ingress_admission
+    assert capability._claimed and capability._transaction is None and capability._connection is None
+    assert resources._inbound_manager.business_lease_count == 0
+    assert len(driver.available) == 2
+    with pytest.raises(RuntimeError), transaction:
+        pytest.fail("cancelled transaction reentered")
+
+
+def test_fixed_ingress_parse_error_rolls_back_before_commit(fixed_ingress_backend):
+    resources, driver = fixed_ingress_backend
+    connection = driver.available[-1]
+    before = connection.commits
+    connection.result = ({"malformed": True},)
+    with pytest.raises(ValueError, match="malformed payload"):
+        resources.executor.apply(validate_ingress_batch(*_sample_raw()))
+    assert connection.commits == before and connection.rollbacks > 0
+    assert connection.status == 0 and len(driver.available) == 2
+
+
+def test_fake_ingress_ticket_and_issuer_cannot_select_fixed_operation(fixed_ingress_backend):
+    from types import SimpleNamespace
+
+    from memplex.auth import local_development_context
+    from memplex.storage.pool import _IngressOperationAuthority
+
+    resources, driver = fixed_ingress_backend
+    with pytest.raises(RuntimeError):
+        _IngressOperationAuthority(resources, resources._inbound_manager, issuer=object())
+    transaction = resources._inbound_manager.transaction(lambda *args: None, local_development_context())
+    transaction._ingress_admission = SimpleNamespace(claim=lambda *args: pytest.fail("forged ticket called"))
+    with pytest.raises(RuntimeError), transaction:
+        pytest.fail("forged ingress entered")
+    assert len(driver.available) == 2
+
+
+def test_fixed_ingress_revoked_before_claim_spends_without_borrow(fixed_ingress_backend):
+    from memplex.storage.pool import _inbound_transaction
+
+    resources, driver = fixed_ingress_backend
+    transaction = _inbound_transaction(resources._ingress_authority, validate_ingress_batch(*_sample_raw()))
+    resources.close()
+    before = [list(connection.calls) for connection in driver.connections]
+    with pytest.raises(RuntimeError), transaction:
+        pytest.fail("revoked ingress entered")
+    assert transaction._ingress_admission._claimed
+    assert transaction._ingress_admission._transaction is None
+    assert transaction._ingress_admission._connection is None
+    assert [connection.calls for connection in driver.connections] == before

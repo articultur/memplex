@@ -1795,7 +1795,7 @@ def test_migration_plan_and_dry_run_on_empty_schema_are_read_only(migration_dsn)
     plan = runner.plan()
     dry_run = runner.apply(dry_run=True)
 
-    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [item.version for item in plan.pending] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert dry_run == plan
     assert not _migration_table_exists(migration_dsn, "memplex_schema_migrations")
 
@@ -4842,7 +4842,7 @@ def test_best_effort_vector_unavailable_degrades_without_capability_row(migratio
     )
 
     assert status.state == "degraded"
-    assert _ledger_rows(migration_dsn) == [(version, "executed") for version in range(1, 9)]
+    assert _ledger_rows(migration_dsn) == [(version, "executed") for version in range(1, 10)]
     assert not _migration_column_exists(migration_dsn, "memplex_functions", "embedding")
     conn = psycopg2.connect(migration_dsn)
     try:
@@ -9853,3 +9853,377 @@ def test_graph_snapshot_preserves_original_authorized_facades(store, monkeypatch
     facades[0].add(replacement, SRC)
     assert targets(builders[0]) == ["graph-replacement"]
     assert targets(builders[1]) == ["graph-visible-1"]
+
+
+@pytest.fixture(params=["ordinary_owner", "bypass_owner"])
+def guarded_ingress(request, migration_dsn):
+    """Isolated v9 owner/execute-only roles; production ACL/RLS are unchanged."""
+    from types import SimpleNamespace
+
+    suffix = uuid.uuid4().hex[:12]
+    schema, owner, ingress = f"ingress_v9_{suffix}", f"ingress_owner_{suffix}", f"ingress_login_{suffix}"
+    ordinary = request.param == "ordinary_owner"
+    admin = psycopg2.connect(migration_dsn)
+    try:
+        with admin.cursor() as cursor:
+            if ordinary:
+                cursor.execute(pg_sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOBYPASSRLS").format(pg_sql.Identifier(owner)))
+                cursor.execute(pg_sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(pg_sql.Identifier(schema), pg_sql.Identifier(owner)))
+            else:
+                cursor.execute(pg_sql.SQL("CREATE SCHEMA {}").format(pg_sql.Identifier(schema)))
+        admin.commit()
+    finally:
+        admin.close()
+    admin_dsn = psycopg2.extensions.make_dsn(migration_dsn, options=f"-csearch_path={schema}")
+    owner_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=owner) if ordinary else admin_dsn
+    def cleanup():
+        _drop_schema(migration_dsn, schema)
+        _drop_unprivileged_role(migration_dsn, ingress)
+        if ordinary:
+            _drop_unprivileged_role(migration_dsn, owner)
+    request.addfinalizer(cleanup)
+    origin = "remote-guard"
+    scope = SyncScope("tenant-source", "subject-source", "workspace-source", "user", "agent-source", "session-source")
+    assert PostgresMigrationRunner(owner_dsn).apply().current_version == 9
+    _provision_ingress_role(admin_dsn, ingress, origin)
+    ingress_dsn = psycopg2.extensions.make_dsn(admin_dsn, user=ingress)
+
+    def event(number, *, node="node", kind=SyncNodeType.FACT, operation=SyncOperation.UPSERT,
+              second=None, event_scope=None, payload=None, key=None):
+        event_id = f"123e4567-e89b-42d3-a456-{number:012d}"
+        return SyncEvent(1, event_id, origin, kind, key or SyncEntityKey.node(node), operation,
+                         str(SyncVersion.create(datetime(2026, 8, 11, tzinfo=UTC) + timedelta(seconds=number if second is None else second), origin, event_id)),
+                         event_scope or scope, None if operation is SyncOperation.TOMBSTONE else (payload or {"id": node, "value": number}))
+
+    def batch(*events):
+        return SyncBatch(1, str(uuid.uuid4()), origin, tuple(events))
+
+    def apply(value, connection=None):
+        own = connection is None
+        connection = psycopg2.connect(ingress_dsn) if own else connection
+        raw = value.canonical_bytes if isinstance(value, SyncBatch) else json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT memplex_sync_apply_inbound(%s,%s)", (raw, hashlib.sha256(raw).hexdigest()))
+                result = cursor.fetchone()[0]
+            if own:
+                connection.commit()
+            return result
+        finally:
+            if own:
+                connection.close()
+
+    def write(statement, parameters=()):
+        connection = psycopg2.connect(admin_dsn)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(statement, parameters)
+            connection.commit()
+        finally:
+            connection.close()
+
+    def authority(workspace="workspace-source", state="live"):
+        write("INSERT INTO memplex_source_authorities VALUES (%s,%s,%s,%s,1,1,%s::jsonb,1)",
+              (str(uuid.uuid4()), scope.tenant_id, workspace, state, json.dumps({"revision": 1, "entries": [], "algorithm_versions": []})))
+
+    def snapshot():
+        tables = ["memplex_functions", "memplex_facts", "memplex_preferences", "memplex_observations", "memplex_edges",
+                  "memplex_source_authorities", "memplex_source_heads", "memplex_derivation_records", "memplex_sync_outbox",
+                  "memplex_sync_inbox", "memplex_sync_entity_versions", "memplex_sync_deliveries", "memplex_sync_batches"]
+        result = {name: _admin_query(admin_dsn, f"SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) FROM {name} t")[0][0] for name in tables}
+        result["sequence"] = _admin_query(admin_dsn, "SELECT last_value, is_called FROM memplex_sync_outbox_stream_seq_seq")
+        return result
+
+    return SimpleNamespace(admin=admin_dsn, owner=owner_dsn, ingress=ingress_dsn, ordinary=ordinary,
+                           ingress_role=ingress, scope=scope, origin=origin, event=event, batch=batch,
+                           apply=apply, write=write, authority=authority, snapshot=snapshot)
+
+
+@pytest.mark.parametrize("state", ["live", "deleted", "quarantined"])
+@pytest.mark.parametrize("operation", [SyncOperation.UPSERT, SyncOperation.TOMBSTONE])
+@pytest.mark.parametrize("kind", [SyncNodeType.FACT, SyncNodeType.FUNCTION, SyncNodeType.PREFERENCE, SyncNodeType.OBSERVATION])
+def test_v9_ingress_rejects_actual_source_scope_before_any_sequence(guarded_ingress, state, kind, operation):
+    h = guarded_ingress
+    if operation is SyncOperation.TOMBSTONE:
+        h.apply(h.batch(h.event(0, kind=kind)))
+    h.authority(state=state)
+    before = h.snapshot()
+    legacy_scope = SyncScope("tenant-source", "subject-source", "legacy", "user", "agent-source", "session-source")
+    mixed = h.batch(h.event(1, node="first", event_scope=legacy_scope), h.event(2, kind=kind, operation=operation))
+    with pytest.raises(psycopg2.Error, match="source ingress is unsupported"):
+        h.apply(mixed)
+    assert h.snapshot() == before
+
+
+@pytest.mark.parametrize("protected", ["old", "new"])
+def test_v9_ingress_checks_both_actual_update_workspaces(guarded_ingress, protected):
+    h = guarded_ingress
+    h.apply(h.batch(h.event(1)))
+    destination = SyncScope("tenant-source", "subject-source", "moved", "user", "agent-source", "session-source")
+    h.authority(workspace="workspace-source" if protected == "old" else "moved")
+    before = h.snapshot()
+    with pytest.raises(psycopg2.Error, match="source ingress is unsupported"):
+        h.apply(h.batch(h.event(2, event_scope=destination)))
+    assert h.snapshot() == before
+
+
+def test_v9_ingress_hidden_conflict_and_unsigned_cascade_precede_sequence(guarded_ingress):
+    h = guarded_ingress
+    if not h.ordinary:
+        pytest.skip("hidden-row schedule specifically requires ordinary FORCE-RLS owner")
+    h.write("INSERT INTO memplex_facts (tenant_id,id,data,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,'hidden','{}','other-owner','hidden-workspace','user','','')", (h.scope.tenant_id,))
+    before = h.snapshot()
+    with pytest.raises(psycopg2.Error, match="row-level security"):
+        h.apply(h.batch(h.event(1, node="first"), h.event(2, node="hidden")))
+    assert h.snapshot() == before
+    h.apply(h.batch(h.event(3, kind=SyncNodeType.FUNCTION)))
+    h.write("INSERT INTO memplex_edges (tenant_id,source,target,edge_type,weight,evidence,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,'node','node','supports',1,'[]','other-owner','hidden-workspace','user','','')", (h.scope.tenant_id,))
+    before = h.snapshot()
+    with pytest.raises(psycopg2.Error, match="operation is not signed"):
+        h.apply(h.batch(h.event(4, node="first"), h.event(5, kind=SyncNodeType.FUNCTION, operation=SyncOperation.TOMBSTONE)))
+    assert h.snapshot() == before
+
+
+def test_v9_ingress_zero_row_tombstone_preserves_registered_source(guarded_ingress):
+    h = guarded_ingress
+    if not h.ordinary:
+        pytest.skip("zero-row RLS schedule specifically requires ordinary FORCE-RLS owner")
+    import time
+
+    from memplex.auth import AuthorizationContext, Principal
+    from memplex.source_contract import (
+        AuthorityScope,
+        ExpectedAbsent,
+        SourceClass,
+        SourceKey,
+        SourceKind,
+        SourceMutation,
+        SourceOperation,
+    )
+    from memplex.storage.postgres_sources import (
+        _bound_payload,
+        _mutation_head,
+        _PostgresReadSession,
+    )
+    from tests.test_source_v1_pg_schema import _AUTHORITY, _authority, _head
+
+    context = AuthorizationContext(Principal(h.scope.tenant_id, "other-owner", frozenset({"member"}), "hidden-credential"),
+                                   h.scope.workspace_id, agent_id="hidden-agent", session_id="hidden-session")
+    key = SourceKey(_AUTHORITY, h.scope.tenant_id, h.scope.workspace_id, SourceKind.FACT, "hidden")
+    command = SourceMutation(key, ExpectedAbsent.ABSENT, SourceOperation.CREATE,
+                             Fact(id="hidden", subject="hidden", predicate="is", object_="original", visibility="user").to_dict(),
+                             SourceClass.DIRECT_INPUT, {}, ())
+    payload = _bound_payload(command, context)
+    head = _mutation_head(command, None, payload, 1)
+    h.write("INSERT INTO memplex_facts (tenant_id,id,data,owner_subject,workspace,visibility,source_agent,source_session) VALUES (%s,'hidden',%s::jsonb,'other-owner','workspace-source','user','hidden-agent','hidden-session')", (h.scope.tenant_id, json.dumps(payload)))
+    connection = psycopg2.connect(h.admin)
+    try:
+        with connection.cursor() as cursor:
+            _authority(cursor)
+            _head(cursor, kind="fact", logical_id="hidden")
+            cursor.execute("UPDATE memplex_source_heads SET incarnation=%s,payload_locator=%s,semantic_digest=%s,owner_subject='other-owner',source_agent='hidden-agent',source_session='hidden-session'",
+                           (head.ref.token.incarnation, head.payload_locator, head.ref.semantic_digest))
+            for name, value in [("tenant_id", h.scope.tenant_id), ("workspace_id", h.scope.workspace_id),
+                                ("subject_id", "other-owner"), ("agent_id", "hidden-agent"), ("session_id", "hidden-session")]:
+                cursor.execute("SELECT set_config(%s,%s,true)", ("memplex." + name, value))
+            verified = _PostgresReadSession(cursor, AuthorityScope(_AUTHORITY, h.scope.tenant_id, h.scope.workspace_id), time.monotonic_ns() + 2_000_000_000).source(key)
+            assert verified.head == head
+        connection.commit()
+    finally:
+        connection.close()
+    before = h.snapshot()
+    result = h.apply(h.batch(h.event(1, node="hidden", operation=SyncOperation.TOMBSTONE)))
+    assert result["accepted"] == 1
+    after = h.snapshot()
+    for name in ["memplex_facts", "memplex_source_authorities", "memplex_source_heads", "memplex_derivation_records"]:
+        assert after[name] == before[name]
+    assert after["memplex_source_heads"][0]["authority_id"] == _AUTHORITY
+    assert after["sequence"] != before["sequence"]
+
+
+@pytest.mark.parametrize("scenario,expected", [
+    ("lww", ["accepted", "accepted", "rejected_conflict"]),
+    ("recreate", ["accepted", "accepted", "accepted"]),
+    ("delete_stale", ["accepted", "rejected_conflict"]),
+    ("repeated_id", ["accepted", "duplicate"]),
+    ("conflict_duplicate", ["rejected_conflict", "duplicate"]),
+    ("different_kinds", ["accepted", "accepted"]),
+])
+def test_v9_ingress_bounded_plan_preserves_same_batch_outcomes(guarded_ingress, scenario, expected):
+    h = guarded_ingress
+    if scenario == "lww":
+        events = [h.event(1), h.event(3), h.event(2)]
+    elif scenario == "recreate":
+        events = [h.event(1), h.event(2, operation=SyncOperation.TOMBSTONE), h.event(3)]
+    elif scenario == "delete_stale":
+        events = [h.event(3, operation=SyncOperation.TOMBSTONE), h.event(2)]
+    elif scenario == "conflict_duplicate":
+        h.apply(h.batch(h.event(5)))
+        events = [h.event(2)]
+    elif scenario == "repeated_id":
+        events = [h.event(1)]
+    else:
+        events = [h.event(1), h.event(2, kind=SyncNodeType.OBSERVATION)]
+    value = h.batch(*events).to_dict()
+    if scenario in {"conflict_duplicate", "repeated_id"}:
+        repeated = dict(value["events"][0])
+        repeated["entity_key"] = str(SyncEntityKey.node("untouched"))
+        value["events"].append(repeated)
+    before = h.snapshot()
+    result = h.apply(value)
+    assert [receipt["outcome"] for receipt in result["receipts"]] == expected
+    assert len(h.snapshot()["memplex_sync_outbox"]) - len(before["memplex_sync_outbox"]) == expected.count("accepted")
+    assert h.apply(value) == result
+    if scenario in {"lww", "recreate"}:
+        assert _admin_query(h.admin, "SELECT data->>'value' FROM memplex_facts") == [("3",)]
+    if scenario == "delete_stale":
+        assert _admin_query(h.admin, "SELECT count(*) FROM memplex_facts") == [(0,)]
+    if scenario in {"conflict_duplicate", "repeated_id"}:
+        assert _admin_query(h.admin, "SELECT count(*) FROM memplex_facts WHERE id='untouched'") == [(0,)]
+
+
+def test_v9_ingress_duplicate_precedes_corrupt_prior_version_and_restores_gucs(guarded_ingress):
+    h = guarded_ingress
+    first = h.event(1)
+    h.apply(h.batch(first))
+    # The stored version remains valid against its coarse SQL constraint, but
+    # fails JSON decoding. A persisted duplicate must still win before decode.
+    h.write("UPDATE memplex_sync_entity_versions SET version_key='v1:eA'")
+    connection = psycopg2.connect(h.ingress)
+    settings = ["tenant_id", "subject_id", "workspace_id", "agent_id", "session_id", "verified_remote_node_id", "sync_capture", "sync_apply_mode", "sync_inbound_event"]
+    try:
+        with connection.cursor() as cursor:
+            for name in settings:
+                cursor.execute("SELECT set_config(%s,%s,true)", ("memplex." + name, "caller-" + name))
+        duplicate = h.batch(first)
+        assert h.apply(duplicate, connection)["duplicate"] == 1
+        assert h.apply(duplicate, connection)["duplicate"] == 1
+        with connection.cursor() as cursor:
+            for name in settings:
+                cursor.execute("SELECT current_setting(%s,true)", ("memplex." + name,))
+                assert cursor.fetchone() == ("caller-" + name,)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("isolation", ["REPEATABLE READ", "SERIALIZABLE"])
+def test_v9_ingress_direct_sql_rejects_other_isolation_without_effects(guarded_ingress, isolation):
+    h = guarded_ingress
+    before = h.snapshot()
+    connection = psycopg2.connect(h.ingress)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL " + isolation)
+        with pytest.raises(psycopg2.Error, match="requires read committed"):
+            h.apply(h.batch(h.event(1)), connection)
+        connection.rollback()
+    finally:
+        connection.close()
+    assert h.snapshot() == before
+
+
+@pytest.mark.parametrize("gate", ["authority", "principal", "row_lock", "quota", "source_advisory"])
+def test_v9_ingress_nonwaiting_gates_and_absent_initialization(guarded_ingress, gate):
+    import time
+
+    h = guarded_ingress
+    holder = psycopg2.connect(h.admin)
+    before = h.snapshot()
+    try:
+        with holder.cursor() as cursor:
+            if gate == "authority":
+                cursor.execute("LOCK TABLE memplex_source_authorities IN ROW EXCLUSIVE MODE")
+            elif gate == "principal":
+                cursor.execute("LOCK TABLE memplex_sync_ingress_principals IN ROW EXCLUSIVE MODE")
+            elif gate == "row_lock":
+                cursor.execute("SELECT * FROM memplex_facts FOR UPDATE")
+            elif gate == "quota":
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("memplex-sync-delivery-quota:" + h.scope.tenant_id,))
+            else:
+                from memplex.storage.postgres_sources import _source_lock_key
+                target = PostgresMigrationRunner(h.owner).inspect_target()
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", (_source_lock_key(target, "11111111-1111-4111-8111-111111111111"),))
+        started = time.monotonic()
+        if gate == "source_advisory":
+            assert h.apply(h.batch(h.event(1)))["accepted"] == 1
+        else:
+            with pytest.raises(psycopg2.Error) as failure:
+                h.apply(h.batch(h.event(1)))
+            assert failure.value.pgcode == "55P03"
+            assert h.snapshot() == before
+        assert time.monotonic() - started < 3
+    finally:
+        holder.rollback()
+        holder.close()
+    # With no contention and no authority the normal legacy write succeeds.
+    if gate != "source_advisory":
+        assert h.apply(h.batch(h.event(1)))["accepted"] == 1
+    # A real initializer INSERT cannot cross the held authority SHARE gate.
+    connection = psycopg2.connect(h.ingress)
+    initializer = psycopg2.connect(h.admin)
+    try:
+        assert h.apply(h.batch(h.event(2)), connection)["accepted"] == 1
+        with initializer.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout='100ms'")
+            with pytest.raises(psycopg2.Error) as failure:
+                cursor.execute("INSERT INTO memplex_source_authorities VALUES (%s,%s,%s,'live',1,1,%s::jsonb,1)",
+                               (str(uuid.uuid4()), h.scope.tenant_id, h.scope.workspace_id, json.dumps({"revision": 1, "entries": [], "algorithm_versions": []})))
+            assert failure.value.pgcode == "55P03"
+        initializer.rollback()
+        connection.commit()
+    finally:
+        connection.close()
+        initializer.close()
+    h.authority()
+    before = h.snapshot()
+    with pytest.raises(psycopg2.Error, match="unsupported"):
+        h.apply(h.batch(h.event(3)))
+    assert h.snapshot() == before
+
+
+@pytest.mark.parametrize("interruption", [None, ValueError, KeyboardInterrupt])
+def test_v9_private_ingress_cannot_lend_its_physical_admission(guarded_ingress, interruption):
+    from contextlib import nullcontext
+
+    from memplex.auth import local_development_context
+    from memplex.storage.pool import _inbound_transaction
+
+    h = guarded_ingress
+    app_role = "ingress_app_" + uuid.uuid4().hex[:12]
+    _provision_application_role(h.admin, app_role)
+    resources = PostgresSyncStorageResources(psycopg2.extensions.make_dsn(h.admin, user=app_role), h.owner, h.ingress)
+    try:
+        resources.ensure_ready(VectorCapabilityRequest(0, "disabled"), "production")
+        value = h.batch(h.event(1))
+        batch = validate_ingress_batch(value.canonical_bytes, value.request_digest)
+        transaction = _inbound_transaction(resources._ingress_authority, batch)
+        outer = nullcontext() if interruption is None else pytest.raises(interruption)
+        connections = []
+        with outer, transaction as (connection, cursor):
+            assert connection.isolation_level in (None, psycopg2.extensions.ISOLATION_LEVEL_READ_COMMITTED)
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege), resources._inbound_manager.transaction(
+                lambda inner_cursor, context: connections.append(inner_cursor.connection), local_development_context(),
+            ):
+                pytest.fail("ordinary ingress transaction inherited the private operation")
+            assert len(connections) == 1
+            assert connections[0] is not connection
+            assert connections[0].get_backend_pid() != connection.get_backend_pid()
+            with pytest.raises(RuntimeError):
+                cursor.execute("UPDATE memplex_facts SET data='{}'")
+            cursor.execute("SELECT memplex_sync_apply_inbound(%s,%s)", (batch.canonical_bytes, batch.request_digest))
+            assert cursor.fetchone()[0]["accepted"] == 1
+            if interruption is not None:
+                raise interruption("cancel native private operation")
+        assert resources._inbound_manager.business_lease_count == 0
+        assert _admin_query(h.admin, "SELECT count(*) FROM memplex_facts") == [(1 if interruption is None else 0,)]
+        with pytest.raises(RuntimeError), transaction:
+            pytest.fail("re-entered native spent ingress ticket")
+        assert resources.executor.apply(batch).receipts[0].outcome == "accepted"
+        executor = resources.executor
+        resources.close()
+        with pytest.raises(RuntimeError, match="ingress|not ready"):
+            executor.apply(batch)
+    finally:
+        resources.close()
+        _drop_unprivileged_role(h.admin, app_role)

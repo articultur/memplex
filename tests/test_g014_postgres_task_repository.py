@@ -52,7 +52,7 @@ def test_0006_is_packaged_and_catalogue_verified(pg_function_dsn: str) -> None:
     applied = runner.apply()
 
     assert applied.state == "ready"
-    assert applied.current_version == 8
+    assert applied.current_version == 9
     assert runner.plan().state == "ready"
 
 

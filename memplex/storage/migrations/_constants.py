@@ -752,6 +752,7 @@ class SchemaVariantFeatures:
     has_background_tasks: bool = False
     vector_dim: int | None = None
     has_source_validity: bool = False
+    has_source_ingress_guard: bool = False
 
     def display_name(self) -> str:
         """Render the canonical variant name for status output and digests."""
@@ -769,6 +770,8 @@ class SchemaVariantFeatures:
             name = f"{name}_background_tasks_v6"
         if self.has_source_validity:
             name = f"{name}_source_validity_v1"
+        if self.has_source_ingress_guard:
+            name = f"{name}_source_ingress_guard_v9"
         if self.vector_dim is not None:
             name = f"{name}_vector_{self.vector_dim}"
         return name

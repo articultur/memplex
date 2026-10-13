@@ -72,7 +72,13 @@ def test_policy_commit_precedes_new_read(publication_backend):
     with pytest.raises(SourceContractError, match="denied"), _fence(h.backend):
         pass
     new_context = replacement.authenticate("test-token")
-    with _fence(h.backend, new_context) as session:
+    if h.kind == "postgres":
+        with pytest.raises(SourceContractError, match="denied"), _fence(h.backend, new_context):
+            pass
+        fresh_backend = h.store.authorized(new_context).source_versions()
+    else:
+        fresh_backend = h.backend
+    with _fence(fresh_backend, new_context) as session:
         assert session.authority().policy == policy
     with pytest.raises(SourceContractError):
         _replace_principal_registry(state, current, backend=h.backend, expected_revision=1,
@@ -134,7 +140,14 @@ def test_changed_roles_deny_old_context(publication_backend):
     h.backend.replace_policy(1, new, policy_authority(h))
     with pytest.raises(SourceContractError, match="denied"), _fence(h.backend):
         pass
-    with _fence(h.backend, replace(CONTEXT, principal=replace(CONTEXT.principal, roles=frozenset({"reader"})))) as session:
+    new_context = replace(CONTEXT, principal=replace(CONTEXT.principal, roles=frozenset({"reader"})))
+    if h.kind == "postgres":
+        with pytest.raises(SourceContractError, match="denied"), _fence(h.backend, new_context):
+            pass
+        fresh_backend = h.store.authorized(new_context).source_versions()
+    else:
+        fresh_backend = h.backend
+    with _fence(fresh_backend, new_context) as session:
         assert session.authority().policy == new
 
 

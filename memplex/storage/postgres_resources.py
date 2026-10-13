@@ -18,8 +18,6 @@ from hashlib import sha256
 from threading import Condition, RLock
 from typing import Any
 
-from memplex.auth import local_development_context
-
 # ``_pool.PostgresPoolManager`` / ``_pool._new_migration_runner`` are monkeypatched on the
 # pool module by the test suite. Importing the pool *module* (not the names)
 # keeps the moved code honouring those patches: attribute access resolves
@@ -622,6 +620,7 @@ class PostgresSyncStorageResources:
         self._executor: InboundSyncExecutor | None = None
         self._app_resources: PostgresStorageResources | None = None
         self._inbound_manager: _pool.PostgresPoolManager | None = None
+        self._ingress_authority: _pool._IngressOperationAuthority | None = None
         self._fault: BaseException | None = None
         self._close_in_progress = False
         self._close_error: BaseException | None = None
@@ -852,13 +851,10 @@ class PostgresSyncStorageResources:
                     "PostgreSQL inbound principal is not direct login/session login"
                 )
 
-            def noop_bind(_cursor: Any, _context: Any) -> None:  # pylint: disable=unused-argument
-                return None
-
-            executor = InboundSyncExecutor(
-                lambda: staged_manager.transaction(noop_bind, local_development_context()),
-                authority_check=self._assert_inbound_authority,
+            ingress_authority = _pool._IngressOperationAuthority(
+                self, staged_manager, issuer=_pool._INGRESS_ISSUER,
             )
+            executor = InboundSyncExecutor._for_resource(ingress_authority)
 
             with self._condition:
                 if self._state is not ResourceState.INITIALIZING:
@@ -867,6 +863,7 @@ class PostgresSyncStorageResources:
                 self._executor = executor
                 self._app_resources = staged_app_resources
                 self._inbound_manager = staged_manager
+                self._ingress_authority = ingress_authority
                 self._status = status
                 self._state = ResourceState.READY
                 self._condition.notify_all()

@@ -605,6 +605,7 @@ from memplex.storage.migrations.catalogue_checks import (
     _is_background_tasks_current_variant,
     _is_edge_integrity_current_variant,
     _is_reliable_sync_current_variant,
+    _is_source_ingress_guard_current_variant,
     _is_source_validity_current_variant,
     _legacy_base_columns,
     _legacy_vector_dimension,
@@ -670,7 +671,8 @@ def schema_fingerprint(
             _variant_digest("pre_g002_3_2_7"),
             "pre_g002_3_2_7",
         )
-    has_reliable_sync = _reliable_sync_catalogue_matches(tables, snapshot)
+    has_source_ingress_guard = _reliable_sync_catalogue_matches(tables, snapshot, guarded=True)
+    has_reliable_sync = has_source_ingress_guard or _reliable_sync_catalogue_matches(tables, snapshot)
     has_background_tasks = _background_tasks_catalogue_matches(tables)
     has_source_validity = _source_validity_catalogue_matches(tables)
     # v5 deliberately adds capture triggers to the existing business tables.
@@ -742,6 +744,8 @@ def schema_fingerprint(
             return SchemaFingerprint("unknown", digest, "unknown")
     elif any(name in tables for name in _SOURCE_TABLES):
         return SchemaFingerprint("unknown", digest, "unknown")
+    if has_source_ingress_guard and not has_source_validity:
+        return SchemaFingerprint("unknown", digest, "unknown")
     features = SchemaVariantFeatures(
         layout=layout,
         feedback_v1=feedback_v1,
@@ -750,6 +754,7 @@ def schema_fingerprint(
         has_reliable_sync=has_reliable_sync,
         has_background_tasks=has_background_tasks,
         has_source_validity=has_source_validity,
+        has_source_ingress_guard=has_source_ingress_guard,
         vector_dim=vector_dim,
     )
     variant = features.display_name()

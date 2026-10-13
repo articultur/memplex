@@ -8,6 +8,7 @@ import os
 import stat
 from pathlib import Path
 from threading import BrokenBarrierError
+from unittest.mock import Mock
 
 import pytest
 
@@ -75,13 +76,125 @@ def _record_recall_after_capture_read(
 
 
 def _join_processes(*processes: multiprocessing.Process) -> None:
-    for process in processes:
-        process.join(timeout=10)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=2)
-            pytest.fail(f"runtime-status child process hung: {process.name}")
-        assert process.exitcode == 0
+    failure: BaseException | None = None
+    try:
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+                pytest.fail(f"runtime-status child process hung: {process.name}")
+            assert process.exitcode == 0
+    except BaseException as exc:  # noqa: BLE001 -- preserve the first failure after owned-child cleanup
+        failure = exc
+    finally:
+        for process in processes:
+            if process.pid is None:
+                continue
+            reaped = False
+            for stop in (process.terminate, process.kill):
+                try:
+                    if process.is_alive():
+                        stop()
+                except BaseException as exc:  # noqa: BLE001 -- retry this child and retain the first failure
+                    if failure is None:
+                        failure = exc
+                try:
+                    process.join(timeout=2)
+                    reaped = not process.is_alive()
+                except BaseException as exc:  # noqa: BLE001 -- kill/reap remains independent of terminate/join
+                    if failure is None:
+                        failure = exc
+                if reaped:
+                    break
+            if not reaped:
+                message = f"runtime-status child not reaped: {process.name}"
+                if failure is None:
+                    failure = AssertionError(message)
+                else:
+                    failure.add_note(message)
+    if failure is not None:
+        raise failure
+
+
+@pytest.mark.parametrize("first_failure", ["timeout", "nonzero"])
+@pytest.mark.parametrize("needs_kill", [False, True])
+def test_join_processes_reaps_later_owned_child_after_failure(first_failure, needs_kill):
+    first = Mock(spec=multiprocessing.Process, pid=101, exitcode=1)
+    later = Mock(spec=multiprocessing.Process, pid=102, exitcode=None)
+    first.name = "first"
+    later.name = "later"
+    first.is_alive.return_value = first_failure == "timeout"
+    first.terminate.side_effect = lambda: setattr(first.is_alive, "return_value", False)
+    later.is_alive.return_value = True
+    if not needs_kill:
+        later.terminate.side_effect = lambda: setattr(later.is_alive, "return_value", False)
+    later.kill.side_effect = lambda: setattr(later.is_alive, "return_value", False)
+
+    error = pytest.fail.Exception if first_failure == "timeout" else AssertionError
+    with pytest.raises(error) as caught:
+        _join_processes(first, later)
+
+    if first_failure == "timeout":
+        assert str(caught.value) == "runtime-status child process hung: first"
+    assert not later.is_alive()
+    later.terminate.assert_called_once_with()
+    later.join.assert_called()
+    assert later.kill.called is needs_kill
+
+
+@pytest.mark.parametrize("cleanup_operation", ["terminate", "join"])
+@pytest.mark.parametrize("cleanup_error", [KeyboardInterrupt, OSError])
+def test_join_processes_retries_interrupted_owned_child(cleanup_operation, cleanup_error):
+    primary = AssertionError("original runtime failure")
+    first = Mock(spec=multiprocessing.Process, pid=101, exitcode=1)
+    interrupted = Mock(spec=multiprocessing.Process, pid=102, exitcode=None)
+    later = Mock(spec=multiprocessing.Process, pid=103, exitcode=None)
+    unstarted = Mock(spec=multiprocessing.Process, pid=None)
+    first.name, interrupted.name, later.name = "first", "interrupted", "later"
+    first.join.side_effect = [primary, None]
+    first.is_alive.return_value = False
+    interrupted.is_alive.return_value = True
+    getattr(interrupted, cleanup_operation).side_effect = [cleanup_error("cleanup fault"), None]
+    interrupted.kill.side_effect = lambda: setattr(interrupted.is_alive, "return_value", False)
+    later.is_alive.return_value = True
+    later.terminate.side_effect = lambda: setattr(later.is_alive, "return_value", False)
+
+    with pytest.raises(AssertionError) as caught:
+        _join_processes(first, interrupted, later, unstarted)
+
+    assert caught.value is primary
+    assert not interrupted.is_alive()
+    assert not later.is_alive()
+    interrupted.kill.assert_called_once_with()
+    interrupted.join.assert_called_with(timeout=2)
+    later.join.assert_called_with(timeout=2)
+    assert not unstarted.mock_calls
+    assert all(call.kwargs["timeout"] in {2, 10} for call in first.join.call_args_list)
+
+
+def test_join_processes_reports_persistent_unreaped_child():
+    primary = AssertionError("original runtime failure")
+    first = Mock(spec=multiprocessing.Process, pid=101, exitcode=1)
+    unreaped = Mock(spec=multiprocessing.Process, pid=102, exitcode=None)
+    later = Mock(spec=multiprocessing.Process, pid=103, exitcode=None)
+    first.name, unreaped.name, later.name = "first", "unreaped", "later"
+    first.join.side_effect = [primary, None]
+    first.is_alive.return_value = False
+    unreaped.is_alive.return_value = True
+    unreaped.terminate.side_effect = OSError("terminate failed")
+    unreaped.kill.side_effect = OSError("kill failed")
+    later.is_alive.return_value = True
+    later.terminate.side_effect = lambda: setattr(later.is_alive, "return_value", False)
+
+    with pytest.raises(AssertionError) as caught:
+        _join_processes(first, unreaped, later)
+
+    assert caught.value is primary
+    assert "runtime-status child not reaped: unreaped" in getattr(caught.value, "__notes__", [])
+    unreaped.kill.assert_called_once_with()
+    unreaped.join.assert_called_with(timeout=2)
+    assert not later.is_alive()
 
 
 def _read_status_in_child(path: str, results: multiprocessing.Queue) -> None:

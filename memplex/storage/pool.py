@@ -570,6 +570,163 @@ def _source_transaction(manager: PostgresPoolManager, bind_scope: BindScope,
     return transaction
 
 
+_INGRESS_ISSUER = object()
+_INBOUND_SQL = "SELECT memplex_sync_apply_inbound(%s,%s)"
+
+
+class _IngressOperationAuthority:
+    """Private READY-resource identity; it confers no ordinary SQL admission."""
+
+    def __init__(self, resource: Any, manager: PostgresPoolManager, *, issuer: object) -> None:
+        if issuer is not _INGRESS_ISSUER:
+            raise RuntimeError("invalid ingress operation authority")
+        self._resource = resource
+        self._manager = manager
+        self._target = manager._expected_target
+        self._principal = manager._expected_application_principal
+
+    def assert_ready(self) -> None:
+        from memplex.storage.postgres_resources import (
+            PostgresSyncStorageResources as _SyncResources,
+        )
+
+        if (type(self) is not _IngressOperationAuthority
+                or type(self._resource) is not _SyncResources
+                or self._resource._ingress_authority is not self
+                or self._resource._inbound_manager is not self._manager
+                or self._manager._expected_target != self._target
+                or self._manager._expected_application_principal != self._principal):
+            raise RuntimeError("invalid ingress operation authority")
+        self._resource._assert_inbound_authority()
+
+    def __reduce__(self) -> Any:
+        raise TypeError("ingress authority cannot be serialized")
+
+
+class _IngressTransactionAdmission:
+    """One-use capability for one bound payload, transaction and physical lease."""
+
+    def __init__(self, authority: _IngressOperationAuthority, transaction: _TransactionContext,
+                 parameters: tuple[bytes, str], *, issuer: object) -> None:
+        if issuer is not _INGRESS_ISSUER or type(authority) is not _IngressOperationAuthority:
+            raise RuntimeError("invalid ingress transaction admission")
+        authority.assert_ready()
+        self._authority = authority
+        self._transaction: _TransactionContext | None = transaction
+        self._parameters = parameters
+        self._connection: Any | None = None
+        self._claimed = False
+        self._consumed = False
+
+    def claim(self, transaction: _TransactionContext) -> None:
+        if (type(self) is not _IngressTransactionAdmission or self._claimed
+                or transaction is not self._transaction):
+            raise RuntimeError("invalid ingress transaction admission")
+        self._claimed = True
+        try:
+            self._authority.assert_ready()
+        except BaseException:
+            self.discard()
+            raise
+
+    def prepare(self, reservation: _BorrowCapacityReservation, connection: Any) -> None:
+        transaction = self._transaction
+        if (not self._claimed or self._consumed or self._connection is not None
+                or transaction is None or transaction._reservation is not reservation
+                or reservation._manager is not self._authority._manager
+                or reservation._connection is not connection):
+            raise RuntimeError("invalid ingress physical reservation")
+        self._authority.assert_ready()
+        self._connection = connection
+        if (connection is None or getattr(connection, "autocommit", None) is not False
+                or not _source_connection_healthy(connection, idle=True)):
+            raise RuntimeError("ingress connection is not idle")
+        cursor = connection.cursor()
+        primary: BaseException | None = None
+        try:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            try:
+                cursor.close()
+            except BaseException as exc:
+                self._authority._manager._mark_fault(exc)
+                try:
+                    cursor.close()
+                except BaseException as retry_error:  # noqa: BLE001 - first failure remains authoritative
+                    logger.debug("suppressed ingress cleanup retry failure: %s", retry_error)
+                if primary is None:
+                    raise
+
+    def consume(self, transaction: _TransactionContext, connection: Any, cursor: Any) -> _FixedIngressCursor:
+        if not self._claimed or self._consumed:
+            raise RuntimeError("invalid ingress transaction admission")
+        self._consumed = True
+        try:
+            self._authority.assert_ready()
+            if (type(transaction) is not _TransactionContext or transaction is not self._transaction
+                    or transaction._manager is not self._authority._manager
+                    or connection is None or connection is not self._connection
+                    or transaction._connection is not connection
+                    or cursor is None or transaction._cursor is not cursor):
+                raise RuntimeError("invalid ingress physical admission")
+            return _FixedIngressCursor(cursor, self._parameters)
+        finally:
+            self.discard()
+
+    def discard(self) -> None:
+        self._transaction = None
+        self._connection = None
+
+    def __reduce__(self) -> Any:
+        raise TypeError("ingress admission cannot be serialized")
+
+
+class _FixedIngressCursor:
+    """Internal, single-call surface; no raw connection or arbitrary SQL API."""
+
+    def __init__(self, cursor: Any, parameters: tuple[bytes, str]) -> None:
+        self.__cursor = cursor
+        self.__parameters = parameters
+        self.__executed = False
+        self.__fetched = False
+        self.__closed = False
+
+    def execute(self, query: Any, parameters: Any = None) -> Any:
+        if (self.__closed or self.__executed or type(query) is not str or query != _INBOUND_SQL
+                or type(parameters) is not tuple or parameters != self.__parameters):
+            raise RuntimeError("ingress permits only its bound operation")
+        self.__executed = True
+        return self.__cursor.execute(_INBOUND_SQL, self.__parameters)
+
+    def fetchone(self) -> Any:
+        if self.__closed or not self.__executed or self.__fetched:
+            raise RuntimeError("ingress result is not available")
+        self.__fetched = True
+        return self.__cursor.fetchone()
+
+    def close(self) -> None:
+        if not self.__closed:
+            self.__cursor.close()
+            self.__closed = True
+
+
+def _inbound_transaction(authority: _IngressOperationAuthority, batch: Any) -> _TransactionContext:
+    from memplex.auth import local_development_context
+    from memplex.sync_ingress import ValidatedIngressBatch
+
+    if type(authority) is not _IngressOperationAuthority or type(batch) is not ValidatedIngressBatch:
+        raise TypeError("invalid ingress operation")
+    authority.assert_ready()
+    transaction = _TransactionContext(authority._manager, lambda cursor, context: None, local_development_context())
+    transaction._ingress_admission = _IngressTransactionAdmission(
+        authority, transaction, (batch.canonical_bytes, batch.request_digest), issuer=_INGRESS_ISSUER,
+    )
+    return transaction
+
+
 class _SourceReadCursor:
     """Default-deny SQL admission for non-repository transactions in a V1 pool."""
 
@@ -725,7 +882,9 @@ class _BorrowCapacityReservation:
     exceptions strand later borrowers.
     """
 
-    def __init__(self, manager: PostgresPoolManager, deadline_ns: int | None = None) -> None:
+    def __init__(self, manager: PostgresPoolManager, deadline_ns: int | None = None,
+                 ingress_admission: _IngressTransactionAdmission | None = None) -> None:
+        self._ingress_admission = ingress_admission
         self._manager = manager
         self._deadline_ns = deadline_ns
         self._token = object()
@@ -787,6 +946,10 @@ class _BorrowCapacityReservation:
                           _require_source_pool(self._manager)._getconn_before(self._deadline_ns))
             self._connection = connection
             self._manager._attach_borrowed_connection(self._token, connection)
+            if self._ingress_admission is not None:
+                if type(self._ingress_admission) is not _IngressTransactionAdmission:
+                    raise RuntimeError("invalid ingress reservation admission")
+                self._ingress_admission.prepare(self, connection)
             if self._deadline_ns is not None:
                 _source_transaction_setup(connection, self._deadline_ns, manager=self._manager)
             if self._deadline_ns is None:
@@ -868,8 +1031,13 @@ class _TransactionContext:
         self._cursor: Any | None = None
         self._closed_cursor_ids: set[int] = set()
         self._source_admission: _SourceTransactionAdmission | None = None
+        self._ingress_admission: _IngressTransactionAdmission | None = None
 
     def __enter__(self) -> tuple[Any, Any]:
+        if self._ingress_admission is not None:
+            if type(self._ingress_admission) is not _IngressTransactionAdmission or self._source_admission is not None:
+                raise RuntimeError("invalid ingress transaction admission")
+            self._ingress_admission.claim(self)
         if self._source_admission is not None:
             self._source_admission.claim(self)
         reservation_context: Any | None = None
@@ -877,9 +1045,14 @@ class _TransactionContext:
         connection: Any | None = None
         cursor: Any | None = None
         try:
-            reservation_context = (self._manager._borrow_capacity_reservation()
-                                   if self._deadline_ns is None else
-                                   self._manager._borrow_capacity_reservation(self._deadline_ns))
+            if self._ingress_admission is not None:
+                reservation_context = self._manager._borrow_capacity_reservation(
+                    ingress_admission=self._ingress_admission,
+                )
+            else:
+                reservation_context = (self._manager._borrow_capacity_reservation()
+                                       if self._deadline_ns is None else
+                                       self._manager._borrow_capacity_reservation(self._deadline_ns))
             reservation = reservation_context.__enter__()
             self._reservation_context = reservation_context
             self._reservation = reservation
@@ -888,15 +1061,20 @@ class _TransactionContext:
                       _SourceDeadlineCursor(connection.cursor(), self._deadline_ns))
             self._connection = connection
             self._cursor = cursor
-            self._bind_scope(cursor, self._context)
-            cursor = _source_cursor_admission(self._manager, cursor, self._context,
-                                              transaction=self, connection=connection)
+            if self._ingress_admission is not None:
+                cursor = self._ingress_admission.consume(self, connection, cursor)
+            else:
+                self._bind_scope(cursor, self._context)
+                cursor = _source_cursor_admission(self._manager, cursor, self._context,
+                                                  transaction=self, connection=connection)
             self._cursor = cursor
             reservation.publish(connection)
             return connection, cursor
         except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
             primary_error = exc
             primary_traceback = exc.__traceback__
+            if self._ingress_admission is not None:
+                self._ingress_admission.discard()
             # Every cleanup phase has a second route in a nested ``finally``.
             # A trace/cancellation at one phase gate therefore cannot skip the
             # cursor close or manager-authoritative release that follows it.
@@ -1254,9 +1432,11 @@ class PostgresPoolManager:
                 raise cleanup_error
 
     @contextmanager
-    def _borrow_capacity_reservation(self, deadline_ns: int | None = None) -> Iterator[_BorrowCapacityReservation]:
+    def _borrow_capacity_reservation(
+        self, deadline_ns: int | None = None, *, ingress_admission: _IngressTransactionAdmission | None = None,
+    ) -> Iterator[_BorrowCapacityReservation]:
         """Own pre-publication capacity until a caller explicitly publishes."""
-        with _BorrowCapacityReservation(self, deadline_ns) as reservation:
+        with _BorrowCapacityReservation(self, deadline_ns, ingress_admission) as reservation:
             yield reservation
 
     def _notify_locked(self, *, suppress: bool = False) -> None:

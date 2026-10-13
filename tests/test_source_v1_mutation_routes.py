@@ -642,3 +642,41 @@ def test_raw_namespace_edits_preserve_distinct_physical_identity_and_typed_refer
     assert final_raw.head.last_commit_seq == final_typed.head.last_commit_seq
     assert final_raw.payload["premise_superseded"]
     assert final_typed.payload["source_paragraphs"] == ("physical-raw",)
+
+
+@pytest.mark.parametrize("controlled", [False, True])
+def test_task_repository_binds_real_scope_before_ordinary_source_admission(controlled):
+    import re
+
+    from memplex.storage.pool import _source_cursor_admission
+    from memplex.storage.postgres_tasks import _TASK_CONTEXT, PostgresTaskRepository
+
+    settings, statements = {}, []
+    row = None
+
+    def execute(sql, parameters=()):
+        nonlocal row
+        statements.append((sql, parameters))
+        keys = re.findall(r"set_config\('([^']+)', %s, true\)", sql)
+        if keys:
+            assert len(keys) == len(parameters)
+            settings.update(zip(keys, parameters))
+        if "AS has_source_authority" in sql:
+            # Model actual transaction GUCs, not the lookup's requested scope.
+            row = (settings.get("memplex.tenant_id"), settings.get("memplex.workspace_id"), controlled)
+
+    cursor = SimpleNamespace(execute=execute, fetchone=lambda: row)
+    PostgresTaskRepository._bind_task_scope(cursor, _TASK_CONTEXT)
+    admitted = _source_cursor_admission(SimpleNamespace(_source_resource=None), cursor, _TASK_CONTEXT)
+    assert settings == {
+        "memplex.tenant_id": "memplex-system", "memplex.subject_id": "background-worker",
+        "memplex.workspace_id": "memplex-system", "memplex.agent_id": "background-worker",
+        "memplex.session_id": "",
+    }
+    if controlled:
+        with pytest.raises(SourceContractError, match="unsupported_semantics"):
+            admitted.execute("UPDATE memplex_facts SET data='{}'")
+        assert statements[-1][0] == "SET TRANSACTION READ ONLY"
+    else:
+        assert admitted is cursor
+        admitted.execute("SELECT task_id FROM memplex_background_tasks")

@@ -88,11 +88,19 @@ class PostgresTaskRepository(TaskRepository):
         self._pool_manager = sealed.manager
 
     @staticmethod
-    def _bind_task_scope(_cursor: Any, _context: AuthorizationContext) -> None:
-        # The task catalogue is service-global and intentionally has no RLS.
-        # The pool has already verified the exact application principal and
-        # target before this no-op binder is invoked.
-        return None
+    def _bind_task_scope(cursor: Any, context: AuthorizationContext) -> None:
+        # Tasks are service-global, but ordinary source admission must inspect
+        # real transaction settings for this repository's fixed system scope.
+        cursor.execute(
+            "SELECT "
+            "set_config('memplex.tenant_id', %s, true), "
+            "set_config('memplex.subject_id', %s, true), "
+            "set_config('memplex.workspace_id', %s, true), "
+            "set_config('memplex.agent_id', %s, true), "
+            "set_config('memplex.session_id', %s, true)",
+            (context.principal.tenant_id, context.principal.subject_id,
+             context.workspace_id, context.agent_id, context.session_id),
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:

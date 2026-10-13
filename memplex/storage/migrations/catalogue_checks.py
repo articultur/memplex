@@ -1069,6 +1069,11 @@ _SYNC_FUNCTION_DEFINITION_DIGESTS: Final[dict[str, str]] = {
 }
 
 
+_SOURCE_INGRESS_FUNCTION_DEFINITION_DIGESTS: Final[dict[str, str]] = {
+    "memplex_sync_capture_before": "ca54d2f1500740e0552c94dc80d35a10a3d8bff745606d5e0a76ee4b7437741c",
+    "memplex_sync_apply_inbound": "95823b9dd0f182216412d07a04ed6086c98c1fedc01e8a152f13340fbe758828",
+}
+
 def _sync_function_digest(definition: str) -> str:
     canonical = re.sub(r"CREATE OR REPLACE FUNCTION [^(]+", "CREATE OR REPLACE FUNCTION <schema>", definition, count=1)
     canonical = re.sub(
@@ -1080,7 +1085,9 @@ def _sync_function_digest(definition: str) -> str:
     return sha256(_normalise_sql(canonical).encode("utf-8")).hexdigest()
 
 
-def _reliable_sync_catalogue_matches(tables: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+def _reliable_sync_catalogue_matches(
+    tables: dict[str, Any], snapshot: dict[str, Any], *, guarded: bool = False,
+) -> bool:
     """Recognise v5 only when every durable table and core capture hook exists."""
     if not all(name in tables and _sync_table_catalogue_matches(name, tables[name]) for name in _SYNC_TABLES):
         return False
@@ -1112,14 +1119,17 @@ def _reliable_sync_catalogue_matches(tables: dict[str, Any], snapshot: dict[str,
         for table_name, rows in expected_trigger_rows.items()
     )
     expected_functions = set(_SYNC_FUNCTIONS)
+    expected_digests = _SYNC_FUNCTION_DEFINITION_DIGESTS | (
+        _SOURCE_INGRESS_FUNCTION_DEFINITION_DIGESTS if guarded else {}
+    )
     function_rows = snapshot["sync_functions"]
     functions_match = (
         {row[0] for row in function_rows} == expected_functions
         and all(
             row[2] and row[3] and row[5]
             and row[4] == (f"search_path=pg_catalog, {snapshot['schema_path']}",)
-            and _SYNC_FUNCTION_DEFINITION_DIGESTS[row[0]]
-            and _sync_function_digest(row[6]) == _SYNC_FUNCTION_DEFINITION_DIGESTS[row[0]]
+            and expected_digests[row[0]]
+            and _sync_function_digest(row[6]) == expected_digests[row[0]]
             for row in function_rows
         )
     )
@@ -1215,7 +1225,7 @@ def _is_reliable_sync_current_variant(variant: str) -> bool:
 
 
 def _is_background_tasks_current_variant(variant: str) -> bool:
-    base_variant = variant.replace("_source_validity_v1", "", 1)
+    base_variant = variant.replace("_source_ingress_guard_v9", "", 1).replace("_source_validity_v1", "", 1)
     return base_variant.endswith("_background_tasks_v6") or "_background_tasks_v6_vector_" in base_variant
 
 
@@ -1225,6 +1235,8 @@ def _allowed_adoption_baselines(current_variant: str) -> frozenset[str]:
     A final runtime feedback layout cannot show whether feedback already existed
     before 0003, so only its two documented runtime ancestors are accepted.
     """
+    if "_source_ingress_guard_v9" in current_variant:
+        return _allowed_adoption_baselines(current_variant.replace("_source_ingress_guard_v9", "", 1))
     if "_source_validity_v1" in current_variant:
         return _allowed_adoption_baselines(current_variant.replace("_source_validity_v1", "", 1))
     if "_background_tasks_v6_vector_" in current_variant:
@@ -1416,4 +1428,9 @@ def _source_validity_catalogue_matches(tables: dict[str, Any]) -> bool:
 
 
 def _is_source_validity_current_variant(variant: str) -> bool:
+    variant = variant.replace("_source_ingress_guard_v9", "", 1)
     return variant.endswith("_source_validity_v1") or "_source_validity_v1_vector_" in variant
+
+
+def _is_source_ingress_guard_current_variant(variant: str) -> bool:
+    return variant.endswith("_source_ingress_guard_v9") or "_source_ingress_guard_v9_vector_" in variant

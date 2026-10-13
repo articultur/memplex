@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import os
+import selectors
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -354,30 +356,177 @@ def test_operations_report_loader_rejects_a_directory(tmp_path) -> None:
     assert str(directory) not in str(caught.value)
 
 
-def test_operations_report_loader_rejects_a_fifo_without_blocking(tmp_path) -> None:
+def _cleanup_fifo_probe(process, failure: BaseException | None) -> None:
+    reaped = False
+    for _ in range(2):
+        try:
+            if process.poll() is None:
+                process.kill()
+        except BaseException as exc:  # noqa: BLE001 -- independently reap and retry this owned child
+            if failure is None:
+                failure = exc
+        try:
+            process.wait(timeout=2)
+            reaped = True
+        except BaseException as exc:  # noqa: BLE001 -- retain the primary failure through bounded cleanup
+            if failure is None:
+                failure = exc
+        if reaped:
+            break
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except BaseException as exc:  # noqa: BLE001 -- close every pipe without masking the primary failure
+            if failure is None:
+                failure = exc
+    if not reaped:
+        message = "operations-report child not reaped"
+        if failure is None:
+            failure = AssertionError(message)
+        else:
+            failure.add_note(message)
+    if failure is not None:
+        raise failure
+
+
+@pytest.mark.parametrize("probe_mode", ["normal", "delayed_start", "never_ready", "early_eof", "blocking_loader"])
+def test_operations_report_loader_rejects_a_fifo_without_blocking(tmp_path, probe_mode) -> None:
     fifo = tmp_path / "report.fifo"
     os.mkfifo(fifo)
-    script = """
+    script = r"""
 import sys
+import os
+import time
 from pathlib import Path
+if sys.argv[2] == "delayed_start":
+    time.sleep(1.25)
 from memplex.operations import OperationsEvidenceError, load_operations_report
+if sys.argv[2] == "never_ready":
+    sys.stdin.readline()
+if sys.argv[2] == "early_eof":
+    raise SystemExit(5)
+os.write(sys.stdout.fileno(), b"R")
+if sys.stdin.readline() != "start\n":
+    raise SystemExit(4)
 try:
+    if sys.argv[2] == "blocking_loader":
+        os.open(sys.argv[1], os.O_RDONLY)
     load_operations_report(Path(sys.argv[1]))
 except OperationsEvidenceError as exc:
     raise SystemExit(0 if str(exc) == "operations_report_invalid" else 2)
 raise SystemExit(3)
 """
 
-    completed = subprocess.run(
-        [sys.executable, "-c", script, str(fifo)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=1,
+    command = [sys.executable, "-c", script, str(fifo), probe_mode]
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
     )
+    failure: BaseException | None = None
+    try:
+        assert process.stdout is not None
+        # Import readiness has its own bounded setup watchdog. The loader
+        # retains the original one-second deadline after the start signal.
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            ready = selector.select(timeout=10)
+        startup_failure = probe_mode in {"never_ready", "early_eof"}
+        with pytest.raises(AssertionError) if startup_failure else nullcontext():
+            assert ready, "operations-report probe startup timed out"
+            assert os.read(process.stdout.fileno(), 1) == b"R", "probe exited before ready"
+        if startup_failure:
+            return
+        if probe_mode == "blocking_loader":
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.communicate(input="start\n", timeout=1)
+            assert process.poll() is None
+            return
+        stdout, stderr = process.communicate(input="start\n", timeout=1)
+        assert process.returncode == 0
+        assert str(fifo) not in stdout + stderr
+    except BaseException as exc:  # noqa: BLE001 -- preserve the probe failure through owned-child cleanup
+        failure = exc
+    finally:
+        _cleanup_fifo_probe(process, failure)
 
-    assert completed.returncode == 0
-    assert str(fifo) not in completed.stdout + completed.stderr
+
+@pytest.mark.parametrize("has_primary_failure", [False, True])
+@pytest.mark.parametrize(
+    "cleanup_fault", ["kill_interrupt", "kill_error", "wait_timeout", "wait_interrupt", "persistent_wait"]
+)
+def test_fifo_probe_cleanup_faults_preserve_failure_and_bounds(
+    tmp_path, monkeypatch, has_primary_failure, cleanup_fault,
+) -> None:
+    original_popen = subprocess.Popen
+    primary = AssertionError("original FIFO probe failure")
+    injected = (
+        OSError("kill failed") if cleanup_fault == "kill_error"
+        else subprocess.TimeoutExpired("owned FIFO probe", 2)
+        if cleanup_fault in {"wait_timeout", "persistent_wait"}
+        else KeyboardInterrupt("cleanup interrupted")
+    )
+    owned = []
+
+    class CleanupFaultPopen(original_popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cleaning = False
+            self.cleanup_waits = []
+            self.cleanup_kills = 0
+            owned.append(self)
+
+        def communicate(self, *args, **kwargs):
+            try:
+                if has_primary_failure:
+                    raise primary
+                return super().communicate(*args, **kwargs)
+            finally:
+                self.cleaning = True
+
+        def kill(self):
+            self.cleanup_kills += 1
+            if cleanup_fault.startswith("kill_") and self.cleanup_kills == 1:
+                raise injected
+            return super().kill()
+
+        def wait(self, timeout=None):
+            if self.cleaning:
+                self.cleanup_waits.append(timeout)
+                assert timeout is not None, "FIFO cleanup attempted an unbounded wait"
+                if cleanup_fault == "persistent_wait" or (
+                    cleanup_fault.startswith("wait_") and len(self.cleanup_waits) == 1
+                ):
+                    raise injected
+            return super().wait(timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", CleanupFaultPopen)
+    try:
+        with pytest.raises(BaseException) as caught:
+            test_operations_report_loader_rejects_a_fifo_without_blocking(
+                tmp_path, "normal" if has_primary_failure else "blocking_loader",
+            )
+        assert len(owned) == 1
+        process = owned[0]
+        assert caught.value is (primary if has_primary_failure else injected)
+        assert process.cleanup_waits and all(timeout == 2 for timeout in process.cleanup_waits)
+        assert all(pipe.closed for pipe in (process.stdin, process.stdout, process.stderr))
+        if cleanup_fault == "persistent_wait":
+            assert "operations-report child not reaped" in getattr(caught.value, "__notes__", [])
+            assert len(process.cleanup_waits) == 2
+        else:
+            assert process.returncode is not None
+        if cleanup_fault.startswith("kill_"):
+            assert process.cleanup_kills == 2
+    finally:
+        # The real owned child is also reaped when the regression assertion is RED.
+        for process in owned:
+            if process.poll() is None:
+                original_popen.kill(process)
+            original_popen.wait(process, timeout=2)
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
 
 
 def test_operations_report_loader_accepts_128_kib_and_rejects_one_more_byte(

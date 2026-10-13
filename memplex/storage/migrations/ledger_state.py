@@ -33,6 +33,7 @@ from memplex.storage.migrations.catalogue_checks import (
     _is_background_tasks_current_variant,
     _is_edge_integrity_current_variant,
     _is_reliable_sync_current_variant,
+    _is_source_ingress_guard_current_variant,
     _is_source_validity_current_variant,
     _variant_digest,
 )
@@ -270,6 +271,8 @@ def _plan_from_observed_state(
         if current >= 6 and not _is_background_tasks_current_variant(fingerprint.variant):
             raise MigrationIntegrityError("migration ledger does not match the schema")
         if (current >= 8) != _is_source_validity_current_variant(fingerprint.variant):
+            raise MigrationIntegrityError("migration ledger does not match the schema")
+        if (current >= 9) != _is_source_ingress_guard_current_variant(fingerprint.variant):
             raise MigrationIntegrityError("migration ledger does not match the schema")
         if 2 <= current < 4 and _is_edge_integrity_current_variant(fingerprint.variant):
             raise MigrationIntegrityError("migration ledger does not match the schema")

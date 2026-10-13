@@ -13,11 +13,42 @@ _SOURCE_TABLES = (
 )
 
 
+@pytest.mark.parametrize("helper", [
+    "_is_source_validity_current_variant", "_is_background_tasks_current_variant",
+    "_allowed_adoption_baselines",
+])
+@pytest.mark.parametrize("with_vector", [False, True])
+def test_ingress_guard_variant_preserves_existing_feature_identity(helper, with_vector):
+    base = "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6_source_validity_v1"
+    guarded = base + "_source_ingress_guard_v9"
+    if with_vector:
+        base += "_vector_8"
+        guarded += "_vector_8"
+    check = getattr(runner, helper)
+    assert check(base)
+    assert check(guarded) == check(base)
+
+
+def test_v9_ledger_cannot_admit_unguarded_v8_function_fingerprint():
+    migrations = tuple(item for item in runner.discover_migrations() if item.version <= 8) + (
+        runner.Migration(9, "source_ingress_guard", b"SELECT 1;", "9" * 64),
+    )
+    entries = tuple(runner._LedgerEntry(item.version, item.name, item.checksum, "executed", None)
+                    for item in migrations)
+    fingerprint = runner.SchemaFingerprint(
+        "post_g002_current", "fixture",
+        "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6_source_validity_v1",
+    )
+    with pytest.raises(runner.MigrationIntegrityError, match="migration ledger does not match"):
+        runner._plan_from_observed_state(entries, fingerprint, migrations)
+
+
 def test_migration_catalogue_and_rls_contract() -> None:
     """A packaged V1 migration registers three forced-RLS ledger relations."""
     migrations = runner.discover_migrations()
-    assert [(item.version, item.name) for item in migrations][-1] == (8, "source_validity")
-    sql = migrations[-1].sql_bytes.decode()
+    source_migration = next(item for item in migrations if item.version == 8)
+    assert source_migration.name == "source_validity"
+    sql = source_migration.sql_bytes.decode()
     for name in _SOURCE_TABLES:
         assert f"CREATE TABLE {name}" in sql
         assert f"ALTER TABLE {name} ENABLE ROW LEVEL SECURITY" in sql
@@ -52,7 +83,7 @@ def test_unknown_relation_or_missing_constraint_blocks_ready() -> None:
 def _declared_tables():
     import re
 
-    migration = runner.discover_migrations()[-1].sql_bytes.decode()
+    migration = next(item for item in runner.discover_migrations() if item.version == 8).sql_bytes.decode()
     primary = {
         _SOURCE_TABLES[0]: ("authority_id",),
         _SOURCE_TABLES[1]: ("authority_id", "kind", "logical_id"),
@@ -214,7 +245,7 @@ def test_source_variant_keeps_historical_adoption_and_vector_identity(with_vecto
     assert runner._allowed_adoption_baselines(prior) == runner._allowed_adoption_baselines(current)
     assert runner._is_background_tasks_current_variant(current)
     assert runner._is_source_validity_current_variant(current)
-    migrations = runner.discover_migrations()
+    migrations = tuple(item for item in runner.discover_migrations() if item.version <= 8)
     entries = tuple(runner._LedgerEntry(item.version, item.name, item.checksum, "executed", None)
                     for item in migrations)
     fingerprint = runner.SchemaFingerprint("post_g002_current", "fixture", current)
@@ -331,7 +362,7 @@ def _scope(cursor, role, *, tenant="tenant-source", workspace="workspace-source"
 def test_native_migration_catalogue_and_rls_contract(source_pg) -> None:
     migration, connection, cursor, role = source_pg
 
-    assert migration.plan().current_version == 8
+    assert migration.plan().current_version == 9
     _grant_source_tables(cursor, role)
     for name in _SOURCE_TABLES:
         cursor.execute(f"SELECT count(*) FROM {name}")
@@ -532,3 +563,69 @@ def test_postgres_boolean_test_deparse_matches_catalogue(change: str) -> None:
     table["checks"] = tuple((name, canonical if name == key else value, *flags)
                             for name, value, *flags in table["checks"])
     assert _source_validity_catalogue_matches(tables) is (change == "none")
+
+
+@pytest.mark.parametrize("ledger_version,guarded,expected", [
+    (8, False, "upgrade_required"), (9, True, "ready"),
+    (8, True, "integrity"), (9, False, "integrity"),
+])
+def test_guard_body_feature_and_migration_ledger_must_agree(ledger_version, guarded, expected):
+    migrations = runner.discover_migrations()
+    entries = tuple(runner._LedgerEntry(item.version, item.name, item.checksum, "executed", None)
+                    for item in migrations if item.version <= ledger_version)
+    variant = "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6_source_validity_v1"
+    if guarded:
+        variant += "_source_ingress_guard_v9"
+    fingerprint = runner.SchemaFingerprint("post_g002_current", "fixture", variant)
+    if expected == "integrity":
+        with pytest.raises(runner.MigrationIntegrityError, match="ledger does not match"):
+            runner._plan_from_observed_state(entries, fingerprint, migrations)
+    else:
+        assert runner._plan_from_observed_state(entries, fingerprint, migrations).state == expected
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("tamper", ["apply", "capture", "both", "ledger"])
+def test_native_v9_upgrade_preserves_function_identity_and_requires_exact_pair(pg_function_dsn, tamper):
+    import psycopg2
+
+    from memplex.storage.migrations.catalogue_checks import (
+        _SOURCE_INGRESS_FUNCTION_DEFINITION_DIGESTS,
+        _sync_function_digest,
+    )
+
+    previous = runner.PostgresMigrationRunner(pg_function_dsn)
+    previous._migrations = tuple(item for item in previous._migrations if item.version <= 8)
+    assert previous.apply().current_version == 8
+    latest = runner.PostgresMigrationRunner(pg_function_dsn)
+    assert latest.plan().state == "upgrade_required"
+    connection = psycopg2.connect(pg_function_dsn)
+    names = ("memplex_sync_capture_before", "memplex_sync_apply_inbound")
+    query = "SELECT proname, oid, proowner, proacl::text, proconfig, pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace=current_schema()::regnamespace AND proname IN %s ORDER BY proname"
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(query, (names,))
+            before = cursor.fetchall()
+            cursor.execute("SELECT version, checksum FROM memplex_schema_migrations ORDER BY version")
+            ledger_before = cursor.fetchall()
+        connection.rollback()
+        assert latest.apply().current_version == 9
+        with connection.cursor() as cursor:
+            cursor.execute(query, (names,))
+            after = cursor.fetchall()
+            assert [row[:5] for row in after] == [row[:5] for row in before]
+            for row in after:
+                assert _sync_function_digest(row[5]) == _SOURCE_INGRESS_FUNCTION_DEFINITION_DIGESTS[row[0]]
+            cursor.execute("SELECT version, checksum FROM memplex_schema_migrations WHERE version<=8 ORDER BY version")
+            assert cursor.fetchall() == ledger_before
+            if tamper == "ledger":
+                cursor.execute("DELETE FROM memplex_schema_migrations WHERE version=9")
+            else:
+                for row in before:
+                    if tamper == "both" or (tamper == "apply") == (row[0] == "memplex_sync_apply_inbound"):
+                        cursor.execute(row[5])
+        connection.commit()
+        with pytest.raises(runner.MigrationIntegrityError):
+            latest.plan()
+    finally:
+        connection.close()

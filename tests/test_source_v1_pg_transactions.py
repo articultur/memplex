@@ -308,9 +308,15 @@ def test_no_scope_leak_between_sessions(source_backend):
         row = cursor.fetchone()
         assert row[0] == "another-session"
         assert row[2:] == ("0", "0")
-    with resources.pool_manager.transaction(lambda cursor, context: None, later) as (_, cursor):
+    def inspect_reset_then_bind(cursor, context):
         cursor.execute("SELECT current_setting('memplex.session_id', true)")
         assert cursor.fetchone()[0] in ("", None)
+        store._bind_transaction_scope(cursor, context)
+
+    with resources.pool_manager.transaction(inspect_reset_then_bind, later) as (_, cursor):
+        cursor.execute("SELECT current_setting('memplex.session_id', true)")
+        assert cursor.fetchone()[0] == "another-session"
+    assert resources.pool_manager.business_lease_count == 0
 
 
 @NATIVE
