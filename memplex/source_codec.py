@@ -74,7 +74,8 @@ _ROOT_IDENTITY_FIELDS = frozenset(
 )
 # These aliases are identity claims only in the binder's declared locations.
 _NAMESPACE_IDENTITY_FIELDS = frozenset(
-    {"memplex_tenant_id", "memplex_subject_id", "memplex_workspace_id"}
+    {"memplex_tenant_id", "memplex_subject_id", "memplex_workspace_id", "memplex_grants",
+     "memplex_source_agent", "memplex_agent"}
 )
 _PROVENANCE_IDENTITY_FIELDS = frozenset(
     {"agent_id", "authentication_id", "request_id", "session_id"}

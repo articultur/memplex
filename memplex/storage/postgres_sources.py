@@ -62,18 +62,21 @@ from memplex.source_contract import (
 from memplex.source_validation import finalize_at, validate_sources
 from memplex.storage.migrations import PostgresTargetIdentity
 from memplex.storage.pool import _remaining_transaction_ms as _remaining_ms
-from memplex.storage.pool import _target_key, validate_ready_postgres_pool
+from memplex.storage.pool import _source_transaction, _target_key, validate_ready_postgres_pool
 from memplex.storage.source_versions import (
     _RESOURCE_ISSUER,
+    PolicyUpdateAuthority,
     SourceAdmission,
     SourceReadSession,
     SourceValidationHooks,
     _admit_publication,
+    _check_policy_update,
     _check_publication_inputs,
     _make_publication,
     _publication_replay,
     _publication_request_digest,
     _publication_tombstone,
+    _raw_retirements,
     validate_publish_command,
 )
 
@@ -99,11 +102,9 @@ def _source_lock_key(target: PostgresTargetIdentity, authority_id: str) -> int:
 
 
 def _admit_current_policy(context: AuthorizationContext, policy: PolicySnapshot) -> None:
-    principal = context.principal
-    current = (principal.authentication_id, principal.tenant_id, principal.subject_id,
-               context.workspace_id, context.agent_id, principal.roles)
-    if not any(current == (entry.authentication_id, entry.tenant_id, entry.subject_id,
-                           entry.workspace_id, entry.agent_id, entry.roles) for entry in policy.entries):
+    from memplex.source_policy import admit_principal
+
+    if not admit_principal(context, policy):
         raise SourceContractError(RejectionCode.DENIED)
 
 
@@ -390,8 +391,9 @@ class PostgresSourceVersionStore:
     def _transaction(self, authorization: AuthorizationContext, deadline_ns: int, *, shared: bool) -> Iterator[_PostgresReadSession]:
         scope = self._preflight(authorization, deadline_ns)
         try:
-            with self._owner._pool_manager.transaction(self._owner._bind_transaction_scope, authorization,
-                                                       deadline_ns=deadline_ns) as (_, cursor):
+            with _source_transaction(self._owner._pool_manager, self._owner._bind_transaction_scope,
+                                     authorization, resource=self._resource, issuer=_RESOURCE_ISSUER,
+                                     deadline_ns=deadline_ns) as (_, cursor):
                 session = _PostgresReadSession(cursor, scope, deadline_ns)
                 try:
                     lock = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
@@ -409,6 +411,38 @@ class PostgresSourceVersionStore:
 
     def initialize_authority(self, scope: AuthorityScope, policy: PolicySnapshot, *, admission: SourceAdmission) -> AuthorityState:
         raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+
+    def _increment_access(self, authorization: AuthorizationContext, memory_ids: list[str]) -> None:
+        with self._transaction(authorization, time.monotonic_ns() + 250_000_000, shared=False) as session:
+            self._admit(session, authorization)
+            assert self._hooks is not None
+            for memory_id in memory_ids:
+                key = session.resolve_id(memory_id)
+                current = session.source(key) if key is not None else None
+                if (current is None or current.head.state is not SourceState.LIVE
+                        or current.head.ref.key.kind is not SourceKind.FUNCTION
+                        or not self._hooks.own_acl(current, authorization)):
+                    continue
+                session._execute("UPDATE memplex_functions SET data=jsonb_set(jsonb_set(data, '{access_count}', "
+                                 "to_jsonb(COALESCE((data->>'access_count')::bigint,0)+1)), '{last_accessed_at}', "
+                                 "to_jsonb(clock_timestamp()::text)) WHERE id=%s AND " + _scope_sql() + " RETURNING id",
+                                 (memory_id,))
+                _integrity(session._cursor.fetchone() == (memory_id,))
+
+    def replace_policy(self, expected_revision: int, policy: PolicySnapshot,
+                       authority: PolicyUpdateAuthority) -> PolicySnapshot:
+        _check_policy_update(authority, self._resource, expected_revision, policy)
+        with self._transaction(authority._context, time.monotonic_ns() + 250_000_000, shared=False) as session:
+            current = session.authority()
+            if current.state is not SourceState.LIVE or current.policy.revision != expected_revision:
+                raise SourceContractError(RejectionCode.AUTH_CHANGED)
+            updated = replace(current, policy=policy, commit_seq=_advance(current.commit_seq))
+            session._execute("UPDATE memplex_source_authorities SET policy_revision=%s,policy=%s::jsonb,commit_seq=%s "
+                             "WHERE authority_id=%s AND tenant_id=%s AND workspace=%s AND policy_revision=%s RETURNING commit_seq",
+                             (policy.revision, _canonical(policy), updated.commit_seq, current.scope.authority_id,
+                              current.scope.tenant_id, current.scope.workspace_id, expected_revision))
+            _integrity(session._cursor.fetchone() == (updated.commit_seq,))
+        return policy
 
     def _admit(self, session: _PostgresReadSession, authorization: AuthorizationContext) -> AuthorityState:
         authority = session.authority()
@@ -470,13 +504,22 @@ class PostgresSourceVersionStore:
                 if not self._hooks.own_acl(SourceSnapshot(head, {**payload, "id": command.key.logical_id}), authorization):
                     raise SourceContractError(RejectionCode.DENIED)
                 self._check_source_inputs(session, authorization, command)
+            for raw_command in _raw_retirements(session, current, command):
+                raw = session.source(raw_command.key)
+                assert raw is not None
+                if not self._hooks.own_acl(raw, authorization):
+                    raise SourceContractError(RejectionCode.DENIED)
+                raw_payload = _bound_payload(raw_command, authorization)
+                raw_head = _mutation_head(raw_command, raw, raw_payload, head.last_commit_seq)
+                self._write_source(session, authorization, raw_command, raw, raw_head, raw_payload,
+                                   advance_authority=False)
             self._write_source(session, authorization, command, current, head, payload)
             receipt = SourceReceipt(head.ref, head.state, head.last_commit_seq)
         return receipt
 
     def _write_source(self, session: _PostgresReadSession, authorization: AuthorizationContext,
                       command: SourceMutation, current: SourceSnapshot | None, head: SourceHead,
-                      payload: dict[str, Any] | None) -> None:
+                      payload: dict[str, Any] | None, *, advance_authority: bool = True) -> None:
         key = command.key
         if key.kind is SourceKind.FUNCTION:
             from memplex.storage.postgres import _function_write_lock_key
@@ -533,6 +576,8 @@ class PostgresSourceVersionStore:
                           head.source_class.value, head.payload_locator, head.ref.semantic_digest,
                           head.last_commit_seq, head_data, *identity))
         _integrity(session._cursor.fetchone() == (key.logical_id,))
+        if not advance_authority:
+            return
         session._execute("UPDATE memplex_source_authorities SET commit_seq=%s "
                          "WHERE authority_id=%s AND tenant_id=%s AND workspace=%s AND commit_seq=%s RETURNING commit_seq",
                          (head.last_commit_seq, key.authority_id, key.tenant_id, key.workspace_id, session.authority().commit_seq))
@@ -672,6 +717,10 @@ class _AuthorizedPostgresSources:
         if type(backend) is not PostgresSourceVersionStore or type(context) is not AuthorizationContext:
             raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
         self._backend, self._context = backend, context
+
+    def replace_policy(self, expected_revision: int, policy: PolicySnapshot,
+                       authority: PolicyUpdateAuthority) -> PolicySnapshot:
+        return self._backend.replace_policy(expected_revision, policy, authority)
 
     def initialize_authority(self, scope: AuthorityScope, policy: PolicySnapshot, *, admission: SourceAdmission) -> AuthorityState:
         return self._backend.initialize_authority(scope, policy, admission=admission)

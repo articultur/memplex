@@ -142,6 +142,7 @@ jobs:
             tests/test_g004_postgres_backup_real_value.py \
             tests/test_g004_postgres_probe_isolation.py \
             tests/test_source_v1_pg_schema.py tests/test_source_v1_pg_transactions.py tests/test_source_v1_publication.py \
+            tests/test_source_v1_policy.py tests/test_source_v1_mutation_routes.py \
             -v --timeout=120
 
   security:

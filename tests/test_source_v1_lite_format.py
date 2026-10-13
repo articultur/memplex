@@ -22,6 +22,7 @@ from memplex.source_contract import (
     ALGORITHM_VERSION,
     CARRIER_KEY,
     AuthorityScope,
+    PolicyEntry,
     PolicySnapshot,
     SourceClass,
     SourceContractError,
@@ -41,12 +42,13 @@ from memplex.storage.source_versions import (
     SourceAdmission,
     SourceValidationHooks,
     _issue_admission,
+    _source_write_scope,
 )
 from tests.source_v1_support import AUTHORITY_ID, INCARNATION, fact_envelope, source_snapshot
 
 SCOPE = AuthorityScope(AUTHORITY_ID, "t1", "w1")
-POLICY = PolicySnapshot(1, (), frozenset({ALGORITHM_VERSION}))
-CONTEXT = AuthorizationContext(Principal("t1", "alice", authentication_id="auth"), "w1")
+POLICY = PolicySnapshot(1, (PolicyEntry("auth", "t1", "alice", "w1", "agent-1", frozenset()),), frozenset({ALGORITHM_VERSION}))
+CONTEXT = AuthorizationContext(Principal("t1", "alice", authentication_id="auth"), "w1", agent_id="agent-1")
 HOOKS = SourceValidationHooks(lambda snapshot, context: True, lambda snapshot: True)
 OLD_COMMIT = "826335024c0b67b1b25fdb477596bf08ddeb7dad"
 OLD_TREE = "7fd32f681a1a2cc9044823b672aaacfa96e63ef6"
@@ -300,7 +302,7 @@ def test_v3_downgrade_and_raw_envelope_stripping_are_rejected(tmp_path):
     memory = copy.deepcopy(base.memory)
     memory.pop("source_validity")
     memory["schema_version"] = 2
-    with store._durability.writer_lock(), pytest.raises(LiteStorageIntegrityError):
+    with store._durability.writer_lock(), _source_write_scope(store._durability, issuer=_RESOURCE_ISSUER), pytest.raises(LiteStorageIntegrityError):
         store._durability.commit_locked(base, LitePair(memory, [], 2, "downgrade"))
     with pytest.raises(LiteStorageIntegrityError):
         store._durability._decode_pair(base.memory, [])

@@ -741,6 +741,10 @@ class PostgresMemoryStore:
         operation: str,
     ) -> Any:
         """One locked transaction for a public Function/edge write operation."""
+        if self.source_versions() is not None:
+            from memplex.source_contract import RejectionCode, SourceContractError
+
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         try:
             with self._pool_manager.transaction(
                 self._bind_transaction_scope, context
@@ -1257,6 +1261,10 @@ class PostgresMemoryStore:
         """Batch add.  Per-item failures are isolated and recorded in
         ``BatchResult.failed_items``; each item goes through :meth:`add`
         so embeddings and changelog entries are written too."""
+        if self.source_versions() is not None:
+            from memplex.source_contract import RejectionCode, SourceContractError
+
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         result = BatchResult(total=len(funcs))
         for func, src in zip(funcs, sources):
             try:
@@ -1635,6 +1643,10 @@ class PostgresMemoryStore:
 
     def increment_access(self, func_id: str) -> None:
         context = self._authorization_context()
+        backend = self.source_versions()
+        if backend is not None:
+            backend._increment_access(context, [func_id])
+            return
         with self._function_write_transaction(context, "increment_access") as cur:
             locked = self._locked_function_by_id(cur, func_id, context)
             if locked is None:
@@ -1657,6 +1669,10 @@ class PostgresMemoryStore:
 
     def increment_access_batch(self, func_ids: Any) -> None:
         context = self._authorization_context()
+        backend = self.source_versions()
+        if backend is not None:
+            backend._increment_access(context, list(func_ids))
+            return
         with self._function_write_transaction(context, "increment_access_batch") as cur:
             for fid in func_ids:
                 locked = self._locked_function_by_id(cur, fid, context)

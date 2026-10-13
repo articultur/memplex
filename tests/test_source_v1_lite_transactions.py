@@ -27,7 +27,7 @@ from memplex.source_contract import (
 from memplex.storage.lite.durability import LiteDurability, LiteStorageIntegrityError
 from memplex.storage.lite.single_writer import SingleWriterQueue
 from memplex.storage.lite.source_versions import LiteSourceVersionStore
-from memplex.storage.source_versions import _RESOURCE_ISSUER
+from memplex.storage.source_versions import _RESOURCE_ISSUER, _source_write_scope
 from tests.test_source_v1_lite_format import CONTEXT, HOOKS, SCOPE, fence, new_bank
 
 
@@ -873,7 +873,7 @@ def test_regressive_v3_pair_is_rejected_before_io(tmp_path, route, case, monkeyp
     decisions = []
     monkeypatch.setattr(store._durability, "before_journal_durable_publish", lambda: decisions.append(1))
     if route == "commit":
-        with store._durability.writer_lock(), pytest.raises(LiteStorageIntegrityError):
+        with store._durability.writer_lock(), _source_write_scope(store._durability, issuer=_RESOURCE_ISSUER), pytest.raises(LiteStorageIntegrityError):
             store._durability.commit_locked(base, target)
         assert not store._durability._journal_path.exists()
     else:
@@ -902,7 +902,7 @@ def test_operation_only_v3_journal_replays_idempotently(tmp_path, monkeypatch):
         raise OSError("owned post-decision crash")
 
     monkeypatch.setattr(store._durability, "after_journal_rename_and_parent_dir_fsync", crash)
-    with store._durability.writer_lock(), pytest.raises(OSError, match="owned post-decision crash"):
+    with store._durability.writer_lock(), _source_write_scope(store._durability, issuer=_RESOURCE_ISSUER), pytest.raises(OSError, match="owned post-decision crash"):
         store._durability.commit_locked(base, target)
     fresh = LiteDurability(store._path, store._changelog._path)
     assert fresh.load_authoritative() == target

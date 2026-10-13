@@ -24,6 +24,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
@@ -96,6 +97,19 @@ from memplex.query_pipeline import QueryPipeline
 from memplex.retrieval.embedding import EmbeddingService, Vector
 from memplex.retrieval.multi_path import MultiPathRetriever
 from memplex.retrieval.reranker import CrossEncoderReranker, Reranker
+from memplex.source_contract import (
+    RejectionCode,
+    SourceClass,
+    SourceContractError,
+    SourceKey,
+    SourceKind,
+    SourceMutation,
+    SourceOperation,
+    SourceReceipt,
+    SourceSnapshot,
+    SourceState,
+    SourceToken,
+)
 from memplex.storage import MemoryStore, create_store
 from memplex.storage.feedback import FeedbackStore, create_feedback_store
 from memplex.storage.migrations.runner import VectorCapabilityRequest
@@ -103,6 +117,7 @@ from memplex.storage.pool import (
     PostgresStorageResources,
     PostgresSyncStorageResources,
 )
+from memplex.storage.source_versions import SourceVersionStore
 from memplex.storage.typed_batch import (
     TypedBatchInput,
     TypedBatchRunner,
@@ -1205,6 +1220,23 @@ class MemplexService:
         context = self._require_authorization(authorization)
         store = self._store_for(context)
         memory_ids = list(memory_ids)
+        if self._v1_source_store(context) is not None:
+            if len(memory_ids) != 1:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+            node, snapshot = self._mutation_node(memory_ids[0], context)
+            assert snapshot is not None
+            if snapshot.head.ref.key.kind is SourceKind.RAW_PARAGRAPH and needs_review is not None:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+            if attributes:
+                if isinstance(node, Function):
+                    node.attributes.update(attributes)
+                else:
+                    node.namespace.update({str(key): str(value) for key, value in attributes.items()
+                                           if str(key).startswith("memplex_") and value is not None})
+            if needs_review is not None:
+                node.needs_review = needs_review
+            self._replace_source_node(snapshot, node, context)
+            return [node]
         visible_nodes = [self._require_visible_node(memory_id, context) for memory_id in memory_ids]
         controlled_annotate = getattr(store, "annotate_nodes", None)
         if callable(controlled_annotate):
@@ -1341,6 +1373,8 @@ class MemplexService:
             merge results).
         """
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         store = self._store_for(context)
 
         # 0. Strip <private>...</private> blocks before extraction so
@@ -1877,6 +1911,8 @@ class MemplexService:
         """Bind and persist an Observation through the authorized store."""
 
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         bind_node_identity(observation, context, visibility=visibility)
         self.scan_nodes_before_persistence([observation])
         add = getattr(self._store_for(context), "add_observation", None)
@@ -1887,6 +1923,83 @@ class MemplexService:
         add(observation)
         self._invalidate_hot_references((observation.id,), context=context)
         return observation
+
+    def _v1_source_store(self, context: AuthorizationContext) -> SourceVersionStore | None:
+        """Recognize only concrete audited adapters, never a duck-typed wrapper."""
+        from memplex.storage.lite.store import LiteMemoryStore
+        from memplex.storage.postgres import PostgresMemoryStore
+
+        if type(self.store) is LiteMemoryStore:
+            self.store._refresh_for_read()
+            pair = self.store._committed_pair
+            if pair is None or pair.memory.get("schema_version") != 3:
+                return None
+            backend = self.store.source_versions()
+            if backend is None:
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            return backend
+        if type(self.store) is PostgresMemoryStore:
+            return cast(SourceVersionStore | None, self.store.authorized(context).source_versions())
+        return None
+
+    def _source_for_mutation(self, memory_id: str, context: AuthorizationContext) -> SourceSnapshot | None:
+        from memplex.authorization import is_own_node_visible, source_authorization_node
+
+        backend = self._v1_source_store(context)
+        if backend is None:
+            return None
+        with backend.read_fence(context, deadline_ns=time.monotonic_ns() + 250_000_000) as session:
+            key = session.resolve_id(memory_id)
+            snapshot = session.source(key) if key is not None else None
+            if (snapshot is None or snapshot.head.state is not SourceState.LIVE
+                    or not is_own_node_visible(source_authorization_node(snapshot), context)):
+                raise MemoryNotFoundError("Memory not found")
+            return snapshot
+
+    def replace_source(self, key: SourceKey, expected: SourceToken, payload: Mapping[str, object], *,
+                       authorization: AuthorizationContext) -> SourceReceipt:
+        context = self._require_authorization(authorization)
+        backend = self._v1_source_store(context)
+        if backend is None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        snapshot = self._source_for_mutation(key.logical_id, context)
+        if snapshot is None or snapshot.head.ref.key != key:
+            raise MemoryNotFoundError("Memory not found")
+        command = SourceMutation(key, expected, SourceOperation.REPLACE, payload,
+                                 snapshot.head.source_class, snapshot.head.input_context, snapshot.head.root_refs)
+        receipt = backend.mutate_source(context, command, deadline_ns=time.monotonic_ns() + 250_000_000)
+        self._invalidate_hot_references((key.logical_id,), context=context)
+        return receipt
+
+    def delete_source(self, key: SourceKey, expected: SourceToken, *,
+                      authorization: AuthorizationContext) -> SourceReceipt:
+        context = self._require_authorization(authorization)
+        backend = self._v1_source_store(context)
+        if backend is None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        snapshot = self._source_for_mutation(key.logical_id, context)
+        if snapshot is None or snapshot.head.ref.key != key:
+            raise MemoryNotFoundError("Memory not found")
+        command = SourceMutation(key, expected, SourceOperation.DELETE, None,
+                                 snapshot.head.source_class, {}, ())
+        receipt = backend.mutate_source(context, command, deadline_ns=time.monotonic_ns() + 250_000_000)
+        self._invalidate_hot_references((key.logical_id,), context=context)
+        return receipt
+
+    def _mutation_node(self, memory_id: str, context: AuthorizationContext) -> tuple[Any, SourceSnapshot | None]:
+        from memplex.authorization import source_authorization_node
+
+        snapshot = self._source_for_mutation(memory_id, context)
+        if snapshot is not None:
+            return source_authorization_node(snapshot), snapshot
+        return self._require_visible_node(memory_id, context), None
+
+    def _replace_source_node(self, snapshot: SourceSnapshot, node: Any, context: AuthorizationContext) -> None:
+        from memplex.authorization import source_mutation_payload
+
+        self.scan_nodes_before_persistence([node])
+        self.replace_source(snapshot.head.ref.key, snapshot.head.ref.token,
+                            source_mutation_payload(snapshot, node), authorization=context)
 
     def update_memory(
         self,
@@ -1913,7 +2026,7 @@ class MemplexService:
         UpdateResult
         """
         context = self._require_authorization(authorization)
-        func = self._require_visible_node(memory_id, context)
+        func, snapshot = self._mutation_node(memory_id, context)
         if not isinstance(func, Function):
             raise MemoryNotFoundError("Memory not found")
 
@@ -1938,6 +2051,13 @@ class MemplexService:
             if IndirectInjectionGuard.is_suspected(current):
                 current.attributes["memplex_injection_suspected"] = "true"
 
+        if snapshot is not None:
+            old_value = func.update_role(role, new_value)
+            if IndirectInjectionGuard.is_suspected(func):
+                func.attributes["memplex_injection_suspected"] = "true"
+            self._replace_source_node(snapshot, func, context)
+            return UpdateResult(memory_id=memory_id, role=role, old_value=old_value,
+                                new_value=new_value, version=func.version, success=True)
         store = self._store_for(context)
         update = getattr(store, "update_function_role", None)
         if callable(update):
@@ -1971,7 +2091,10 @@ class MemplexService:
     ) -> None:
         """Delete a visible memory through its typed store boundary."""
         context = self._require_authorization(authorization)
-        node = self._require_visible_node(memory_id, context)
+        node, snapshot = self._mutation_node(memory_id, context)
+        if snapshot is not None:
+            self.delete_source(snapshot.head.ref.key, snapshot.head.ref.token, authorization=context)
+            return
         delete_method = {
             "fact": "delete_fact",
             "preference": "delete_preference",
@@ -2065,6 +2188,8 @@ class MemplexService:
             ``{"status": "resolved", "action": action}``
         """
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         self._require_visible_node(memory_id, context)
         self._feedback_store_for(context).resolve(memory_id, field_role, action)
 
@@ -2481,7 +2606,9 @@ class MemplexService:
         if tier not in self._KNOWLEDGE_TIERS:
             raise ValueError(f"tier must be one of {sorted(self._KNOWLEDGE_TIERS)}")
         context = self._require_authorization(authorization)
-        node = self._require_visible_node(memory_id, context)
+        node, snapshot = self._mutation_node(memory_id, context)
+        if snapshot is not None and snapshot.head.ref.key.kind is SourceKind.RAW_PARAGRAPH:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
 
         owner_subject = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
         is_owner = owner_subject == context.principal.subject_id
@@ -2500,6 +2627,10 @@ class MemplexService:
         provenance["promoted_at"] = datetime.now(UTC).isoformat()
         provenance["promoted_to_tier"] = tier
         node.provenance = provenance
+
+        if snapshot is not None:
+            self._replace_source_node(snapshot, node, context)
+            return {"memory_id": memory_id, "tier": tier, "visibility": node.visibility, "version": node.version}
 
         store = self._store_for(context)
         add = getattr(store, "add_fact", None)
@@ -2546,7 +2677,7 @@ class MemplexService:
         if any(ch in agent_id for ch in ",\t\n\r"):
             raise ValueError("agent_id must not contain commas or whitespace")
         context = self._require_authorization(authorization)
-        node = self._require_visible_node(memory_id, context)
+        node, snapshot = self._mutation_node(memory_id, context)
 
         owner_subject = self._identity_value(node, "owner_subject_id", "memplex_subject_id")
         is_owner = owner_subject == context.principal.subject_id
@@ -2563,6 +2694,10 @@ class MemplexService:
             grants.append(agent_id)
         namespace["memplex_grants"] = ",".join(sorted(set(grants)))
         node.namespace = namespace
+
+        if snapshot is not None:
+            self._replace_source_node(snapshot, node, context)
+            return {"memory_id": memory_id, "granted_agents": grants}
 
         store = self._store_for(context)
         add = getattr(store, "add_fact", None)

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from memplex.models import MemoryNode
+    from memplex.source_contract import PolicySnapshot
 
 
 class IdentityClaimError(ValueError):
@@ -216,6 +217,14 @@ class PrincipalRegistry:
         if not isinstance(parsed, list):
             raise PrincipalRegistryError("MEMPLEX_PRINCIPALS_JSON must be a JSON list")
         return cls(tuple(PrincipalCredential.from_mapping(item) for item in parsed))
+
+    def policy_snapshot(self, revision: int, *, algorithm_versions: frozenset[str]) -> PolicySnapshot:
+        """Project authenticated mappings without persisting tokens or their hashes."""
+        from memplex.source_contract import PolicyEntry, PolicySnapshot
+
+        return PolicySnapshot(revision, tuple(PolicyEntry(
+            item.credential_id, item.tenant_id, item.subject_id, item.workspace_id,
+            item.agent_id, item.roles) for item in self.credentials), algorithm_versions)
 
     def authenticate(
         self,

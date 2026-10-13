@@ -647,6 +647,29 @@ def _validated_pair_record(value: Any, *, label: str) -> dict[str, Any]:
     }
 
 
+def _admit_source_write(resource: object, base: LitePair, target: LitePair) -> None:
+    """Only repository decisions and exact access bookkeeping may write V3."""
+    from memplex.source_contract import RejectionCode, SourceContractError
+    from memplex.storage.source_versions import _source_write_mode
+
+    if base.memory.get("schema_version") != 3 and target.memory.get("schema_version") != 3:
+        return
+    mode = _source_write_mode(resource)
+    if mode == "source":
+        return
+    if mode == "access" and base.changelog == target.changelog:
+        def without_access(memory: dict[str, Any]) -> dict[str, Any]:
+            result = dict(memory)
+            result["functions"] = [{key: value for key, value in row.items()
+                                    if key not in {"access_count", "last_accessed_at"}}
+                                   for row in memory.get("functions", [])]
+            return result
+
+        if without_access(base.memory) == without_access(target.memory):
+            return
+    raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+
+
 def _validate_source_transition(base: dict[str, Any], target: dict[str, Any]) -> None:
     """Reject stale V3 state before either commit or journal recovery writes."""
     from memplex.source_codec import decode_ledger
@@ -1174,6 +1197,7 @@ class LiteDurability:
             current = self._load_authoritative_locked(deadline_ns=deadline_ns)
             if current != base:
                 raise LiteStorageIntegrityError("Lite authoritative state changed before commit")
+        _admit_source_write(self, base, target)
         _validate_memory_payload(
             base.memory, allow_legacy_missing_schema=base.transaction_id == "legacy",
             deadline_ns=deadline_ns,

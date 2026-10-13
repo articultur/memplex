@@ -318,6 +318,7 @@ class _MockCursor:
 
     def execute(self, sql, params=()):
         self.executed.append((sql, params))
+        self._source_authority_consumed = False
         if "set_config('memplex.tenant_id'" in sql:
             self._probe_tenant = params[0]
 
@@ -325,6 +326,12 @@ class _MockCursor:
         if not self.executed:
             return self._fetchone_val
         sql, params = self.executed[-1]
+        if "AS has_source_authority" in sql:
+            # Explicitly model one consumed row for this authority-empty fixture.
+            if self._source_authority_consumed:
+                return None
+            self._source_authority_consumed = True
+            return (params[0], params[1], False)
         if any(
             denied in str(param)
             for denied in ("memplex_sync_local_identity", "memplex_sync_ingress_principals")
@@ -1651,11 +1658,12 @@ def test_fetch_primary_survives_close_call_interrupt_and_reclaims_lease(interrup
     from memplex.storage.pool import PooledReadCursor, PostgresPoolManager
 
     raw_pool = _PoolMock()
+    manager = PostgresPoolManager("dbname=fake", pool=raw_pool)
+    cursor = manager.read_cursor(lambda _cursor, _context: None, _authorization())
+    # Inject after current-authority admission, at the owned cursor fetch boundary.
     raw_pool.connection.cursor_instance.fetchone = lambda: (_ for _ in ()).throw(
         ValueError("fetch primary")
     )
-    manager = PostgresPoolManager("dbname=fake", pool=raw_pool)
-    cursor = manager.read_cursor(lambda _cursor, _context: None, _authorization())
     source, start_line = inspect.getsourcelines(PooledReadCursor._fetch)
     target_line = start_line + next(
         index for index, line in enumerate(source) if "self.close()" in line

@@ -228,6 +228,26 @@ def source_authorization_node(snapshot: SourceSnapshot) -> Any:
     return models[snapshot.head.ref.key.kind].from_dict(payload)
 
 
+def source_mutation_payload(snapshot: SourceSnapshot, node: Any) -> dict[str, object]:
+    """Preserve canonical fields unknown to the legacy model during controlled edits."""
+    import json
+
+    from memplex.source_codec import _canonical
+
+    payload = json.loads(_canonical(snapshot.payload))
+    if type(node) is _RawParagraphView:
+        # This is an ACL read view, not the raw persistence schema. Only the
+        # supported namespace edit is taken from it; never persist defaults
+        # or transient projection fields.
+        # The read projection uses the logical ID; the validated locator
+        # retains the existing physical raw row for convenience-only edits.
+        payload["id"] = json.loads(snapshot.head.payload_locator)["id"]
+        payload["namespace"] = dict(node.namespace)
+    else:
+        payload.update(node.to_dict())
+    return payload
+
+
 class AuthorizationGate:
     """Encapsulates request authorization and ACL visibility filtering.
 

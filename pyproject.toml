@@ -148,6 +148,7 @@ files = [
     "memplex/source_contract.py",
     "memplex/source_codec.py",
     "memplex/source_validation.py",
+    "memplex/source_policy.py",
     "memplex/authorization.py",
     "memplex/sync_ingress.py",
     "memplex/sync_repository.py",

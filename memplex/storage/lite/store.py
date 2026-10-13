@@ -26,7 +26,7 @@ import tarfile
 import tempfile
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timezone
 from functools import wraps
 from itertools import islice
@@ -198,7 +198,13 @@ def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep reload, COW mutation, and journal decision in one flock scope."""
 
     def _locked_call(self: Any, args: tuple, kwargs: dict) -> Any:
-        with self._durability.writer_lock():
+        from memplex.storage.source_versions import _RESOURCE_ISSUER, _source_write_scope
+
+        access = (type(self) is LiteMemoryStore and method.__name__ in {"increment_access", "increment_access_batch"}
+                  and getattr(LiteMemoryStore, method.__name__).__wrapped__ is method)
+        scope = (_source_write_scope(self._durability, issuer=_RESOURCE_ISSUER, access_only=True)
+                 if access else nullcontext())
+        with self._durability.writer_lock(), scope:
             try:
                 return method(self, *args, **kwargs)
             except BaseException:
@@ -1185,6 +1191,7 @@ class LiteMemoryStore:
         funcs: list[Function],
         sources: list[SourceDocument],
     ) -> BatchResult:
+        self._reload_for_mutation()
         result = BatchResult(total=len(funcs))
         for func, src in zip(funcs, sources):
             try:
@@ -2732,6 +2739,21 @@ class LiteMemoryStore:
         post-decision failure is recovered/republished before its exception
         escapes.
         """
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.source_versions import _source_write_mode
+
+        if (self._committed_pair is not None and self._committed_pair.memory.get("schema_version") == 3
+                and _source_write_mode(self._durability) != "access"):
+            previous = self._committed_pair
+            unchanged = (self._raw_memory() == previous.memory
+                         and self._raw_changelog() == previous.changelog)
+            self._reload_for_mutation(force=True)
+            if unchanged:
+                if previous != self._committed_pair:
+                    raise LiteStorageIntegrityError("Lite V3 authority changed during legacy scope")
+                # Empty legacy/deferred scopes publish nothing.
+                return
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         if self._commit_defer_depth > 0:
             # Batching: validate the resident invariants now, but let the
             # outermost deferred_commit() exit pay the durable pair once.
@@ -2954,10 +2976,18 @@ class LiteMemoryStore:
         skipped.  ``force=True`` is used by rollback paths that must discard
         a speculative resident state even when the files are unchanged.
         """
-        if not force and self._committed_pair is not None and self._pair_files_unchanged():
-            return
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.source_versions import _source_write_mode
+
         with self._durability.writer_lock():
-            self._publish_pair(self._durability._load_authoritative_locked())
+            if force or self._committed_pair is None or not self._pair_files_unchanged():
+                self._publish_pair(self._durability._load_authoritative_locked())
+            assert self._committed_pair is not None
+            if (not force and self._committed_pair.memory.get("schema_version") == 3
+                    and _source_write_mode(self._durability) != "access"):
+                # Discard resident objects even if an old writer edited before admission.
+                self._publish_pair(self._durability._load_authoritative_locked())
+                raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
 
     def _refresh_for_read(self) -> None:
         """Observe a peer's committed pair before returning a public value.

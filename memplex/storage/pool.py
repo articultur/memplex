@@ -41,6 +41,7 @@ from memplex.storage.migrations.runner import (
     VectorCapabilityRequest,
     VectorCapabilityStatus,
 )
+from memplex.storage.source_versions import _ResourceSeal
 
 BindScope = Callable[[Any, AuthorizationContext], None]
 
@@ -512,6 +513,127 @@ def _require_source_pool(manager: PostgresPoolManager, *, quiescent: bool = Fals
     return pool
 
 
+class _SourceTransactionAdmission(_ResourceSeal):
+    """One-use exemption for one repository transaction and its actual lease."""
+
+    __slots__ = ("_claimed", "_consumed", "_manager", "_transaction")
+    _manager: PostgresPoolManager
+    _transaction: _TransactionContext | None
+    _claimed: bool
+    _consumed: bool
+
+    def __init__(self, manager: PostgresPoolManager, transaction: _TransactionContext,
+                 *, resource: object, issuer: object) -> None:
+        super().__init__(resource=resource, issuer=issuer)
+        object.__setattr__(self, "_manager", manager)
+        object.__setattr__(self, "_transaction", transaction)
+        object.__setattr__(self, "_claimed", False)
+        object.__setattr__(self, "_consumed", False)
+
+    def claim(self, transaction: _TransactionContext) -> None:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        if type(self) is not _SourceTransactionAdmission or self._claimed or transaction is not self._transaction:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        # Spend entry before borrowing/binding. Cancellation cannot make this
+        # same capability re-entrant or transferable to another transaction.
+        object.__setattr__(self, "_claimed", True)
+
+    def consume(self, transaction: _TransactionContext, connection: Any, cursor: Any) -> None:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        if not self._claimed or self._consumed:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        object.__setattr__(self, "_consumed", True)
+        try:
+            if (type(transaction) is not _TransactionContext or transaction is not self._transaction
+                    or transaction._manager is not self._manager
+                    or self._manager._source_resource is not self._resource
+                    or connection is None or transaction._connection is not connection
+                    or cursor is None or transaction._cursor is not cursor):
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        finally:
+            # No transaction/connection authority survives consumption. The
+            # repository retains only its already admitted owned cursor.
+            object.__setattr__(self, "_transaction", None)
+
+
+def _source_transaction(manager: PostgresPoolManager, bind_scope: BindScope,
+                        context: AuthorizationContext, *, resource: object,
+                        issuer: object, deadline_ns: int) -> _TransactionContext:
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    if type(manager) is not PostgresPoolManager or manager._source_resource is not resource:
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    transaction = manager.transaction(bind_scope, context, deadline_ns=deadline_ns)
+    transaction._source_admission = _SourceTransactionAdmission(manager, transaction, resource=resource, issuer=issuer)
+    return transaction
+
+
+class _SourceReadCursor:
+    """Default-deny SQL admission for non-repository transactions in a V1 pool."""
+
+    def __init__(self, cursor: Any) -> None:
+        self._cursor = cursor
+
+    def execute(self, query: Any, parameters: Any = None) -> Any:
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        if type(query) is not str or not query.lstrip().upper().startswith("SELECT ") or ";" in query:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+        return self._cursor.execute(query, parameters)
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def fetchall(self) -> Any:
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size: int | None = None) -> Any:
+        return self._cursor.fetchmany() if size is None else self._cursor.fetchmany(size)
+
+    def close(self) -> None:
+        self._cursor.close()
+
+    @property
+    def rowcount(self) -> Any:
+        return self._cursor.rowcount
+
+    @property
+    def description(self) -> Any:
+        return self._cursor.description
+
+
+def _source_cursor_admission(manager: PostgresPoolManager, cursor: Any,
+                             context: AuthorizationContext, *,
+                             transaction: _TransactionContext | None = None,
+                             connection: Any = None) -> Any:
+    from memplex.source_contract import RejectionCode, SourceContractError
+    resource = getattr(manager, "_source_resource", None)
+    if transaction is not None and transaction._source_admission is not None:
+        if type(transaction._source_admission) is not _SourceTransactionAdmission:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        transaction._source_admission.consume(transaction, connection, cursor)
+        return cursor
+    # Binding precedes this read. The verified authority RLS policy depends
+    # only on tenant/workspace; it cannot hide an authority from a subject in
+    # that exact scope. Query/binding failures never mean "legacy".
+    cursor.execute("SELECT current_setting('memplex.tenant_id', true), "
+                   "current_setting('memplex.workspace_id', true), EXISTS (SELECT 1 FROM memplex_source_authorities "
+                   "WHERE tenant_id=%s AND workspace=%s) AS has_source_authority",
+                   (context.principal.tenant_id, context.workspace_id))
+    row = cursor.fetchone()
+    if (row is None or len(row) != 3 or row[:2] != (context.principal.tenant_id, context.workspace_id)
+            or type(row[2]) is not bool):
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    if resource is not None or row[2]:
+        # PostgreSQL also rejects writes through SELECT functions/CTEs. The
+        # fixed cursor surface admits only ordinary read statements.
+        cursor.execute("SET TRANSACTION READ ONLY")
+        return _SourceReadCursor(cursor)
+    return cursor
+
+
 class _SourceDeadlineCursor:
     """Unnamed, non-streaming source cursor with one-message timeout setup."""
 
@@ -745,8 +867,11 @@ class _TransactionContext:
         self._connection: Any | None = None
         self._cursor: Any | None = None
         self._closed_cursor_ids: set[int] = set()
+        self._source_admission: _SourceTransactionAdmission | None = None
 
     def __enter__(self) -> tuple[Any, Any]:
+        if self._source_admission is not None:
+            self._source_admission.claim(self)
         reservation_context: Any | None = None
         reservation: _BorrowCapacityReservation | None = None
         connection: Any | None = None
@@ -764,6 +889,9 @@ class _TransactionContext:
             self._connection = connection
             self._cursor = cursor
             self._bind_scope(cursor, self._context)
+            cursor = _source_cursor_admission(self._manager, cursor, self._context,
+                                              transaction=self, connection=connection)
+            self._cursor = cursor
             reservation.publish(connection)
             return connection, cursor
         except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative
@@ -899,6 +1027,8 @@ class _TransactionContext:
 
 class PostgresPoolManager:
     """One bounded pool shared by all stores in a ready storage resource."""
+
+    _source_resource: object | None = None
 
     def __init__(
         self,
@@ -1439,6 +1569,7 @@ class PostgresPoolManager:
             try:
                 cursor = connection.cursor()
                 bind_scope(cursor, context)
+                cursor = _source_cursor_admission(self, cursor, context)
                 wrapped = PooledReadCursor(self, reservation._token, connection, cursor)
                 reservation.publish(connection)
             except BaseException as exc:  # noqa: BLE001 - shutdown/cleanup semantics; primary error stays authoritative

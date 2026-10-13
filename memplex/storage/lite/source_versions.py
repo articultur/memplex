@@ -75,17 +75,21 @@ from memplex.storage.lite.durability import (
 from memplex.storage.lite.single_writer import SingleWriterQueue, single_writer_enabled
 from memplex.storage.source_versions import (
     _RESOURCE_ISSUER,
+    PolicyUpdateAuthority,
     SourceAdmission,
     SourceCapability,
     SourceReadSession,
     SourceValidationHooks,
     _admit_publication,
     _check_admission,
+    _check_policy_update,
     _check_publication_inputs,
     _make_publication,
     _publication_replay,
     _publication_request_digest,
     _publication_tombstone,
+    _raw_retirements,
+    _source_write_scope,
     validate_publish_command,
 )
 
@@ -116,7 +120,7 @@ def _payload_locator(key: SourceKey, payload: Mapping[str, object]) -> str:
     _require(isinstance(namespace, Mapping))
     assert isinstance(namespace, Mapping)
     aliases = {alias: namespace[alias] for alias in
-               ("memplex_tenant_id", "memplex_workspace_id", "memplex_subject_id") if alias in namespace}
+               _NAMESPACE_IDENTITY_FIELDS if alias in namespace}
     for alias, field in (("memplex_tenant_id", "tenant_id"), ("memplex_workspace_id", "workspace_id"),
                          ("memplex_subject_id", "owner_subject_id")):
         _require(alias not in aliases or aliases[alias] == payload.get(field))
@@ -431,7 +435,7 @@ class LiteSourceVersionStore:
         _check_admission(admission, self._durability, scope)
         if os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", ""):
             raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
-        with self._durability.writer_lock():
+        with self._durability.writer_lock(), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
             # The official alternate durable authority is not a rebuildable
             # FTS/vector cache. Even an incomplete prior authority is not new.
             sqlite_path = self._durability._memory_path.parent / "shadow_v2.sqlite3"
@@ -454,6 +458,27 @@ class LiteSourceVersionStore:
         self._install_hooks(admission._hooks, scope=scope, issuer=_RESOURCE_ISSUER)
         return authority
 
+    def replace_policy(self, expected_revision: int, policy: PolicySnapshot,
+                       authority: PolicyUpdateAuthority) -> PolicySnapshot:
+        _check_policy_update(authority, self._durability, expected_revision, policy)
+        if self._hooks is None or self._owner is None or self._scope is None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        deadline = time.monotonic_ns() + 250_000_000
+        with self._durability.writer_lock_until(deadline), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
+            base = self._durability._load_authoritative_locked(deadline_ns=deadline)
+            ledger = decode_ledger(base.memory["source_validity"])
+            if ledger.authority.scope != self._scope or ledger.authority.state is not SourceState.LIVE:
+                raise SourceContractError(RejectionCode.QUARANTINED)
+            if ledger.authority.policy.revision != expected_revision:
+                raise SourceContractError(RejectionCode.AUTH_CHANGED)
+            updated = replace(ledger.authority, policy=policy, commit_seq=_advance(ledger.authority.commit_seq))
+            memory = copy.deepcopy(base.memory)
+            memory["source_validity"] = encode_ledger(replace(ledger, authority=updated))
+            target = LitePair(memory, copy.deepcopy(base.changelog), base.generation + 1, uuid.uuid4().hex)
+            committed = self._durability.commit_locked(base, target, base_verified=True, deadline_ns=deadline)
+            self._owner._publish_pair(committed)
+        return policy
+
     @contextmanager
     def read_fence(self, authorization: AuthorizationContext, *,
                    deadline_ns: int) -> Iterator[SourceReadSession]:
@@ -472,6 +497,10 @@ class LiteSourceVersionStore:
                 if (authority.scope != self._scope or authority.state is not SourceState.LIVE
                         or authorization.principal.tenant_id != authority.scope.tenant_id
                         or authorization.workspace_id != authority.scope.workspace_id):
+                    raise SourceContractError(RejectionCode.DENIED)
+                from memplex.source_policy import admit_principal
+
+                if not admit_principal(authorization, authority.policy):
                     raise SourceContractError(RejectionCode.DENIED)
                 yield session
             finally:
@@ -529,13 +558,14 @@ class LiteSourceVersionStore:
     def _mutate_locked(self, authorization: AuthorizationContext, command: SourceMutation,
                        deadline_ns: int) -> SourceReceipt:
         assert self._hooks is not None and self._owner is not None
-        with self._durability.writer_lock_until(deadline_ns):
+        with self._durability.writer_lock_until(deadline_ns), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
             session = _LiteReadSession(base, deadline_ns)
             try:
                 ledger = session._ledger
+                _admit_publication(session, authorization, ledger.authority.scope)
                 scope = ledger.authority.scope
                 if (scope != self._scope or ledger.authority.state is not SourceState.LIVE
                         or (command.key.authority_id, command.key.tenant_id, command.key.workspace_id)
@@ -557,6 +587,18 @@ class LiteSourceVersionStore:
                         raise SourceContractError(RejectionCode.DENIED)
                     self._check_source_inputs(session, authorization, command, deadline_ns)
                 target = _source_target(base, ledger, command, current, head, payload)
+                for raw_command in _raw_retirements(session, current, command):
+                    raw = session.source(raw_command.key)
+                    assert raw is not None
+                    if not self._hooks.own_acl(raw, authorization):
+                        raise SourceContractError(RejectionCode.DENIED)
+                    raw_payload = json.loads(_canonical(raw_command.payload))
+                    # Raw physical IDs can differ from the public logical handle.
+                    raw_payload["id"] = json.loads(raw.head.payload_locator)["id"]
+                    raw_head = _mutation_head(raw_command, raw, raw_payload, head.last_commit_seq)
+                    target = _source_target(target, decode_ledger(target.memory["source_validity"]),
+                                            raw_command, raw, raw_head, raw_payload)
+                    target = replace(target, generation=base.generation + 1)
                 _check_read_deadline(deadline_ns)
                 committed = self._durability.commit_locked(base, target, base_verified=True, deadline_ns=deadline_ns)
                 self._owner._publish_pair(committed)
@@ -602,7 +644,7 @@ class LiteSourceVersionStore:
     def _publish_locked(self, authorization: AuthorizationContext, command: PublishCommand,
                         deadline_ns: int, expected_deleted: TargetToken | None) -> PublicationReceipt:
         assert self._hooks is not None and self._owner is not None and self._scope is not None
-        with self._durability.writer_lock_until(deadline_ns):
+        with self._durability.writer_lock_until(deadline_ns), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
@@ -663,7 +705,7 @@ class LiteSourceVersionStore:
     def _delete_locked(self, authorization: AuthorizationContext, derivation_key: str,
                        expected: TargetToken, deadline_ns: int) -> TargetHead:
         assert self._owner is not None and self._hooks is not None and self._scope is not None
-        with self._durability.writer_lock_until(deadline_ns):
+        with self._durability.writer_lock_until(deadline_ns), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)

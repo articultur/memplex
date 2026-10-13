@@ -1110,3 +1110,22 @@ def validate_deployment_contract(config: MemplexConfig) -> None:
             raise ValueError("sync-enabled inbound DSN must be distinct from migration DSN")
         if application_dsn == migration_dsn:
             raise ValueError("sync-enabled migration DSN must be distinct from application DSN")
+
+
+def _replace_principal_registry(runtime: Any, registry: Any, *, backend: Any,
+                                expected_revision: int, authority: Any,
+                                algorithm_versions: frozenset[str]) -> Any:
+    """Maintenance-only install: commit authority policy before exposing new credentials.
+
+    No HTTP/config namespace can supply the resource-owned authority. Other
+    processes may retain their registry; every V1 fence re-admits current policy.
+    """
+    from memplex.auth import PrincipalRegistry
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    if type(registry) is not PrincipalRegistry:
+        raise SourceContractError(RejectionCode.MALFORMED)
+    policy = registry.policy_snapshot(expected_revision + 1, algorithm_versions=algorithm_versions)
+    committed = backend.replace_policy(expected_revision, policy, authority)
+    runtime.principal_registry = registry
+    return committed

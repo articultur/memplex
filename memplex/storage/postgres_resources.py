@@ -136,6 +136,7 @@ class PostgresStorageResources:
             adapter = PostgresSourceVersionStore(store, resource=self)
             adapter._install_hooks(hooks, scope=scope, issuer=issuer)
             admission = _issue_admission(self, scope, hooks, issuer=issuer)
+            manager._source_resource = self
             store._source_version_adapter = adapter
             return admission
 

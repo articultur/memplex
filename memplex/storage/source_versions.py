@@ -8,8 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Literal, NoReturn, Protocol
@@ -35,6 +36,7 @@ from memplex.source_contract import (
     SourceKey,
     SourceKind,
     SourceMutation,
+    SourceOperation,
     SourceReceipt,
     SourceRef,
     SourceSnapshot,
@@ -60,6 +62,8 @@ class SourceReadSession(Protocol):
 
 
 class SourceVersionStore(Protocol):
+    def replace_policy(self, expected_revision: int, policy: PolicySnapshot,
+                       authority: PolicyUpdateAuthority) -> PolicySnapshot: ...
     def initialize_authority(self, scope: AuthorityScope, policy: PolicySnapshot, *,
                              admission: SourceAdmission) -> AuthorityState: ...
     def read_fence(self, authorization: AuthorizationContext, *,
@@ -121,7 +125,51 @@ class SourceAdmission(_ResourceSeal):
 
 
 class PolicyUpdateAuthority(_ResourceSeal):
-    __slots__ = ()
+    __slots__ = ("_context",)
+    _context: AuthorizationContext
+
+    def __init__(self, *, issuer: object = None, resource: object = None,
+                 context: AuthorizationContext | None = None) -> None:
+        super().__init__(issuer=issuer, resource=resource)
+        if type(context) is not AuthorizationContext:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        object.__setattr__(self, "_context", context)
+
+
+def _issue_policy_authority(resource: object, context: AuthorizationContext, *,
+                            issuer: object) -> PolicyUpdateAuthority:
+    return PolicyUpdateAuthority(issuer=issuer, resource=resource, context=context)
+
+
+def _check_policy_update(authority: PolicyUpdateAuthority, resource: object,
+                         expected_revision: int, policy: PolicySnapshot) -> None:
+    if (type(authority) is not PolicyUpdateAuthority or authority._issuer is not _RESOURCE_ISSUER
+            or authority._resource is not resource):
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    if (type(expected_revision) is not int or not 1 <= expected_revision < MAX_REVISION
+            or type(policy) is not PolicySnapshot or policy.revision != expected_revision + 1):
+        raise SourceContractError(RejectionCode.AUTH_CHANGED)
+
+
+_SOURCE_WRITE: ContextVar[tuple[object, str] | None] = ContextVar("source_write", default=None)
+
+
+@contextmanager
+def _source_write_scope(resource: object, *, issuer: object, access_only: bool = False) -> Iterator[None]:
+    """Non-wire, resource-local write admission owned by reviewed internal paths."""
+    if issuer is not _RESOURCE_ISSUER:
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    token = _SOURCE_WRITE.set((resource, "access" if access_only else "source"))
+    try:
+        yield
+    finally:
+        _SOURCE_WRITE.reset(token)
+
+
+def _source_write_mode(resource: object) -> str | None:
+    active = _SOURCE_WRITE.get()
+    return active[1] if active is not None and active[0] is resource else None
+
 
 
 class SourceCapability(_ResourceSeal):
@@ -174,6 +222,41 @@ def _check_admission(admission: SourceAdmission, resource: object, scope: Author
         raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
 
 
+def _raw_retirements(session: SourceReadSession, current: SourceSnapshot | None,
+                     command: SourceMutation) -> tuple[SourceMutation, ...]:
+    """Carry typed historical/superseded effects into raw heads in one decision."""
+    if current is None or command.key.kind is SourceKind.RAW_PARAGRAPH or command.payload is None:
+        return ()
+    attributes = command.payload.get("attributes", {})
+    before = current.payload.get("attributes", {})
+    namespace = command.payload.get("namespace", {})
+    old_namespace = current.payload.get("namespace", {})
+    role_edit = (isinstance(attributes, Mapping) and isinstance(before, Mapping)
+                 and bool(attributes.get("memplex_role_updates"))
+                 and attributes.get("memplex_role_updates") != before.get("memplex_role_updates"))
+    superseded = (isinstance(namespace, Mapping) and isinstance(old_namespace, Mapping)
+                  and bool(namespace.get("premise_superseded"))
+                  and namespace.get("premise_superseded") != old_namespace.get("premise_superseded"))
+    if not (role_edit or superseded):
+        return ()
+    values = current.payload.get("source_paragraphs", ())
+    if not isinstance(values, (tuple, list)) or any(type(value) is not str for value in values):
+        raise SourceContractError(RejectionCode.MALFORMED)
+    source_ids = set(values)
+    source_ids.update(ref.key.logical_id for ref in current.head.root_refs if ref.key.kind is SourceKind.RAW_PARAGRAPH)
+    result = []
+    for identifier in sorted(source_ids):
+        key = session.resolve_id(identifier)
+        raw = session.source(key) if key is not None else None
+        if raw is None or raw.head.ref.key.kind is not SourceKind.RAW_PARAGRAPH or raw.head.state is not SourceState.LIVE:
+            raise SourceContractError(RejectionCode.INVALID_UPSTREAM)
+        payload = dict(raw.payload)
+        payload["premise_superseded"] = "typed:" + command.key.logical_id
+        result.append(SourceMutation(raw.head.ref.key, raw.head.ref.token, SourceOperation.REPLACE,
+                                     payload, raw.head.source_class, raw.head.input_context, raw.head.root_refs))
+    return tuple(result)
+
+
 def reject_reserved_publication(memory_id: object, namespace: object) -> None:
     """Ordinary writers cannot mint or strip a source-derived publication."""
     if (isinstance(memory_id, str) and memory_id.startswith(PUBLICATION_PREFIX)
@@ -219,10 +302,9 @@ def _admit_publication(session: SourceReadSession, context: AuthorizationContext
     if (authority.scope != scope or authority.state is not SourceState.LIVE
             or (principal.tenant_id, context.workspace_id) != (scope.tenant_id, scope.workspace_id)):
         raise SourceContractError(RejectionCode.DENIED)
-    actual = (principal.authentication_id, principal.tenant_id, principal.subject_id,
-              context.workspace_id, context.agent_id, principal.roles)
-    if not any(actual == (entry.authentication_id, entry.tenant_id, entry.subject_id,
-                           entry.workspace_id, entry.agent_id, entry.roles) for entry in authority.policy.entries):
+    from memplex.source_policy import admit_principal
+
+    if not admit_principal(context, authority.policy):
         raise SourceContractError(RejectionCode.DENIED)
     return authority
 
