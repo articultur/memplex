@@ -24,6 +24,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 from itertools import islice
 from typing import TYPE_CHECKING, Optional
@@ -69,10 +70,12 @@ class MultiPathRetriever:
         store: MemoryStore,
         embedding_service: EmbeddingService | None = None,
         wiki_searcher: object | None = None,
+        result_guard: Callable[[list[SearchResult]], list[SearchResult]] | None = None,
     ) -> None:
         self._store = store
         self._embedding_service = embedding_service
         self._wiki_searcher = wiki_searcher
+        self._result_guard = result_guard
 
     # ── Retrieval paths ──────────────────────────────────────────────
 
@@ -238,18 +241,27 @@ class MultiPathRetriever:
         # TF-IDF corpus statistics (pinned by
         # test_query_does_not_pollute_tfidf_stats).
         embed_query_batch = getattr(self._embedding_service, "embed_query_batch", None)
-        if not callable(embed_query_batch):
-            # Minimal services expose only per-text methods.
-            for r in missing:
-                r.vector_cache = self._embed_query_text(r.summary)
-            return
-        batch_size = max(1, int(getattr(self._embedding_service, "batch_size", 32) or 32))
-        texts = [r.summary for r in missing]
-        vectors: list[Vector] = []
-        for start in range(0, len(texts), batch_size):
-            vectors.extend(embed_query_batch(texts[start : start + batch_size]))
-        for r, vector in zip(missing, vectors):
-            r.vector_cache = vector
+        for batch in self._embedding_batches(missing):
+            current = self._result_guard(batch) if self._result_guard is not None else batch
+            if not current:
+                continue
+            vectors = (embed_query_batch([r.summary for r in current]) if callable(embed_query_batch)
+                       else [self._embed_query_text(current[0].summary)])
+            for result, vector in zip(current, vectors):
+                result.vector_cache = vector
+
+    def _embedding_batches(self, results: list[SearchResult]) -> list[list[SearchResult]]:
+        """Retain each existing outer and inner transport cut, in order."""
+        if not callable(getattr(self._embedding_service, "embed_query_batch", None)):
+            return [[result] for result in results]
+        limits = [max(1, int(getattr(self._embedding_service, "batch_size", 32) or 32))]
+        nested_limits = getattr(self._embedding_service, "query_batch_limits", None)
+        if callable(nested_limits):
+            limits.extend(nested_limits())
+        batches = [results]
+        for size in limits:
+            batches = [batch[start:start + size] for batch in batches for start in range(0, len(batch), size)]
+        return batches
 
     def _embed_query_text(self, text: str) -> Vector:
         """Embed query-time text without polluting TF-IDF corpus statistics."""

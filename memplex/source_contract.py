@@ -89,7 +89,8 @@ class SourceContractError(ValueError):
 
 
 class SourceBusyError(SourceContractError):
-    pass
+    def __init__(self, code: RejectionCode = RejectionCode.BUDGET_EXHAUSTED) -> None:
+        super().__init__(code)
 
 
 class SourceIntegrityError(SourceContractError):

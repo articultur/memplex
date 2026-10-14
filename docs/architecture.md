@@ -190,6 +190,7 @@ context.py            Bounded source-ID context assembly; no adapters, service o
 core/                 Pure computation layer (CoreEngine, extractors, hooks)
 factual_capture.py    Opt-in evidence namespace/materialization, committed raw + typed lineage
 source_capture.py     V1 source receipts, fenced complete input capture, publication requests
+source_runtime.py     V1 public current reads; proof, final UTC and projection in one read fence
 factual_lineage.py    Factual-only semantic source snapshots and current-source safety
 host_lifecycle.py     G008 host-contract digests (detailed below)
 improve.py            Proactive fact maintenance (dedupe/expire/reindex) ⁴
@@ -285,8 +286,40 @@ internal dependency validation retains own-ACL checks. A PostgreSQL handle
 without an adapter establishes genuine legacy scope through the existing
 bound tenant/workspace authority query and verified RLS policy; a recognized
 V1 domain or uncertain response fails closed. This adds no grants or production
-initialization. Complete V1 query text projection remains a separate read-path
-task. Both V1 admission and factual capture retain their existing off defaults.
+initialization. V1 admission and factual capture retain their existing off defaults.
+
+`source_runtime.py` owns current V1 service reads. It validates every root and
+its sources under one admitted backend read fence, takes one authority UTC L,
+rechecks expiry (equality is expired), then detaches and renders inside that
+same fence. It reuses the storage-independent `context.py` renderer; no second
+model channel or reusable authorization proof is introduced. Query candidates
+are projected before each reranker body send and again before public return.
+Candidate vector backfill is deferred to that guarded reranker input; the
+existing batch embedding path never receives unproved retrieval summaries.
+The original outer batch, embedding-service chunk and remote request cap are
+retained as separate cut points. Each outgoing batch (or per-text fallback)
+gets a new projection immediately before that send, without holding the source
+lock over model I/O or adding requests. Legacy retrieval applies its marker and
+authorization guard before each candidate-body embedding as well.
+Only their rank and score survive; names, summaries, trust and result metadata
+come from current snapshots, while graph context and unsupported explanation
+fields are dropped. Direct get and lists resolve current IDs again, including
+when legacy historical list flags are supplied. V1 timelines expose current
+body-free audit metadata without reading legacy changelog bodies. Pending review
+values are rebuilt from current nodes instead of saved conflict text. Registered
+captured typed inputs stay internal. A V1 carrier or reserved publication ID
+without an audited adapter cannot enter a legacy public read. Full domain
+admission, old-writer and restore isolation remain separate unfinished work.
+
+The runtime fixes one monotonic hard end before acquiring the fence, bounded by
+the caller's deadline and 250 ms. After entry it reserves one tenth of the
+remaining time (at least 1 ns) for the final authority clock, expiry checks and
+pure projection; validation receives the earlier soft end. This reduces the
+time available for validation without increasing any frozen limit. Final L is
+still sampled after validation. A hard timeout or failed final clock produces
+no unfinalized body, retaining only aggregate proof-stage counts on the original
+exception. These counts contain no source IDs or reusable proof. Lock, cursor
+and transaction deadlines are unchanged, and no performance benefit is claimed.
 
 `service.query()` itself delegates the six-stage read path to
 `query_pipeline.QueryPipeline`: the service resolves the request-scoped

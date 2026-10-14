@@ -19,6 +19,7 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 from datetime import UTC, datetime, timezone
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,7 @@ class QueryPipeline:
         auth: AuthorizationGate,
         detect_scope: Callable[[str], QueryScope],
         compute_hyde_vector: Callable[[str], Vector | None],
+        project_candidates: Callable[[QueryResult], QueryResult] | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -81,6 +83,7 @@ class QueryPipeline:
         self._auth = auth
         self._detect_scope = detect_scope
         self._compute_hyde_vector = compute_hyde_vector
+        self._project_candidates = project_candidates
 
     def run(
         self,
@@ -116,15 +119,7 @@ class QueryPipeline:
         # A compiled wiki index is not tenant-addressable.  On a scoped
         # backend, use its SQL/FTS path instead of producing global wiki
         # candidates and attempting to remove them afterwards.
-        retriever = (
-            self._retriever
-            if store is self._base_store
-            else MultiPathRetriever(
-                store,
-                embedding_service=self._embedding_service,
-                wiki_searcher=None,
-            )
-        )
+        retriever = self._candidate_retriever(context)
         scope = self._detect_scope(text)
         start = datetime.now(UTC)
         trace: dict[str, Any] | None = None
@@ -189,7 +184,8 @@ class QueryPipeline:
                 }
             )
         before_authorization = len(results)
-        results = self._auth.filter_authorized_results(results, context)
+        results = (self._auth.filter_authorized_results(results, context)
+                   if self._project_candidates is None else self._project(results, scope).results)
         if trace is not None:
             trace["stages"].append(
                 {
@@ -238,6 +234,7 @@ class QueryPipeline:
                     recency_halflife_days=self._config.reranker.recency_halflife_days,
                 )
             )
+            results = self._rerank_inputs(results, scope)
             results = reranker.rerank(text, results, top_k * 2, query_vector)
             if trace is not None:
                 trace["stages"].append(
@@ -252,6 +249,7 @@ class QueryPipeline:
         # Stage 2: Cross-encoder precision rerank (optional)
         if self._cross_reranker is not None:
             before_cross = len(results)
+            results = self._project(results, scope).results
             results = self._cross_reranker.rerank(text, results)
             if trace is not None:
                 trace["stages"].append(
@@ -268,7 +266,7 @@ class QueryPipeline:
         # (MCP memory_search, HTTP /memories, CLI recall, AgentMemoryRuntime).
         # The flag is stamped at write time in write(); this is the read-side
         # enforcement that previously only AgentMemoryRuntime applied.
-        if results:
+        if results and self._project_candidates is None:
             before_injection = len(results)
             results = drop_injection_suspected(
                 results,
@@ -312,7 +310,7 @@ class QueryPipeline:
 
         latency = int((datetime.now(UTC) - start).total_seconds() * 1000)
 
-        results, used, truncated = self._apply_token_budget(results, max_tokens, trace)
+        results, used, truncated = self._final_budget(results, max_tokens, trace)
         if trace is not None:
             # Mark which per-path candidates survived to the final window.
             final_ids = {r.func_id for r in results}
@@ -333,7 +331,7 @@ class QueryPipeline:
                 for r in results
             ]
 
-        return QueryResult(
+        result = QueryResult(
             results=results,
             scope=scope,
             latency_ms=latency,
@@ -342,6 +340,58 @@ class QueryPipeline:
             truncated=truncated,
             explanation=build_query_explanation(trace),
         )
+        return self._finalize(result)
+
+    def _candidate_retriever(self, context: AuthorizationContext) -> MultiPathRetriever:
+        def guard(results: list[SearchResult]) -> list[SearchResult]:
+            return self._auth.filter_authorized_results(results, context)
+
+        if self._store is self._base_store and self._project_candidates is None:
+            # Keep current instance collaborators/patches without installing
+            # a request's authorization closure on the shared retriever.
+            retriever = copy(self._retriever)
+            retriever._result_guard = guard
+            return retriever
+        # V1 candidates carry unproved bodies. Defer result embedding until
+        # their guarded projection immediately before the existing reranker.
+        return MultiPathRetriever(
+            self._store, wiki_searcher=None,
+            embedding_service=self._embedding_service if self._project_candidates is None else None,
+            result_guard=guard if self._project_candidates is None else None,
+        )
+
+    def _rerank_inputs(self, results: list[SearchResult], scope: QueryScope) -> list[SearchResult]:
+        if self._project_candidates is None or self._embedding_service is None:
+            return self._project(results, scope).results
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        retriever = MultiPathRetriever(self._store, embedding_service=self._embedding_service)
+        current: list[SearchResult] = []
+        for batch in retriever._embedding_batches(results):
+            projected = self._project(batch, scope).results
+            retriever._prefill_result_vectors(projected)
+            if any(item.vector_cache is None for item in projected):
+                # A missing vector must never cause an unguarded reranker
+                # retry of the body after a preceding transport request.
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            current.extend(projected)
+        return current
+
+    def _final_budget(
+        self, results: list[SearchResult], max_tokens: int, trace: dict[str, Any] | None,
+    ) -> tuple[list[SearchResult], int, bool]:
+        if self._project_candidates is not None:
+            # V1 budgets whole freshly rendered fragments at the final fence.
+            return results, 0, False
+        return self._apply_token_budget(results, max_tokens, trace)
+
+    def _finalize(self, result: QueryResult) -> QueryResult:
+        return self._project_candidates(result) if self._project_candidates is not None else result
+
+    def _project(self, results: list[SearchResult], scope: QueryScope) -> QueryResult:
+        """A new guarded read before each potential external body send."""
+        candidate = QueryResult(results=results, scope=scope, latency_ms=0)
+        return self._project_candidates(candidate) if self._project_candidates is not None else candidate
 
     def _orchestrated_fanout(
         self,

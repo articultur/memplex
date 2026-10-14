@@ -360,6 +360,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "memplex/source_codec.py",
         "memplex/source_validation.py",
         "memplex/source_capture.py",
+        "memplex/source_runtime.py",
         "memplex/source_policy.py",
         "memplex/authorization.py",
         "memplex/sync_ingress.py",
@@ -536,6 +537,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "tests/test_source_v1_policy.py",
         "tests/test_source_v1_mutation_routes.py",
         "tests/test_source_v1_capture.py",
+        "tests/test_source_v1_service_reads.py",
     ):
         assert required_test in postgres_steps
 

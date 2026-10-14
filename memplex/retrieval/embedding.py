@@ -525,6 +525,19 @@ class EmbeddingService:
                     vectors.extend(self._embedder.encode(part))
             return vectors
 
+    def query_batch_limits(self) -> tuple[int, ...]:
+        """Existing nested transport cuts, so callers can guard each request.
+
+        This only describes embed_query_batch's existing split points. It
+        does not encode, change the configured batch size, or add requests.
+        """
+        chunk = min(self.batch_size, 16) or 16
+        if chunk <= 0:
+            raise ValueError("query embedding batch size must be positive")
+        if isinstance(self._embedder, RemoteEmbedder):
+            return chunk, self._embedder._max_request_size
+        return (chunk,)
+
     def embed_function(
         self,
         func: Function,

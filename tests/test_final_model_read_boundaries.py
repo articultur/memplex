@@ -483,3 +483,51 @@ def test_mcp_host_metadata_alone_is_not_canonical_observation_identity(surfaces)
     text, payload = _call(server, "memory_observations")
     assert [node["id"] for node in payload["observations"]] == ["good-observation"]
     assert unbound.id not in text and "UNBOUND BODY" not in text
+
+
+def test_current_projection_removes_entire_stale_explanation_and_graph(monkeypatch):
+    """A public/model serializer receives only the rebuilt current payload."""
+    from contextlib import contextmanager
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from memplex import source_runtime
+    from memplex.context import ContextCandidate
+    from memplex.llm.injection_guard import InjectionRiskRegistry
+    from memplex.models import QueryResult, QueryScope, SearchResult
+    from memplex.source_runtime import project_v1_results
+    from tests.source_v1_support import FakeReadSession, validation_snapshot
+    from tests.test_source_v1_validation import CONTEXT
+
+    session = FakeReadSession([validation_snapshot("current")])
+    monkeypatch.setattr(source_runtime, "time", SimpleNamespace(monotonic_ns=session.monotonic_ns))
+    active = []
+
+    @contextmanager
+    def fence(*args, **kwargs):
+        active.append(True)
+        try:
+            yield session
+        finally:
+            active.pop()
+
+    class SourceService:
+        _injection_risks = InjectionRiskRegistry()
+
+        def _v1_source_store(self, context):
+            from types import SimpleNamespace
+            return SimpleNamespace(read_fence=fence)
+
+        def is_safe_for_model(self, node):
+            assert active
+            return True
+
+    candidate = QueryResult([SearchResult("current", "OLD_SECRET", "OLD_SECRET", 0.72, "OLD_SECRET",
+                                          graph_context={"neighbor": "OLD_SECRET"})],
+                            QueryScope.ALL, 0, explanation={"unknown": {"old": "OLD_SECRET"}})
+    result = project_v1_results(SourceService(), candidate, authorization=CONTEXT, top_k=1,
+                               max_tokens=4000, deadline_ns=session.monotonic_ns() + 250_000_000)
+    serialized = json.dumps(asdict(result), default=str)
+    assert "OLD_SECRET" not in serialized and "source current" in serialized
+    assert result.results[0].relevance_score == 0.72
+    assert not active

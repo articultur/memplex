@@ -149,6 +149,7 @@ files = [
     "memplex/source_codec.py",
     "memplex/source_validation.py",
     "memplex/source_capture.py",
+    "memplex/source_runtime.py",
     "memplex/source_policy.py",
     "memplex/authorization.py",
     "memplex/sync_ingress.py",
@@ -434,7 +435,7 @@ forbidden_modules = ["memplex.adapters"]
 # carve-out below — an indirect ban would reject that bridge.
 name = "Service layer never directly imports host adapters"
 type = "forbidden"
-source_modules = ["memplex.service"]
+source_modules = ["memplex.service", "memplex.source_runtime"]
 allow_indirect_imports = true
 forbidden_modules = ["memplex.adapters"]
 

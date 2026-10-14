@@ -981,6 +981,15 @@ class MemplexService:
         authorization, binds the current collaborators, and delegates.
         """
         context = self._require_authorization(authorization)
+        from memplex.source_runtime import project_v1_results
+
+        project_candidates: Callable[[QueryResult], QueryResult] | None = None
+        if self._v1_source_store(context) is not None:
+            def project_candidates(result: QueryResult) -> QueryResult:
+                return project_v1_results(
+                    self, result, authorization=context, top_k=len(result.results),
+                    max_tokens=result.max_tokens, deadline_ns=time.monotonic_ns() + 250_000_000,
+                )
         detect_scope: Callable[[str], QueryScope] = self._detect_scope
         sub_queries: list[str] | None = None
         if orchestrated is None:
@@ -1017,6 +1026,7 @@ class MemplexService:
             auth=self._auth,
             detect_scope=detect_scope,
             compute_hyde_vector=self._compute_hyde_vector,
+            project_candidates=project_candidates,
         )
         return pipeline.run(
             text,
@@ -1784,6 +1794,8 @@ class MemplexService:
         type uniformly (previously a typed id always returned ``None``).
         """
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            return self.resolve_context_nodes([memory_id], authorization=context).get(memory_id)
         # The unbound development API is intentionally a compatibility
         # surface for local tooling. Production never reaches this branch
         # because ``_require_authorization`` rejects absent credentials.
@@ -1807,6 +1819,11 @@ class MemplexService:
     ) -> list:
         """Return a visible memory's changelog, hiding cross-scope IDs."""
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            from memplex.source_runtime import source_timeline
+
+            return source_timeline(self, memory_id, authorization=context,
+                                   deadline_ns=time.monotonic_ns() + 250_000_000)[:max(0, limit)]
         if self._visible_node(memory_id, context) is None:
             return []
         try:
@@ -1848,6 +1865,9 @@ class MemplexService:
             return []
         try:
             facts = list(list_fn(limit=limit))
+            if self._v1_source_store(context) is not None:
+                current = self.resolve_context_nodes([fact.id for fact in facts], authorization=context)
+                return [node for node in current.values() if isinstance(node, Fact)]
             compatibility = authorization is None and self._is_local_development_context(context)
             visible = [fact for fact in facts if (
                 compatibility and fact.provenance.get("extraction") != "factual_capture_v1"
@@ -1893,7 +1913,12 @@ class MemplexService:
             return []
         try:
             observations = list(list_fn(limit=limit, category=category, owner=owner))
-            visible = observations if (
+            if self._v1_source_store(context) is not None:
+                current = self.resolve_context_nodes([node.id for node in observations], authorization=context)
+                return [node for node in current.values() if isinstance(node, Observation)
+                        and (category is None or node.category == category)
+                        and (owner is None or node.owner == owner)]
+            visible = [node for node in observations if self._auth.is_public_source(node, context)] if (
                 authorization is None and self._is_local_development_context(context)
             ) else [
                 observation
@@ -2255,6 +2280,13 @@ class MemplexService:
         list[PendingReview]
         """
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            from memplex.source_runtime import project_v1_reviews
+
+            return project_v1_reviews(
+                self, self._feedback_store_for(context).get_pending(), authorization=context,
+                owner=owner, limit=limit, deadline_ns=time.monotonic_ns() + 250_000_000,
+            )
         pending = []
         for review in self._feedback_store_for(context).get_pending():
             node = self._visible_node(review.memory_id, context)
@@ -2572,6 +2604,11 @@ class MemplexService:
         self, memory_ids: Sequence[str], *, authorization: AuthorizationContext,
     ) -> dict[str, Any]:
         """Return only current committed, authorized and safe source nodes."""
+        if self._v1_source_store(authorization) is not None:
+            from memplex.source_runtime import resolve_v1_nodes
+
+            return dict(resolve_v1_nodes(self, memory_ids, authorization=authorization,
+                                         deadline_ns=time.monotonic_ns() + 250_000_000))
         nodes, _dropped = self._resolve_context_snapshot(memory_ids, authorization=authorization)
         return nodes
 
@@ -2583,6 +2620,11 @@ class MemplexService:
     ) -> ContextAssembly:
         """Apply a host's pure predicate and the single final context renderer."""
         context = self._require_authorization(authorization)
+        if self._v1_source_store(context) is not None:
+            from memplex.source_runtime import assemble_v1_context
+
+            return assemble_v1_context(self, candidates, authorization=context, runtime_filter=runtime_filter,
+                                       max_tokens=max_tokens, deadline_ns=time.monotonic_ns() + 250_000_000)
         resolution_drops: Counter[str] = Counter()
 
         def resolve(ids: Sequence[str]) -> Mapping[str, Any]:

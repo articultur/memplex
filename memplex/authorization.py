@@ -395,17 +395,26 @@ class AuthorizationGate:
         import json
         import time
 
-        from memplex.source_contract import SourceClass, SourceKind, SourceState
+        from memplex.source_contract import (
+            CARRIER_KEY,
+            PUBLICATION_PREFIX,
+            SourceClass,
+            SourceKind,
+            SourceState,
+        )
         from memplex.storage.lite.store import LiteMemoryStore
         from memplex.storage.postgres import PostgresMemoryStore
 
         store = self._store_provider()
+        namespace = getattr(node, "namespace", {})
+        marked = (isinstance(namespace, Mapping) and CARRIER_KEY in namespace
+                  or str(getattr(node, "id", "")).startswith(PUBLICATION_PREFIX))
         try:
             if type(store) is LiteMemoryStore:
                 store._refresh_for_read()
                 pair = store._committed_pair
                 if pair is None or pair.memory.get("schema_version") != 3:
-                    return True
+                    return not marked
                 backend = store.source_versions()
             elif type(store) is PostgresMemoryStore:
                 backend = store.authorized(context).source_versions()
@@ -423,11 +432,11 @@ class AuthorizationGate:
                         row = cursor.fetchone()
                     finally:
                         cursor.close()
-                    return (row is not None and len(row) == 3
+                    return (not marked and row is not None and len(row) == 3
                             and row[:2] == (context.principal.tenant_id, context.workspace_id)
                             and type(row[2]) is bool and row[2] is False)
             else:
-                return True
+                return not marked
             if backend is None:
                 return False
             with backend.read_fence(context, deadline_ns=time.monotonic_ns() + 250_000_000) as session:
