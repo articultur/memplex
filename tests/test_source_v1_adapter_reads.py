@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -29,6 +31,31 @@ from tests.test_source_v1_publication import publish_command
 
 SECRET = "adapteroldsecret"
 CONTROL = "adaptercurrentcontrol"
+
+
+@pytest.fixture(autouse=True)
+def _close_case_owned_queues(monkeypatch):
+    """End only queues created for this case, after its dependent fixtures."""
+    from memplex.storage.lite.single_writer import SingleWriterQueue
+
+    owner_pid = os.getpid()
+    initialize = SingleWriterQueue.__init__
+    owned = []
+
+    def track(queue):
+        initialize(queue)
+        owned.append((os.getpid(), queue))
+
+    monkeypatch.setattr(SingleWriterQueue, "__init__", track)
+    try:
+        yield
+    finally:
+        assert os.getpid() == owner_pid
+        assert all(pid == owner_pid for pid, _queue in owned)
+        with ExitStack() as cleanup:
+            for _pid, queue in owned:
+                cleanup.callback(queue.close, drain=True)
+        assert all(queue._thread is None or not queue._thread.is_alive() for _pid, queue in owned)
 
 
 @pytest.fixture
@@ -83,6 +110,54 @@ def _change(h, receipt, text="changed", **fields):
         expected=receipt.ref.token, operation=SourceOperation.REPLACE)
     return _mutate(h.backend, replace(command, payload={
         **command.payload, "namespace": {"domain": "adapter", "memplex_subject_id": "alice"}, **fields}))
+
+
+def _write_as(h, node, context, *, kind=SourceKind.FACT, receipt=None, visibility="session"):
+    """Use the writer's actual native view and verify its committed identity."""
+    from memplex.auth import bind_node_identity
+
+    node = bind_node_identity(deepcopy(node), context, visibility=visibility)
+    backend = h.service._v1_source_store(context)
+    assert backend is not None
+    command = replace(_command(name=node.id, kind=kind,
+        expected=receipt.ref.token if receipt else None,
+        operation=SourceOperation.REPLACE if receipt else SourceOperation.CREATE), payload=node.to_dict())
+    committed = _mutate(backend, command, context)
+    if receipt is not None:
+        assert committed.ref.key == receipt.ref.key
+        assert committed.ref.token.incarnation == receipt.ref.token.incarnation
+        assert committed.ref.token.content_revision == receipt.ref.token.content_revision
+        assert committed.ref.token.auth_revision == receipt.ref.token.auth_revision + 1
+        assert committed.ref.semantic_digest == receipt.ref.semantic_digest
+    with backend.read_fence(context, deadline_ns=time.monotonic_ns() + 250_000_000) as session:
+        snapshot = session.source(committed.ref.key)
+        assert snapshot is not None and snapshot.head.ref == committed.ref
+        payload = snapshot.payload
+        assert payload["tenant_id"] == context.principal.tenant_id
+        assert payload["owner"] == payload["owner_subject_id"] == context.principal.subject_id
+        assert payload["workspace_id"] == context.workspace_id and payload["visibility"] == visibility
+        assert payload["origin_session"] == context.session_id
+        assert payload["namespace"]["memplex_subject_id"] == context.principal.subject_id
+        assert payload["namespace"]["memplex_workspace_id"] == context.workspace_id
+        assert payload["provenance"]["agent_id"] == context.agent_id
+        assert payload["provenance"]["session_id"] == context.session_id
+        assert payload["provenance"]["authentication_id"] == context.principal.authentication_id
+    assert h.service.get(node.id, authorization=context) is not None
+    return committed
+
+
+def _move_session_source(h, node, context, receipt, mismatch, *, kind=SourceKind.FACT):
+    """Change canonical identity through a lawful same-incarnation live row."""
+    alternate = (replace(context, session_id="other-session") if mismatch == "session"
+        else h.contexts["cli" if context.agent_id != "cli" else "codex"])
+    assert (alternate.agent_id == context.agent_id) == (mismatch == "session")
+    assert (alternate.session_id == context.session_id) == (mismatch == "origin")
+    shared = _write_as(h, node, context, kind=kind, receipt=receipt, visibility="workspace")
+    current = _write_as(h, node, alternate, kind=kind, receipt=shared)
+    assert current.ref.token.incarnation == receipt.ref.token.incarnation
+    assert SECRET in str(h.service.get(node.id, authorization=alternate))
+    assert h.service.get(node.id, authorization=context) is None
+    return current
 
 
 def _runtime(h, key="codex", **kwargs):
@@ -207,13 +282,13 @@ def test_prefetch_consumption_revalidates_after_source_change(adapters):
 def test_session_mismatch_denied_across_adapters(adapters, surface, mismatch, monkeypatch, capsys):
     h = adapters
     agent = "cli" if surface.startswith("cli_") else "hermes" if surface == "hermes" else "codex"
-    source = _put(h, text="adapterquery " + SECRET, visibility="session",
-        origin_session=CONTEXT.session_id, provenance={"agent_id": agent})
+    context = h.contexts[agent]
+    node = Fact(id="current", subject="item", predicate="is", object_="adapterquery " + SECRET,
+        namespace={"domain": "adapter"})
+    source = _write_as(h, node, context)
     _put(h, "control", "adapterquery " + CONTROL)
     assert SECRET in str(_surface(h, surface, monkeypatch, capsys))
-    _change(h, source, "adapterquery " + SECRET, visibility="session",
-        origin_session="other-session" if mismatch == "session" else CONTEXT.session_id,
-        provenance={"agent_id": "other-agent" if mismatch == "origin" else agent})
+    _move_session_source(h, node, context, source, mismatch)
     result = str(_surface(h, surface, monkeypatch, capsys))
     assert SECRET not in result
     if surface in {"http_get", "mcp_get", "cli_get"}:
@@ -474,23 +549,20 @@ def test_collection_origin_acl_preserves_independent_control(adapters, surface, 
     from memplex.models import Observation
 
     h = adapters
+    context = h.contexts["codex"]
     receipts = []
-    commands = []
+    nodes = []
     for identifier, body in (("restricted", SECRET), ("control", CONTROL)):
-        identity = {"id": identifier, "tenant_id": CONTEXT.principal.tenant_id,
-            "owner": "alice", "owner_subject_id": "alice", "workspace_id": CONTEXT.workspace_id,
-            "visibility": "session" if identifier == "restricted" else "workspace",
-            "origin_session": CONTEXT.session_id, "provenance": {"agent_id": "codex"},
-            "namespace": {"memplex_subject_id": "alice"}}
+        identity = {"id": identifier, "namespace": {"memplex_subject_id": "alice"}}
         if surface == "mcp_observations":
             node = Observation(**identity, category="note", event=body, context=body)
             kind = SourceKind.OBSERVATION
         else:
             node = Function(**identity, name=identifier, action=[FieldValue(desc=body)])
             kind = SourceKind.FUNCTION
-        command = replace(_command(name=identifier, kind=kind), payload=node.to_dict())
-        commands.append(command)
-        receipts.append(_mutate(h.backend, command))
+        nodes.append(node)
+        receipts.append(_write_as(h, node, context, kind=kind,
+            visibility="session" if identifier == "restricted" else "workspace"))
     if surface != "mcp_observations":
         monkeypatch.setattr(h.service._feedback_store_for(h.contexts["codex"]), "get_pending",
             lambda: [PendingReview(name, "action", []) for name in ("restricted", "control")])
@@ -499,10 +571,7 @@ def test_collection_origin_acl_preserves_independent_control(adapters, surface, 
             return _http(h, "/memories/pending_reviews")
         return _mcp(h, "memory_observations" if surface == "mcp_observations" else "memory_pending_reviews")
     assert SECRET in str(read()) and CONTROL in str(read())
-    command = commands[0]
-    _mutate(h.backend, replace(command, expected=receipts[0].ref.token, operation=SourceOperation.REPLACE,
-        payload={**command.payload, "origin_session": "other" if mismatch == "session" else CONTEXT.session_id,
-                 "provenance": {"agent_id": "other" if mismatch == "origin" else "codex"}}))
+    _move_session_source(h, nodes[0], context, receipts[0], mismatch, kind=kind)
     result = str(read())
     assert SECRET not in result and CONTROL in result
 
