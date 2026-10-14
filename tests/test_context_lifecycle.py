@@ -272,6 +272,133 @@ def test_reference_cleanup_failure_does_not_mask_successful_delete(service, monk
     assert service.store.read_context_nodes(["node"]) == {}
 
 
+@pytest.mark.parametrize("path", ["live", "search", "prefetch"])
+@pytest.mark.parametrize("mutation", ["delete", "revoke"])
+def test_round2_candidate_metadata_never_authorizes_changed_ancestor(service, monkeypatch, path, mutation):
+    from memplex.models import QueryScope
+    from memplex.retrieval.multi_path import MultiPathRetriever
+
+    ancestor = _bound_node(service, "ancestor")
+    child = _bound_node(service, "uniquechildquery", namespace={"memplex_source_refs": ancestor.id})
+    service._embedding_service = service._reranker = service._cross_reranker = None
+    service._retriever = MultiPathRetriever(service.store)
+    service._detect_scope = lambda _text: QueryScope.IMMEDIATE
+    runtime = _runtime(service, top_k=1)
+    query = service.query
+    observed = []
+
+    def change_ancestor():
+        if mutation == "delete":
+            service.store.delete(ancestor.id)
+        else:
+            ancestor.owner = ancestor.owner_subject_id = "bob"
+            ancestor.visibility = "user"
+            ancestor.namespace["memplex_subject_id"] = "bob"
+            service.store.replace_function(ancestor)
+
+    def after_query(*args, **kwargs):
+        result = query(*args, **kwargs)
+        assert [item.func_id for item in result.results] == [child.id]
+        observed.append(result)
+        change_ancestor()
+        return result
+
+    if path == "prefetch":
+        assert child.name in runtime.prefetch("uniquechildquery").context
+        change_ancestor()
+        result = runtime.before_prompt("uniquechildquery")
+        assert result.source == "prefetch"
+    else:
+        monkeypatch.setattr(service, "query", after_query)
+        result = (runtime.search_memories("uniquechildquery") if path == "search"
+                  else runtime.before_prompt("uniquechildquery"))
+        assert len(observed) == 1
+    if path == "search":
+        assert result.results == []
+    else:
+        assert result.context == "" and result.total == 0
+    assert runtime.get_accessible_memory(child.id) is None
+
+
+@pytest.mark.parametrize("rejection", ["own_acl", "carrier", "reserved_id", "domain", "unsafe"])
+def test_round2_candidate_current_metadata_filters_before_top_k(service, monkeypatch, rejection):
+    from memplex.source_contract import CARRIER_KEY, PUBLICATION_PREFIX
+
+    allowed = _bound_node(service, "allowed", domain="engineering")
+    later = _bound_node(service, "later", domain="engineering")
+    denied = _bound_node(service, "denied", domain="engineering")
+    if rejection == "own_acl":
+        denied.owner = denied.owner_subject_id = "bob"
+        denied.visibility = "user"
+        denied.namespace["memplex_subject_id"] = "bob"
+    elif rejection == "carrier":
+        denied.namespace[CARRIER_KEY] = "malformed"
+    elif rejection == "reserved_id":
+        denied.id = PUBLICATION_PREFIX + "opaque"
+    elif rejection == "domain":
+        denied.domain = "finance"
+    else:
+        denied.attributes["memplex_injection_suspected"] = "true"
+    # Inject malformed stored candidates at the private lookup seam; ordinary
+    # writers correctly reject reserved source claims before persistence.
+    real_lookup = service._auth.typed_lookup_for
+
+    def lookup(context):
+        assert context is runtime.authorization_context
+        scoped = real_lookup(context)
+        original = scoped.get
+        scoped.get = lambda key: denied if key == denied.id else original(key)
+        return scoped
+
+    service._config.agent_domains.agent_domains = {"codex": ["engineering"]}
+    _query_ids(service, monkeypatch, denied, allowed, later)
+    runtime = _runtime(service, top_k=1)
+    monkeypatch.setattr(service._auth, "typed_lookup_for", lookup)
+    candidates = runtime._search_memory_candidates("metadata")
+    assert [item.func_id for item in candidates.results] == [allowed.id]
+    assert runtime.search_memories("metadata").results[0].func_id == allowed.id
+
+
+@pytest.mark.parametrize("outcome", ["success", "empty", "raise", "denied_ancestor"])
+def test_round2_retrieval_legacy_namespace_migration_stays_authorized(service, monkeypatch, outcome):
+    from types import SimpleNamespace
+
+    node = Preference(id="legacy-retrieval", aspect="theme", preference="LEGACY-CURRENT")
+    bind_node_identity(node, _context())
+    node.namespace = {}
+    if outcome == "denied_ancestor":
+        source = _bound_node(service, "legacy-source")
+    service.store.add_preference(node)
+    _query_ids(service, monkeypatch, SimpleNamespace(id=node.id, name="legacy", domain=""))
+    runtime = _runtime(service)
+    annotate = service.annotate_memories
+    calls = []
+
+    def migrate(*args, **kwargs):
+        assert kwargs["authorization"] is runtime.authorization_context
+        calls.append(args)
+        if outcome == "raise":
+            raise OSError("namespace write unavailable")
+        if outcome == "empty":
+            return []
+        if outcome == "denied_ancestor":
+            # The authorized migration must re-read a concurrent lineage
+            # change instead of relying on the earlier routing metadata.
+            node.namespace = {"memplex_source_refs": source.id}
+            service.store.add_preference(node)
+            service.store.delete(source.id)
+        return annotate(*args, **kwargs)
+
+    monkeypatch.setattr(service, "annotate_memories", migrate)
+    result = runtime.search_memories("legacy")
+    assert bool(result.results) is (outcome == "success")
+    if outcome == "success":
+        assert len(calls) == 1 and "LEGACY-CURRENT" in result.results[0].summary
+        assert service.store.get_preference(node.id).namespace
+    else:
+        assert "memplex_workspace_id" not in service.store.get_preference(node.id).namespace
+
+
 # Final-output runtime controls: retrieval summaries and legacy hot strings are
 # intentionally untrusted. Only the final context can prove this boundary.
 def _runtime(service, context=None, **kwargs):

@@ -820,7 +820,7 @@ class AgentMemoryRuntime:
             explain=explain,
             authorization=self.authorization_context,
         )
-        visible = [item for item in result.results if self._result_in_namespace(item.func_id)]
+        visible = [item for item in result.results if self._candidate_in_namespace(item.func_id)]
         public_top_k_truncated = len(visible) > selected_top_k
         result.results = visible[:selected_top_k]
         result.tokens_used = sum(
@@ -981,6 +981,30 @@ class AgentMemoryRuntime:
             )
             confirmed = [node.id for node in stamped if node.id in proven and node.id in ids]
             self.service._publish_hot_references(confirmed, context=self.authorization_context)
+
+    def _candidate_in_namespace(self, func_id: str) -> bool:
+        """Filter retrieved routing metadata before top_k, without lineage proof.
+
+        Only a boolean leaves this check. Every public recall/search output
+        still uses fresh complete assembly; hot references and public gets
+        keep their full authorized get. Legacy namespace writes still pass
+        through the original authorized annotation entry point.
+        """
+        context = self.authorization_context
+        gate = self.service._auth
+        try:
+            node = gate.typed_lookup_for(context).get(func_id)
+            return bool(
+                node is not None
+                and gate._is_node_in_scope(node, context)
+                and gate.is_public_source(node, context)
+                and self.service.is_safe_for_model(node)
+                and self._node_in_namespace(node)
+                and self._context_node_allowed(node)
+            )
+        except Exception as exc:  # noqa: BLE001 - uncertain routing metadata fails closed
+            logger.debug("candidate namespace lookup failed closed: %s", exc)
+            return False
 
     def _result_in_namespace(self, func_id: str) -> bool:
         node = self.service.get(func_id, authorization=self.authorization_context)

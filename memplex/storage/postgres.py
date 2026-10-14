@@ -1709,12 +1709,13 @@ class PostgresMemoryStore:
         # --- tsvector leg (always runs) ---
         cur = self._execute(
             f"""
-            WITH query AS (SELECT plainto_tsquery('simple', %s) AS terms)
-            SELECT id, data, score, row_kind FROM (
+            SELECT id, data, score, row_kind FROM
+            (SELECT plainto_tsquery('simple', %s) AS terms) query
+            CROSS JOIN LATERAL (
                 (
                     SELECT f.id, f.data, ts_rank(f.search_tsv, query.terms) AS score,
                            'function' AS row_kind
-                    FROM memplex_functions f CROSS JOIN query
+                    FROM memplex_functions f
                     WHERE {_acl_scope_sql('f')}
                       AND f.search_tsv @@ query.terms
                     ORDER BY score DESC, f.id
@@ -1725,7 +1726,7 @@ class PostgresMemoryStore:
                     SELECT fact.id, fact.data,
                            ts_rank(lexical.search_tsv, query.terms) AS score,
                            'fact' AS row_kind
-                    FROM memplex_facts fact CROSS JOIN query
+                    FROM memplex_facts fact
                     CROSS JOIN LATERAL (
                         SELECT to_tsvector('simple', COALESCE(
                             NULLIF(btrim(concat_ws(' ',

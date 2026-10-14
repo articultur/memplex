@@ -3757,6 +3757,27 @@ def test_vector_search_uses_tsquery(pg_store):
     assert "plainto_tsquery" in sql
 
 
+@pytest.mark.parametrize("method", ["vector_search", "fts_search"])
+def test_round2_lexical_search_passes_existing_source_read_admission(pg_store, monkeypatch, method):
+    from memplex.storage.pool import _SourceReadCursor
+
+    store, conn = pg_store
+    conn._cursor._result = [("pg-1", _func_to_json(_sample_func()), 0.9, "function")]
+    admitted = _SourceReadCursor(conn._cursor)
+
+    def execute(sql, params=(), *, commit=True):
+        assert commit is False
+        admitted.execute(sql, params)
+        return admitted
+
+    monkeypatch.setattr(store, "_execute", execute)
+    results = getattr(store, method)("login", top_k=3)
+    assert [item.func_id for item in results] == ["pg-1"]
+    assert results[0].summary == "user logs in"
+    assert results[0].relevance_score == pytest.approx(1 / 61)
+    assert conn._cursor.executed[-1][1] == ("login", 6, 6, 6)
+
+
 def test_vector_search_lexical_sql_scopes_and_bounds_functions_and_facts(pg_store):
     """Each typed branch is scoped before its bounded lexical candidates merge."""
     store, conn = pg_store

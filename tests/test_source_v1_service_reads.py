@@ -751,10 +751,11 @@ def test_round1_native_deadline_finalization_keeps_proof_stages(reads, monkeypat
             assert result.dropped["budget_exhausted"] == 1
             assert state["soft"] < state["hard"] <= deadline
         else:
-            from psycopg2.errors import DivisionByZero
+            expected = RuntimeError if mode == "clock_failure" else SourceBusyError
+            if mode == "transaction_abort":
+                from psycopg2.errors import DivisionByZero
 
-            expected = (DivisionByZero if mode == "transaction_abort" else
-                        RuntimeError if mode == "clock_failure" else SourceBusyError)
+                expected = DivisionByZero
             with pytest.raises(expected) as captured:
                 source_runtime.assemble_v1_context(*args, **kwargs)
             if mode not in {"clock_failure", "transaction_abort"}:
