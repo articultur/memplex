@@ -53,6 +53,7 @@ class ContextCacheKey:
     agent_id: str | None
     session_id: str | None
     normalized_query: str
+    query_options: tuple[int, int, str] | None = None
 
 
 def _valid_cached_candidates(value: Any) -> bool:

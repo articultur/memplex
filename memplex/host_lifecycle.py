@@ -176,6 +176,9 @@ def _contract_files(project_root: Path) -> dict[str, tuple[Path, ...]]:
         adapter_shared,
         managed_identity,
         runtime_status,
+        package_root / "service.py",
+        package_root / "source_runtime.py",
+        package_root / "context.py",
     )
     return {
         "claude-code": (

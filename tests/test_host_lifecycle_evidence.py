@@ -55,6 +55,9 @@ _CONTRACT_COVERAGE = {
         "hermes",
         "openclaw",
     },
+    "memplex/service.py": {"claude-code", "codex", "hermes", "openclaw"},
+    "memplex/source_runtime.py": {"claude-code", "codex", "hermes", "openclaw"},
+    "memplex/context.py": {"claude-code", "codex", "hermes", "openclaw"},
     "memplex/adapters/agent_runtime.py": {
         "claude-code",
         "codex",

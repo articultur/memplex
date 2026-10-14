@@ -1637,7 +1637,7 @@ class MemplexService:
                     continue
                 self._working_memory.add_reference(
                     memory_id,
-                    storage_namespace=self.storage_namespace(),
+                    storage_namespace=self._context_reference_namespace(context),
                     tenant_id=context.principal.tenant_id,
                 )
         except Exception as exc:  # noqa: BLE001 - hot publication is best-effort, fail closed
@@ -1655,7 +1655,7 @@ class MemplexService:
             try:
                 self._working_memory.remove_reference(
                     memory_id,
-                    storage_namespace=self.storage_namespace(),
+                    storage_namespace=self._context_reference_namespace(context),
                     tenant_id=context.principal.tenant_id,
                 )
             except Exception as exc:  # noqa: BLE001 - cleanup cannot undo a successful mutation
@@ -2553,6 +2553,28 @@ class MemplexService:
         if store_path is None:
             return f"service:{id(self)}"
         return str(store_path)
+
+    def _context_reference_namespace(self, context: AuthorizationContext) -> str:
+        """Partition V1 references by current authority and complete identity.
+
+        This is a cache key, never a reusable authorization result. Every
+        consumer still enters its own current-source read fence. Failures
+        propagate; callers doing post-commit cache maintenance catch them.
+        """
+        import hashlib
+        import json
+
+        namespace = self.storage_namespace()
+        backend = self._v1_source_store(context)
+        if backend is None:
+            return namespace
+        with backend.read_fence(context, deadline_ns=time.monotonic_ns() + 250_000_000) as session:
+            scope = session.authority().scope
+            identity = [namespace, scope.authority_id, scope.tenant_id, scope.workspace_id,
+                        context.principal.authentication_id, context.principal.tenant_id,
+                        context.principal.subject_id, sorted(context.principal.roles),
+                        context.workspace_id, context.agent_id, context.session_id]
+        return "source-v1:" + hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
 
     def _resolve_context_snapshot(
         self, memory_ids: Sequence[str], *, authorization: AuthorizationContext,

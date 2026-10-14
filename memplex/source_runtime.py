@@ -173,6 +173,7 @@ def source_timeline(
 def project_v1_reviews(
     service: MemplexService, reviews: Sequence[PendingReview], *, authorization: AuthorizationContext,
     owner: str | None, limit: int, deadline_ns: int,
+    runtime_filter: Callable[[Any], bool] | None = None,
 ) -> list[PendingReview]:
     """Rebuild pending review values from current nodes, never saved conflicts."""
     from memplex.models import FieldValue, PendingReview
@@ -184,6 +185,8 @@ def project_v1_reviews(
             if snapshot is None or len(projected) >= max(0, limit):
                 continue
             node = source_authorization_node(snapshot)
+            if runtime_filter is not None and not runtime_filter(node):
+                continue
             if owner is not None and getattr(node, "owner", None) != owner:
                 continue
             # Field names are fixed model schema, not saved feedback text.

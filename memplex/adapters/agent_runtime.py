@@ -627,6 +627,11 @@ class AgentMemoryRuntime:
 
         selected_visibility = str(visibility or DEFAULT_MEMORY_VISIBILITY).lower()
         self._validate_visibility(selected_visibility)
+        # Only the audited native service can choose the V1 write route.
+        # A model/legacy extractor's similarly named field is not a receipt.
+        v1_capture = isinstance(self.service, MemplexService) and self.service._v1_source_store(
+            self.authorization_context,
+        ) is not None
         result = self.service.write_text(
             text=text,
             source_type=source_type,
@@ -635,10 +640,13 @@ class AgentMemoryRuntime:
             reference_datetime=reference_datetime,
             author_role=author_role,
         )
-        self._stamp_captured_memories(
-            result.functions + result.facts + result.preferences,
-            visibility=selected_visibility,
-        )
+        if not (v1_capture and type(result) is ExtractedData and type(result.source_contract_receipt) is dict):
+            self._stamp_captured_memories(
+                result.functions + result.facts + result.preferences,
+                visibility=selected_visibility,
+            )
+        # V1 identities were bound before their source/publication commit.
+        # Legacy annotation cannot mutate an immutable publication afterward.
         return result
 
     def _capture_observation(self, payload: dict[str, Any]) -> None:
@@ -731,7 +739,7 @@ class AgentMemoryRuntime:
         working_memory = getattr(self.service, "_working_memory", None)
         if working_memory is not None and any(c.origin == "hot" for c in candidates):
             live_hot.update(working_memory.recall_references(
-                storage_namespace=self._storage_namespace(),
+                storage_namespace=self._reference_namespace(),
                 tenant_id=self.authorization_context.principal.tenant_id,
                 limit=min(MAX_CONTEXT_CANDIDATES, max(0, int(
                     self.service._config.working_memory.inject_limit,
@@ -758,7 +766,7 @@ class AgentMemoryRuntime:
                 max(0, int(self.service._config.working_memory.inject_limit)),
             )
             refs = working_memory.recall_references(
-                storage_namespace=self._storage_namespace(),
+                storage_namespace=self._reference_namespace(),
                 tenant_id=self.authorization_context.principal.tenant_id,
                 limit=limit,
             )
@@ -875,15 +883,29 @@ class AgentMemoryRuntime:
 
     def _cache_key(self, query: str) -> ContextCacheKey:
         context = self.authorization_context
+        namespace = self._reference_namespace()
+        options = None if namespace == self._storage_namespace() else (
+            self.top_k, self.token_budget, json.dumps(self._domain_scoped_filters(), sort_keys=True),
+        )
         return ContextCacheKey(
-            storage_namespace=self._storage_namespace(),
+            storage_namespace=namespace,
             tenant_id=context.principal.tenant_id,
             subject_id=context.principal.subject_id,
             workspace_id=context.workspace_id,
             agent_id=context.agent_id,
             session_id=context.session_id,
             normalized_query=self._query_from_prompt(query),
+            query_options=options,
         )
+
+    def _reference_namespace(self) -> str:
+        """Require the service boundary to establish its current cache partition."""
+        from memplex.source_contract import RejectionCode, SourceContractError
+
+        namespace = getattr(self.service, "_context_reference_namespace", None)
+        if not callable(namespace):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        return namespace(self.authorization_context)
 
     def _storage_namespace(self) -> str:
         return self.service.storage_namespace()

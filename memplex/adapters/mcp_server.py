@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import sys
+import time
 import traceback
 from collections.abc import Sequence
 from datetime import datetime
@@ -748,12 +749,28 @@ class MCPServer:
                 # facades predating the authorization keyword. The production
                 # service path above is always authorization-bound.
                 reviews = get_pending_reviews(limit=MAX_MODEL_SCAN_ITEMS)
-            current_ids = {
-                node.id for node in self._resolve_model_nodes(
-                    [review.memory_id for review in reviews], runtime,
+            source_store = getattr(self._service, "_v1_source_store", None)
+            if not callable(source_store):
+                from memplex.source_contract import RejectionCode, SourceContractError
+
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            if source_store(runtime.authorization_context) is not None:
+                from memplex.source_runtime import project_v1_reviews
+
+                # Review candidates nominate IDs/fields only. Serialize the
+                # projection produced by this same final authority fence.
+                reviews = project_v1_reviews(
+                    self._service, reviews, authorization=runtime.authorization_context,
+                    owner=None, limit=limit, deadline_ns=time.monotonic_ns() + 250_000_000,
+                    runtime_filter=runtime._context_node_allowed,
                 )
-            }
-            reviews = [review for review in reviews if review.memory_id in current_ids][:limit]
+            else:
+                current_ids = {
+                    node.id for node in self._resolve_model_nodes(
+                        [review.memory_id for review in reviews], runtime,
+                    )
+                }
+                reviews = [review for review in reviews if review.memory_id in current_ids][:limit]
         except Exception:  # noqa: BLE001 - model inspection fails closed
             reviews = []
         return {
