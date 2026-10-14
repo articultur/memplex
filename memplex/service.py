@@ -1373,8 +1373,9 @@ class MemplexService:
             merge results).
         """
         context = self._require_authorization(authorization)
-        if self._v1_source_store(context) is not None:
-            raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
+        source_backend = self._v1_source_store(context)
+        if source_backend is not None:
+            return self._write_source_v1(source, context, backend=source_backend, visibility=visibility)
         store = self._store_for(context)
 
         # 0. Strip <private>...</private> blocks before extraction so
@@ -1793,6 +1794,8 @@ class MemplexService:
                 return None
         else:
             node = self._visible_node(memory_id, context)
+        if node is not None and not self._auth.is_public_source(node, context):
+            return None
         return node if node is None or self.is_safe_for_model(node) else None
 
     def get_timeline(
@@ -1848,6 +1851,7 @@ class MemplexService:
             compatibility = authorization is None and self._is_local_development_context(context)
             visible = [fact for fact in facts if (
                 compatibility and fact.provenance.get("extraction") != "factual_capture_v1"
+                and self._auth.is_public_source(fact, context)
             ) or self._is_node_visible(fact, context)]
             safe = [fact for fact in visible if self.is_safe_for_model(fact)]
             if include_invalidated:
@@ -1923,6 +1927,40 @@ class MemplexService:
         add(observation)
         self._invalidate_hot_references((observation.id,), context=context)
         return observation
+
+    def _write_source_v1(
+        self, source: SourceDocument, context: AuthorizationContext, *,
+        backend: SourceVersionStore, visibility: str,
+    ) -> ExtractedData:
+        from memplex.factual_capture import capture_source_facts
+        from memplex.llm.factual_capture import FactualCaptureResult
+        from memplex.privacy import strip_private_tags
+        from memplex.source_capture import persist_capture_sources, prepare_capture_sources
+
+        source = replace(source, content=strip_private_tags(source.content) if source.content else source.content)
+        store = self._store_for(context)
+        engine = self._engine if store is self.store else CoreEngine(store=store)
+        extracted = engine.extract(source)
+        tier = self._bind_trust_tiers(extracted, source)
+        try:
+            prepared = prepare_capture_sources(extracted, source, authorization=context, visibility=visibility,
+                                               trust_tier=tier, config=self._config.llm)
+            self.scan_nodes_before_persistence([*extracted.facts, *extracted.preferences, *extracted.functions])
+            complete = persist_capture_sources(extracted, prepared, backend=backend, authorization=context)
+        except Exception:  # noqa: BLE001 - preflight failures acknowledge no uncommitted sources
+            complete = False
+        if not self._config.llm.factual_capture:
+            return extracted
+        if not complete:
+            extracted.factual_capture = FactualCaptureResult("source_unavailable").receipt()
+            return extracted
+        derived, extracted.factual_capture = capture_source_facts(
+            extracted, source, context, backend=backend, enhancer=self._llm,
+            config=self._config.llm, visibility=visibility,
+        )
+        extracted.facts.extend(derived)
+        self._publish_hot_references(tuple(node.id for node in derived), context=context)
+        return extracted
 
     def _v1_source_store(self, context: AuthorizationContext) -> SourceVersionStore | None:
         """Recognize only concrete audited adapters, never a duck-typed wrapper."""
@@ -2516,6 +2554,9 @@ class MemplexService:
                 dropped[lookup.failure_reason or "missing"] += 1
                 continue
             try:
+                if not self._auth.is_public_source(node, context):
+                    dropped["source_unavailable"] += 1
+                    continue
                 allowed, reason = visibility.check(node)
                 if not allowed:
                     dropped[reason] += 1

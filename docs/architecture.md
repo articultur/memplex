@@ -189,6 +189,7 @@ config.py             Configuration load/validate (MEMPLEX_* env > config.yaml >
 context.py            Bounded source-ID context assembly; no adapters, service or storage imports
 core/                 Pure computation layer (CoreEngine, extractors, hooks)
 factual_capture.py    Opt-in evidence namespace/materialization, committed raw + typed lineage
+source_capture.py     V1 source receipts, fenced complete input capture, publication requests
 factual_lineage.py    Factual-only semantic source snapshots and current-source safety
 host_lifecycle.py     G008 host-contract digests (detailed below)
 improve.py            Proactive fact maintenance (dedupe/expire/reindex) ⁴
@@ -265,6 +266,27 @@ reads use the same check. Optional new Lite raw identity metadata and existing
 PostgreSQL ACL columns provide source proof without adopting legacy raw rows.
 See [the factual capture contract](capability-mechanisms.md#opt-in-evidence-linked-factual-capture)
 for outcomes, limits, dates, fallback and deadline semantics.
+
+On an explicitly admitted source-validity V1 bank, `source_capture.py` prepares
+fresh identities in memory and commits raw evidence, typed facts/preferences,
+then Functions. Every acknowledged source is returned in the optional
+`ExtractedData.source_contract_receipt`; a missing reply is unknown, and earlier
+commits remain. This approved V1 phase-order amendment leaves the legacy order
+intact. Raw retention caps and an unavailable raw layer reject before writes.
+Within one source fence, `freeze_capture_inputs` reads the exact committed raw
+bytes and the complete typed/raw closure, including trusted role, optional
+interpretation time, and a non-secret model configuration digest. The existing
+enhancer runs once outside that fence. Validated, safe low-trust candidates use
+T7 publication CAS; accepted counts come only from real publication receipts.
+
+Captured typed roots are internal inputs. Public get, query, list, and context
+resolution classify their current native source heads and deny them, while
+internal dependency validation retains own-ACL checks. A PostgreSQL handle
+without an adapter establishes genuine legacy scope through the existing
+bound tenant/workspace authority query and verified RLS policy; a recognized
+V1 domain or uncertain response fails closed. This adds no grants or production
+initialization. Complete V1 query text projection remains a separate read-path
+task. Both V1 admission and factual capture retain their existing off defaults.
 
 `service.query()` itself delegates the six-stage read path to
 `query_pipeline.QueryPipeline`: the service resolves the request-scoped

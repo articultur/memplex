@@ -108,6 +108,8 @@ class ExtractedData:
     paragraphs: list = field(default_factory=list)  # List[Paragraph]
     # Optional operational extraction receipt, never a model/billing attestation.
     factual_capture: dict | None = None
+    # Source handles and real committed acknowledgements, owned by the service.
+    source_contract_receipt: dict[str, object] | None = None
 
 
 @dataclass

@@ -380,6 +380,8 @@ class AuthorizationGate:
         """Apply the canonical own ACL and existing default lineage lookup."""
         if not self._is_node_in_scope(node, context):
             return False
+        if source_lookup is None and not _source_path and not self.is_public_source(node, context):
+            return False
         if source_lookup is None and self.identity_value(node, "tenant_id", "memplex_tenant_id") is None:
             # Keep the explicit identity-less legacy compatibility default.
             # M1 snapshot evaluation always checks its declared dependencies.
@@ -387,6 +389,57 @@ class AuthorizationGate:
         return self._sources_still_visible(
             node, context, source_lookup=source_lookup, _source_path=_source_path,
         )
+
+    def is_public_source(self, node: Any, context: AuthorizationContext) -> bool:
+        """Deny internal captured roots using committed native identity and source role."""
+        import json
+        import time
+
+        from memplex.source_contract import SourceClass, SourceKind, SourceState
+        from memplex.storage.lite.store import LiteMemoryStore
+        from memplex.storage.postgres import PostgresMemoryStore
+
+        store = self._store_provider()
+        try:
+            if type(store) is LiteMemoryStore:
+                store._refresh_for_read()
+                pair = store._committed_pair
+                if pair is None or pair.memory.get("schema_version") != 3:
+                    return True
+                backend = store.source_versions()
+            elif type(store) is PostgresMemoryStore:
+                backend = store.authorized(context).source_versions()
+                if backend is None:
+                    # The ready resource verifies this authority table's RLS:
+                    # only tenant/workspace filter it, never subject or head ACL.
+                    # Required legacy application SELECT already covers it.
+                    cursor = store.authorized(context)._execute(
+                        "SELECT current_setting('memplex.tenant_id', true), "
+                        "current_setting('memplex.workspace_id', true), EXISTS (SELECT 1 FROM memplex_source_authorities "
+                        "WHERE tenant_id=%s AND workspace=%s)",
+                        (context.principal.tenant_id, context.workspace_id), commit=False,
+                    )
+                    try:
+                        row = cursor.fetchone()
+                    finally:
+                        cursor.close()
+                    return (row is not None and len(row) == 3
+                            and row[:2] == (context.principal.tenant_id, context.workspace_id)
+                            and type(row[2]) is bool and row[2] is False)
+            else:
+                return True
+            if backend is None:
+                return False
+            with backend.read_fence(context, deadline_ns=time.monotonic_ns() + 250_000_000) as session:
+                key = session.resolve_id(node.id)
+                snapshot = session.source(key) if key is not None else None
+                if (snapshot is None or snapshot.head.state is not SourceState.LIVE
+                        or json.loads(snapshot.head.payload_locator).get("id") != node.id):
+                    return False
+                return (snapshot.head.source_class is not SourceClass.CAPTURED_INPUT
+                        or snapshot.head.ref.key.kind is SourceKind.RAW_PARAGRAPH)
+        except Exception:  # noqa: BLE001 - uncertain V1 identity never grants a public root
+            return False
 
     def _is_node_in_scope(self, node: Any, context: AuthorizationContext) -> bool:
         """Single own-node ACL decision, shared by both lineage evaluators."""

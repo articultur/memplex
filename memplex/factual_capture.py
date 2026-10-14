@@ -154,3 +154,76 @@ def capture_derived_facts(
     except Exception:  # noqa: BLE001 - missing/malformed source never grants authority
         return [], {**outcome.receipt(), "status": "source_unavailable"}
     return derived, outcome.receipt()
+
+
+def capture_source_facts(
+    extracted: ExtractedData, source: SourceDocument, context: AuthorizationContext, *,
+    backend: Any, enhancer: Any, config: LLMConfig, visibility: str,
+) -> tuple[list[Fact], dict[str, Any]]:
+    """Freeze committed inputs, make the existing call, and acknowledge real CAS receipts."""
+    import uuid
+
+    from memplex.llm.factual_capture import validate_payload
+    from memplex.source_capture import (
+        _wire,
+        capture_deadline,
+        freeze_capture_inputs,
+        prepare_publication,
+    )
+    from memplex.source_contract import ALGORITHM_VERSION, ExpectedAbsent, PublicationReceipt
+
+    unavailable = FactualCaptureResult("source_unavailable").receipt()
+    if enhancer is None:
+        return [], FactualCaptureResult("unavailable").receipt()
+    try:
+        with backend.read_fence(context, deadline_ns=capture_deadline()) as session:
+            frozen = freeze_capture_inputs(extracted, source, session=session, authorization=context,
+                                           algorithm_version=ALGORITHM_VERSION, input_limit=config.max_input_length)
+    except Exception:  # noqa: BLE001 - uncertain inputs never reach the model
+        return [], unavailable
+    parameters = frozen.manifest.input_parameters
+    reference = datetime.fromisoformat(parameters["reference_datetime"]) if parameters.get("reference_datetime") else None
+    try:
+        outcome = enhancer.factualize_sync(frozen.evidence, reference_datetime=reference,
+                                          author_role=parameters["author_role"])
+        if type(outcome) is not FactualCaptureResult:
+            raise ValueError("invalid capture result")
+        if outcome.status != "success":
+            return [], outcome.receipt()
+        candidates = validate_payload({"facts": [_wire(candidate) for candidate in outcome.candidates]},
+                                      frozen.evidence, reference_datetime=reference,
+                                      max_facts=config.factual_capture_max_facts)
+        commands = [prepare_publication(candidate, frozen.manifest, expected_target=ExpectedAbsent.ABSENT,
+                                        authorization=context, visibility=visibility, request_id=str(uuid.uuid4()))
+                    for candidate in candidates]
+    except Exception:  # noqa: BLE001 - no retries or model-authored service receipts
+        return [], FactualCaptureResult("invalid").receipt()
+    assert extracted.source_contract_receipt is not None
+    publications = extracted.source_contract_receipt["publications"]
+    assert isinstance(publications, list)
+    derived: list[Fact] = []
+    receipt = outcome.receipt()
+    extracted.source_contract_receipt["publication_acknowledgement"] = "incomplete"
+    try:
+        for command in commands:
+            with backend.read_fence(context, deadline_ns=capture_deadline()) as session:
+                target = session.target(command.derivation_key)
+            if target is not None:
+                command = replace(command, expected_target=target.token)
+            committed = backend.publish_if_current(context, command, deadline_ns=capture_deadline())
+            if type(committed) is not PublicationReceipt:
+                raise ValueError("invalid publication acknowledgement")
+            publications.append(_wire(committed))
+            receipt["accepted"] = len(publications)
+            with backend.read_fence(context, deadline_ns=capture_deadline()) as session:
+                key = session.resolve_id(committed.publication_id)
+                current = session.source(key) if key is not None else None
+            if current is not None:
+                derived.append(Fact.from_dict(_wire(current.payload)))
+    except Exception:  # noqa: BLE001 - retain every actual acknowledged publication
+        extracted.source_contract_receipt["publication_acknowledgement"] = "unknown"
+        receipt["status"] = "publication_conflict"
+        receipt["accepted"] = len(publications)
+    else:
+        extracted.source_contract_receipt["publication_acknowledgement"] = "complete"
+    return derived, receipt

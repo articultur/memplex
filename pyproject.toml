@@ -148,6 +148,7 @@ files = [
     "memplex/source_contract.py",
     "memplex/source_codec.py",
     "memplex/source_validation.py",
+    "memplex/source_capture.py",
     "memplex/source_policy.py",
     "memplex/authorization.py",
     "memplex/sync_ingress.py",
@@ -402,6 +403,7 @@ source_modules = [
     "memplex.source_contract",
     "memplex.source_codec",
     "memplex.source_validation",
+    "memplex.source_capture",
     # Top-level leaf modules verified adapter-free (direct + indirect).
     # memplex.__main__ is the CLI entry shim and therefore stays out.
     "memplex.auth",
