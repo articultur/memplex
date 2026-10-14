@@ -73,6 +73,11 @@ def adapters(publication_backend, tmp_path, monkeypatch):
     svc = legacy_service(tmp_path / "service")
     original_store = svc.store
     svc.store = h.store
+    from memplex.config import SourceContractConfig
+    from tests.test_source_v1_pg_transactions import SCOPE
+    svc._config.source_contract = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+    svc._config.storage.backend = "lite" if h.kind == "lite" else "postgres"
+    svc._config.storage.path = str(h.store._path.parent) if h.kind == "lite" else h.dsn
     svc._embedding_service = svc._reranker = svc._cross_reranker = svc._llm = None
     svc._detect_scope = lambda text: QueryScope.ALL
     svc._retriever = MultiPathRetriever(h.store, embedding_service=None, wiki_searcher=None)
@@ -513,6 +518,11 @@ def test_two_native_lite_authorities_partition_same_logical_ids(tmp_path, monkey
             hooks = SourceValidationHooks(lambda snapshot, context: True, lambda snapshot: True)
             backend.initialize_authority(scope, POLICY, admission=_issue_admission(
                 store._durability, scope, hooks, issuer=_RESOURCE_ISSUER))
+            from memplex.config import SourceContractConfig
+            from memplex.source_compatibility import _admit_lite
+            svc._config.source_contract = SourceContractConfig("v1", scope.authority_id, scope.tenant_id, scope.workspace_id)
+            svc._config.storage.path = str(store._path.parent)
+            _admit_lite(store, svc._config.source_contract, issuer=_RESOURCE_ISSUER)
             svc.store = store
             monkeypatch.setattr(svc, "storage_namespace", lambda: "same-physical-cache-name")
             keys.append(AgentMemoryRuntime(service=svc, authorization=CONTEXT)._cache_key("query"))

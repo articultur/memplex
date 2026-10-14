@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from memplex.source_contract import SourceBusyError
+from memplex.source_contract import AuthorityScope, SourceBusyError
 from memplex.sync_protocol import (
     SyncBatchResult,
     SyncEntityKey,
@@ -706,7 +706,7 @@ def _validate_source_transition(base: dict[str, Any], target: dict[str, Any]) ->
             raise LiteStorageIntegrityError("regressive Lite V3 source transition")
 
 
-def _validate_transition(base: LitePair, target: LitePair) -> None:
+def _validate_transition(base: LitePair, target: LitePair, *, quarantine_scope: AuthorityScope | None = None) -> None:
     if type(base.memory) is not dict or type(base.changelog) is not list:
         raise LiteStorageIntegrityError("invalid Lite base pair")
     if type(target.memory) is not dict or type(target.changelog) is not list:
@@ -720,8 +720,9 @@ def _validate_transition(base: LitePair, target: LitePair) -> None:
         if (base.generation != 0 or base.transaction_id != "empty" or base.changelog
                 or any(base.memory.get(name) for name in _MEMORY_OPTIONAL_COLLECTION_KEYS | {"functions", "edges"})
                 or base.memory.get("sync") != _empty_sync_state()
-                or ledger.sources or ledger.targets or ledger.publications
-                or ledger.authority.commit_seq != 1):
+                or (quarantine_scope is None and (ledger.sources or ledger.targets or ledger.publications
+                                                  or ledger.authority.commit_seq != 1))
+                or (quarantine_scope is not None and ledger.authority.scope != quarantine_scope)):
             raise LiteStorageIntegrityError("Lite V3 requires an empty new bank")
     if base.memory.get("schema_version") == 3:
         _validate_source_transition(base.memory, target.memory)
@@ -982,6 +983,25 @@ class LiteDurability:
         except (KeyError, TypeError, ValueError) as exc:
             raise LiteStorageIntegrityError("invalid Lite pair envelope") from exc
 
+    def _quarantined_restore_scope(self) -> AuthorityScope | None:
+        """Derive only a fresh restore exception from this resource's external marker."""
+        from memplex.source_compatibility import _read_lite_marker
+        from memplex.source_contract import RejectionCode, SourceContractError, _uuid
+        marker = _read_lite_marker(self)
+        if marker is None or marker["state"] != "quarantined":
+            return None
+        if set(marker) != {"version", "storage_identity", "scope", "state", "restore_id"}:
+            raise SourceContractError(RejectionCode.QUARANTINED)
+        _uuid(marker["restore_id"])
+        scope = marker["scope"]
+        if type(scope) is not dict or set(scope) != {"authority_id", "tenant_id", "workspace_id"}:
+            raise SourceContractError(RejectionCode.QUARANTINED)
+        sqlite = self._memory_path.parent / "shadow_v2.sqlite3"
+        if (os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", "") or any(p.exists() for p in (
+                sqlite, sqlite.with_name(sqlite.name + "-wal"), sqlite.with_name(sqlite.name + "-shm")))):
+            raise SourceContractError(RejectionCode.QUARANTINED)
+        return AuthorityScope(**scope)
+
     def _recover_locked(self, *, deadline_ns: int | None = None) -> None:
         _check_read_deadline(deadline_ns)
         if not self._journal_path.exists():
@@ -1031,7 +1051,7 @@ class LiteDurability:
             deadline_ns=deadline_ns
         )
         try:
-            _validate_transition(base_pair, pair)
+            _validate_transition(base_pair, pair, quarantine_scope=self._quarantined_restore_scope())
         except LiteStorageIntegrityError as exc:
             raise LiteStorageIntegrityError("invalid Lite durable journal") from exc
         # Both journal records are authority candidates; never forward a
@@ -1203,7 +1223,7 @@ class LiteDurability:
             deadline_ns=deadline_ns,
         )
         _validate_memory_payload(target.memory, deadline_ns=deadline_ns)
-        _validate_transition(base, target)
+        _validate_transition(base, target, quarantine_scope=self._quarantined_restore_scope())
         if not target_validated:
             self._validate_semantics(target)
         _check_read_deadline(deadline_ns)

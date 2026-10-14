@@ -326,6 +326,8 @@ class _MockCursor:
         if not self.executed:
             return self._fetchone_val
         sql, params = self.executed[-1]
+        if "SELECT pg_catalog.obj_description(oid, 'pg_namespace')" in sql:
+            return (getattr(self, "_source_schema_marker_value", None),)
         if "AS has_source_authority" in sql:
             # Explicitly model one consumed row for this authority-empty fixture.
             if self._source_authority_consumed:

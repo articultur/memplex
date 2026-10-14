@@ -13,7 +13,7 @@ import os
 import shlex
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -636,6 +636,26 @@ class OperationsConfig:
 
 
 @dataclass
+class SourceContractConfig:
+    """Explicit request for one dedicated source-validity authority."""
+
+    mode: Literal["off", "v1"] = "off"
+    authority_id: str | None = None
+    tenant_id: str | None = None
+    workspace_id: str | None = None
+
+    def validate(self) -> None:
+        from memplex.source_contract import AuthorityScope, RejectionCode, SourceContractError
+
+        if type(self.mode) is not str or self.mode not in {"off", "v1"}:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        if self.mode == "v1":
+            if any(type(value) is not str or not value for value in (self.authority_id, self.tenant_id, self.workspace_id)):
+                raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            AuthorityScope(cast(str, self.authority_id), cast(str, self.tenant_id), cast(str, self.workspace_id))
+
+
+@dataclass
 class MemplexConfig:
     """Top-level Memplex configuration.
 
@@ -643,6 +663,7 @@ class MemplexConfig:
     Use ``load_config()`` to create an instance.
     """
 
+    source_contract: SourceContractConfig = field(default_factory=SourceContractConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
@@ -674,6 +695,10 @@ class MemplexConfig:
 # ``_apply_env_overrides()`` using the same naming convention.
 
 _ENV_TYPE_COERCIONS: dict[str, type] = {
+    "source_contract.mode": str,
+    "source_contract.authority_id": str,
+    "source_contract.tenant_id": str,
+    "source_contract.workspace_id": str,
     # StorageConfig
     "storage.backend": str,
     "storage.path": str,
@@ -877,6 +902,8 @@ def _apply_env_overrides(config: MemplexConfig) -> None:
         if type(parsed_targets) is not dict:
             raise ValueError("MEMPLEX_SYNC_TARGETS_JSON must be a JSON object")
         config.sync.targets = parsed_targets
+
+    config.source_contract.validate()
 
 
 # ── YAML loading helpers ────────────────────────────────────────

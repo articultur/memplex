@@ -250,6 +250,8 @@ class SyncableStore:
     """
 
     def __init__(self, local: Any, config: RemoteSyncConfig | None = None) -> None:
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(local)
         self._local = local
         self._config = config or RemoteSyncConfig()
         self._last_pull_at: str | None = None
@@ -298,6 +300,10 @@ class SyncableStore:
             raise TypeError("context must be an AuthorizationContext")
         return _AuthorizedSyncableStore(self, context)
 
+    def source_versions(self) -> None:
+        """A legacy transport wrapper never delegates a source capability."""
+        return
+
     def _local_for_context(self, context: AuthorizationContext | None = None) -> Any:
         """Return local storage constrained by the explicit active identity.
 
@@ -307,6 +313,8 @@ class SyncableStore:
         has a narrow, separately-audited re-entry path in
         :meth:`pull_incremental`.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._local)
         context = context or _SYNC_SCOPE.get()
         if context is None:
             return self._local

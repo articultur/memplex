@@ -178,41 +178,42 @@ def test_restore_consumes_the_same_artifact_inode_that_was_verified(
         pg_restore_version="16.2",
     )
     executor = PostgresBackupExecutor(expected_target=_target(), tools=tools)
-    inspected = 0
-
-    def _inspect(_dsn: str, _schema: str) -> tuple[str, bool, int]:
-        nonlocal inspected
-        inspected += 1
-        if inspected == 1:
-            original.rename(detached)
-            replacement.rename(original)
-            return "16.2", False, 0
-        return "16.2", True, 5
-
     consumed: list[bytes] = []
 
-    def _run(argv: tuple[str, ...], **_kwargs: object) -> SimpleNamespace:
-        consumed.append(Path(argv[-1]).read_bytes())
-        return SimpleNamespace(returncode=0)
+    class _Cursor:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def execute(self, *args):
+            pass
+        def fetchone(self):
+            return ("16.2",)
 
-    class _Runner:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
+    class _Connection:
+        def cursor(self):
+            return _Cursor()
+        def rollback(self):
+            pass
+        def close(self):
             pass
 
-        def status(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(state="ready", current_version=5)
+    def connect(_dsn):
+        # Swap the path after verified open and before TOC staging.
+        original.rename(detached)
+        replacement.rename(original)
+        return _Connection()
 
-    monkeypatch.setattr(executor, "_inspect_restore_state", _inspect)
-    monkeypatch.setattr("subprocess.run", _run)
-    monkeypatch.setattr("memplex.storage.postgres_backup.PostgresMigrationRunner", _Runner)
+    def preflight(payload, _environment, _deadline):
+        consumed.append(payload.read_bytes())
+        raise BackupIntegrityError("stop_after_verified_staging")
 
-    result = executor.restore(
-        migration_dsn="postgresql://user:password@127.0.0.1:5432/memplex",
-        artifact=original,
-        signing_key=key,
-        target_schema="tenant_a",
-    )
-
-    assert result.backup_id == "018f7f1d-7c9e-7c31-9d34-35f6a91e2bb8"
+    monkeypatch.setattr(executor, "_connect", connect)
+    monkeypatch.setattr(executor, "_restore_toc", preflight)
+    with pytest.raises(BackupIntegrityError, match="stop_after_verified_staging"):
+        executor.restore(
+            migration_dsn="postgresql://user:password@127.0.0.1:5432/memplex",
+            artifact=original, signing_key=key, target_schema="tenant_a",
+        )
     assert consumed == [b"ORIGINAL"]
     assert (detached / "payload.dump").read_bytes() == b"ORIGINAL"

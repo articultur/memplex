@@ -702,10 +702,12 @@ class LiteMemoryStore:
         sync_consumer_ttl_seconds: int = 86400,
         sync_retention_min_seconds: int = 86400,
         deployment_profile: str = "development",
+        _source_open: object = None,
     ) -> None:
         if deployment_profile not in {"development", "production"}:
             raise BackupConfigurationError("lite_backup_profile_invalid")
         self._deployment_profile = deployment_profile
+        self._source_open = _source_open
         self._path = path or Path("~/.memplex/memory.json").expanduser()
         self._functions: dict[str, Function] = {}
         self._name_index: dict[str, str] = {}  # name_normalized -> func_id
@@ -880,9 +882,20 @@ class LiteMemoryStore:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BackupIntegrityError(_BACKUP_ARTIFACT_INVALID) from exc
 
-    def restore_backup(self, artifact: Path, signing_key: bytes) -> None:
+    def restore_backup(self, artifact: Path, signing_key: bytes, *, authority: Any = None) -> None:
         """Replace the current Lite pair from one verified development snapshot."""
         self._require_development_backup()
+        from memplex.source_compatibility import _check_restore, _read_lite_marker
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.source_versions import _RESOURCE_ISSUER, _source_write_scope
+        if authority is not None:
+            with self._durability.writer_lock():
+                _check_restore(authority, self)
+                before_restore = self._durability._load_authoritative_locked()
+                if before_restore.generation != 0 or before_restore.transaction_id != "empty":
+                    raise SourceContractError(RejectionCode.QUARANTINED)
+        elif _read_lite_marker(self._durability) is not None:
+            raise SourceContractError(RejectionCode.QUARANTINED)
         artifact_path = Path(artifact)
         try:
             with open_verified_backup_artifact(artifact_path, signing_key) as opened:
@@ -924,6 +937,8 @@ class LiteMemoryStore:
         self._durability._validate_semantics(restored)
         with self._durability.writer_lock():
             base = self._durability._load_authoritative_locked()
+            if authority is not None and (base.generation != 0 or base.transaction_id != "empty"):
+                raise SourceContractError(RejectionCode.QUARANTINED)
             target = LitePair(
                 memory=copy.deepcopy(restored.memory),
                 changelog=copy.deepcopy(restored.changelog),
@@ -931,6 +946,17 @@ class LiteMemoryStore:
                 transaction_id=uuid.uuid4().hex,
             )
             self._decode_pair(target)
+            # A restore never obtains a live capability, even for a live backup.
+            if authority is not None:
+                from memplex.source_codec import decode_ledger
+                _check_restore(authority, self)
+                if (restored.memory.get("schema_version") != 3
+                        or decode_ledger(restored.memory["source_validity"]).authority.scope != authority.target.scope):
+                    raise SourceContractError(RejectionCode.QUARANTINED)
+                with _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
+                    committed = self._durability.commit_locked(base, target, base_verified=True)
+                _check_restore(authority, self)
+                return
             # The flock has been held continuously since ``base`` was read.
             committed = self._durability.commit_locked(base, target, base_verified=True)
             if _sqlite_write_authority():
@@ -2980,6 +3006,10 @@ class LiteMemoryStore:
         from memplex.storage.source_versions import _source_write_mode
 
         with self._durability.writer_lock():
+            from memplex.source_compatibility import _read_lite_marker
+            marker = _read_lite_marker(self._durability)
+            if marker is not None and marker["state"] != "live":
+                raise SourceContractError(RejectionCode.QUARANTINED)
             if force or self._committed_pair is None or not self._pair_files_unchanged():
                 self._publish_pair(self._durability._load_authoritative_locked())
             assert self._committed_pair is not None
@@ -2996,6 +3026,11 @@ class LiteMemoryStore:
         publish (stat-based fingerprint), so a scope=ALL query that
         triggers 6-10 read calls performs 1 full load instead of 6-10.
         """
+        from memplex.source_compatibility import _read_lite_marker
+        from memplex.source_contract import RejectionCode, SourceContractError
+        marker = _read_lite_marker(self._durability)
+        if marker is not None and marker["state"] != "live":
+            raise SourceContractError(RejectionCode.QUARANTINED)
         if self._pair_files_unchanged():
             return
         with self._durability.writer_lock():
@@ -3046,11 +3081,28 @@ class LiteMemoryStore:
         try:
             with self._durability.writer_lock():
                 pair = self._durability._load_authoritative_locked()
+                from memplex.source_compatibility import (
+                    _check_lite_live,
+                    _LiteOpenAuthority,
+                    _read_lite_marker,
+                )
+                from memplex.storage.source_versions import _RESOURCE_ISSUER
+                trusted = self._source_open
+                marker = _read_lite_marker(self._durability)
+                if trusted is not None:
+                    if (not isinstance(trusted, _LiteOpenAuthority) or type(trusted) is not _LiteOpenAuthority or trusted._issuer is not _RESOURCE_ISSUER
+                            or trusted._resource != self._path.resolve()):
+                        raise LiteStorageIntegrityError("invalid source open authority")
+                    trusted = cast(_LiteOpenAuthority, trusted)
+                    _check_lite_live(self._durability, trusted.scope, pair)
+                    cast(Any, self.source_versions())._install_hooks(trusted.hooks, scope=trusted.scope, issuer=_RESOURCE_ISSUER)
+                elif marker is not None:
+                    raise LiteStorageIntegrityError("Lite V3 requires a trusted source read session")
                 # A legacy raw pair is only upgraded after the exact same model
                 # decode that guards all normal publication has succeeded.
                 decoded = self._decode_pair(pair)
                 schema_version = pair.memory.get("schema_version")
-                if schema_version == 3:
+                if schema_version == 3 and trusted is None:
                     raise LiteStorageIntegrityError("Lite V3 requires a trusted source read session")
                 needs_inbound_cursor_upgrade = (
                     schema_version == 2

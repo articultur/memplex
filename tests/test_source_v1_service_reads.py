@@ -29,6 +29,11 @@ def reads(publication_backend, tmp_path, monkeypatch):
     svc = legacy_service(tmp_path / "service")
     original_store = svc.store
     svc.store = h.store
+    from memplex.config import SourceContractConfig
+    from tests.test_source_v1_pg_transactions import SCOPE
+    svc._config.source_contract = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+    svc._config.storage.backend = "lite" if h.kind == "lite" else "postgres"
+    svc._config.storage.path = str(h.store._path.parent) if h.kind == "lite" else h.dsn
     svc._embedding_service = svc._reranker = svc._cross_reranker = svc._llm = None
     svc._detect_scope = lambda text: QueryScope.ALL
     result = SimpleNamespace(service=svc, backend=h.backend, store=h.store, kind=h.kind,

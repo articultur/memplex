@@ -1082,6 +1082,8 @@ class BackgroundWorker:
         Functions is the application layer's job; this handler reports
         extraction counts.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._resolve_store())
         from memplex.core.engine import CoreEngine
         from memplex.models import SourceDocument
 
@@ -1138,6 +1140,8 @@ class BackgroundWorker:
         task via the payload's ``wiki_dir``).  When ``wiki.enabled`` is
         false the task is skipped gracefully.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._resolve_store())
         from memplex.wiki.compiler import WikiCompiler
 
         config = self._resolve_config()
@@ -1172,6 +1176,8 @@ class BackgroundWorker:
         With a ``func_id`` in the payload only that Function is
         re-embedded; otherwise all Functions are refreshed in batches.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._resolve_store())
         from memplex.retrieval.embedding import EmbeddingService
         from memplex.storage.vector import InMemoryVectorStore
 
@@ -1198,6 +1204,8 @@ class BackgroundWorker:
         When a CompactionPipeline is injected at init time, this handler
         delegates to it.  Otherwise falls back to a stub.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._resolve_store())
         trigger = payload.get("trigger", "manual")
         scope = payload.get("scope", "global")
         logger.info("Compaction triggered: trigger=%s scope=%s", trigger, scope)

@@ -179,6 +179,8 @@ class LiteSyncRepository(AbstractSyncRepository):
     @contextmanager
     def _read(self) -> Iterator[None]:
         with self._store._durability.writer_lock():
+            from memplex.source_compatibility import reject_legacy_writer
+            reject_legacy_writer(self._store)
             self._store._refresh_for_read()
             yield
 
@@ -1164,6 +1166,9 @@ class LiteSyncRepository(AbstractSyncRepository):
             return
 
         node_id = event.entity_key.node_id
+        from memplex.storage.source_versions import reject_reserved_publication
+        wire_payload = event.to_dict()["payload"]
+        reject_reserved_publication(node_id, wire_payload.get("namespace") if isinstance(wire_payload, dict) else None)
         if node_id is None:
             raise ValueError("node event requires node entity key")
         collection: Any

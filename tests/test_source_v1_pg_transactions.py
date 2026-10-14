@@ -155,12 +155,10 @@ def source_backend(pg_function_dsn, monkeypatch):
             lambda snapshot: snapshot.payload.get("unsafe") is not True,
         )
         admission = resources._install_source_versions(store, SCOPE, hooks, issuer=_RESOURCE_ISSUER)
-        # Fixture bootstrap is explicit SQL, never a production activation path.
-        from contextlib import closing
-
-        with closing(psycopg2.connect(pg_function_dsn)) as admin, admin, admin.cursor() as cur:
-            cur.execute("INSERT INTO memplex_source_authorities VALUES (%s,%s,%s,'live',1,1,%s::jsonb,1)",
-                        (SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id, _canonical(POLICY)))
+        from memplex.config import SourceContractConfig
+        store.source_versions().initialize_authority(SCOPE, POLICY, admission=admission)
+        resources._source_startup(SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id),
+                                  store, issuer=_RESOURCE_ISSUER)
         backend = store.authorized(CONTEXT).source_versions()
         trace.clear()
         yield store, backend, resources, trace, pg_function_dsn, admission
@@ -529,8 +527,9 @@ def test_capability_requires_sealed_resource_installation(protocol_backend):
     with pytest.raises(SourceContractError), _fence(uninstalled):
         pass
     admission = resources._install_source_versions(store, SCOPE, hooks, issuer=issuer)
+    assert admission._resource is resources
     with pytest.raises(SourceContractError):
-        store.authorized(CONTEXT).source_versions().initialize_authority(SCOPE, POLICY, admission=admission)
+        store.authorized(CONTEXT).source_versions().initialize_authority(SCOPE, POLICY, admission=object())
     with pytest.raises(SourceContractError):
         resources._install_source_versions(store, SCOPE, hooks, issuer=issuer)
 

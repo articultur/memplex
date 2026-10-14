@@ -65,6 +65,10 @@ def publication_backend(request, tmp_path):
     )
     admission = _issue_admission(store._durability, SCOPE, hooks, issuer=_RESOURCE_ISSUER)
     backend.initialize_authority(SCOPE, POLICY, admission=admission)
+    from memplex.config import SourceContractConfig
+    from memplex.source_compatibility import _admit_lite
+    _admit_lite(store, SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id),
+                issuer=_RESOURCE_ISSUER)
     return SimpleNamespace(kind="lite", store=store, backend=backend, trace=[])
 
 

@@ -56,6 +56,8 @@ class PostgresSyncRepository(AbstractSyncRepository):
         consumer_ttl_seconds: int = 86400,
         retention_min_seconds: int = 86400,
     ) -> None:
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(store)
         if type(max_attempts) is not int:
             raise TypeError("max_attempts must be an int")
         if max_attempts < 1:
@@ -799,6 +801,8 @@ class PostgresSyncRepository(AbstractSyncRepository):
         return page
 
     def sync_apply_batch(self, batch: SyncBatch) -> SyncBatchResult:
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self._store)
         if type(batch) is not SyncBatch:
             raise TypeError("batch must be an exact SyncBatch")
         executor = getattr(self._store, "_inbound_executor", None)
@@ -881,6 +885,8 @@ class PostgresSyncRepository(AbstractSyncRepository):
     ) -> None:
         scope = event.scope
         payload = self._event_payload(event)
+        from memplex.storage.source_versions import reject_reserved_publication
+        reject_reserved_publication(event.entity_key.node_id, payload.get("namespace") if payload is not None else None)
         if event.node_type is SyncNodeType.EDGE:
             edge_parts = event.entity_key.edge_parts
             if edge_parts is None:

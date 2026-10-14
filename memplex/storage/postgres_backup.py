@@ -251,6 +251,88 @@ class PostgresClientTools:
         )
 
 
+def _approved_restore_toc(text: str, schema: str) -> tuple[str, str]:
+    """Constrain trusted first-party TOC objects, never parse/rewrite dump SQL."""
+    from memplex.storage.migrations._constants import (
+        _KNOWN_MEMPLEX_RELATION_KINDS,
+        _MANAGED_TABLES,
+        _SYNC_FUNCTIONS,
+    )
+    relations = set(_KNOWN_MEMPLEX_RELATION_KINDS) | {'fts_functions_idx', 'feedback', 'feedback_pkey',
+                                                   'feedback_tenant_memory_idx'}
+    functions = set(_SYNC_FUNCTIONS)
+    constraints = relations | {'memplex_edges_source_function_fk', 'memplex_edges_target_function_fk',
+                              'memplex_source_heads_authority_fk', 'memplex_derivation_records_authority_fk',
+                              'memplex_sync_deliveries_tenant_id_target_id_fkey',
+                              'memplex_sync_deliveries_tenant_id_stream_seq_fkey',
+                              'memplex_sync_snapshot_items_tenant_id_snapshot_id_fkey'}
+    triggers = {'memplex_sync_' + table + '_' + stage
+                for table in ('functions', 'edges', 'observations', 'facts', 'preferences') for stage in ('before', 'after')}
+    policies = {name + '_scope' for name in _MANAGED_TABLES} | {'feedback_tenant_scope'}
+    kinds = ('SEQUENCE OWNED BY', 'TABLE DATA', 'SEQUENCE SET', 'FK CONSTRAINT', 'ROW SECURITY',
+             'DEFAULT ACL', 'CONSTRAINT', 'FUNCTION', 'SEQUENCE', 'SCHEMA', 'COMMENT', 'DEFAULT',
+             'TABLE', 'INDEX', 'TRIGGER', 'POLICY', 'ACL')
+    data, schema_acl, seen = [], [], set()
+    for line in text.splitlines():
+        if not line or line.startswith(';'):
+            continue
+        match = re.fullmatch(r'(\d+); (\d+) (\d+) (.+)', line)
+        if match is None or match[1] in seen:
+            raise ValueError('unexpected TOC')
+        seen.add(match[1])
+        tail = match[4]
+        kind = next((kind for kind in kinds if tail.startswith(kind + ' ')), None)
+        if kind is None:
+            raise ValueError('unexpected TOC kind')
+        rest = tail[len(kind) + 1:]
+        if kind == 'SCHEMA':
+            if not rest.startswith('- ' + schema + ' '):
+                raise ValueError('foreign schema')
+            continue
+        if kind in {'COMMENT', 'ACL'} and rest.startswith('- SCHEMA ' + schema + ' '):
+            if kind == 'ACL':
+                schema_acl.append(line)
+            continue
+        if not rest.startswith(schema + ' '):
+            raise ValueError('foreign object')
+        body = rest[len(schema) + 1:]
+        if kind == 'COMMENT':
+            continue
+        if kind == 'DEFAULT ACL':
+            # Restore no target administrative defaults from source metadata.
+            if not any(body.startswith('DEFAULT PRIVILEGES FOR ' + kind + ' ')
+                       for kind in ('TABLES', 'SEQUENCES', 'FUNCTIONS')):
+                raise ValueError('unexpected default privilege kind')
+            continue
+        if kind == 'ACL':
+            object_kind, body = body.split(' ', 1)
+            if object_kind not in {'TABLE', 'SEQUENCE', 'FUNCTION'}:
+                raise ValueError('unexpected ACL object')
+            name = body.split('(', 1)[0] if object_kind == 'FUNCTION' else body.split(' ', 1)[0]
+            if name not in (functions if object_kind == 'FUNCTION' else relations):
+                raise ValueError('unknown ACL object')
+        elif kind == 'FUNCTION':
+            if body.split('(', 1)[0] not in functions:
+                raise ValueError('unknown function')
+        else:
+            fields = body.split()
+            name = fields[0] if fields else ''
+            allowed = set(_MANAGED_TABLES) if kind in {'TABLE', 'TABLE DATA', 'ROW SECURITY', 'DEFAULT',
+                                                        'CONSTRAINT', 'FK CONSTRAINT', 'TRIGGER', 'POLICY'} else relations
+            if name not in allowed:
+                raise ValueError('unknown relation')
+            if kind in {'CONSTRAINT', 'FK CONSTRAINT', 'TRIGGER', 'POLICY'}:
+                names = constraints if kind in {'CONSTRAINT', 'FK CONSTRAINT'} else triggers if kind == 'TRIGGER' else policies
+                if len(fields) != 3 or fields[1] not in names:
+                    raise ValueError('unknown attached object')
+            elif kind == 'DEFAULT' and (len(fields) != 3 or fields[1] not in {'id', 'stream_seq'}):
+                raise ValueError('unknown default column')
+        data.append(line)
+    if not data or not any(' TABLE DATA ' in line for line in data):
+        raise ValueError('empty managed archive')
+    return '\n'.join(data) + '\n', '\n'.join(schema_acl) + ('\n' if schema_acl else '')
+
+
 class PostgresBackupExecutor:
     """Create schema-scoped PostgreSQL backups bound to one inspected target."""
 
@@ -541,89 +623,339 @@ class PostgresBackupExecutor:
             raise BackupIntegrityError("backup_publish_outcome_unknown")
         return manifest
 
-    def restore(
-        self,
-        *,
-        migration_dsn: str,
-        artifact: Path,
-        signing_key: bytes,
-        target_schema: str,
-    ) -> RestoreResult:
-        started = time.monotonic()
-        with open_verified_backup_artifact(Path(artifact), signing_key) as opened:
-            manifest = opened.manifest
-            if (
-                manifest.backend != "postgres"
-                or type(target_schema) is not str
-                or target_schema != manifest.schema
-                or manifest.database != self._target.database
-                or target_schema != self._target.schema
-            ):
-                raise BackupIntegrityError("postgres_restore_target_mismatch")
+    def _restore_authority(self, migration_dsn: str, scope: Any, *, issuer: object) -> Any:
+        from memplex.source_compatibility import RestoreAuthority, RestoreTarget
+        from memplex.source_contract import RejectionCode, SourceContractError
+        from memplex.storage.postgres_resources import _source_target_identity
+        from memplex.storage.source_versions import _RESOURCE_ISSUER
+        if issuer is not _RESOURCE_ISSUER:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        self._source_restore_dsn = migration_dsn
+        return RestoreAuthority(issuer=issuer, resource=self, target=RestoreTarget(
+            "postgres", scope, _source_target_identity(self._target)))
 
-            environment = _libpq_environment(migration_dsn)
-            server_version, exists, _ = self._inspect_restore_state(
-                migration_dsn, target_schema
-            )
-            if exists:
-                raise BackupIntegrityError("postgres_restore_target_exists")
-            if _parse_major(self._client_tools().pg_restore_version) != _parse_major(
-                server_version
-            ):
-                raise BackupIntegrityError("postgres_client_server_major_mismatch")
-            try:
-                with tempfile.TemporaryDirectory(
-                    prefix=".postgres-restore-"
-                ) as restore_dir:
-                    os.chmod(restore_dir, 0o700)
-                    payload = Path(restore_dir) / "payload.dump"
-                    opened.copy_payload_to(payload)
-                    completed = subprocess.run(
-                        self._pg_restore_argv(payload),
-                        shell=False,
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=self._timeout_seconds,
-                        env=environment,
-                    )
-            except subprocess.TimeoutExpired as exc:
-                raise _fixed_error("postgres_restore_command_timeout", exc)
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise _fixed_error("postgres_restore_command_failed", exc)
-        if completed.returncode != 0:
-            raise BackupIntegrityError("postgres_restore_command_failed")
+    def _begin_source_restore(self, authority: Any) -> None:
+        from contextlib import closing
+        with closing(self._connect(self._source_restore_dsn)) as connection:
+            self._reserve_restore(connection, backup_id=None, authority=authority,
+                                  deadline=time.monotonic() + self._timeout_seconds)
 
-        _, exists_after, migration_version = self._inspect_restore_state(
-            migration_dsn, target_schema
+    @staticmethod
+    def _remaining_restore(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackupIntegrityError("postgres_restore_command_timeout")
+        return remaining
+
+    def _restore_owner(self, connection: Any, cursor: Any, deadline: float) -> None:
+        from memplex.storage.postgres_resources import _source_target_lock
+        remaining = max(1, int(self._remaining_restore(deadline) * 1000))
+        cursor.execute("SELECT set_config('lock_timeout',%s,true), set_config('statement_timeout',%s,true)",
+                       (f"{remaining}ms", f"{remaining}ms"))
+        cursor.execute("SELECT current_database(),inet_server_addr()::text,inet_server_port()")
+        if cursor.fetchone() != (self._target.database, self._target.server_address, self._target.server_port):
+            raise BackupIntegrityError("postgres_restore_target_mismatch")
+        _source_target_lock(cursor, self._target, session=True)
+
+    def _check_restore_isolation(self, cursor: Any) -> str:
+        """New-schema access barrier; observe existing rights, never change them."""
+        cursor.execute("SELECT pg_catalog.current_schema()")
+        if cursor.fetchone() != (self._target.schema,):
+            raise BackupIntegrityError("postgres_restore_target_mismatch")
+        cursor.execute("SELECT n.oid,n.nspowner,current_user,n.nspowner=to_regrole(current_user) "
+                       "FROM pg_catalog.pg_namespace n WHERE n.nspname=%s", (self._target.schema,))
+        row = cursor.fetchone()
+        if row is None or row[3] is not True:
+            raise BackupIntegrityError("postgres_restore_target_not_isolated")
+        schema_oid, owner_oid, owner, _ = row
+        # Match the existing conservative membership safety rule: a role may
+        # SET ROLE through NOINHERIT memberships even without ambient access.
+        cursor.execute("WITH RECURSIVE reachable(oid) AS ("
+                       "SELECT oid FROM pg_catalog.pg_roles WHERE oid<>%s AND rolcanlogin AND NOT rolsuper "
+                       "UNION SELECT m.roleid FROM pg_catalog.pg_auth_members m JOIN reachable r ON m.member=r.oid) "
+                       "SELECT 1 FROM reachable WHERE "
+                       "has_schema_privilege(oid,%s,'USAGE') OR has_schema_privilege(oid,%s,'CREATE') LIMIT 1",
+                       (owner_oid, schema_oid, schema_oid))
+        if cursor.fetchone() is not None:
+            raise BackupIntegrityError("postgres_restore_target_not_isolated")
+        cursor.execute("SELECT 1 FROM pg_catalog.pg_namespace n, LATERAL aclexplode(n.nspacl) a "
+                       "WHERE n.oid=%s AND a.grantee<>n.nspowner LIMIT 1", (schema_oid,))
+        if cursor.fetchone() is not None:
+            raise BackupIntegrityError("postgres_restore_target_not_isolated")
+        # Object defaults may reproduce the already approved app/ingress ACL.
+        # They cannot grant schema access or introduce a new recipient/right.
+        cursor.execute("SELECT d.defaclobjtype,a.grantee,r.rolname,a.privilege_type,a.is_grantable "
+                       "FROM pg_catalog.pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a "
+                       "LEFT JOIN pg_catalog.pg_roles r ON r.oid=a.grantee "
+                       "WHERE d.defaclrole=%s AND d.defaclnamespace IN (0,%s) AND a.grantee<>d.defaclrole",
+                       (owner_oid, schema_oid))
+        for kind, _grantee, role, privilege, grantable in cursor.fetchall():
+            app = self._application_acl is not None and role == self._application_acl.role
+            ingress = self._ingress_acl is not None and role == self._ingress_acl.role
+            allowed = ((app and ((kind == 'r' and privilege in {'SELECT', 'INSERT', 'UPDATE', 'DELETE'})
+                                  or (kind == 'S' and privilege == 'USAGE')
+                                  or (kind == 'f' and privilege == 'EXECUTE')))
+                       or (ingress and kind == 'f' and privilege == 'EXECUTE')
+                       or (kind == 'f' and _grantee == 0 and privilege == 'EXECUTE'))
+            if grantable or not allowed:
+                raise BackupIntegrityError("postgres_restore_defaults_unsafe")
+        return str(owner)
+
+    def _reserve_restore(self, connection: Any, *, backup_id: str | None,
+                         authority: Any, deadline: float) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        from psycopg2 import sql
+
+        from memplex.source_compatibility import RestoreAuthority
+        from memplex.storage.postgres_resources import (
+            _source_schema_marker,
+            _source_target_identity,
+            _write_source_schema_marker,
         )
-        if not exists_after or migration_version != manifest.migration_version:
-            raise BackupIntegrityError("postgres_restore_readback_failed")
-        factory = None
-        if self._connection_factory is not None:
-            connection_factory_impl = self._connection_factory
+        from memplex.storage.source_versions import _RESOURCE_ISSUER
+        connection.set_session(isolation_level="READ COMMITTED", readonly=False, autocommit=False)
+        with connection.cursor() as cursor:
+            self._restore_owner(connection, cursor, deadline)
+            explicit = authority is not None
+            if explicit and (type(authority) is not RestoreAuthority or authority._issuer is not _RESOURCE_ISSUER
+                             or authority._resource is not self or authority.target.backend != 'postgres'
+                             or authority.target.storage_identity != _source_target_identity(self._target)):
+                raise BackupIntegrityError("postgres_restore_authority_invalid")
+            cursor.execute('SELECT current_user')
+            owner = cursor.fetchone()[0]
+            marker = {"version": 1, "state": "quarantined", "kind": "explicit_v1" if explicit else "legacy_candidate",
+                      "restore_id": authority.receipt.restore_id if explicit else str(uuid.uuid4()),
+                      "backup_id": backup_id, "storage_identity": _source_target_identity(self._target),
+                      "owner": owner, "scope": asdict(authority.target.scope) if explicit else None}
+            cursor.execute('SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname=%s)', (self._target.schema,))
+            if cursor.fetchone()[0]:
+                existing = _source_schema_marker(cursor, self._target.schema)
+                if existing is None:
+                    raise BackupIntegrityError("postgres_restore_target_exists")
+                from memplex.source_contract import _uuid
+                _uuid(existing.get('restore_id'))
+                compare = dict(marker)
+                compare['restore_id'] = existing.get('restore_id')
+                if explicit:
+                    compare['restore_id'] = authority.receipt.restore_id
+                    # begin_v1_restore has no archive bytes yet; bind the first verified backup once.
+                    if existing.get('backup_id') is None:
+                        compare['backup_id'] = None
+                if existing != compare:
+                    raise BackupIntegrityError("postgres_restore_target_exists")
+                cursor.execute("SELECT EXISTS(SELECT 1 FROM pg_class WHERE relnamespace=%s::regnamespace) OR "
+                               "EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace=%s::regnamespace) OR "
+                               "EXISTS(SELECT 1 FROM pg_type WHERE typnamespace=%s::regnamespace)",
+                               (self._target.schema,) * 3)
+                if cursor.fetchone()[0]:
+                    raise BackupIntegrityError("postgres_restore_target_exists")
+                marker['restore_id'] = existing['restore_id']
+            else:
+                cursor.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(self._target.schema)))
+            if self._check_restore_isolation(cursor) != owner:
+                raise BackupIntegrityError("postgres_restore_target_not_isolated")
+            _write_source_schema_marker(cursor, self._target.schema, marker)
+        connection.commit()
+        with connection.cursor() as cursor:
+            if _source_schema_marker(cursor, self._target.schema) != marker:
+                raise BackupIntegrityError("postgres_restore_quarantine_lost")
+            self._check_restore_isolation(cursor)
+        connection.commit()
+        return marker
 
-            def connection_factory() -> Any:
-                return connection_factory_impl(migration_dsn)
-
-            factory = connection_factory
+    def _restore_toc(self, payload: Path, environment: dict[str, str], deadline: float) -> tuple[str, str]:
+        completed = subprocess.run((str(self._client_tools().pg_restore), '--list', str(payload)),
+            shell=False, check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=self._remaining_restore(deadline), env=environment)
+        if completed.returncode != 0 or not isinstance(completed.stdout, bytes):
+            raise BackupIntegrityError('postgres_restore_command_failed')
         try:
-            final = PostgresMigrationRunner(
-                migration_dsn, connection_factory=factory
-            ).status(
-                expected_target=self._target,
-                application_acl=self._application_acl,
-                ingress_acl=self._ingress_acl,
-                deployment_profile=self._deployment_profile,
-            )
-        except Exception as exc:  # noqa: BLE001 - broad catch, re-raised/wrapped below
-            raise _fixed_error("postgres_restore_readback_failed", exc)
-        if final.state != "ready" or final.current_version != manifest.migration_version:
-            raise BackupIntegrityError("postgres_restore_readback_failed")
-        return RestoreResult(
-            backup_id=manifest.backup_id,
-            database=manifest.database,
-            schema=manifest.schema,
-            restored=True,
-            elapsed_seconds=time.monotonic() - started,
+            return _approved_restore_toc(completed.stdout.decode('utf-8'), self._target.schema)
+        except (ValueError, UnicodeError) as exc:
+            raise BackupIntegrityError('postgres_restore_catalog_invalid') from exc
+
+    def _restore_list(self, payload: Path, use_list: Path, environment: dict[str, str], deadline: float) -> None:
+        argv = self._pg_restore_argv(payload)
+        completed = subprocess.run((*argv[:-1], '--no-owner', f'--use-list={use_list}', argv[-1]),
+            shell=False, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=self._remaining_restore(deadline), env=environment)
+        if completed.returncode != 0:
+            raise BackupIntegrityError('postgres_restore_command_failed')
+
+    def _quarantined_structure(self, cursor: Any, manifest: BackupManifest, authority: Any) -> None:
+        """Validate restored structure without claiming application readiness."""
+        from memplex.storage.migrations import discover_migrations
+        from memplex.storage.migrations.runner import (
+            _plan_from_observed_state,
+            _read_ledger_if_present,
+            schema_fingerprint,
         )
+        from memplex.storage.postgres_resources import _source_global_proof
+        permitted = self._quarantined_object_acls(cursor)
+        plan = _plan_from_observed_state(_read_ledger_if_present(cursor),
+            schema_fingerprint(cursor, permit_application_acl=permitted), discover_migrations())
+        if plan.state != 'ready' or plan.current_version != manifest.migration_version:
+            raise BackupIntegrityError('postgres_restore_readback_failed')
+        _source_global_proof(cursor, self._target.schema, empty=False, scope=authority.target.scope)
+        scope = authority.target.scope
+        cursor.execute("SELECT set_config('memplex.tenant_id',%s,true),set_config('memplex.workspace_id',%s,true)",
+                       (scope.tenant_id, scope.workspace_id))
+        cursor.execute('SELECT authority_id::text,tenant_id,workspace,contract_version FROM memplex_source_authorities')
+        if cursor.fetchall() != [(scope.authority_id, scope.tenant_id, scope.workspace_id, 1)]:
+            raise BackupIntegrityError('postgres_restore_readback_failed')
+
+    def _quarantined_object_acls(self, cursor: Any) -> bool:
+        from memplex.storage.migrations._constants import (
+            _APPLICATION_ACL,
+            _CAPABILITIES_TABLE,
+            _LEDGER_TABLE,
+        )
+        from memplex.storage.migrations.acl_verification import (
+            _verify_application_function_acls,
+            _verify_application_sequence_acls,
+            _verify_ingress_production_roles,
+        )
+        role_oid = None
+        if self._application_acl is not None:
+            cursor.execute('SELECT oid,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=%s', (self._application_acl.role,))
+            row = cursor.fetchone()
+            if row is None or row[1] or row[2]:
+                raise BackupIntegrityError('postgres_restore_acl_invalid')
+            role_oid = row[0]
+            # This existing helper is the same recursive owner/superuser/
+            # BYPASSRLS rule used by application ACL verification.
+            _verify_ingress_production_roles(cursor, role_oid)
+        if self._ingress_acl is not None:
+            cursor.execute('SELECT oid FROM pg_roles WHERE rolname=%s', (self._ingress_acl.role,))
+            ingress = cursor.fetchone()
+            if ingress is None:
+                raise BackupIntegrityError('postgres_restore_acl_invalid')
+            _verify_ingress_production_roles(cursor, ingress[0])
+        tables = [*_APPLICATION_ACL, _CAPABILITIES_TABLE, _LEDGER_TABLE]
+        cursor.execute("SELECT c.relname,c.relowner=to_regrole(current_user),a.attname "
+                       "FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attacl IS NOT NULL "
+                       "WHERE c.relnamespace=%s::regnamespace AND c.relname=ANY(%s)", (self._target.schema, tables))
+        rows = cursor.fetchall()
+        if len(rows) != len(tables) or any(not row[1] or row[2] is not None for row in rows):
+            raise BackupIntegrityError('postgres_restore_acl_invalid')
+        cursor.execute("SELECT c.relname,c.relowner,a.grantee,a.privilege_type,a.is_grantable "
+                       "FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a "
+                       "WHERE c.relnamespace=%s::regnamespace", (self._target.schema,))
+        observed: dict[str, set[str]] = {name: set() for name in _APPLICATION_ACL}
+        for name, owner, grantee, privilege, grantable in cursor.fetchall():
+            if grantee == owner:
+                continue
+            if role_oid is None or grantee != role_oid or grantable:
+                raise BackupIntegrityError('postgres_restore_acl_invalid')
+            if name in observed:
+                observed[name].add(privilege)
+            elif name not in {'memplex_changelog_id_seq', 'memplex_sync_outbox_stream_seq_seq'}:
+                raise BackupIntegrityError('postgres_restore_acl_invalid')
+        if role_oid is None:
+            cursor.execute("SELECT p.proowner,a.grantee,r.rolname,p.proname,a.privilege_type,a.is_grantable "
+                           "FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a "
+                           "LEFT JOIN pg_roles r ON r.oid=a.grantee WHERE p.pronamespace=%s::regnamespace",
+                           (self._target.schema,))
+            for owner, grantee, role, function, privilege, grantable in cursor.fetchall():
+                if owner == grantee:
+                    continue
+                if (self._ingress_acl is None or role != self._ingress_acl.role
+                        or function != 'memplex_sync_apply_inbound' or privilege != 'EXECUTE' or grantable):
+                    raise BackupIntegrityError('postgres_restore_acl_invalid')
+            return False
+        if observed != {name: set(rights) for name, rights in _APPLICATION_ACL.items()}:
+            raise BackupIntegrityError('postgres_restore_acl_invalid')
+        _verify_application_sequence_acls(cursor, role_oid)
+        _verify_application_function_acls(cursor, role_oid,
+                                          self._ingress_acl.role if self._ingress_acl is not None else None)
+        return True
+
+    def _normal_restore_status(self, migration_dsn: str, manifest: BackupManifest, deadline: float) -> None:
+        def factory() -> Any:
+            connection = self._connect(migration_dsn)
+            try:
+                with connection.cursor() as cursor:
+                    remaining = max(1, int(self._remaining_restore(deadline) * 1000))
+                    cursor.execute("SELECT set_config('statement_timeout',%s,false)", (f"{remaining}ms",))
+                connection.commit()
+                return connection
+            except BaseException:
+                connection.close()
+                raise
+        final = PostgresMigrationRunner(migration_dsn, connection_factory=factory).status(
+            expected_target=self._target, application_acl=self._application_acl,
+            ingress_acl=self._ingress_acl, deployment_profile=self._deployment_profile)
+        if final.state != 'ready' or final.current_version != manifest.migration_version:
+            raise BackupIntegrityError('postgres_restore_readback_failed')
+
+    def restore(
+        self, *, migration_dsn: str, artifact: Path, signing_key: bytes,
+        target_schema: str, authority: Any = None,
+    ) -> RestoreResult:
+        """Restore only a fresh isolated target; unknown/V1 bytes stay quarantined."""
+        from contextlib import closing
+
+        from memplex.storage.postgres_resources import (
+            _source_global_proof,
+            _source_schema_marker,
+            _write_source_schema_marker,
+        )
+        started = time.monotonic()
+        deadline = started + self._timeout_seconds
+        try:
+            with open_verified_backup_artifact(Path(artifact), signing_key) as opened:
+                manifest = opened.manifest
+                if (manifest.backend != 'postgres' or type(target_schema) is not str
+                        or target_schema != manifest.schema or manifest.database != self._target.database
+                        or target_schema != self._target.schema):
+                    raise BackupIntegrityError('postgres_restore_target_mismatch')
+                environment = _libpq_environment(migration_dsn)
+                with closing(self._connect(migration_dsn)) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT current_setting('server_version')")
+                        server_version = cursor.fetchone()[0]
+                    connection.rollback()
+                    if _parse_major(self._client_tools().pg_restore_version) != _parse_major(server_version):
+                        raise BackupIntegrityError('postgres_client_server_major_mismatch')
+                    with tempfile.TemporaryDirectory(prefix='.postgres-restore-') as restore_dir:
+                        payload = Path(restore_dir) / 'payload.dump'
+                        opened.copy_payload_to(payload)
+                        data, schema_acl = self._restore_toc(payload, environment, deadline)
+                        data_list = Path(restore_dir) / 'objects.list'
+                        acl_list = Path(restore_dir) / 'schema-acl.list'
+                        data_list.write_text(data)
+                        acl_list.write_text(schema_acl)
+                        marker = self._reserve_restore(connection, backup_id=manifest.backup_id,
+                                                       authority=authority, deadline=deadline)
+                        self._restore_list(payload, data_list, environment, deadline)
+                        with connection, connection.cursor() as cursor:
+                            self._restore_owner(connection, cursor, deadline)
+                            if _source_schema_marker(cursor, target_schema) != marker:
+                                raise BackupIntegrityError('postgres_restore_quarantine_lost')
+                            self._check_restore_isolation(cursor)
+                            if authority is not None:
+                                self._quarantined_structure(cursor, manifest, authority)
+                            else:
+                                _source_global_proof(cursor, target_schema, empty=False)
+                        if authority is None:
+                            if schema_acl:
+                                self._restore_list(payload, acl_list, environment, deadline)
+                            # This uses its own connection before the final AX locks.
+                            self._normal_restore_status(migration_dsn, manifest, deadline)
+                            with connection, connection.cursor() as cursor:
+                                self._restore_owner(connection, cursor, deadline)
+                                _source_global_proof(cursor, target_schema, empty=False)
+                                if _source_schema_marker(cursor, target_schema) != marker:
+                                    raise BackupIntegrityError('postgres_restore_quarantine_lost')
+                                _write_source_schema_marker(cursor, target_schema, None)
+        except subprocess.TimeoutExpired as exc:
+            raise _fixed_error('postgres_restore_command_timeout', exc)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise _fixed_error('postgres_restore_command_failed', exc)
+        except BackupIntegrityError:
+            raise
+        except Exception as exc:
+            raise BackupIntegrityError('postgres_restore_quarantined') from exc
+        return RestoreResult(backup_id=manifest.backup_id, database=manifest.database,
+                             schema=manifest.schema, restored=True, elapsed_seconds=time.monotonic() - started)

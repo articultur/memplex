@@ -410,7 +410,51 @@ class PostgresSourceVersionStore:
             raise
 
     def initialize_authority(self, scope: AuthorityScope, policy: PolicySnapshot, *, admission: SourceAdmission) -> AuthorityState:
-        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        from contextlib import closing
+        from dataclasses import asdict
+
+        from memplex.storage import pool
+        from memplex.storage.migrations.runner import _verify_target_identity
+        from memplex.storage.postgres_resources import (
+            _source_global_proof,
+            _source_schema_marker,
+            _source_target_identity,
+            _source_target_lock,
+            _write_source_schema_marker,
+        )
+        from memplex.storage.source_versions import _check_admission
+
+        _check_admission(admission, self._resource, scope)
+        if (self._scope != scope or self._hooks is not admission._hooks
+                or self._resource._source_capacity is None or type(policy) is not PolicySnapshot
+                or self._owner._sync_capture_policy.mode != "off"):
+
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        authority = AuthorityState(scope, SourceState.LIVE, 1, policy, 1)
+        target = self._owner._ready_pool.target
+        runner = pool._new_migration_runner(self._resource.migration_dsn)
+        with closing(runner._open_connection()) as connection, connection, connection.cursor() as cursor:
+            connection.set_session(isolation_level="READ COMMITTED", readonly=False, autocommit=False)
+            cursor.execute("SET LOCAL lock_timeout='2000ms'; SET LOCAL statement_timeout='5000ms'")
+            _verify_target_identity(connection, cursor, target)
+            _source_target_lock(cursor, target)
+            if _source_schema_marker(cursor, target.schema) is not None:
+                raise SourceContractError(RejectionCode.QUARANTINED)
+            _source_global_proof(cursor, target.schema, empty=True)
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true), "
+                           "set_config('memplex.workspace_id', %s, true)", (scope.tenant_id, scope.workspace_id))
+            cursor.execute("INSERT INTO memplex_source_authorities "
+                           "(authority_id,tenant_id,workspace,state,policy_revision,commit_seq,policy,contract_version) "
+                           "VALUES (%s,%s,%s,'live',%s,1,%s::jsonb,1)",
+                           (scope.authority_id, scope.tenant_id, scope.workspace_id, policy.revision, _canonical(policy)))
+            _write_source_schema_marker(cursor, target.schema, {
+                "version": 1, "state": "live", "scope": asdict(scope),
+                "storage_identity": _source_target_identity(target),
+            })
+            cursor.execute("SELECT authority_id::text,tenant_id,workspace FROM memplex_source_authorities")
+            if cursor.fetchall() != [(scope.authority_id, scope.tenant_id, scope.workspace_id)]:
+                raise SourceContractError(RejectionCode.QUARANTINED)
+        return authority
 
     def _increment_access(self, authorization: AuthorizationContext, memory_ids: list[str]) -> None:
         with self._transaction(authorization, time.monotonic_ns() + 250_000_000, shared=False) as session:

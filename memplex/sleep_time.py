@@ -100,6 +100,8 @@ class SleepTimeAgent:
     # ── The pass itself (synchronous, testable) ──────────────────────
 
     def run_once(self) -> dict[str, Any]:
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(getattr(self._service, "store", None))
         report: dict[str, Any] = {
             "improved": {},
             "pinned_inferences": 0,

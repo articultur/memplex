@@ -777,7 +777,9 @@ def _source_cursor_admission(manager: PostgresPoolManager, cursor: Any,
     # that exact scope. Query/binding failures never mean "legacy".
     cursor.execute("SELECT current_setting('memplex.tenant_id', true), "
                    "current_setting('memplex.workspace_id', true), EXISTS (SELECT 1 FROM memplex_source_authorities "
-                   "WHERE tenant_id=%s AND workspace=%s) AS has_source_authority",
+                   "WHERE tenant_id=%s AND workspace=%s) OR EXISTS ("
+                   "SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname=current_schema() AND "
+                   "pg_catalog.obj_description(oid,'pg_namespace') LIKE 'memplex_source_%%') AS has_source_authority",
                    (context.principal.tenant_id, context.workspace_id))
     row = cursor.fetchone()
     if (row is None or len(row) != 3 or row[:2] != (context.principal.tenant_id, context.workspace_id)

@@ -30,6 +30,11 @@ def service(publication_backend):
     service = MemplexService.__new__(MemplexService)
     service.store = h.store
     service._config = MemplexConfig()
+    from memplex.config import SourceContractConfig
+    from tests.test_source_v1_pg_transactions import SCOPE
+    service._config.source_contract = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+    service._config.storage.backend = "lite" if h.kind == "lite" else "postgres"
+    service._config.storage.path = str(h.store._path.parent) if h.kind == "lite" else h.dsn
     service.feedback_store = SimpleNamespace(resolve=lambda *args: pytest.fail("partial feedback resolution"))
     service._auth = AuthorizationGate(service._config, lambda: service.store, lambda: service.feedback_store)
     service._invalidate_hot_references = lambda *args, **kwargs: None

@@ -276,8 +276,9 @@ def test_bootstrap_journal_uses_v3_and_recovery_retains_it(tmp_path, monkeypatch
     assert journal["target"]["memory"]["schema_version"] == 3
     fresh = LiteSourceVersionStore(LiteDurability(store._path, store._changelog._path))
     fresh._install_hooks(HOOKS, scope=SCOPE, issuer=_RESOURCE_ISSUER)
-    with fence(fresh) as session:
-        assert session.authority().scope == SCOPE
+    # The pair decision recovers, but interrupted first admission has no live receipt.
+    with pytest.raises(SourceContractError, match="quarantined"), fence(fresh):
+        pass
     assert not store._durability._journal_path.exists()
     assert json.loads(store._changelog._path.read_text())["format_version"] == 3
     with pytest.raises(LiteStorageIntegrityError):
@@ -585,13 +586,17 @@ print(json.dumps({'forbidden_modules': forbidden}))
 def test_recovery_timeout_keeps_durable_decision_for_next_fence(tmp_path, monkeypatch):
     from memplex.source_contract import SourceBusyError
     from memplex.storage.lite import durability as implementation
+    from memplex.storage.source_versions import _issue_policy_authority
     store = LiteMemoryStore(tmp_path / "memory.json")
+    store.source_versions().initialize_authority(SCOPE, POLICY, admission=_issue_admission(
+        store._durability, SCOPE, HOOKS, issuer=_RESOURCE_ISSUER))
+    old_changelog = store._changelog._path.read_bytes()
     def crash():
         raise RuntimeError("durable decision before pair replacement")
     monkeypatch.setattr(store._durability, "after_journal_rename_and_parent_dir_fsync", crash)
     with pytest.raises(RuntimeError, match="durable decision"):
-        store.source_versions().initialize_authority(SCOPE, POLICY, admission=_issue_admission(
-            store._durability, SCOPE, HOOKS, issuer=_RESOURCE_ISSUER))
+        store.source_versions().replace_policy(1, replace(POLICY, revision=2),
+            _issue_policy_authority(store._durability, CONTEXT, issuer=_RESOURCE_ISSUER))
     journal = store._durability._journal_path.read_bytes()
     backend = LiteSourceVersionStore(LiteDurability(store._path, store._changelog._path))
     backend._install_hooks(HOOKS, scope=SCOPE, issuer=_RESOURCE_ISSUER)
@@ -608,9 +613,10 @@ def test_recovery_timeout_keeps_durable_decision_for_next_fence(tmp_path, monkey
         with pytest.raises(SourceBusyError), backend.read_fence(CONTEXT, deadline_ns=now[0] + 250_000_000):
             pass
     assert replacements == ["memory.json"]
-    assert not store._changelog._path.exists()
+    assert store._changelog._path.read_bytes() == old_changelog
     assert store._durability._journal_path.read_bytes() == journal
     with fence(backend) as session:
         assert session.authority().scope == SCOPE
+        assert session.authority().policy.revision == 2
     assert not store._durability._journal_path.exists()
     assert json.loads(store._changelog._path.read_text())["format_version"] == 3

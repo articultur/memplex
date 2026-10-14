@@ -47,6 +47,14 @@ def validate_ingress_batch(raw: bytes, request_sha256: str) -> ValidatedIngressB
         )
         value = _normalise_protocol_numbers(value)
         batch = SyncBatch.from_dict(value)
+        from memplex.source_contract import CARRIER_KEY, PUBLICATION_PREFIX
+        for event in batch.events:
+            payload = event.to_dict()["payload"]
+            namespace = payload.get("namespace") if isinstance(payload, dict) else None
+            node_id = event.entity_key.node_id
+            if ((isinstance(node_id, str) and node_id.startswith(PUBLICATION_PREFIX))
+                    or (isinstance(namespace, dict) and CARRIER_KEY in namespace)):
+                raise ValueError("source publication is not a legacy sync payload")
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise SyncBatchRejected("invalid ingress request") from exc
     if batch.canonical_bytes != raw:

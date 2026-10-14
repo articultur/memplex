@@ -317,6 +317,12 @@ class MemplexService:
 
         self._config = config or load_config()
         cfg = self._config
+        cfg.source_contract.validate()
+        if cfg.source_contract.mode == "v1" and (
+            cfg.storage.backend not in {"lite", "postgres"} or cfg.sync.enabled
+            or os.environ.get("MEMPLEX_REMOTE_URL", "")
+        ):
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
         self._context_prefetch_cache = ContextCandidateCache()
         # Authorization gate is constructed early because store construction
         # (below) already needs the production-profile check. Stores are
@@ -387,6 +393,11 @@ class MemplexService:
                     app_dsn=storage_path,
                     migration_dsn=migration_dsn,
                     inbound_dsn=inbound_dsn,
+                )
+            elif cfg.source_contract.mode == "v1":
+                from memplex.storage.source_versions import _RESOURCE_ISSUER
+                self._postgres_resources = PostgresStorageResources._for_source_validity(
+                    storage_path, migration_dsn=cfg.storage.migration_dsn, issuer=_RESOURCE_ISSUER,
                 )
             else:
                 self._postgres_resources = PostgresStorageResources(
@@ -471,13 +482,30 @@ class MemplexService:
         storage_kwargs: dict[str, Any],
     ) -> None:
         """Construct all runtime collaborators after storage readiness."""
-        self.store: MemoryStore = create_store(
-            backend=backend,
-            path=cfg.storage.path,
-            require_authorization=self._is_production_profile(),
-            deployment_profile=str(cfg.deployment.profile),
-            **storage_kwargs,
-        )
+        from memplex.source_compatibility import _open_lite, assert_v1_admission
+        from memplex.storage.source_versions import _RESOURCE_ISSUER
+
+        if backend == "lite" and cfg.source_contract.mode == "v1":
+            self.store: MemoryStore = _open_lite(
+                Path(cfg.storage.path).expanduser() / "memory.json", cfg.source_contract,
+                issuer=_RESOURCE_ISSUER, deployment_profile=str(cfg.deployment.profile),
+            )
+        else:
+            self.store = create_store(
+                backend=backend,
+                path=cfg.storage.path,
+                require_authorization=self._is_production_profile(),
+                deployment_profile=str(cfg.deployment.profile),
+                **storage_kwargs,
+            )
+        if backend == "postgres":
+            resource = self._postgres_resources
+            if type(resource) is PostgresSyncStorageResources:
+                resource = resource._app_resources
+            assert resource is not None
+            cast(PostgresStorageResources, resource)._source_startup(cfg.source_contract, self.store, issuer=_RESOURCE_ISSUER)
+        if cfg.source_contract.mode == "v1":
+            assert_v1_admission(cfg, cast(Any, getattr(self.store, "_source_capability", None)))
 
         if cfg.sync.enabled and cfg.sync.targets:
             self._initialize_sync_dispatcher(cfg)
@@ -1989,9 +2017,13 @@ class MemplexService:
 
     def _v1_source_store(self, context: AuthorizationContext) -> SourceVersionStore | None:
         """Recognize only concrete audited adapters, never a duck-typed wrapper."""
+        from memplex.source_compatibility import assert_v1_admission, reject_legacy_writer
         from memplex.storage.lite.store import LiteMemoryStore
         from memplex.storage.postgres import PostgresMemoryStore
-
+        if self._config.source_contract.mode == "off":
+            reject_legacy_writer(self.store)
+            return None
+        assert_v1_admission(self._config, cast(Any, getattr(self.store, "_source_capability", None)))
         if type(self.store) is LiteMemoryStore:
             self.store._refresh_for_read()
             pair = self.store._committed_pair
@@ -2840,6 +2872,8 @@ class MemplexService:
         scope:
             ``"session"`` | ``"project"`` | ``"global"``.
         """
+        from memplex.source_compatibility import reject_legacy_writer
+        reject_legacy_writer(self.store)
         compaction_scope = CompactionScope(scope)
         # CompactionPipeline.run is async; run it in a thread
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

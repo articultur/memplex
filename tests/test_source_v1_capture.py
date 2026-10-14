@@ -74,6 +74,11 @@ def capture_service(publication_backend, tmp_path, monkeypatch):
     svc = legacy_service(tmp_path / "service")
     original_store = svc.store
     svc.store = h.store
+    from memplex.config import SourceContractConfig
+    from tests.test_source_v1_pg_transactions import SCOPE
+    svc._config.source_contract = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+    svc._config.storage.backend = "lite" if h.kind == "lite" else "postgres"
+    svc._config.storage.path = str(h.store._path.parent) if h.kind == "lite" else h.dsn
     spy = CaptureSpy(svc._config.llm)
     svc._llm = spy
     inputs = extracted_input()
@@ -409,6 +414,11 @@ def test_actual_engine_enhancer_and_native_publication_path(publication_backend,
     svc = legacy_service(tmp_path / "actual-engine", payload_for)
     original_store = svc.store
     svc.store = h.store
+    from memplex.config import SourceContractConfig
+    from tests.test_source_v1_pg_transactions import SCOPE
+    svc._config.source_contract = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+    svc._config.storage.backend = "lite" if h.kind == "lite" else "postgres"
+    svc._config.storage.path = str(h.store._path.parent) if h.kind == "lite" else h.dsn
     try:
         result = svc.write(SourceDocument(type="text", content="Alice uses PostgreSQL. Bob uses SQLite.",
                                           author_role="user"), authorization=CONTEXT)

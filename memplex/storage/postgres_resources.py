@@ -44,6 +44,112 @@ from memplex.storage.pool import (  # names never monkeypatched at module scope
 )
 
 
+def _source_target_identity(target: PostgresTargetIdentity) -> str:
+    import json
+    return sha256(json.dumps(_target_key(target), separators=(",", ":")).encode()).hexdigest()
+
+
+def _source_target_lock(cursor: Any, target: PostgresTargetIdentity, *, session: bool = False) -> None:
+    key = int.from_bytes(sha256(("memplex-source-target:" + _source_target_identity(target)).encode()).digest()[:8],
+                         "big", signed=True)
+    function = "pg_advisory_lock" if session else "pg_advisory_xact_lock"
+    cursor.execute(f"SELECT pg_catalog.{function}(%s)", (key,))
+
+
+def _source_schema_marker(cursor: Any, schema: str) -> dict[str, Any] | None:
+    import json
+
+    from memplex.source_compatibility import _MARKER_PREFIX
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    cursor.execute("SELECT pg_catalog.obj_description(oid, 'pg_namespace') "
+                   "FROM pg_catalog.pg_namespace WHERE nspname=%s", (schema,))
+    row = cursor.fetchone()
+    if row is None:
+        raise SourceContractError(RejectionCode.QUARANTINED)
+    text = row[0]
+    if text is None or (type(text) is str and not text.startswith("memplex_source_")):
+        return None
+    try:
+        if type(text) is not str or not text.startswith(_MARKER_PREFIX):
+            raise ValueError
+        marker = json.loads(text[len(_MARKER_PREFIX):])
+        if (type(marker) is not dict or type(marker.get("version")) is not int or marker.get("version") != 1
+                or marker.get("state") not in {"live", "quarantined"}):
+            raise ValueError
+        return marker
+    except (ValueError, TypeError) as exc:
+        raise SourceContractError(RejectionCode.QUARANTINED) from exc
+
+
+def _write_source_schema_marker(cursor: Any, schema: str, marker: dict[str, Any] | None) -> None:
+    import json
+
+    from psycopg2 import sql  # type: ignore[import-untyped]
+
+    from memplex.source_compatibility import _MARKER_PREFIX
+    from memplex.source_contract import RejectionCode, SourceContractError
+
+    value = None if marker is None else _MARKER_PREFIX + json.dumps(marker, sort_keys=True, separators=(",", ":"))
+    cursor.execute(sql.SQL("COMMENT ON SCHEMA {} IS %s").format(sql.Identifier(schema)), (value,))
+    if _source_schema_marker(cursor, schema) != marker:
+        raise SourceContractError(RejectionCode.QUARANTINED)
+
+
+def _source_global_proof(cursor: Any, schema: str, *, empty: bool, scope: Any = None) -> None:
+    """Owner constraint validation scans physical tuples despite FORCE RLS.
+
+    No commit/savepoint is allowed inside this helper. Its caller retains all
+    relation locks through the admission/release decision and commits once.
+    """
+    import uuid
+
+    from psycopg2 import sql
+
+    from memplex.source_contract import RejectionCode, SourceContractError
+    from memplex.storage.migrations._constants import (
+        _CAPABILITIES_TABLE,
+        _LEDGER_TABLE,
+        _MANAGED_TABLES,
+    )
+
+    tables = sorted(set(_MANAGED_TABLES) - {_CAPABILITIES_TABLE, _LEDGER_TABLE})
+    cursor.execute("SELECT c.relname, c.relkind, c.relowner=pg_catalog.to_regrole(current_user), "
+                   "EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid) "
+                   "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON c.relnamespace=n.oid "
+                   "WHERE n.nspname=%s AND c.relname=ANY(%s)", (schema, tables))
+    rows = cursor.fetchall()
+    if (len(rows) != len(tables) or {r[0] for r in rows} != set(tables)
+            or any(r[1:] != ("r", True, False) for r in rows)):
+        raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+    cursor.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
+        sql.SQL(", ").join(sql.Identifier(schema, name) for name in tables)))
+    source = {"memplex_source_authorities", "memplex_source_heads", "memplex_derivation_records"}
+    typed = {"memplex_functions", "memplex_facts", "memplex_preferences", "memplex_observations"}
+    for table in tables:
+        if scope is not None:
+            if table not in source:
+                continue
+            predicate = sql.SQL("authority_id={}::uuid AND tenant_id={} AND workspace={}").format(
+                sql.Literal(scope.authority_id), sql.Literal(scope.tenant_id), sql.Literal(scope.workspace_id))
+        elif empty or table in source:
+            predicate = sql.SQL("false")
+        elif table in typed:
+            predicate = ("left(id, length('fact_derived_v1_')) <> 'fact_derived_v1_' AND "
+                         "NOT COALESCE((data->'namespace') ? 'memplex_derivation_contract', false)")
+        elif table == "memplex_paragraphs":
+            predicate = "left(id, length('fact_derived_v1_')) <> 'fact_derived_v1_'"
+        else:
+            continue
+        relation = sql.Identifier(schema, table)
+        constraint = sql.Identifier("memplex_source_check_" + uuid.uuid4().hex)
+        cursor.execute(sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} CHECK (({}) IS TRUE) NOT VALID").format(
+            relation, constraint, sql.SQL(predicate) if isinstance(predicate, str) else predicate))
+        cursor.execute(sql.SQL("ALTER TABLE {} VALIDATE CONSTRAINT {}").format(relation, constraint))
+        cursor.execute(sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(relation, constraint))
+
+
+
 class PostgresStorageResources:
     """Service-owned migration/capability gate and shared business pool.
 
@@ -137,6 +243,53 @@ class PostgresStorageResources:
             manager._source_resource = self
             store._source_version_adapter = adapter
             return admission
+
+    def _source_startup(self, config: Any, store: Any = None, *, issuer: object) -> Any:
+        """Owner admission, performed once before runtime collaborators exist."""
+        from contextlib import closing
+        from dataclasses import asdict
+
+        from memplex.source_compatibility import _audited_hooks, _scope
+        from memplex.source_contract import RejectionCode, SourceContractError, SourceState
+        from memplex.storage.migrations.runner import _verify_target_identity
+        from memplex.storage.source_versions import _RESOURCE_ISSUER, SourceCapability
+
+        if issuer is not _RESOURCE_ISSUER:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        config.validate()
+        target = self.ready_pool.target
+        runner = _pool._new_migration_runner(self.migration_dsn)
+        with closing(runner._open_connection()) as connection, connection, connection.cursor() as cursor:
+            connection.set_session(isolation_level="READ COMMITTED", readonly=False, autocommit=False)
+            cursor.execute("SET LOCAL lock_timeout='2000ms'; SET LOCAL statement_timeout='5000ms'")
+            _verify_target_identity(connection, cursor, target)
+            _source_target_lock(cursor, target)
+            marker = _source_schema_marker(cursor, target.schema)
+            if config.mode == "off":
+                if marker is not None:
+                    raise SourceContractError(RejectionCode.QUARANTINED)
+                _source_global_proof(cursor, target.schema, empty=False)
+                return None
+            scope = _scope(config)
+            if marker != {"version": 1, "state": "live", "scope": asdict(scope),
+                          "storage_identity": _source_target_identity(target)}:
+                raise SourceContractError(RejectionCode.QUARANTINED)
+            cursor.execute("SELECT set_config('memplex.tenant_id', %s, true), "
+                           "set_config('memplex.workspace_id', %s, true)", (scope.tenant_id, scope.workspace_id))
+            cursor.execute("SELECT state,contract_version FROM memplex_source_authorities "
+                           "WHERE authority_id=%s AND tenant_id=%s AND workspace=%s",
+                           (scope.authority_id, scope.tenant_id, scope.workspace_id))
+            if cursor.fetchall() != [("live", 1)]:
+                raise SourceContractError(RejectionCode.QUARANTINED)
+        backend = store.source_versions()
+        if backend is None:
+            self._install_source_versions(store, scope, _audited_hooks(), issuer=issuer)
+        elif backend._resource is not self or backend._scope != scope or backend._hooks is None:
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+        capability = SourceCapability(issuer=issuer, resource=store, backend="postgres",
+                                      scope=scope, contract_version=1, state=SourceState.LIVE)
+        store._source_capability = capability
+        return capability
 
     @property
     def state(self) -> str:

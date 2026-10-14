@@ -432,7 +432,11 @@ class LiteSourceVersionStore:
 
     def initialize_authority(self, scope: AuthorityScope, policy: PolicySnapshot, *,
                              admission: SourceAdmission) -> AuthorityState:
+        from memplex.source_compatibility import _lite_marker, _read_lite_marker, _write_lite_marker
+
         _check_admission(admission, self._durability, scope)
+        if self._owner is None or self._owner._sync_repository._capture_policy.mode != "off":
+            raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
         if os.environ.get("MEMPLEX_LITE_SQLITE_AUTHORITY", ""):
             raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
         with self._durability.writer_lock(), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
@@ -443,6 +447,8 @@ class LiteSourceVersionStore:
                                              sqlite_path.with_name(sqlite_path.name + "-shm"))):
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
             base = self._durability._load_authoritative_locked()
+            if _read_lite_marker(self._durability) is not None:
+                raise SourceContractError(RejectionCode.QUARANTINED)
             if (base.generation != 0 or base.transaction_id != "empty" or base.changelog
                     or any(base.memory.get(name) for name in (*_COLLECTIONS.values(), "edges"))
                     or base.memory.get("sync") != _empty_sync_state()):
@@ -452,7 +458,9 @@ class LiteSourceVersionStore:
             memory.update(schema_version=3, source_validity=encode_ledger(SourceLedger(authority, {}, {}, {})))
             memory.setdefault("paragraphs", [])
             target = LitePair(memory, [], 1, uuid.uuid4().hex)
+            _write_lite_marker(self._durability, _lite_marker(self._durability, scope, "initializing"), exclusive=True)
             committed = self._durability.commit_locked(base, target, base_verified=True)
+            _write_lite_marker(self._durability, _lite_marker(self._durability, scope, "live"), exclusive=False)
             if self._owner is not None:
                 self._owner._publish_pair(committed)
         self._install_hooks(admission._hooks, scope=scope, issuer=_RESOURCE_ISSUER)
@@ -466,6 +474,8 @@ class LiteSourceVersionStore:
         deadline = time.monotonic_ns() + 250_000_000
         with self._durability.writer_lock_until(deadline), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
             base = self._durability._load_authoritative_locked(deadline_ns=deadline)
+            from memplex.source_compatibility import _check_lite_live
+            _check_lite_live(self._durability, self._scope, base)
             ledger = decode_ledger(base.memory["source_validity"])
             if ledger.authority.scope != self._scope or ledger.authority.state is not SourceState.LIVE:
                 raise SourceContractError(RejectionCode.QUARANTINED)
@@ -491,6 +501,8 @@ class LiteSourceVersionStore:
             _check_read_deadline(end)
             if pair.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            from memplex.source_compatibility import _check_lite_live
+            _check_lite_live(self._durability, self._scope, pair)
             session = _LiteReadSession(pair, end)
             try:
                 authority = session.authority()
@@ -562,6 +574,8 @@ class LiteSourceVersionStore:
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            from memplex.source_compatibility import _check_lite_live
+            _check_lite_live(self._durability, self._scope, base)
             session = _LiteReadSession(base, deadline_ns)
             try:
                 ledger = session._ledger
@@ -648,6 +662,8 @@ class LiteSourceVersionStore:
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            from memplex.source_compatibility import _check_lite_live
+            _check_lite_live(self._durability, self._scope, base)
             session = _LiteReadSession(base, deadline_ns)
             try:
                 authority = _admit_publication(session, authorization, self._scope)
@@ -709,6 +725,8 @@ class LiteSourceVersionStore:
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
+            from memplex.source_compatibility import _check_lite_live
+            _check_lite_live(self._durability, self._scope, base)
             session = _LiteReadSession(base, deadline_ns)
             try:
                 authority = _admit_publication(session, authorization, self._scope)

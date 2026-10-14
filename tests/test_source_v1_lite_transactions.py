@@ -401,13 +401,14 @@ def test_sync_required_rejection_and_atomic_body_free_bookkeeping(tmp_path):
     required = LiteMemoryStore(tmp_path / "required" / "memory.json",
                                sync_capture_policy=SyncCapturePolicy("required", "node"))
     writer = required.source_versions()
-    writer.initialize_authority(SCOPE, POLICY,
-        admission=_issue_admission(required._durability, SCOPE, HOOKS, issuer=_RESOURCE_ISSUER))
-    exact = (required._path.read_bytes(), required._changelog._path.read_bytes())
+    exact = required._durability.load_authoritative()
     with pytest.raises(SourceContractError) as rejected:
-        mutate(writer, command())
+        writer.initialize_authority(SCOPE, POLICY,
+            admission=_issue_admission(required._durability, SCOPE, HOOKS, issuer=_RESOURCE_ISSUER))
     assert rejected.value.code == "unsupported_capability"
-    assert (required._path.read_bytes(), required._changelog._path.read_bytes()) == exact
+    assert required._durability.load_authoritative() == exact
+    with pytest.raises(SourceContractError):
+        mutate(writer, command())
 
 
 def _process_cas(backend, token, start, results, value, single_writer):
