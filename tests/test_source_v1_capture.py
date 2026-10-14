@@ -81,7 +81,11 @@ def capture_service(publication_backend, tmp_path, monkeypatch):
     # Extraction and model transport are the only stubs. Reads/writes/CAS use
     # the real source backend. The current authority admits CONTEXT explicitly.
     monkeypatch.setattr("memplex.service.CoreEngine", lambda **kwargs: svc._engine)
-    yield SimpleNamespace(service=svc, backend=h.backend, store=h.store, kind=h.kind,
+    # Authorized PostgreSQL facades are fresh per request. Faults must reach
+    # their shared admitted adapter, while service calls retain their real scope.
+    fault_backend = h.store.source_versions()
+    assert fault_backend is not None
+    yield SimpleNamespace(service=svc, backend=h.backend, fault_backend=fault_backend, store=h.store, kind=h.kind,
                           spy=spy, inputs=inputs, harness=h)
     svc.store = original_store
     svc.stop()
@@ -139,19 +143,21 @@ def test_full_model_input_manifest_not_self_citations(capture_service):
 def test_partial_typed_raw_capture_never_publishes(capture_service, monkeypatch, fail_kind, fail_number, expected):
     h = capture_service
     h.inputs.functions[:] = extracted_input(functions=True).functions
-    original = h.backend.mutate_source
-    calls, committed = [], []
+    original = h.fault_backend.mutate_source
+    calls, committed, reached = [], [], []
 
     def fault(context, command, **kwargs):
         calls.append(command.key.kind)
         if command.key.kind is fail_kind and calls.count(fail_kind) == fail_number:
+            reached.append((command.key.kind, calls.count(fail_kind)))
             raise OSError("synthetic source acknowledgement failure")
         receipt = original(context, command, **kwargs)
         committed.append(receipt)
         return receipt
 
-    monkeypatch.setattr(h.backend, "mutate_source", fault)
+    monkeypatch.setattr(h.fault_backend, "mutate_source", fault)
     result = write(h)
+    assert reached == [(fail_kind, fail_number)]
     assert result.factual_capture["accepted"] == 0
     assert h.spy.calls == []
     assert not result.source_contract_receipt["complete"]
@@ -164,16 +170,18 @@ def test_partial_typed_raw_capture_never_publishes(capture_service, monkeypatch,
 
 def test_committed_source_with_lost_response_is_unknown_not_fabricated(capture_service, monkeypatch):
     h = capture_service
-    original = h.backend.mutate_source
-    actually_committed = []
+    original = h.fault_backend.mutate_source
+    actually_committed, attempted = [], []
 
     def lose_response(context, command, **kwargs):
+        attempted.append(command)
         receipt = original(context, command, **kwargs)
         actually_committed.append(receipt)
         raise OSError("commit reply lost")
 
-    monkeypatch.setattr(h.backend, "mutate_source", lose_response)
+    monkeypatch.setattr(h.fault_backend, "mutate_source", lose_response)
     result = write(h)
+    assert len(attempted) == 1
     assert len(actually_committed) == 1  # no guessed CREATE retry
     assert receipts(result) == []
     assert result.source_contract_receipt["acknowledgement"] == "unknown"
@@ -225,13 +233,23 @@ def test_capture_input_hidden_but_internal_closure_checked(capture_service, monk
 @pytest.mark.parametrize("setting,value", [("MEMPLEX_TRUST_TIER2_CAP", "1"), ("MEMPLEX_RAW_PARAGRAPH_LAYER", "0")])
 def test_unsupported_capture_configuration_rejects_before_writes(capture_service, monkeypatch, setting, value):
     h = capture_service
-    monkeypatch.setenv(setting, value)
     calls = []
-    monkeypatch.setattr(h.backend, "mutate_source", lambda *a, **kw: calls.append(a))
-    result = write(h)
-    assert calls == [] and h.spy.calls == []
-    assert result.factual_capture["accepted"] == 0
-    assert receipts(result) == []
+    original = h.fault_backend.mutate_source
+
+    def observe(context, command, **kwargs):
+        calls.append(command)
+        return original(context, command, **kwargs)
+
+    monkeypatch.setattr(h.fault_backend, "mutate_source", observe)
+    with monkeypatch.context() as settings:
+        settings.setenv(setting, value)
+        result = write(h)
+        assert calls == [] and h.spy.calls == []
+        assert result.factual_capture["accepted"] == 0
+        assert receipts(result) == []
+    # A valid request reaches this same observer; the zero-write proof above
+    # must not pass merely because a detached facade was patched.
+    assert len(receipts(write(h))) == len(calls) == 3
 
 
 def test_source_change_during_model_rejects_publication_without_retry(capture_service):
@@ -322,15 +340,17 @@ def test_independent_b_only_publication_survives_unrelated_a_deletion(capture_se
 
 def test_publication_lost_response_is_unknown_without_retry(capture_service, monkeypatch):
     h = capture_service
-    original = h.backend.publish_if_current
-    committed = []
+    original = h.fault_backend.publish_if_current
+    committed, attempted = [], []
 
     def lose_response(context, command, **kwargs):
+        attempted.append(command)
         committed.append(original(context, command, **kwargs))
         raise OSError("publication reply lost")
 
-    monkeypatch.setattr(h.backend, "publish_if_current", lose_response)
+    monkeypatch.setattr(h.fault_backend, "publish_if_current", lose_response)
     result = write(h)
+    assert len(attempted) == 1
     assert len(committed) == 1 and len(h.spy.calls) == 1
     assert snapshot(h.backend, committed[0].publication_id) is not None
     assert result.factual_capture["accepted"] == 0
@@ -341,7 +361,14 @@ def test_publication_lost_response_is_unknown_without_retry(capture_service, mon
 def test_missing_root_and_input_budget_reject_before_any_mutation(capture_service, monkeypatch):
     h = capture_service
     calls = []
-    monkeypatch.setattr(h.backend, "mutate_source", lambda *args, **kwargs: calls.append(args))
+    original = h.fault_backend.mutate_source
+    original_limit = h.service._config.llm.max_input_length
+
+    def observe(context, command, **kwargs):
+        calls.append(command)
+        return original(context, command, **kwargs)
+
+    monkeypatch.setattr(h.fault_backend, "mutate_source", observe)
     h.inputs.facts[0].source_paragraphs = ["unresolved-root"]
     result = write(h)
     assert not receipts(result) and not calls and not h.spy.calls
@@ -349,12 +376,14 @@ def test_missing_root_and_input_budget_reject_before_any_mutation(capture_servic
     h.service._config.llm.max_input_length = len(A)
     result = write(h)
     assert not receipts(result) and not calls and not h.spy.calls
+    h.service._config.llm.max_input_length = original_limit
+    assert len(receipts(write(h))) == len(calls) == 3
 
 
 def test_change_before_freeze_never_calls_model(capture_service, monkeypatch):
     h = capture_service
-    original = h.backend.mutate_source
-    raw = []
+    original = h.fault_backend.mutate_source
+    raw, reached = [], []
 
     def change_after_originals(context, command, **kwargs):
         receipt = original(context, command, **kwargs)
@@ -362,10 +391,12 @@ def test_change_before_freeze_never_calls_model(capture_service, monkeypatch):
             raw.append(receipt)
         elif command.key.kind is SourceKind.FACT:
             h.service.delete_source(raw[0].ref.key, raw[0].ref.token, authorization=CONTEXT)
+            reached.append(raw[0].ref)
         return receipt
 
-    monkeypatch.setattr(h.backend, "mutate_source", change_after_originals)
+    monkeypatch.setattr(h.fault_backend, "mutate_source", change_after_originals)
     result = write(h)
+    assert reached == [raw[0].ref]
     assert len(receipts(result)) == 3 and result.source_contract_receipt["complete"]
     assert h.spy.calls == [] and result.factual_capture["accepted"] == 0
 
@@ -435,7 +466,14 @@ def _application_grants():
     return _APPLICATION_ACL.items()
 
 
+def _application_sequence_grants():
+    # Existing application contract: exactly USAGE, never SELECT/UPDATE.
+    return ("memplex_changelog_id_seq", "memplex_sync_outbox_stream_seq_seq")
+
+
 def test_native_capture_grant_recipe_uses_existing_application_privileges():
+    from memplex.storage.migrations._constants import _KNOWN_MEMPLEX_RELATION_KINDS
+
     grants = dict(_application_grants())
     assert grants["memplex_source_authorities"] == frozenset({"SELECT", "INSERT", "UPDATE"})
     assert grants["memplex_source_heads"] == frozenset({"SELECT", "INSERT", "UPDATE"})
@@ -443,6 +481,9 @@ def test_native_capture_grant_recipe_uses_existing_application_privileges():
     assert grants["memplex_paragraphs"] == frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
     assert grants["memplex_sync_ingress_principals"] == frozenset()
     assert all(type(table) is str and type(privileges) is frozenset for table, privileges in grants.items())
+    assert set(_application_sequence_grants()) == {
+        name for name, kind in _KNOWN_MEMPLEX_RELATION_KINDS.items() if kind == "S"
+    }
 
 
 @NATIVE
@@ -488,6 +529,9 @@ def test_native_legacy_handle_before_registration_and_after_reopen(request, pg_f
                 if privileges:
                     cursor.execute(sql.SQL("GRANT {} ON {} TO {}").format(
                         sql.SQL(", ".join(sorted(privileges))), sql.Identifier(table), sql.Identifier(role)))
+            for sequence in _application_sequence_grants():
+                cursor.execute(sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(
+                    sql.Identifier(sequence), sql.Identifier(role)))
         bind_role(old)
         for context, memory_id in ((CONTEXT, "before-registration"), (other, "ordinary")):
             node = bind_node_identity(Fact(id=memory_id, subject="item", predicate="is", object_="legacy"), context)

@@ -26,29 +26,45 @@ def pg_raw_source(monkeypatch, tmp_path):
         "payload": {"raw_text": "CURRENT-PG-RAW", "trust_tier": 2, "source": "source.md#1"},
         "identity": ("raw", "tenant", "alice", "workspace", "user", "agent", "session"),
         "queries": [], "contexts": [], "absent": False, "context_historical": False,
+        "read_cursors_closed": 0,
     }
 
     class Cursor:
+        def __init__(self, authorization):
+            self.authorization = authorization
+
         def execute(self, sql, args):
             state["queries"].append((sql, args))
 
         def fetchone(self):
+            sql = state["queries"][-1][0]
+            if "memplex_source_authorities" in sql:
+                scope = (self.authorization.principal.tenant_id, self.authorization.workspace_id)
+                assert state["queries"][-1][1] == scope
+                assert "EXISTS" in sql and "current_setting('memplex.tenant_id'" in sql
+                return state.get("authority_row", (*scope, False))
             if state["absent"]:
                 return None
-            sql = state["queries"][-1][0]
             if "SELECT data FROM" in sql:
                 return (deepcopy(state["payload"]),)
             row_id, *identity = state["identity"]
             return (row_id, deepcopy(state["payload"]), *identity, state["context_historical"])
 
+        def close(self):
+            state["read_cursors_closed"] += 1
+
     @contextmanager
     def transaction(_binder, authorization):
         state["contexts"].append(authorization)
-        yield None, Cursor()
+        yield None, Cursor(authorization)
+
+    def read_cursor(_binder, authorization):
+        state["contexts"].append(authorization)
+        return Cursor(authorization)
 
     store = object.__new__(PostgresMemoryStore)
     store._require_authorization = True
-    store._pool_manager = SimpleNamespace(transaction=transaction)
+    store._pool_manager = SimpleNamespace(transaction=transaction, read_cursor=read_cursor)
     for name in ("get", "get_fact", "get_preference", "get_observation"):
         monkeypatch.setattr(store, name, lambda _id: None)
     config = MemplexConfig()
@@ -81,12 +97,30 @@ def test_fix1_actual_pg_payload_shape_renders_with_persisted_row_metadata(pg_raw
     assert result.memory_ids == ("raw",)
     assert "CURRENT-PG-RAW" in result.context
     assert "trust=LOW" in result.context
-    assert len(state["queries"]) == 1
-    sql, args = state["queries"][0]
+    paragraph_queries = [query for query in state["queries"] if "memplex_source_authorities" not in query[0]]
+    authority_queries = [query for query in state["queries"] if "memplex_source_authorities" in query[0]]
+    assert len(paragraph_queries) == len(authority_queries) == 1
+    assert state["read_cursors_closed"] == 1
+    sql, args = paragraph_queries[0]
     assert "tenant_id" in sql and "owner_subject" in sql and "source_session" in sql
     assert "current_setting('memplex.tenant_id'" in sql
     assert args == ("raw",)
     assert state["contexts"][-1] == context
+
+
+@pytest.mark.parametrize("row", [
+    ("tenant", "workspace", True), None,
+    ("wrong", "workspace", False), ("tenant", "wrong", False),
+    ("tenant", "workspace", 0), ("tenant", "workspace"),
+])
+def test_pg_context_domain_probe_fail_closed(pg_raw_source, row):
+    service, _store, context, state = pg_raw_source
+    state["authority_row"] = row
+    assert _assemble(service, context).memory_ids == ()
+    assert state["read_cursors_closed"] == 1
+    authority_queries = [query for query in state["queries"] if "memplex_source_authorities" in query[0]]
+    assert len(authority_queries) == 1
+    assert authority_queries[0][1] == (context.principal.tenant_id, context.workspace_id)
 
 
 def test_fix1_pg_context_snapshot_contains_sql_identity_without_changing_crud(pg_raw_source):
