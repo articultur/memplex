@@ -2,7 +2,6 @@
 
 from contextlib import contextmanager
 from copy import deepcopy
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +15,9 @@ from memplex.config import MemplexConfig
 from memplex.context import ContextCandidate
 from memplex.models import Fact
 from memplex.service import MemplexService
+from memplex.source_contract import SourceContractError
 from memplex.storage.postgres import PostgresMemoryStore
+from tests.test_postgres_store import _install_resource_runner_sequence, _test_ready_pool
 
 
 @pytest.fixture
@@ -38,6 +39,9 @@ def pg_raw_source(monkeypatch, tmp_path):
 
         def fetchone(self):
             sql = state["queries"][-1][0]
+            if sql.startswith("SELECT pg_catalog.obj_description"):
+                assert state["queries"][-1][1] == ("public",)
+                return (state.get("schema_marker"),)
             if "memplex_source_authorities" in sql:
                 scope = (self.authorization.principal.tenant_id, self.authorization.workspace_id)
                 assert state["queries"][-1][1] == scope
@@ -62,9 +66,11 @@ def pg_raw_source(monkeypatch, tmp_path):
         state["contexts"].append(authorization)
         return Cursor(authorization)
 
-    store = object.__new__(PostgresMemoryStore)
-    store._require_authorization = True
-    store._pool_manager = SimpleNamespace(transaction=transaction, read_cursor=read_cursor)
+    _install_resource_runner_sequence(monkeypatch)
+    ready = _test_ready_pool()
+    store = PostgresMemoryStore("dbname=fake", ready_pool=ready, require_authorization=True)
+    monkeypatch.setattr(ready.manager, "transaction", transaction)
+    monkeypatch.setattr(ready.manager, "read_cursor", read_cursor)
     for name in ("get", "get_fact", "get_preference", "get_observation"):
         monkeypatch.setattr(store, name, lambda _id: None)
     config = MemplexConfig()
@@ -76,6 +82,7 @@ def pg_raw_source(monkeypatch, tmp_path):
     yield service, store, context, state
     service.store = original_store
     service.stop()
+    ready.manager.close()
 
 
 def _assemble(service, context):
@@ -97,10 +104,12 @@ def test_fix1_actual_pg_payload_shape_renders_with_persisted_row_metadata(pg_raw
     assert result.memory_ids == ("raw",)
     assert "CURRENT-PG-RAW" in result.context
     assert "trust=LOW" in result.context
-    paragraph_queries = [query for query in state["queries"] if "memplex_source_authorities" not in query[0]]
+    paragraph_queries = [query for query in state["queries"] if "FROM memplex_paragraphs" in query[0]]
     authority_queries = [query for query in state["queries"] if "memplex_source_authorities" in query[0]]
-    assert len(paragraph_queries) == len(authority_queries) == 1
-    assert state["read_cursors_closed"] == 1
+    marker_queries = [query for query in state["queries"] if query[0].startswith("SELECT pg_catalog.obj_description")]
+    assert len(paragraph_queries) == len(authority_queries) == len(marker_queries) == 1
+    assert len(state["queries"]) == 3
+    assert state["read_cursors_closed"] == 2
     sql, args = paragraph_queries[0]
     assert "tenant_id" in sql and "owner_subject" in sql and "source_session" in sql
     assert "current_setting('memplex.tenant_id'" in sql
@@ -117,10 +126,21 @@ def test_pg_context_domain_probe_fail_closed(pg_raw_source, row):
     service, _store, context, state = pg_raw_source
     state["authority_row"] = row
     assert _assemble(service, context).memory_ids == ()
-    assert state["read_cursors_closed"] == 1
+    assert state["read_cursors_closed"] == 2
     authority_queries = [query for query in state["queries"] if "memplex_source_authorities" in query[0]]
     assert len(authority_queries) == 1
     assert authority_queries[0][1] == (context.principal.tenant_id, context.workspace_id)
+
+
+def test_pg_context_global_v1_marker_refuses_off_mode_before_raw_read(pg_raw_source):
+    from memplex.source_compatibility import _MARKER_PREFIX
+
+    service, _store, context, state = pg_raw_source
+    state["schema_marker"] = _MARKER_PREFIX + '{"version":1,"state":"live"}'
+    with pytest.raises(SourceContractError):
+        _assemble(service, context)
+    assert len(state["queries"]) == state["read_cursors_closed"] == 1
+    assert "pg_catalog.obj_description" in state["queries"][0][0]
 
 
 def test_fix1_pg_context_snapshot_contains_sql_identity_without_changing_crud(pg_raw_source):

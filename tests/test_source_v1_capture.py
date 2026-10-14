@@ -504,19 +504,28 @@ def test_native_legacy_handle_before_registration_and_after_reopen(request, pg_f
     from psycopg2 import sql
 
     from memplex.auth import bind_node_identity
+    from memplex.config import SourceContractConfig
+    from memplex.source_contract import SourceContractError
     from memplex.storage.migrations.runner import VectorCapabilityRequest
     from memplex.storage.pool import PostgresStorageResources
     from memplex.storage.postgres import PostgresMemoryStore
+    from memplex.storage.source_versions import _RESOURCE_ISSUER
+    from tests.test_source_v1_pg_transactions import SCOPE
 
     resources = PostgresStorageResources(pg_function_dsn)
     resources.ensure_ready(VectorCapabilityRequest(0, "disabled"), "development")
+    # Retain an unregistered handle before admission, without populating the
+    # dedicated V1 domain. Genuine legacy traffic has its own physical schema.
     old = PostgresMemoryStore(pg_function_dsn, ready_pool=resources.ready_pool, require_authorization=True)
-    svc = legacy_service(tmp_path / "legacy-reader")
-    original_store = svc.store
+    svc = legacy_service(tmp_path / "source-reader")
+    legacy = legacy_service(tmp_path / "legacy-reader")
+    original_store, original_legacy_store = svc.store, legacy.store
     svc.store = old
     other = replace(CONTEXT, workspace_id="ordinary-legacy-workspace")
     connection = psycopg2.connect(pg_function_dsn)
     role = "capture_reader_" + uuid.uuid4().hex
+    legacy_schema = "capture_legacy_" + uuid.uuid4().hex
+    legacy_resources = cold = None
 
     def bind_role(store):
         bind = store._bind_transaction_scope
@@ -533,23 +542,37 @@ def test_native_legacy_handle_before_registration_and_after_reopen(request, pg_f
         with connection, connection.cursor() as cursor:
             cursor.execute("SELECT current_schema()")
             schema = cursor.fetchone()[0]
+            cursor.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(legacy_schema)))
+        legacy_dsn = psycopg2.extensions.make_dsn(pg_function_dsn, options=f"-c search_path={legacy_schema}")
+        legacy_resources = PostgresStorageResources(legacy_dsn)
+        legacy_resources.ensure_ready(VectorCapabilityRequest(0, "disabled"), "development")
+        legacy.store = PostgresMemoryStore(legacy_dsn, ready_pool=legacy_resources.ready_pool, require_authorization=True)
+        with connection, connection.cursor() as cursor:
             cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOSUPERUSER NOBYPASSRLS").format(sql.Identifier(role)))
-            cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(role)))
-            for table, privileges in _application_grants():
-                if privileges:
-                    cursor.execute(sql.SQL("GRANT {} ON {} TO {}").format(
-                        sql.SQL(", ".join(sorted(privileges))), sql.Identifier(table), sql.Identifier(role)))
-            for sequence in _application_sequence_grants():
-                cursor.execute(sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(
-                    sql.Identifier(sequence), sql.Identifier(role)))
+            for target_schema in (schema, legacy_schema):
+                cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(target_schema), sql.Identifier(role)))
+                for table, privileges in _application_grants():
+                    if privileges:
+                        cursor.execute(sql.SQL("GRANT {} ON {} TO {}").format(
+                            sql.SQL(", ".join(sorted(privileges))),
+                            sql.Identifier(target_schema, table), sql.Identifier(role)))
+                for sequence in _application_sequence_grants():
+                    cursor.execute(sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(
+                        sql.Identifier(target_schema, sequence), sql.Identifier(role)))
         bind_role(old)
+        bind_role(legacy.store)
+        assert old.authorized(CONTEXT).get_fact("before-registration") is None
         for context, memory_id in ((CONTEXT, "before-registration"), (other, "ordinary")):
             node = bind_node_identity(Fact(id=memory_id, subject="item", predicate="is", object_="legacy"), context)
-            old.authorized(context).add_fact(node)
-            assert svc.get(memory_id, authorization=context) is not None
+            legacy.store.authorized(context).add_fact(node)
+            assert legacy.get(memory_id, authorization=context) is not None
         writer, backend, _, _, _, _ = request.getfixturevalue("source_backend")
         bind_role(writer)
         svc.store = writer
+        config = SourceContractConfig("v1", SCOPE.authority_id, SCOPE.tenant_id, SCOPE.workspace_id)
+        svc._config.source_contract = config
+        svc._config.storage.backend, svc._config.storage.path = "postgres", pg_function_dsn
         result = svc.write(SourceDocument(type="text", content="Alice uses PostgreSQL. Bob uses SQLite.",
                                          author_role="user"), authorization=CONTEXT)
         assert result.factual_capture["accepted"] == 2
@@ -557,29 +580,56 @@ def test_native_legacy_handle_before_registration_and_after_reopen(request, pg_f
             assert svc.get(receipt["publication_id"], authorization=CONTEXT) is not None
         captured = [r.ref.key.logical_id for r in receipts(result) if r.ref.key.kind is not SourceKind.RAW_PARAGRAPH]
         assert captured
-        svc.store = old
-        assert old.source_versions() is None
         for memory_id in captured:
             assert svc.get(memory_id, authorization=CONTEXT) is None
-            assert svc.resolve_context_nodes([memory_id], authorization=CONTEXT) == {}
+        svc.store = old
+        svc._config.source_contract = SourceContractConfig()
+        assert old.source_versions() is None
+        for memory_id in captured:
+            with pytest.raises(SourceContractError):
+                svc.get(memory_id, authorization=CONTEXT)
+            with pytest.raises(SourceContractError):
+                svc.resolve_context_nodes([memory_id], authorization=CONTEXT)
+        with pytest.raises(SourceContractError):
+            old.authorized(CONTEXT).add_fact(bind_node_identity(
+                Fact(id="old-writer", subject="item", predicate="is", object_="legacy"), CONTEXT))
         assert svc.list_facts(authorization=CONTEXT) == []
-        assert svc.get("ordinary", authorization=other) is not None
         resources.close()
         resources = PostgresStorageResources(pg_function_dsn)
         resources.ensure_ready(VectorCapabilityRequest(0, "disabled"), "development")
-        svc.store = PostgresMemoryStore(pg_function_dsn, ready_pool=resources.ready_pool, require_authorization=True)
+        reopened_old = PostgresMemoryStore(pg_function_dsn, ready_pool=resources.ready_pool, require_authorization=True)
+        with pytest.raises(SourceContractError):
+            resources._source_startup(SourceContractConfig(), reopened_old, issuer=_RESOURCE_ISSUER)
+        svc.store = reopened_old
+        bind_role(reopened_old)
+        with pytest.raises(SourceContractError):
+            svc.get(captured[0], authorization=CONTEXT)
+        cold = PostgresStorageResources._for_source_validity(pg_function_dsn, issuer=_RESOURCE_ISSUER, capacity=2)
+        cold.ensure_ready(VectorCapabilityRequest(0, "disabled"), "development")
+        svc.store = PostgresMemoryStore(pg_function_dsn, ready_pool=cold.ready_pool, require_authorization=True)
+        cold._source_startup(config, svc.store, issuer=_RESOURCE_ISSUER)
         bind_role(svc.store)
+        svc._config.source_contract = config
         assert svc.get(captured[0], authorization=CONTEXT) is None
-        assert svc.get("ordinary", authorization=other) is not None
+        for receipt in result.source_contract_receipt["publications"]:
+            assert svc.get(receipt["publication_id"], authorization=CONTEXT) is not None
         assert snapshot(backend, captured[0]) is not None
+        for context, memory_id in ((CONTEXT, "before-registration"), (other, "ordinary")):
+            assert legacy.get(memory_id, authorization=context) is not None
     finally:
-        svc.store = original_store
+        svc.store, legacy.store = original_store, original_legacy_store
         svc.stop()
+        legacy.stop()
         resources.close()
+        if cold is not None:
+            cold.close()
+        if legacy_resources is not None:
+            legacy_resources.close()
         connection.rollback()
         with connection, connection.cursor() as cursor:
             cursor.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
             cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+            cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(legacy_schema)))
         connection.close()
 
 

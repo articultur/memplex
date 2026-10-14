@@ -279,6 +279,21 @@ def empty_pg_resource(pg_function_dsn):
 from tests.test_source_v1_pg_transactions import NATIVE
 
 
+def _insert_legacy_fact(cursor, memory_id, context):
+    """Seed a coherent legacy row without skipping required SQL identity."""
+    from psycopg2.extras import Json
+
+    from memplex.auth import bind_node_identity
+
+    fact = bind_node_identity(Fact(id=memory_id, subject='item', predicate='is', object_='legacy'), context)
+    cursor.execute(
+        'INSERT INTO memplex_facts(id,data,tenant_id,owner_subject,workspace,visibility,source_agent,source_session) '
+        'VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
+        (fact.id, Json(fact.to_dict()), context.principal.tenant_id, context.principal.subject_id,
+         context.workspace_id, fact.visibility, context.agent_id, context.session_id),
+    )
+
+
 @NATIVE
 @pytest.mark.parametrize('policy_revision', [1, 7])
 def test_native_pg_real_initialization_and_cold_admission(empty_pg_resource, policy_revision):
@@ -425,6 +440,7 @@ def test_native_pg_insert_race_cannot_pass_empty_proof(empty_pg_resource, monkey
     import psycopg2
 
     from memplex.storage import postgres_resources as implementation
+    from tests.test_source_v1_pg_transactions import CONTEXT
     _resource, store, admission, dsn = empty_pg_resource
     connection = psycopg2.connect(dsn)
     locked = Event()
@@ -435,7 +451,7 @@ def test_native_pg_insert_race_cannot_pass_empty_proof(empty_pg_resource, monkey
     monkeypatch.setattr(implementation, '_source_target_lock', observe)
     try:
         with connection.cursor() as cursor:
-            cursor.execute("INSERT INTO memplex_facts(id,data) VALUES ('racing-legacy','{}')")
+            _insert_legacy_fact(cursor, 'racing-legacy', CONTEXT)
         with ThreadPoolExecutor(1) as threads:
             future = threads.submit(store.source_versions().initialize_authority, SCOPE, POLICY, admission=admission)
             assert locked.wait(3)
@@ -450,6 +466,47 @@ def test_native_pg_insert_race_cannot_pass_empty_proof(empty_pg_resource, monkey
     finally:
         connection.rollback()
         connection.close()
+
+
+@NATIVE
+def test_native_pg_deleted_legacy_facts_leave_history_that_refuses_admission(empty_pg_resource):
+    from contextlib import closing
+
+    import psycopg2
+
+    from memplex.auth import bind_node_identity
+    from memplex.storage.migrations.runner import VectorCapabilityRequest
+    from memplex.storage.postgres import PostgresMemoryStore
+    from memplex.storage.postgres_resources import PostgresStorageResources, _source_schema_marker
+    from tests.test_source_v1_pg_transactions import CONTEXT
+
+    resource, store, admission, dsn = empty_pg_resource
+    legacy = PostgresStorageResources(dsn)
+    try:
+        legacy.ensure_ready(VectorCapabilityRequest(0, 'disabled'), 'development')
+        old = PostgresMemoryStore(dsn, ready_pool=legacy.ready_pool, require_authorization=True)
+        fact = bind_node_identity(Fact(id='deleted-legacy', subject='item', predicate='is', object_='legacy'), CONTEXT)
+        old.authorized(CONTEXT).add_fact(fact)
+        old.authorized(CONTEXT).delete_fact(fact.id)
+    finally:
+        legacy.close()
+    with closing(psycopg2.connect(dsn)) as connection, connection.cursor() as cursor:
+        cursor.execute('SELECT count(*) FROM memplex_facts')
+        assert cursor.fetchone() == (0,)
+        cursor.execute('SELECT count(*) FROM memplex_changelog')
+        history_count = cursor.fetchone()[0]
+        assert history_count >= 2
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        store.source_versions().initialize_authority(SCOPE, POLICY, admission=admission)
+    with closing(psycopg2.connect(dsn)) as connection, connection.cursor() as cursor:
+        cursor.execute('SELECT count(*) FROM memplex_source_authorities')
+        assert cursor.fetchone() == (0,)
+        cursor.execute('SELECT count(*) FROM memplex_changelog')
+        assert cursor.fetchone() == (history_count,)
+        assert _source_schema_marker(cursor, resource.ready_pool.target.schema) is None
+        cursor.execute("SELECT count(*) FROM pg_constraint WHERE connamespace=%s::regnamespace "
+                       "AND conname LIKE 'memplex_source_check_%%'", (resource.ready_pool.target.schema,))
+        assert cursor.fetchone() == (0,)
 
 
 @pytest.fixture
@@ -490,16 +547,19 @@ def ordinary_pg_owner(pg_function_dsn):
 @pytest.mark.parametrize('hidden', [False, True])
 def test_native_ordinary_owner_global_empty_proof_defeats_force_rls(ordinary_pg_owner, hidden):
     from contextlib import closing
+    from dataclasses import replace
 
     import psycopg2
 
     from memplex.storage.migrations.runner import VectorCapabilityRequest
     from memplex.storage.postgres import PostgresMemoryStore
     from memplex.storage.postgres_resources import PostgresStorageResources
+    from tests.test_source_v1_pg_transactions import CONTEXT
     admin_dsn, owner_dsn, target = ordinary_pg_owner
     if hidden:
         with closing(psycopg2.connect(admin_dsn)) as connection, connection, connection.cursor() as cursor:
-            cursor.execute("INSERT INTO memplex_facts(id,data,tenant_id,workspace) VALUES ('hidden','{}','foreign','foreign')")
+            foreign = replace(CONTEXT, principal=replace(CONTEXT.principal, tenant_id='foreign'), workspace_id='foreign')
+            _insert_legacy_fact(cursor, 'hidden', foreign)
     with closing(psycopg2.connect(owner_dsn)) as connection, connection.cursor() as cursor:
         cursor.execute('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')
         assert cursor.fetchone() == (False, False)

@@ -342,6 +342,7 @@ def test_native_pg_failed_restore_retry_requires_original_empty_attempt(empty_pg
 @NATIVE
 def test_native_pg_ordinary_owner_legacy_restore_under_force_rls(ordinary_pg_owner, tmp_path):
     from contextlib import closing
+    from dataclasses import replace
 
     import psycopg2
     from psycopg2 import sql
@@ -349,13 +350,16 @@ def test_native_pg_ordinary_owner_legacy_restore_under_force_rls(ordinary_pg_own
     from memplex.storage.postgres_backup import PostgresBackupExecutor
     from memplex.storage.postgres_resources import _source_schema_marker
     from tests.test_postgres_backup_integration import _pgserver_tools
+    from tests.test_source_v1_compatibility import _insert_legacy_fact
+    from tests.test_source_v1_pg_transactions import CONTEXT
     admin_dsn, owner_dsn, target = ordinary_pg_owner
     with closing(psycopg2.connect(owner_dsn)) as connection, connection.cursor() as cursor:
         cursor.execute('SELECT current_user')
         owner = cursor.fetchone()[0]
     with closing(psycopg2.connect(admin_dsn)) as connection, connection, connection.cursor() as cursor:
         cursor.execute(sql.SQL('GRANT CREATE ON DATABASE {} TO {}').format(sql.Identifier(target.database), sql.Identifier(owner)))
-        cursor.execute("INSERT INTO memplex_facts(id,data,tenant_id,workspace) VALUES ('legacy-hidden','{}','foreign','foreign')")
+        foreign = replace(CONTEXT, principal=replace(CONTEXT.principal, tenant_id='foreign'), workspace_id='foreign')
+        _insert_legacy_fact(cursor, 'legacy-hidden', foreign)
     try:
         executor = PostgresBackupExecutor(expected_target=target, tools=_pgserver_tools(), timeout_seconds=30)
         key = bytes(range(32))
