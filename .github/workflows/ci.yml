@@ -76,7 +76,16 @@ jobs:
             --ignore=tests/test_g004_postgres_backup_real_value.py \
             --ignore=tests/test_g004_postgres_probe_isolation.py \
             -v --timeout=120 --cov=memplex --cov-report=term-missing \
-            --cov-fail-under=75
+            --cov-fail-under=75 \
+            --junitxml=source-v1-junit.xml -o junit_family=legacy \
+            -o junit_logging=no -o junit_log_passing_tests=false
+      - name: Preserve source-validity case evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-v1-${{ matrix.os }}-py${{ matrix.python-version }}-${{ github.sha }}
+          path: source-v1-junit.xml
+          retention-days: 7
 
   test-postgres:
     # Exercises the flagship PostgreSQL backend against the pgvector service
@@ -143,7 +152,17 @@ jobs:
             tests/test_g004_postgres_probe_isolation.py \
             tests/test_source_v1_pg_schema.py tests/test_source_v1_pg_transactions.py tests/test_source_v1_publication.py \
             tests/test_source_v1_policy.py tests/test_source_v1_mutation_routes.py tests/test_source_v1_capture.py tests/test_source_v1_service_reads.py tests/test_source_v1_adapter_reads.py tests/test_source_v1_compatibility.py tests/test_source_v1_restore.py \
-            -v --timeout=120
+            tests/test_source_v1_lifecycle_matrix.py tests/test_source_v1_case_manifest.py \
+            -v --timeout=120 \
+            --junitxml=source-v1-junit.xml -o junit_family=legacy \
+            -o junit_logging=no -o junit_log_passing_tests=false
+      - name: Preserve source-validity native case evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-v1-postgres-${{ github.sha }}
+          path: source-v1-junit.xml
+          retention-days: 7
 
   security:
     runs-on: ubuntu-latest

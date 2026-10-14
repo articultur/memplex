@@ -542,6 +542,8 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "tests/test_source_v1_adapter_reads.py",
         "tests/test_source_v1_compatibility.py",
         "tests/test_source_v1_restore.py",
+        "tests/test_source_v1_lifecycle_matrix.py",
+        "tests/test_source_v1_case_manifest.py",
     ):
         assert required_test in postgres_steps
 
@@ -608,3 +610,21 @@ def test_ci_acquires_exact_old_source_validity_reader() -> None:
     assert "git fetch --no-tags --depth=1 origin 826335024c0b67b1b25fdb477596bf08ddeb7dad" in acquire["run"]
     assert "7fd32f681a1a2cc9044823b672aaacfa96e63ef6" in acquire["run"]
     assert steps.index(acquire) < next(i for i, step in enumerate(steps) if step.get("name") == "Test")
+
+
+def test_source_v1_case_evidence_uses_bounded_junit_and_pinned_artifacts() -> None:
+    workflow = _workflow(CI)
+    upload_pin = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    for job_name in ("test", "test-postgres"):
+        job = workflow["jobs"][job_name]
+        text = json_steps(job)
+        assert "--junitxml=source-v1-junit.xml" in text
+        assert "junit_logging=no" in text and "junit_log_passing_tests=false" in text
+        assert "junit_family=legacy" in text
+        upload = next(step for step in job["steps"] if step.get("uses") == upload_pin)
+        assert upload["if"] == "always()"
+        assert upload["with"]["path"] == "source-v1-junit.xml"
+        assert "${{ github.sha }}" in upload["with"]["name"]
+        if job_name == "test":
+            assert "${{ matrix.os }}" in upload["with"]["name"]
+            assert "${{ matrix.python-version }}" in upload["with"]["name"]

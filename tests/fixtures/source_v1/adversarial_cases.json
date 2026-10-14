@@ -1,0 +1,1350 @@
+{
+  "backend_reason_overrides": {
+    "lite": {},
+    "postgres": {
+      "subject": "missing"
+    }
+  },
+  "schema_version": 1,
+  "oracle_origin": "Verbatim original SPEC 13.2 A01-A40 meanings; symbolic forbidden sentinels are reserved inputs, not claimed executions. Reasons denote the named rejection branch; mixed scenarios retain exact allowed/prohibited text.",
+  "backends": {
+    "lite": "SUPPORTED",
+    "postgres": "SUPPORTED",
+    "sqlite": "DENY",
+    "wrapper": "DENY",
+    "sync": "DENY",
+    "legacy_reader": "DENY"
+  },
+  "symbolic_ids": {
+    "D": "the actual committed source-bank publication receipt",
+    "U": "independent current reader-scope control, resolved from its own committed receipt",
+    "E2": "independent publication using only the second evidence source"
+  },
+  "cases": [
+    {
+      "case_id": "A01",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A01:forbidden-old-body",
+        "A01:forbidden-old-citation",
+        "A01:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "读取候选后提交 S=r2，最终锁之后读取",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "读取候选后提交 S=r2，最终锁之后读取",
+      "allowed_behavior": "丢弃 r1 产物，U 正常",
+      "forbidden_behavior": "仍用候选 summary 的 r1 文本",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A02",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "D",
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A02:forbidden-old-body",
+        "A02:forbidden-old-citation",
+        "A02:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "最终锁固定 L 后，S=r2 才提交",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "最终锁固定 L 后，S=r2 才提交",
+      "allowed_behavior": "返回 L 时有效结果，并可识别快照语义",
+      "forbidden_behavior": "误称返回时仍是最新或跨快照混合",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A03",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A03:forbidden-old-body",
+        "A03:forbidden-old-citation",
+        "A03:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "变化 commit 完成后新进程开始 read",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "变化 commit 完成后新进程开始 read",
+      "allowed_behavior": "刷新至该变化或更晚，拒绝旧 D",
+      "forbidden_behavior": "依赖本地 cache invalidate 才看到变化",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A04",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A04:forbidden-old-body",
+        "A04:forbidden-old-citation",
+        "A04:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "读取 D→M→S 之间尝试更新 S",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "读取 D→M→S 之间尝试更新 S",
+      "allowed_behavior": "在锁边界前或后形成一个完整允许视图",
+      "forbidden_behavior": "getter 各自事务拼接无效证明",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A05",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "D",
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A05:forbidden-old-body",
+        "A05:forbidden-old-citation",
+        "A05:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "D1、D2 共用祖先 S",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "D1、D2 共用祖先 S",
+      "allowed_behavior": "两者各自验证；S 只读缓存复用",
+      "forbidden_behavior": "将共享祖先误判 cycle",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A06",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A06:forbidden-old-body",
+        "A06:forbidden-old-citation",
+        "A06:forbidden-old-metadata"
+      ],
+      "expected_reason": "cycle",
+      "control_id": "U",
+      "timeline": "自环／两节点环，同时存在 U",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "自环／两节点环，同时存在 U",
+      "allowed_behavior": "环对应根拒绝，U 正常",
+      "forbidden_behavior": "全响应清空或环按截断成功",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A07",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A07:forbidden-old-body",
+        "A07:forbidden-old-citation",
+        "A07:forbidden-old-metadata"
+      ],
+      "expected_reason": "missing",
+      "control_id": "U",
+      "timeline": "missing 来源、lookup error，同时存在 U",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "missing 来源、lookup error，同时存在 U",
+      "allowed_behavior": "相关根失败关闭，U 正常",
+      "forbidden_behavior": "缺失来源以调用者身份补齐",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A08",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A08:forbidden-old-body",
+        "A08:forbidden-old-citation",
+        "A08:forbidden-old-metadata"
+      ],
+      "expected_reason": "budget_exhausted",
+      "control_id": "U",
+      "timeline": "closure 恰达 128／深度 16 与超出一个",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "closure 恰达 128／深度 16 与超出一个",
+      "allowed_behavior": "边界内按实际有效性判定；超界拒绝",
+      "forbidden_behavior": "off-by-one 放行或静默漏查",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A09",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A09:forbidden-old-body",
+        "A09:forbidden-old-citation",
+        "A09:forbidden-old-metadata"
+      ],
+      "expected_reason": "budget_exhausted",
+      "control_id": "U",
+      "timeline": "复杂根预算耗尽，U 排名前／后各一次",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "复杂根预算耗尽，U 排名前／后各一次",
+      "allowed_behavior": "公平推进后已证有效 U 保留",
+      "forbidden_behavior": "首根吞预算导致全部错误标 invalid",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A10",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A10:forbidden-old-body",
+        "A10:forbidden-old-citation",
+        "A10:forbidden-old-metadata"
+      ],
+      "expected_reason": "expired",
+      "control_id": "U",
+      "timeline": "final projection 前 Fact／必要 raw 到期",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "final projection 前 Fact／必要 raw 到期",
+      "allowed_behavior": "按 L 时间丢弃",
+      "forbidden_behavior": "只检查请求开始时间",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A11",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A11:forbidden-old-body",
+        "A11:forbidden-old-citation",
+        "A11:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "worker 读 r1 后暂停，S=r2 提交",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "worker 读 r1 后暂停，S=r2 提交",
+      "allowed_behavior": "publish CAS 拒绝，无写入成功 receipt",
+      "forbidden_behavior": "r1 先落地再读侧隐藏",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A12",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A12:forbidden-old-body",
+        "A12:forbidden-old-citation",
+        "A12:forbidden-old-metadata"
+      ],
+      "expected_reason": "publication_conflict",
+      "control_id": "U",
+      "timeline": "w2 的新目标先提交，w1 迟到",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "w2 的新目标先提交，w1 迟到",
+      "allowed_behavior": "新 publication 不变，w1 conflict",
+      "forbidden_behavior": "以完成时间后到者获胜",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A13",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A13:forbidden-old-body",
+        "A13:forbidden-old-citation",
+        "A13:forbidden-old-metadata"
+      ],
+      "expected_reason": "publication_conflict",
+      "control_id": "U",
+      "timeline": "worker 输入不变，但 target 被删除",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "worker 输入不变，但 target 被删除",
+      "allowed_behavior": "目标墓碑阻止发布",
+      "forbidden_behavior": "旧 worker 复活 D",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A14",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A14:forbidden-old-body",
+        "A14:forbidden-old-citation",
+        "A14:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "S 删除后同逻辑 ID 同内容合法 recreate",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "S 删除后同逻辑 ID 同内容合法 recreate",
+      "allowed_behavior": "新 incarnation；旧 D 拒绝；新发布另判",
+      "forbidden_behavior": "fingerprint 相等使旧 D 复活",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A15",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A15:forbidden-old-body",
+        "A15:forbidden-old-citation",
+        "A15:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "同 incarnation r3 后重放 r1 payload",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "同 incarnation r3 后重放 r1 payload",
+      "allowed_behavior": "拒绝回退或隔离坏写入",
+      "forbidden_behavior": "普通更大传输版本覆盖语义版本",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A16",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A16:forbidden-old-body",
+        "A16:forbidden-old-citation",
+        "A16:forbidden-old-metadata"
+      ],
+      "expected_reason": "auth_changed",
+      "control_id": "U",
+      "timeline": "撤权后再授权，原文不变",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "撤权后再授权，原文不变",
+      "allowed_behavior": "auth revision 继续递增，旧 D 仍未认证",
+      "forbidden_behavior": "grant 恢复后旧证明自动生效",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A17",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A17:forbidden-old-body",
+        "A17:forbidden-old-citation",
+        "A17:forbidden-old-metadata"
+      ],
+      "expected_reason": "auth_changed",
+      "control_id": "U",
+      "timeline": "公共成员／policy 改变但 source ACL 未改",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "公共成员／policy 改变但 source ACL 未改",
+      "allowed_behavior": "policy revision 推进，旧 D 拒绝",
+      "forbidden_behavior": "只比较 source auth 字段而漏公共策略",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A18",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A18:forbidden-old-body",
+        "A18:forbidden-old-citation",
+        "A18:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "source payload／ledger 写入之间崩溃",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "source payload／ledger 写入之间崩溃",
+      "allowed_behavior": "完整旧或新状态",
+      "forbidden_behavior": "可见 payload 搭旧 head",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A19",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A19:forbidden-old-body",
+        "A19:forbidden-old-citation",
+        "A19:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "publication payload／target head 之间崩溃",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "publication payload／target head 之间崩溃",
+      "allowed_behavior": "完整旧或新状态，幂等重试一致",
+      "forbidden_behavior": "双 active publication 或成功 ID 未提交",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A20",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A20:forbidden-old-body",
+        "A20:forbidden-old-citation",
+        "A20:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "跨实例／跨进程读写，单写者配置两种",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "跨实例／跨进程读写，单写者配置两种",
+      "allowed_behavior": "无混合状态，严格 C<R 保证",
+      "forbidden_behavior": "仅线程锁测试通过即宣称多进程安全",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A21",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A21:forbidden-old-body",
+        "A21:forbidden-old-citation",
+        "A21:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "停止全部重建，修改／删／撤来源",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "停止全部重建，修改／删／撤来源",
+      "allowed_behavior": "新读取仍拒绝旧 D",
+      "forbidden_behavior": "依靠重建完成才失效",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A22",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A22:forbidden-old-body",
+        "A22:forbidden-old-citation",
+        "A22:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "HTTP search／detail 注入旧 ranked payload",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "HTTP search／detail 注入旧 ranked payload",
+      "allowed_behavior": "仅当前投影或拒绝",
+      "forbidden_behavior": "summary 被换了但旧 metadata／引文仍泄漏",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A23",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A23:forbidden-old-body",
+        "A23:forbidden-old-citation",
+        "A23:forbidden-old-metadata"
+      ],
+      "expected_reason": "denied",
+      "control_id": "U",
+      "timeline": "reranker 要发送候选正文",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "reranker 要发送候选正文",
+      "allowed_behavior": "先通过同一 protected projection",
+      "forbidden_behavior": "无权限旧正文提前发给模型",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A24",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A24:forbidden-old-body",
+        "A24:forbidden-old-citation",
+        "A24:forbidden-old-metadata"
+      ],
+      "expected_reason": "auth_changed",
+      "control_id": "U",
+      "timeline": "hot／prefetch 先取 ID 后撤权",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "hot／prefetch 先取 ID 后撤权",
+      "allowed_behavior": "消费时重新验证，拒绝 D",
+      "forbidden_behavior": "以预取成功当许可",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A25",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A25:forbidden-old-body",
+        "A25:forbidden-old-citation",
+        "A25:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "正常重启与 current durable recovery",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "正常重启与 current durable recovery",
+      "allowed_behavior": "保留 ledger／墓碑并做 cold 检查",
+      "forbidden_behavior": "重启后从 namespace 推造缺失账本",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A26",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A26:forbidden-old-body",
+        "A26:forbidden-old-citation",
+        "A26:forbidden-old-metadata"
+      ],
+      "expected_reason": "quarantined",
+      "control_id": "U",
+      "timeline": "删除后恢复删除前完整备份",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "删除后恢复删除前完整备份",
+      "allowed_behavior": "restore quarantine，不返回旧 D",
+      "forbidden_behavior": "备份校验通过即自动 serve",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A27",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A27:forbidden-old-body",
+        "A27:forbidden-old-citation",
+        "A27:forbidden-old-metadata"
+      ],
+      "expected_reason": "quarantined",
+      "control_id": "U",
+      "timeline": "sync 先到 typed D，raw／ledger 未到",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "sync 先到 typed D，raw／ledger 未到",
+      "allowed_behavior": "拒绝或隔离，不能激活",
+      "forbidden_behavior": "仅载荷与 ID 相同就认证",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A28",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A28:forbidden-old-body",
+        "A28:forbidden-old-citation",
+        "A28:forbidden-old-metadata"
+      ],
+      "expected_reason": "unsupported_capability",
+      "control_id": "U",
+      "timeline": "live-only snapshot 引导新 peer",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "live-only snapshot 引导新 peer",
+      "allowed_behavior": "V1 不启用",
+      "forbidden_behavior": "无墓碑被当成“没有删除过”",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A29",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "D",
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A29:forbidden-old-body",
+        "A29:forbidden-old-citation",
+        "A29:forbidden-old-metadata"
+      ],
+      "expected_reason": "valid",
+      "control_id": "U",
+      "timeline": "四节点 Lite／PG model roundtrip 与 identity bind",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "四节点 Lite／PG model roundtrip 与 identity bind",
+      "allowed_behavior": "carrier 精确保留，权威身份不可覆盖",
+      "forbidden_behavior": "新字段丢失后降级为 legacy",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A30",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A30:forbidden-old-body",
+        "A30:forbidden-old-citation",
+        "A30:forbidden-old-metadata"
+      ],
+      "expected_reason": "unsupported_capability",
+      "control_id": "U",
+      "timeline": "old reader／unknown contract version 打开新域",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "old reader／unknown contract version 打开新域",
+      "allowed_behavior": "拒绝访问／隔离",
+      "forbidden_behavior": "忽略标记继续输出正文",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A31",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A31:forbidden-old-body",
+        "A31:forbidden-old-citation",
+        "A31:forbidden-old-metadata"
+      ],
+      "expected_reason": "unsupported_semantics",
+      "control_id": "U",
+      "timeline": "ordinary add／normalized merge 命中旧 ID",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "ordinary add／normalized merge 命中旧 ID",
+      "allowed_behavior": "拒绝不合法 V1 合并或正确更新真实 source head",
+      "forbidden_behavior": "返回旧 canonical ID 当新认证成果",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A32",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U",
+        "E2"
+      ],
+      "forbidden_fragments": [
+        "A32:forbidden-old-body",
+        "A32:forbidden-old-citation",
+        "A32:forbidden-old-metadata"
+      ],
+      "expected_reason": "unsupported_semantics",
+      "control_id": "U",
+      "timeline": "一个 E1 产物失效、独立 E2 产物有效",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "一个 E1 产物失效、独立 E2 产物有效",
+      "allowed_behavior": "保留 E2；单个 alternatives 混合产物拒绝",
+      "forbidden_behavior": "OR 绕 ACL 或全量 AND 隐藏却称支持 alternatives",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A33",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A33:forbidden-old-body",
+        "A33:forbidden-old-citation",
+        "A33:forbidden-old-metadata"
+      ],
+      "expected_reason": "malformed",
+      "control_id": "U",
+      "timeline": "清除 namespace 标记或篡改 output",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "清除 namespace 标记或篡改 output",
+      "allowed_behavior": "登记 mismatch 后隔离",
+      "forbidden_behavior": "去标记洗成普通 Fact",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A34",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A34:forbidden-old-body",
+        "A34:forbidden-old-citation",
+        "A34:forbidden-old-metadata"
+      ],
+      "expected_reason": "unsupported_semantics",
+      "control_id": "U",
+      "timeline": "旧 writer 尝试向 V1 域写未标记派生",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "旧 writer 尝试向 V1 域写未标记派生",
+      "allowed_behavior": "明确拒绝／隔离该项",
+      "forbidden_behavior": "无标记内容绕过 validator",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A35",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A35:forbidden-old-body",
+        "A35:forbidden-old-citation",
+        "A35:forbidden-old-metadata"
+      ],
+      "expected_reason": "denied",
+      "control_id": "U",
+      "timeline": "unbound direct get／旧历史 detail 访问 V1",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "unbound direct get／旧历史 detail 访问 V1",
+      "allowed_behavior": "当前 V1 不走兼容旁路；审计另判",
+      "forbidden_behavior": "historical=true 直接绕当前来源 ACL",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A36",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A36:forbidden-old-body",
+        "A36:forbidden-old-citation",
+        "A36:forbidden-old-metadata"
+      ],
+      "expected_reason": "budget_exhausted",
+      "control_id": "U",
+      "timeline": "时钟倒退／invalid timestamp／deadline 到期",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "时钟倒退／invalid timestamp／deadline 到期",
+      "allowed_behavior": "按明确隔离或预算规则拒绝相关结果",
+      "forbidden_behavior": "到期数据恢复可用或时间异常按成功",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A37",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U",
+        "E2"
+      ],
+      "forbidden_fragments": [
+        "A37:forbidden-old-body",
+        "A37:forbidden-old-citation",
+        "A37:forbidden-old-metadata"
+      ],
+      "expected_reason": "source_changed",
+      "control_id": "U",
+      "timeline": "模型实际读 A／B、只引用 B，predicate 残留 A；随后删／撤 A",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "模型实际读 A／B、只引用 B，predicate 残留 A；随后删／撤 A",
+      "allowed_behavior": "输入 manifest 使该产物失效，独立只读 B 的另条产物仍有效",
+      "forbidden_behavior": "只绑定自报引文 B，继续暴露 A 内容",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A38",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A38:forbidden-old-body",
+        "A38:forbidden-old-citation",
+        "A38:forbidden-old-metadata"
+      ],
+      "expected_reason": "publication_conflict",
+      "control_id": "U",
+      "timeline": "target 删除并合法 recreate，旧任务的 generation 恰好相同",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "target 删除并合法 recreate，旧任务的 generation 恰好相同",
+      "allowed_behavior": "target incarnation 比较失败，拒绝旧任务",
+      "forbidden_behavior": "只比 generation 而产生目标侧 ABA",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 14
+    },
+    {
+      "case_id": "A39",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A39:forbidden-old-body",
+        "A39:forbidden-old-citation",
+        "A39:forbidden-old-metadata"
+      ],
+      "expected_reason": "not_current_publication",
+      "control_id": "U",
+      "timeline": "D→M→S，M 的新 publication 提交，旧 M 审计登记与缓存／残留字节仍在",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "D→M→S，M 的新 publication 提交，旧 M 审计登记与缓存／残留字节仍在",
+      "allowed_behavior": "旧 M 不再 current；依赖旧 M 的 D 拒绝，独立 U 正常",
+      "forbidden_behavior": "只核对旧 carrier 与旧登记便继续使用",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    },
+    {
+      "case_id": "A40",
+      "change": "scenario",
+      "surface": "scenario",
+      "identity": "scenario",
+      "allowed_ids": [
+        "U"
+      ],
+      "forbidden_fragments": [
+        "A40:forbidden-old-body",
+        "A40:forbidden-old-citation",
+        "A40:forbidden-old-metadata"
+      ],
+      "expected_reason": "captured_input_only",
+      "control_id": "U",
+      "timeline": "删除 captured typed 所依赖 raw，再 query／get 该 typed ID",
+      "principal": {
+        "source_subject": "alice",
+        "reader_subject": "alice",
+        "reader_credential": "credential-alice"
+      },
+      "scope": {
+        "authority": "11111111-1111-4111-8111-111111111111",
+        "tenant": "source-tenant",
+        "workspace": "source-workspace"
+      },
+      "failure_phase": "scenario",
+      "scenario": "删除 captured typed 所依赖 raw，再 query／get 该 typed ID",
+      "allowed_behavior": "typed 内部来源不独立返回；factual D 隐藏，独立来源可读",
+      "forbidden_behavior": "D 虽隐藏，规则 typed 仍泄漏同一旧来源内容",
+      "execution": "frozen_scenario_mapping_not_execution",
+      "owner_task": 13
+    }
+  ]
+}
