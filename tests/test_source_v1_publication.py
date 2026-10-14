@@ -58,6 +58,15 @@ def publication_backend(request, tmp_path):
         store, backend, resources, trace, dsn, _ = request.getfixturevalue("source_backend")
         return SimpleNamespace(kind="postgres", store=store, backend=backend, resources=resources, trace=trace, dsn=dsn)
     store = LiteMemoryStore(tmp_path / "memory.json")
+    owner = store._durability
+
+    def close_owned_queue():
+        writer = getattr(owner, "_single_writer", None)
+        if writer is not None:
+            writer.close(drain=True)
+            assert writer._thread is None or not writer._thread.is_alive()
+
+    request.addfinalizer(close_owned_queue)
     backend = store.source_versions()
     hooks = SourceValidationHooks(
         lambda snapshot, context: snapshot.payload.get("tenant_id") == context.principal.tenant_id,
