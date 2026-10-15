@@ -39,6 +39,11 @@ from memplex.sync_protocol import (
 if TYPE_CHECKING:
     from memplex.storage.lite.single_writer import SingleWriterQueue
 
+
+# Temporary T13 diagnostic; remove with the reviewed inverse patch.
+_t13_wall: Any = getattr(time, "monotonic_ns", None)
+_t13_cpu: Any = getattr(time, "thread_time_ns", None)
+
 _FORMAT_VERSION = 2
 _PAIR_RECORD_KEYS = {
     "generation",
@@ -560,7 +565,13 @@ def _validate_sync_state(payload: Any, *, label: str) -> None:
 
 def _check_read_deadline(deadline_ns: int | None) -> None:
     """Cooperative bound; individual filesystem/JSON operations cannot be interrupted."""
-    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+    if deadline_ns is not None and (_t13_rejecting_guard_wall_ns := time.monotonic_ns()) >= deadline_ns:
+        _t13_rejecting_guard_post_cpu_ns = None
+        _t13_faults = 0
+        try:
+            _t13_rejecting_guard_post_cpu_ns = _t13_cpu()
+        except BaseException:  # noqa: BLE001 - original rejection remains primary
+            _t13_faults = 1
         raise SourceBusyError()
 
 
@@ -1212,21 +1223,52 @@ class LiteDurability:
         # only together with ``base_verified``.  ``target_validated`` marks
         # that the caller already ran this instance's semantic validator on
         # the identical target payload, so the third full decode is skipped.
+        _t13_faults = 0
+        _t13_commit_entry_wall_ns = _t13_commit_entry_cpu_ns = None
+        try:
+            _t13_commit_entry_wall_ns = _t13_wall()
+            _t13_commit_entry_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 1
         _check_read_deadline(deadline_ns)
         if not base_verified:
             current = self._load_authoritative_locked(deadline_ns=deadline_ns)
             if current != base:
                 raise LiteStorageIntegrityError("Lite authoritative state changed before commit")
         _admit_source_write(self, base, target)
+        _t13_base_validation_start_wall_ns = _t13_base_validation_start_cpu_ns = None
+        try:
+            _t13_base_validation_start_wall_ns = _t13_wall()
+            _t13_base_validation_start_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 2
         _validate_memory_payload(
             base.memory, allow_legacy_missing_schema=base.transaction_id == "legacy",
             deadline_ns=deadline_ns,
         )
+        _t13_target_validation_start_wall_ns = _t13_target_validation_start_cpu_ns = None
+        try:
+            _t13_target_validation_start_wall_ns = _t13_wall()
+            _t13_target_validation_start_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 4
         _validate_memory_payload(target.memory, deadline_ns=deadline_ns)
+        _t13_target_validation_end_wall_ns = _t13_target_validation_end_cpu_ns = None
+        try:
+            _t13_target_validation_end_wall_ns = _t13_wall()
+            _t13_target_validation_end_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 8
         _validate_transition(base, target, quarantine_scope=self._quarantined_restore_scope())
         if not target_validated:
             self._validate_semantics(target)
         _check_read_deadline(deadline_ns)
+        _t13_encode_start_wall_ns = _t13_encode_start_cpu_ns = None
+        try:
+            _t13_encode_start_wall_ns = _t13_wall()
+            _t13_encode_start_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 16
         # The canonical encodes below reject NaN/Infinity before any file is
         # written; computing them once keeps the failure ahead of the journal
         # while avoiding a second full encode per payload.
@@ -1255,9 +1297,21 @@ class LiteDurability:
         }
         self.before_journal_durable_publish()
         _check_read_deadline(deadline_ns)
+        _t13_temporary_journal_start_wall_ns = _t13_temporary_journal_start_cpu_ns = None
+        try:
+            _t13_temporary_journal_start_wall_ns = _t13_wall()
+            _t13_temporary_journal_start_cpu_ns = _t13_cpu()
+        except Exception:  # noqa: BLE001 - optional diagnostic reads only
+            _t13_faults |= 32
         tmp = _write_and_fsync(self._journal_path, journal)
         renamed = False
         try:
+            _t13_temporary_journal_end_wall_ns = _t13_temporary_journal_end_cpu_ns = None
+            try:
+                _t13_temporary_journal_end_wall_ns = _t13_wall()
+                _t13_temporary_journal_end_cpu_ns = _t13_cpu()
+            except Exception:  # noqa: BLE001 - optional diagnostic reads only
+                _t13_faults |= 64
             # Cancellation is safe until the durable decision starts. Once
             # renamed, finish/recover this decision without a timeout escape.
             _check_read_deadline(deadline_ns)

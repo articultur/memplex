@@ -24,6 +24,11 @@ from typing import Any
 
 from memplex.source_contract import SourceBusyError
 
+# Temporary T13 diagnostic; remove with the reviewed inverse patch.
+_t13_wall: Any = getattr(time, "monotonic_ns", None)
+_t13_cpu: Any = getattr(time, "thread_time_ns", None)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +109,7 @@ class SingleWriterQueue:
         decision. After it starts we await its result, so a timeout cannot
         report failure while a background job subsequently publishes.
         """
-        if type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns:
+        if type(deadline_ns) is not int or (_t13_admission_wall_ns := time.monotonic_ns()) >= deadline_ns:
             raise SourceBusyError()
         if threading.get_ident() == self._writer_ident:
             return fn()
@@ -114,15 +119,22 @@ class SingleWriterQueue:
 
         def run() -> Any:
             nonlocal started
+            _t13_faults = 0
+            _t13_worker_entry_wall_ns = _t13_worker_entry_cpu_ns = None
+            try:
+                _t13_worker_entry_wall_ns = _t13_wall()
+                _t13_worker_entry_cpu_ns = _t13_cpu()
+            except Exception:  # noqa: BLE001 - optional diagnostic reads only
+                _t13_faults |= 1
             with state_lock:
-                if canceled or time.monotonic_ns() >= deadline_ns:
+                if canceled or (_t13_worker_guard_wall_ns := time.monotonic_ns()) >= deadline_ns:
                     raise SourceBusyError()
                 started = True
             return fn()
 
         job = _Job(run)
         self._queue.put(job)
-        remaining = max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+        remaining = max(0, (deadline_ns - (_t13_wait_wall_ns := time.monotonic_ns())) / 1_000_000_000)
         if not job.done.wait(remaining):
             with state_lock:
                 if not started:
