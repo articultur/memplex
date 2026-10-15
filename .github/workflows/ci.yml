@@ -153,6 +153,7 @@ jobs:
             tests/test_source_v1_pg_schema.py tests/test_source_v1_pg_transactions.py tests/test_source_v1_publication.py \
             tests/test_source_v1_policy.py tests/test_source_v1_mutation_routes.py tests/test_source_v1_capture.py tests/test_source_v1_service_reads.py tests/test_source_v1_adapter_reads.py tests/test_source_v1_compatibility.py tests/test_source_v1_restore.py \
             tests/test_source_v1_lifecycle_matrix.py tests/test_source_v1_case_manifest.py tests/test_source_v1_read_grants.py \
+            tests/test_source_v1_concurrency.py tests/test_source_v1_recovery.py \
             -v --timeout=120 \
             --junitxml=source-v1-junit.xml -o junit_family=legacy \
             -o junit_logging=no -o junit_log_passing_tests=false
