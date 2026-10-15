@@ -172,11 +172,6 @@ def _check_publication(snapshot: SourceSnapshot, ledger: SourceLedger) -> None:
     _require(set(publication.source_refs) == set(refs.values()))
 
 
-# Temporary T13 diagnostic; remove with the reviewed inverse patch.
-_t13_wall: Any = getattr(time, "monotonic_ns", None)
-_t13_cpu: Any = getattr(time, "thread_time_ns", None)
-
-
 _T = TypeVar("_T")
 
 
@@ -575,27 +570,8 @@ class LiteSourceVersionStore:
     def _mutate_locked(self, authorization: AuthorizationContext, command: SourceMutation,
                        deadline_ns: int) -> SourceReceipt:
         assert self._hooks is not None and self._owner is not None
-        _t13_faults = 0
-        _t13_lock_request_wall_ns = _t13_lock_request_cpu_ns = None
-        try:
-            _t13_lock_request_wall_ns = _t13_wall()
-            _t13_lock_request_cpu_ns = _t13_cpu()
-        except Exception:  # noqa: BLE001 - optional diagnostic reads only
-            _t13_faults |= 1
         with self._durability.writer_lock_until(deadline_ns), _source_write_scope(self._durability, issuer=_RESOURCE_ISSUER):
-            _t13_load_start_wall_ns = _t13_load_start_cpu_ns = None
-            try:
-                _t13_load_start_wall_ns = _t13_wall()
-                _t13_load_start_cpu_ns = _t13_cpu()
-            except Exception:  # noqa: BLE001 - optional diagnostic reads only
-                _t13_faults |= 2
             base = self._durability._load_authoritative_locked(deadline_ns=deadline_ns)
-            _t13_load_end_wall_ns = _t13_load_end_cpu_ns = None
-            try:
-                _t13_load_end_wall_ns = _t13_wall()
-                _t13_load_end_cpu_ns = _t13_cpu()
-            except Exception:  # noqa: BLE001 - optional diagnostic reads only
-                _t13_faults |= 4
             if base.memory.get("schema_version") != 3:
                 raise SourceContractError(RejectionCode.UNSUPPORTED_CAPABILITY)
             from memplex.source_compatibility import _check_lite_live
@@ -638,12 +614,6 @@ class LiteSourceVersionStore:
                                             raw_command, raw, raw_head, raw_payload)
                     target = replace(target, generation=base.generation + 1)
                 _check_read_deadline(deadline_ns)
-                _t13_commit_request_wall_ns = _t13_commit_request_cpu_ns = None
-                try:
-                    _t13_commit_request_wall_ns = _t13_wall()
-                    _t13_commit_request_cpu_ns = _t13_cpu()
-                except Exception:  # noqa: BLE001 - optional diagnostic reads only
-                    _t13_faults |= 8
                 committed = self._durability.commit_locked(base, target, base_verified=True, deadline_ns=deadline_ns)
                 self._owner._publish_pair(committed)
                 return SourceReceipt(head.ref, head.state, head.last_commit_seq)
