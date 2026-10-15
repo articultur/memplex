@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 
@@ -39,7 +40,7 @@ def payload_for(prompt):
     }]}
 
 
-def service(tmp_path, payload=payload_for):
+def service(tmp_path, payload=payload_for, *, _request=None):
     cfg = MemplexConfig()
     cfg.storage.backend = "lite"
     cfg.storage.path = str(tmp_path)
@@ -51,11 +52,41 @@ def service(tmp_path, payload=payload_for):
     cfg.wiki.enabled = False
     cfg.sleep_time.enabled = False
     svc = MemplexService(config=cfg)
+    if _request is not None:
+        # Final cleanup belongs to this case, even if enhancer setup fails.
+        owner = svc.store._durability
+
+        def close_owned_service():
+            primary_error = None
+            try:
+                svc.stop()
+            except BaseException as exc:  # preserve the primary stop failure
+                primary_error = exc
+                raise
+            finally:
+                try:
+                    writer = getattr(owner, "_single_writer", None)
+                    if writer is not None:
+                        writer.close(drain=True)
+                        thread = writer._thread
+                        assert thread is None or not thread.is_alive(), "case-owned Lite writer survived final cleanup"
+                except BaseException as cleanup_error:  # retain both teardown failures
+                    if primary_error is None:
+                        raise
+                    primary_error.add_note(f"Owned writer cleanup also failed: {cleanup_error!r}")
+
+        _request.addfinalizer(close_owned_service)
     svc._llm = LLMEnhancer(FakeProvider(payload), cfg.llm)
     return svc
 
 
-def test_write_keeps_original_and_creates_two_evidence_linked_facts(tmp_path):
+@pytest.fixture(name="service")
+def _service_fixture(request):
+    # Keep the exported helper callable for modules with their own store owners.
+    return partial(service, _request=request)
+
+
+def test_write_keeps_original_and_creates_two_evidence_linked_facts(tmp_path, service):
     svc = service(tmp_path)
     doc = SourceDocument(type="text", content="Alice uses PostgreSQL. Bob uses SQLite.",
                          content_hash="caller-owned")
@@ -79,7 +110,7 @@ def test_write_keeps_original_and_creates_two_evidence_linked_facts(tmp_path):
         svc.stop()
 
 
-def test_private_text_never_reaches_extractor_or_changes_callers_document(tmp_path):
+def test_private_text_never_reaches_extractor_or_changes_callers_document(tmp_path, service):
     svc = service(tmp_path, {"facts": []})
     doc = SourceDocument(type="text", content="Public. <private>Hidden.</private>")
     try:
@@ -94,7 +125,7 @@ def test_private_text_never_reaches_extractor_or_changes_callers_document(tmp_pa
 
 @pytest.mark.parametrize("payload", [{}, {"facts": "wrong"}, {"facts": ["legacy sentence"]},
                                       {"facts": [], "tenant_id": "forged"}])
-def test_invalid_is_not_empty_success(tmp_path, payload):
+def test_invalid_is_not_empty_success(tmp_path, payload, service):
     svc = service(tmp_path, payload)
     try:
         result = svc.write_text("The database is SQLite.")
@@ -105,7 +136,7 @@ def test_invalid_is_not_empty_success(tmp_path, payload):
         svc.stop()
 
 
-def test_flag_off_never_calls_provider(tmp_path):
+def test_flag_off_never_calls_provider(tmp_path, service):
     svc = service(tmp_path)
     svc._config.llm.factual_capture = False
     try:
@@ -116,7 +147,7 @@ def test_flag_off_never_calls_provider(tmp_path):
         svc.stop()
 
 
-def test_async_deadline_cancels_and_cannot_write_late(tmp_path):
+def test_async_deadline_cancels_and_cannot_write_late(tmp_path, service):
     svc = service(tmp_path)
     cancelled = []
 
@@ -143,7 +174,7 @@ def test_async_deadline_cancels_and_cannot_write_late(tmp_path):
         svc.stop()
 
 
-def test_runtime_supplies_trusted_reference_and_separates_speakers(tmp_path):
+def test_runtime_supplies_trusted_reference_and_separates_speakers(tmp_path, service):
     from memplex.adapters.agent_runtime import AgentMemoryRuntime
 
     svc = service(tmp_path, {"facts": []})
@@ -163,7 +194,7 @@ def test_runtime_supplies_trusted_reference_and_separates_speakers(tmp_path):
         svc.stop()
 
 
-def test_file_source_resolution_is_preserved(tmp_path):
+def test_file_source_resolution_is_preserved(tmp_path, service):
     path = tmp_path / "input.md"
     path.write_text("Alice uses PostgreSQL. Bob uses SQLite.")
     svc = service(tmp_path / "store")
@@ -177,7 +208,7 @@ def test_file_source_resolution_is_preserved(tmp_path):
         svc.stop()
 
 
-def test_assistant_rule_fact_cannot_supersede_user_assertion(tmp_path):
+def test_assistant_rule_fact_cannot_supersede_user_assertion(tmp_path, service):
     from memplex.adapters.agent_runtime import AgentMemoryRuntime
 
     svc = service(tmp_path, {"facts": []})
@@ -189,7 +220,7 @@ def test_assistant_rule_fact_cannot_supersede_user_assertion(tmp_path):
         svc.stop()
 
 
-def test_equal_speaker_text_preserves_both_original_assertions(tmp_path):
+def test_equal_speaker_text_preserves_both_original_assertions(tmp_path, service):
     from memplex.adapters.agent_runtime import AgentMemoryRuntime
 
     svc = service(tmp_path, {"facts": []})
@@ -205,7 +236,7 @@ def test_equal_speaker_text_preserves_both_original_assertions(tmp_path):
         svc.stop()
 
 
-def test_derived_facts_read_committed_originals(tmp_path, monkeypatch):
+def test_derived_facts_read_committed_originals(tmp_path, monkeypatch, service):
     """Derivation sees the committed original typed and raw evidence phases."""
     from memplex.models import ExtractedData, Fact, Paragraph
     from memplex.models.paragraph import persisted_paragraph_id

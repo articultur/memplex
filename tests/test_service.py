@@ -59,8 +59,31 @@ def tmp_dir(tmp_path):
 
 
 @pytest.fixture
-def service(tmp_path):
-    return _make_service(tmp_path)
+def service(tmp_path, request):
+    svc = _make_service(tmp_path)
+    owner = svc.store._durability
+
+    def close_owned_service():
+        primary_error = None
+        try:
+            svc.stop()
+        except BaseException as exc:  # preserve the primary stop failure
+            primary_error = exc
+            raise
+        finally:
+            try:
+                writer = getattr(owner, "_single_writer", None)
+                if writer is not None:
+                    writer.close(drain=True)
+                    thread = writer._thread
+                    assert thread is None or not thread.is_alive(), "case-owned Lite writer survived final cleanup"
+            except BaseException as cleanup_error:  # retain both teardown failures
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"Owned writer cleanup also failed: {cleanup_error!r}")
+
+    request.addfinalizer(close_owned_service)
+    return svc
 
 
 # ── _detect_memory_type ─────────────────────────────────────────────
