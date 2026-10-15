@@ -115,7 +115,7 @@ def test_repeated_field_values_union_sources_without_changing_metadata(role):
 
 
 @pytest.mark.parametrize("mutation", ["edit", "delete"])
-def test_second_occurrence_derived_fact_tracks_coalesced_function(tmp_path, mutation):
+def test_second_occurrence_derived_fact_tracks_coalesced_function(tmp_path, mutation, request):
     from tests.test_factual_capture import service as factual_service
 
     text = "Atlas routing uses AMBER-7382."
@@ -128,7 +128,7 @@ def test_second_occurrence_derived_fact_tracks_coalesced_function(tmp_path, muta
             "evidence": [{"paragraph_id": evidence["paragraph_id"], "quote": text}],
         }]}
 
-    service = factual_service(tmp_path, payload)
+    service = factual_service(tmp_path, payload, _request=request)
     try:
         result = service.write(SourceDocument(type="text", content=f"{text}\n\nOverview.\n\n{text}"))
         assert result.factual_capture["status"] == "success"

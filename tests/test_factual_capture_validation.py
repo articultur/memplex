@@ -301,12 +301,12 @@ def test_environment_cannot_bypass_capture_bounds(tmp_path, monkeypatch, name, v
         load_config(str(tmp_path / "missing.yaml"))
 
 
-def test_factual_candidates_render_low_even_from_requirement_source(tmp_path):
+def test_factual_candidates_render_low_even_from_requirement_source(tmp_path, request):
     from memplex.llm.injection_guard import IndirectInjectionGuard
     from memplex.models import SearchResult, SourceDocument, SourceType
     from tests.test_factual_capture import service
 
-    svc = service(tmp_path)
+    svc = service(tmp_path, _request=request)
     try:
         result = svc.write(SourceDocument(type="text", content="Alice uses PostgreSQL. Bob uses SQLite.",
                                           source_type=SourceType.REQUIREMENT))

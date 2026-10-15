@@ -738,8 +738,8 @@ def test_raw_and_real_direct_input_stay_public(capture_service):
     assert direct.ref.key.logical_id in h.service.resolve_context_nodes([direct.ref.key.logical_id], authorization=CONTEXT)
 
 
-def test_v2_reads_need_no_source_adapter_or_write_admission(tmp_path, monkeypatch):
-    svc = legacy_service(tmp_path)
+def test_v2_reads_need_no_source_adapter_or_write_admission(tmp_path, monkeypatch, request):
+    svc = legacy_service(tmp_path, _request=request)
     try:
         svc._config.llm.factual_capture = False
         monkeypatch.setattr(svc.store, "source_versions", lambda: pytest.fail("V2 read requested source admission"))
