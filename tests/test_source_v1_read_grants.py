@@ -206,7 +206,21 @@ def _business_rows(bank):
         return result
 
 
-def _assert_v9_rollback(bank, before):
+def _owner_catalogue(bank):
+    """Read the same owner-relative catalogue predicates at both boundaries."""
+    from contextlib import closing
+
+    import psycopg2
+
+    from memplex.storage.migrations import runner
+
+    with closing(psycopg2.connect(bank.owner_dsn)) as connection, connection.cursor() as cur:
+        catalogue = runner._catalog_snapshot(cur)
+    assert connection.closed
+    return catalogue
+
+
+def _assert_v9_rollback(bank, before, *, application_acl=None, catalogue_before=None):
     from contextlib import closing
 
     import psycopg2
@@ -215,7 +229,13 @@ def _assert_v9_rollback(bank, before):
     from memplex.storage.migrations.source_read_grants import _MAINTENANCE_TABLES
 
     assert _business_rows(bank) == before
-    assert runner.PostgresMigrationRunner(bank.owner_dsn).plan().current_version == 9
+    assert runner.PostgresMigrationRunner(bank.owner_dsn).plan(
+        application_acl=application_acl,
+        deployment_profile="development" if application_acl is not None else None,
+    ).current_version == 9
+    if application_acl is not None:
+        assert catalogue_before is not None
+        assert _owner_catalogue(bank) == catalogue_before
     with closing(psycopg2.connect(bank.admin_dsn)) as connection, connection.cursor() as cur:
         cur.execute("SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class "
                     "WHERE relnamespace=current_schema()::regnamespace AND relname=ANY(%s) ORDER BY relname",
@@ -305,7 +325,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def _application_role(bank):
+def _application_role(bank, *, vector=False):
     """Exact existing app ACL on a temporary NOLOGIN role, never a credential."""
     import uuid
     from contextlib import closing
@@ -318,8 +338,10 @@ def _application_role(bank):
         _APPLICATION_ACL_FUNCTIONS,
         _SYNC_FUNCTIONS,
     )
+    from memplex.storage.migrations.runner import _vector_extension_type
 
     role = "grant_reader_" + uuid.uuid4().hex
+    runtime_path = bank.target.schema
     with closing(psycopg2.connect(bank.admin_dsn)) as connection:
         try:
             with connection, connection.cursor() as cur:
@@ -337,8 +359,14 @@ def _application_role(bank):
                 for name, signature in cur.fetchall():
                     if name in _APPLICATION_ACL_FUNCTIONS:
                         cur.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(sql.SQL(signature), sql.Identifier(role)))
+                if vector:
+                    extension = _vector_extension_type(cur)
+                    assert extension is not None, "vector fixture requires the installed extension type"
+                    namespace, _type_oid = extension
+                    assert re.fullmatch(r"[a-z_][a-z0-9_]*", namespace), "unsupported vector fixture schema identifier"
+                    runtime_path += "," + namespace
             dsn = psycopg2.extensions.make_dsn(bank.admin_dsn,
-                options=f"-c search_path={bank.target.schema} -c role={role}")
+                options=f"-c search_path={runtime_path} -c role={role}")
             with closing(psycopg2.connect(dsn)) as app, app.cursor() as cur:
                 cur.execute("SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
                 assert cur.fetchone() == (role, False, False)
@@ -358,7 +386,7 @@ def _upgraded_runtime(bank, *, vector=False):
     from memplex.storage.postgres_resources import PostgresStorageResources
     from memplex.storage.source_versions import _RESOURCE_ISSUER
 
-    with _application_role(bank) as (dsn, role):
+    with _application_role(bank, vector=vector) as (dsn, role):
         resources = PostgresStorageResources._for_source_validity(
             dsn, migration_dsn=bank.owner_dsn, issuer=_RESOURCE_ISSUER, capacity=2)
         try:
@@ -483,6 +511,7 @@ def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never
     import psycopg2
 
     from memplex.storage import pool as pool_module
+    from memplex.storage.migrations import runner
     from memplex.storage.migrations import source_read_grants as implementation
     from memplex.storage.migrations.runner import VectorCapabilityRequest
     from memplex.storage.postgres_resources import PostgresStorageResources
@@ -506,7 +535,12 @@ def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never
         monkeypatch.setattr(migration_runner, "_open_connection", tracking_open)
         return migration_runner
     monkeypatch.setattr(pool_module, "_new_migration_runner", tracking_runner)
-    with _application_role(bank) as (dsn, _role):
+    with _application_role(bank) as (dsn, role):
+        application_acl = runner.ApplicationAclContract(role)
+        assert runner.PostgresMigrationRunner(bank.owner_dsn).plan(
+            application_acl=application_acl, deployment_profile="development",
+        ).current_version == 9
+        catalogue_before = _owner_catalogue(bank)
         def observe_then_fail(cur, row):
             original(cur, row)
             with closing(psycopg2.connect(dsn)) as reader:
@@ -546,7 +580,7 @@ def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never
         finally:
             if resource.state != "FAULTED":
                 resource.close()
-    _assert_v9_rollback(bank, before)
+        _assert_v9_rollback(bank, before, application_acl=application_acl, catalogue_before=catalogue_before)
     request.node.user_properties.append(("rollback_stage", "exact_v9_restored"))
 
 
@@ -568,6 +602,7 @@ def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tm
         SourceMutation,
         SourceOperation,
     )
+    from memplex.storage.migrations.runner import _vector_extension_type
     from memplex.storage.postgres import _acl_scope_sql
     from tests.test_source_v1_lifecycle_matrix import QUERY, _service
 
@@ -593,6 +628,11 @@ def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tm
             identity = cur.fetchone()
             assert identity[0] == bank.role and identity[0] != identity[1] and identity[2:] == (False, False)
             request.node.user_properties.append(("embedding_identity", str(identity)))
+            extension = _vector_extension_type(cur)
+            assert extension is not None
+            cur.execute("SELECT current_schema(),to_regtype('vector')::oid")
+            assert cur.fetchone() == (bank.target.schema, extension[1])
+            request.node.user_properties.append(("embedding_vector_type", str(extension)))
             cur.execute(update, parameters)
             assert cur.fetchone() == (function.id,)
         assert connection.closed
