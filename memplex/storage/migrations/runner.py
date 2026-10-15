@@ -32,6 +32,7 @@ from memplex.storage.migrations._constants import (
     _MAX_VECTOR_DIM,
     _SEARCH_TSV_GENERATION_DIGEST,
     _SOURCE_CAPABILITY,
+    _SOURCE_READ_GRANTS_CAPABILITY,
     _SOURCE_TABLES,
     _SYNC_FUNCTIONS,
     _SYNC_TABLES,
@@ -671,6 +672,12 @@ def schema_fingerprint(
             _variant_digest("pre_g002_3_2_7"),
             "pre_g002_3_2_7",
         )
+    from memplex.storage.migrations.source_read_grants import _read_grant_catalogue_base
+
+    grant_base = _read_grant_catalogue_base(tables)
+    has_source_read_grants = grant_base is not None
+    if grant_base is not None:
+        tables = grant_base
     has_source_ingress_guard = _reliable_sync_catalogue_matches(tables, snapshot, guarded=True)
     has_reliable_sync = has_source_ingress_guard or _reliable_sync_catalogue_matches(tables, snapshot)
     has_background_tasks = _background_tasks_catalogue_matches(tables)
@@ -723,7 +730,7 @@ def schema_fingerprint(
         and capabilities is not None
         and _matches_capabilities(
             capabilities, snapshot["capabilities"], vector_dim=vector_dim,
-            source_validity=has_source_validity,
+            source_validity=has_source_validity, source_read_grants=has_source_read_grants,
         )
     ):
         current = True
@@ -755,6 +762,7 @@ def schema_fingerprint(
         has_background_tasks=has_background_tasks,
         has_source_validity=has_source_validity,
         has_source_ingress_guard=has_source_ingress_guard,
+        has_source_read_grants=has_source_read_grants,
         vector_dim=vector_dim,
     )
     variant = features.display_name()
@@ -1042,7 +1050,14 @@ class PostgresMigrationRunner:
             else:
                 if migration.version == 4:
                     _validate_legacy_belongs_to_edges(cur)
-                cur.execute(_body_for_execution(migration).decode("utf-8"))
+                if migration.version == 10:
+                    from memplex.storage.migrations.source_read_grants import (
+                        _apply_source_read_grants_upgrade,
+                    )
+
+                    _apply_source_read_grants_upgrade(cur, _body_for_execution(migration))
+                else:
+                    cur.execute(_body_for_execution(migration).decode("utf-8"))
             self._insert_ledger_row(cur, migration, "executed")
         legacy_vector_dimension = _legacy_vector_dimension(fingerprint.variant)
         if legacy_vector_dimension is not None:
@@ -1128,6 +1143,9 @@ class PostgresMigrationRunner:
         try:
             if hasattr(conn, "autocommit"):
                 conn.autocommit = False
+            # psycopg2 ISOLATION_LEVEL_READ_COMMITTED = 1. Set the fresh
+            # connection before target/catalogue queries can start a snapshot.
+            conn.isolation_level = 1
             cur = conn.cursor()
             try:
                 if expected_target is not None:
@@ -1182,6 +1200,7 @@ class PostgresMigrationRunner:
             self._short_connection(readonly=False) as conn,
             self._short_cursor(conn) as cur,
         ):
+            conn.isolation_level = 1
             if expected_target is not None:
                 _verify_target_identity(conn, cur, expected_target)
             if application_acl is not None or ingress_acl is not None:
@@ -1327,6 +1346,8 @@ class PostgresMigrationRunner:
             expected_digest = _vector_parameter_digest(request.dim)
             features = fingerprint.features
             source_capabilities = (_SOURCE_CAPABILITY,) if features and features.has_source_validity else ()
+            if features and features.has_source_read_grants:
+                source_capabilities = (_SOURCE_READ_GRANTS_CAPABILITY, *source_capabilities)
             if (
                 features is not None
                 and features.current

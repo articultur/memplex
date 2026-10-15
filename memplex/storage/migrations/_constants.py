@@ -11,6 +11,7 @@ paths keep resolving.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Final, Literal
 
 _LEDGER_TABLE: Final[str] = "memplex_schema_migrations"
@@ -53,6 +54,13 @@ _LEGACY_CORE_TABLES: Final[tuple[str, ...]] = (
 _SOURCE_TABLES: Final[tuple[str, ...]] = ('memplex_source_authorities', 'memplex_source_heads', 'memplex_derivation_records')
 
 _SOURCE_CAPABILITY: Final[tuple[str, str]] = ('source_validity_v1', '360810c3a7e55391bed0e6914172ada481757f5cfbeceb36f1e46ac1bc6dd73e')
+_SOURCE_READ_GRANTS_CAPABILITY: Final[tuple[str, str]] = (
+    "source_read_grants_v10", sha256(b"memplex/source-read-grants/v10:select-only:current-head:python-whole-token").hexdigest(),
+)
+_SOURCE_READ_GRANT_TABLES: Final[tuple[str, ...]] = (
+    "memplex_source_heads", "memplex_derivation_records", "memplex_paragraphs",
+    "memplex_functions", "memplex_facts", "memplex_preferences", "memplex_observations",
+)
 
 _SOURCE_COLUMNS: Final[dict[str, tuple[tuple[str, str, bool, str], ...]]] = {'memplex_source_authorities': (('authority_id', 'uuid', True, ''),
                                 ('tenant_id', 'text', True, ''),
@@ -753,6 +761,7 @@ class SchemaVariantFeatures:
     vector_dim: int | None = None
     has_source_validity: bool = False
     has_source_ingress_guard: bool = False
+    has_source_read_grants: bool = False
 
     def display_name(self) -> str:
         """Render the canonical variant name for status output and digests."""
@@ -772,6 +781,8 @@ class SchemaVariantFeatures:
             name = f"{name}_source_validity_v1"
         if self.has_source_ingress_guard:
             name = f"{name}_source_ingress_guard_v9"
+        if self.has_source_read_grants:
+            name = f"{name}_source_read_grants_v10"
         if self.vector_dim is not None:
             name = f"{name}_vector_{self.vector_dim}"
         return name

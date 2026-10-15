@@ -362,7 +362,7 @@ def _scope(cursor, role, *, tenant="tenant-source", workspace="workspace-source"
 def test_native_migration_catalogue_and_rls_contract(source_pg) -> None:
     migration, connection, cursor, role = source_pg
 
-    assert migration.plan().current_version == 9
+    assert migration.plan().current_version == 10
     _grant_source_tables(cursor, role)
     for name in _SOURCE_TABLES:
         cursor.execute(f"SELECT count(*) FROM {name}")
@@ -372,10 +372,8 @@ def test_native_migration_catalogue_and_rls_contract(source_pg) -> None:
         cursor.execute("SELECT has_table_privilege(%s,%s,'SELECT,INSERT,UPDATE'), has_table_privilege(%s,%s,'DELETE')",
                        (role, name, role, name))
         assert cursor.fetchone() == (True, False)
-    cursor.execute("SELECT capability_name, parameter_digest FROM memplex_schema_capabilities")
-    assert cursor.fetchall() == [(
-        "source_validity_v1", "360810c3a7e55391bed0e6914172ada481757f5cfbeceb36f1e46ac1bc6dd73e",
-    )]
+    cursor.execute("SELECT capability_name, parameter_digest FROM memplex_schema_capabilities ORDER BY capability_name")
+    assert tuple(cursor.fetchall()) == (runner._SOURCE_READ_GRANTS_CAPABILITY, runner._SOURCE_CAPABILITY)
     _authority(cursor)
     connection.commit()
     _scope(cursor, role)
@@ -570,7 +568,7 @@ def test_postgres_boolean_test_deparse_matches_catalogue(change: str) -> None:
     (8, True, "integrity"), (9, False, "integrity"),
 ])
 def test_guard_body_feature_and_migration_ledger_must_agree(ledger_version, guarded, expected):
-    migrations = runner.discover_migrations()
+    migrations = tuple(item for item in runner.discover_migrations() if item.version <= 9)
     entries = tuple(runner._LedgerEntry(item.version, item.name, item.checksum, "executed", None)
                     for item in migrations if item.version <= ledger_version)
     variant = "post_g002_runtime_v1_edge_integrity_current_reliable_sync_v5_background_tasks_v6_source_validity_v1"
@@ -609,7 +607,7 @@ def test_native_v9_upgrade_preserves_function_identity_and_requires_exact_pair(p
             cursor.execute("SELECT version, checksum FROM memplex_schema_migrations ORDER BY version")
             ledger_before = cursor.fetchall()
         connection.rollback()
-        assert latest.apply().current_version == 9
+        assert latest.apply().current_version == 10
         with connection.cursor() as cursor:
             cursor.execute(query, (names,))
             after = cursor.fetchall()

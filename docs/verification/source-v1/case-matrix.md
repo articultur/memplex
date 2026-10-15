@@ -71,6 +71,42 @@ Each lifecycle call records backend, actual principal/scope, logical receipt IDs
 Local focused results and exact source/evidence hashes are in the immutable author report. External PostgreSQL was unavailable locally; all native PG entries remain pending exact hosted CI and independent review. The release workload retains its existing six full matrices, native PG/backup/sync files, coverage floor, 250 ms product budget, dependencies and ranking behavior. Only the necessary native test-list/pin and standard JUnit retention are added. No long local full run substitutes for or duplicates those exact release gates.
 
 
-## Pending native boundary investigation
+## PostgreSQL named-grant repair
 
-Independent static review identified an unconfirmed native difference that must be established by real PostgreSQL execution before this task can be accepted. PostgreSQL source resolution/record reads apply relational ACL predicates before Python's own-ACL check; an admitted other subject receives the fixed expected internal `missing` where Lite reaches `denied`. This is a privacy-preserving rejection-stage difference, represented in the reviewed frozen backend annotation; real native execution is still pending. The original cross-subject positive named-agent grant control also remains mandatory: PostgreSQL's relational predicate has no grant branch although the Python ACL does. Its assertion is retained. Neither a native parametrization nor local Lite success resolves these findings. No product or permission-boundary change was made; the exact minimal native control and its static source references are retained for the controller. The mandatory named-grant ALLOW is separate from the subject-row rejection annotation: `missing` there remains an availability failure. No arbitrary expected outcome is introduced.
+[CI189, attempt 1](https://github.com/articultur/memplex/actions/runs/38645028958)
+confirmed the named-grant availability failure on frozen commit
+`30dc51e942a28f4061735d0221db9bcba414dd69`: 599 of 600 mandatory native
+IDs passed, and the Bob ALLOW assertion failed. Its subsequent PostgreSQL
+Charlie/revoke/regrant/U assertions were not reached.
+The original assertion and the 120+40 fixture meanings remain unchanged.
+
+The isolated repair adds immutable migration `0010_source_read_grants`, a
+canonical current-head grant projection, and seven SELECT-only policies. V1
+source reads and actual lexical/vector/list nomination use that projection;
+the existing mutation predicates and legacy SQL selector retain their prior
+rules. A private grantee receives no update, delete, re-share or target rights.
+The service's current-policy, recursive source and final-L fence remains the
+validity boundary. SQL row grants do not cache recursive authorization.
+
+Occupied-bank upgrade requires the existing maintenance owner, READ COMMITTED
+before the first query, fixed eight-table exclusive locks, and one transaction.
+The bounded temporary NO FORCE scope retains enabled RLS, verifies existing
+canonical payload/identity/locator/digests, projects existing grants, and
+restores FORCE before exact catalogue/ledger convergence and commit. All private
+row verification occurs before restoration. A failure before commit rolls back
+the transaction; a lost commit acknowledgement remains unknown until a fresh
+exact target/ledger/catalogue readback. Runtime never receives this connection.
+The existing complete application ACL already includes the head and authority
+SELECT rights used by these policies; no application privilege is added.
+
+`test_source_v1_read_grants.py` retains separate native upgrade, normal
+service/HTTP discovery, real lexical/vector nomination, read-only grant,
+rollback, lock, bootstrap, drift and commit-acknowledgement controls. Its v9
+fixture uses a real previous schema and canonical bound DTO seed, not execution
+of a historical writer. It records the effective maintenance role and session
+role separately, proves non-superuser/non-BYPASSRLS execution and table ownership,
+and uses a distinct ordinary application role. Native parametrization and local
+skips are not execution evidence. The repair native controls remain pending
+actual PostgreSQL execution. Acceptance requires the unchanged original 600
+mandatory native IDs and these 22 new native controls on the exact reviewed
+CI candidate.

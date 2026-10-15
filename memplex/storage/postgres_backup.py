@@ -256,6 +256,7 @@ def _approved_restore_toc(text: str, schema: str) -> tuple[str, str]:
     from memplex.storage.migrations._constants import (
         _KNOWN_MEMPLEX_RELATION_KINDS,
         _MANAGED_TABLES,
+        _SOURCE_READ_GRANT_TABLES,
         _SYNC_FUNCTIONS,
     )
     relations = set(_KNOWN_MEMPLEX_RELATION_KINDS) | {'fts_functions_idx', 'feedback', 'feedback_pkey',
@@ -269,6 +270,8 @@ def _approved_restore_toc(text: str, schema: str) -> tuple[str, str]:
     triggers = {'memplex_sync_' + table + '_' + stage
                 for table in ('functions', 'edges', 'observations', 'facts', 'preferences') for stage in ('before', 'after')}
     policies = {name + '_scope' for name in _MANAGED_TABLES} | {'feedback_tenant_scope'}
+    read_policies = {name + '_source_read_grants': name for name in _SOURCE_READ_GRANT_TABLES}
+    policies.update(read_policies)
     kinds = ('SEQUENCE OWNED BY', 'TABLE DATA', 'SEQUENCE SET', 'FK CONSTRAINT', 'ROW SECURITY',
              'DEFAULT ACL', 'CONSTRAINT', 'FUNCTION', 'SEQUENCE', 'SCHEMA', 'COMMENT', 'DEFAULT',
              'TABLE', 'INDEX', 'TRIGGER', 'POLICY', 'ACL')
@@ -323,7 +326,8 @@ def _approved_restore_toc(text: str, schema: str) -> tuple[str, str]:
                 raise ValueError('unknown relation')
             if kind in {'CONSTRAINT', 'FK CONSTRAINT', 'TRIGGER', 'POLICY'}:
                 names = constraints if kind in {'CONSTRAINT', 'FK CONSTRAINT'} else triggers if kind == 'TRIGGER' else policies
-                if len(fields) != 3 or fields[1] not in names:
+                if (len(fields) != 3 or fields[1] not in names
+                        or (kind == 'POLICY' and read_policies.get(fields[1], name) != name)):
                     raise ValueError('unknown attached object')
             elif kind == 'DEFAULT' and (len(fields) != 3 or fields[1] not in {'id', 'stream_seq'}):
                 raise ValueError('unknown default column')

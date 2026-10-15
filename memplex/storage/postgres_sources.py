@@ -89,7 +89,33 @@ _TABLES = {SourceKind.RAW_PARAGRAPH: "memplex_paragraphs", SourceKind.FUNCTION: 
 _IDENTITY_COLUMNS = "tenant_id, owner_subject, workspace, visibility, source_agent, source_session"
 _HEAD_COLUMNS = ("authority_id::text, kind, logical_id, incarnation::text, content_revision, auth_revision, "
                  "state, source_class, payload_locator, digest_version, semantic_digest, last_commit_seq, "
-                 "head_data, " + _IDENTITY_COLUMNS)
+                 "head_data, " + _IDENTITY_COLUMNS + ", read_grants")
+
+
+def _read_grants(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Project the existing Python whole-token grant contract exactly."""
+    namespace = payload.get("namespace") or {}
+    if not isinstance(namespace, dict) or not (raw := namespace.get("memplex_grants", "")):
+        return ()
+    return tuple(sorted({part.strip() for part in str(raw).split(",") if part.strip()}))
+
+
+def _read_scope_sql(relation: str, alias: str = "", *, write: bool = False) -> str:
+    if write:
+        return _scope_sql(alias)
+    from memplex.storage.migrations.source_read_grants import (
+        _head_grant_sql,
+        _payload_grant_sql,
+        _record_grant_sql,
+    )
+
+    if relation == "memplex_source_heads":
+        grant = _head_grant_sql(alias or relation)
+    elif relation == "memplex_derivation_records":
+        grant = _record_grant_sql(alias or relation)
+    else:
+        grant = _payload_grant_sql(relation, alias)
+    return f"(({_scope_sql(alias)}) OR ({grant}))"
 
 
 def _source_lock_key(target: PostgresTargetIdentity, authority_id: str) -> int:
@@ -227,7 +253,7 @@ class _PostgresReadSession:
 
     def resolve_id(self, memory_id: str) -> SourceKey | None:
         self._execute("SELECT kind, logical_id FROM memplex_source_heads "
-                      f"WHERE authority_id=%s AND logical_id=%s AND {_scope_sql()}",
+                      f"WHERE authority_id=%s AND logical_id=%s AND {_read_scope_sql('memplex_source_heads')}",
                       (self._scope.authority_id, memory_id))
         rows = self._cursor.fetchall()
         if len(rows) > 1:
@@ -237,12 +263,12 @@ class _PostgresReadSession:
         return SourceKey(self._scope.authority_id, self._scope.tenant_id, self._scope.workspace_id,
                          SourceKind(rows[0][0]), rows[0][1])
 
-    def _head(self, key: SourceKey) -> tuple[SourceHead, tuple[object, ...]] | None:
+    def _head(self, key: SourceKey, *, write: bool = False) -> tuple[SourceHead, tuple[object, ...], tuple[str, ...]] | None:
         if (key.authority_id, key.tenant_id, key.workspace_id) != (
                 self._scope.authority_id, self._scope.tenant_id, self._scope.workspace_id):
             raise SourceContractError(RejectionCode.DENIED)
         self._execute(f"SELECT {_HEAD_COLUMNS} FROM memplex_source_heads "
-                      f"WHERE authority_id=%s AND kind=%s AND logical_id=%s AND {_scope_sql()}",
+                      f"WHERE authority_id=%s AND kind=%s AND logical_id=%s AND {_read_scope_sql('memplex_source_heads', write=write)}",
                       (key.authority_id, key.kind.value, key.logical_id))
         row = self._cursor.fetchone()
         if row is None:
@@ -257,32 +283,35 @@ class _PostgresReadSession:
             **row[12],
         })
         _integrity(head.last_commit_seq <= self.authority().commit_seq)
-        return head, tuple(row[13:])
+        _integrity(type(row[19]) is list and all(type(value) is str for value in row[19]))
+        return head, tuple(row[13:19]), tuple(row[19])
 
-    def source(self, key: SourceKey) -> SourceSnapshot | None:
-        found = self._head(key)
+    def source(self, key: SourceKey, *, write: bool = False) -> SourceSnapshot | None:
+        found = self._head(key, write=write)
         if found is None:
             return None
-        head, identity = found
+        head, identity, grants = found
         if head.state is SourceState.DELETED:
+            _integrity(not grants)
             return SourceSnapshot(head, {})
         locator = json.loads(head.payload_locator)
         self._execute(f"SELECT id, data, {_IDENTITY_COLUMNS} FROM {_TABLES[key.kind]} "
-                      f"WHERE id=%s AND {_scope_sql()}", (locator["id"],))
+                      f"WHERE id=%s AND {_read_scope_sql(_TABLES[key.kind], write=write)}", (locator["id"],))
         row = self._cursor.fetchone()
         _integrity(row is not None)
         assert row is not None
         payload = json.loads(_canonical(row[1]))
         _integrity(row[0] == payload.get("id") and tuple(row[2:]) == identity == _identity(payload))
         _integrity(head.payload_locator == _locator(key, payload))
+        _integrity(grants == (() if head.source_class is SourceClass.LEGACY_UNVERIFIED else _read_grants(payload)))
         payload["id"] = key.logical_id
         _integrity(semantic_digest(payload, input_context=head.input_context, root_refs=head.root_refs)
                    == head.ref.semantic_digest)
         return SourceSnapshot(head, payload)
 
-    def _record(self, kind: str, key: str, cls: type[Any]) -> Any:
+    def _record(self, kind: str, key: str, cls: type[Any], *, write: bool = False) -> Any:
         self._execute("SELECT data FROM memplex_derivation_records "
-                      f"WHERE authority_id=%s AND record_kind=%s AND record_key=%s AND {_scope_sql()}",
+                      f"WHERE authority_id=%s AND record_kind=%s AND record_key=%s AND {_read_scope_sql('memplex_derivation_records', write=write)}",
                       (self._scope.authority_id, kind, key))
         row = self._cursor.fetchone()
         if row is None:
@@ -294,8 +323,8 @@ class _PostgresReadSession:
         _integrity((value.last_commit_seq if kind == "target" else value.commit_seq) <= self.authority().commit_seq)
         return value
 
-    def target(self, derivation_key: str) -> TargetHead | None:
-        return cast(TargetHead | None, self._record("target", derivation_key, TargetHead))
+    def target(self, derivation_key: str, *, write: bool = False) -> TargetHead | None:
+        return cast(TargetHead | None, self._record("target", derivation_key, TargetHead, write=write))
 
     def publication(self, publication_id: str) -> PublicationRecord | None:
         return cast(PublicationRecord | None, self._record("publication", publication_id, PublicationRecord))
@@ -537,7 +566,7 @@ class PostgresSourceVersionStore:
             raise SourceContractError(RejectionCode.UNSUPPORTED_SEMANTICS)
         with self._transaction(authorization, deadline_ns, shared=False) as session:
             authority = self._admit(session, authorization)
-            current = session.source(command.key)
+            current = session.source(command.key, write=True)
             assert self._hooks is not None
             if current is not None and current.head.state is SourceState.LIVE and not self._hooks.own_acl(current, authorization):
                 raise SourceContractError(RejectionCode.DENIED)
@@ -549,7 +578,7 @@ class PostgresSourceVersionStore:
                     raise SourceContractError(RejectionCode.DENIED)
                 self._check_source_inputs(session, authorization, command)
             for raw_command in _raw_retirements(session, current, command):
-                raw = session.source(raw_command.key)
+                raw = session.source(raw_command.key, write=True)
                 assert raw is not None
                 if not self._hooks.own_acl(raw, authorization):
                     raise SourceContractError(RejectionCode.DENIED)
@@ -606,19 +635,19 @@ class PostgresSourceVersionStore:
         head_data = _canonical({"input_context": head.input_context, "root_refs": head.root_refs})
         session._execute("INSERT INTO memplex_source_heads "
                          "(authority_id,kind,logical_id,incarnation,content_revision,auth_revision,state,source_class,"
-                         "payload_locator,digest_version,semantic_digest,last_commit_seq,head_data," + _IDENTITY_COLUMNS + ") "
-                         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s) "
+                         "payload_locator,digest_version,semantic_digest,last_commit_seq,head_data," + _IDENTITY_COLUMNS + ",read_grants) "
+                         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s::text[]) "
                          "ON CONFLICT (authority_id,kind,logical_id) DO UPDATE SET "
                          "incarnation=EXCLUDED.incarnation,content_revision=EXCLUDED.content_revision,auth_revision=EXCLUDED.auth_revision,"
                          "state=EXCLUDED.state,source_class=EXCLUDED.source_class,payload_locator=EXCLUDED.payload_locator,"
                          "semantic_digest=EXCLUDED.semantic_digest,last_commit_seq=EXCLUDED.last_commit_seq,head_data=EXCLUDED.head_data,"
                          "owner_subject=EXCLUDED.owner_subject,visibility=EXCLUDED.visibility,source_agent=EXCLUDED.source_agent,"
-                         "source_session=EXCLUDED.source_session "
+                         "source_session=EXCLUDED.source_session,read_grants=EXCLUDED.read_grants "
                          f"WHERE {_scope_sql('memplex_source_heads')} RETURNING logical_id",
                          (key.authority_id, key.kind.value, key.logical_id, head.ref.token.incarnation,
                           head.ref.token.content_revision, head.ref.token.auth_revision, head.state.value,
                           head.source_class.value, head.payload_locator, head.ref.semantic_digest,
-                          head.last_commit_seq, head_data, *identity))
+                          head.last_commit_seq, head_data, *identity, list(_read_grants(payload or {}))))
         _integrity(session._cursor.fetchone() == (key.logical_id,))
         if not advance_authority:
             return
@@ -654,7 +683,7 @@ class PostgresSourceVersionStore:
             if replay is not None:
                 receipt = replay
             else:
-                current = session.target(command.derivation_key)
+                current = session.target(command.derivation_key, write=True)
                 target, record, snapshot = _make_publication(command, authority, authorization, current, digest, expected_deleted)
                 old, old_record = None, None
                 if current is not None and current.state is SourceState.LIVE:
@@ -706,7 +735,7 @@ class PostgresSourceVersionStore:
                     authorization.agent_id, authorization.session_id)
         session._execute(f"DELETE FROM memplex_facts WHERE id=%s AND {_scope_sql()} RETURNING id", (record.publication_id,))
         _integrity(session._cursor.fetchone() == (record.publication_id,))
-        session._execute("UPDATE memplex_source_heads SET state='deleted',payload_locator='',head_data=%s::jsonb,"
+        session._execute("UPDATE memplex_source_heads SET state='deleted',payload_locator='',read_grants='{}'::text[],head_data=%s::jsonb,"
                          "content_revision=%s,last_commit_seq=%s,owner_subject=%s,source_agent=%s,source_session=%s "
                          f"WHERE authority_id=%s AND kind='fact' AND logical_id=%s AND {_scope_sql()} RETURNING logical_id",
                          (_canonical({"input_context": {}, "root_refs": ()}), head.ref.token.content_revision,
@@ -732,7 +761,7 @@ class PostgresSourceVersionStore:
         with self._transaction(authorization, deadline_ns, shared=False) as session:
             assert self._scope is not None and self._hooks is not None
             authority = _admit_publication(session, authorization, self._scope)
-            current = session.target(derivation_key)
+            current = session.target(derivation_key, write=True)
             if current is None or current.state is not SourceState.LIVE or current.token != expected:
                 raise SourceContractError(RejectionCode.PUBLICATION_CONFLICT)
             key = session.resolve_id(expected.current_publication)

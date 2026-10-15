@@ -174,6 +174,21 @@ def _acl_scope_sql(alias: str = "") -> str:
     )
 
 
+def _read_acl_scope_sql(store: PostgresMemoryStore, table: str, alias: str = "") -> str:
+    """Only the resource-issued V1 adapter selects the additional read path."""
+    from memplex.storage.migrations.source_read_grants import _payload_grant_sql
+    from memplex.storage.postgres_sources import PostgresSourceVersionStore
+
+    base = _acl_scope_sql(alias)
+    adapter = store.source_versions()
+    if type(adapter) is not PostgresSourceVersionStore or adapter._scope is None:
+        return base
+    context = store._authorization_context()
+    if (context.principal.tenant_id, context.workspace_id) != (adapter._scope.tenant_id, adapter._scope.workspace_id):
+        return base
+    return f"(({base}) OR ({_payload_grant_sql(table, alias)}))"
+
+
 # The scope is intentionally a ContextVar rather than a store attribute.  A
 # PostgreSQL store is shared by services and workers; putting identity on the
 # store would let concurrent requests overwrite each other's tenant context.
@@ -1433,7 +1448,7 @@ class PostgresMemoryStore:
         import json as _json
 
         context = self._authorization_context()
-        scope_sql = _acl_scope_sql("memplex_paragraphs")
+        scope_sql = _read_acl_scope_sql(self, 'memplex_paragraphs')
         with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
             cur.execute(
                 "SELECT data FROM memplex_paragraphs WHERE id = %s AND " + scope_sql,
@@ -1468,7 +1483,7 @@ class PostgresMemoryStore:
     def get_fact(self, fact_id: str) -> Fact | None:
         cur = self._execute(
             "SELECT data FROM memplex_facts "
-            f"WHERE {_acl_scope_sql()} AND id = %s",
+            f"WHERE {_read_acl_scope_sql(self, 'memplex_facts')} AND id = %s",
             (fact_id,),
             commit=False,
         )
@@ -1482,7 +1497,7 @@ class PostgresMemoryStore:
     def get_preference(self, preference_id: str) -> Preference | None:
         cur = self._execute(
             "SELECT data FROM memplex_preferences "
-            f"WHERE {_acl_scope_sql()} AND id = %s",
+            f"WHERE {_read_acl_scope_sql(self, 'memplex_preferences')} AND id = %s",
             (preference_id,),
             commit=False,
         )
@@ -1499,7 +1514,7 @@ class PostgresMemoryStore:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_facts "
-                f"WHERE {_acl_scope_sql()} AND data->>'owner' = %s "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_facts')} AND data->>'owner' = %s "
                 "ORDER BY data->>'updated_at' DESC OFFSET %s LIMIT %s",
                 (owner, offset, limit),
                 commit=False,
@@ -1507,7 +1522,7 @@ class PostgresMemoryStore:
         else:
             cur = self._execute(
                 "SELECT data FROM memplex_facts "
-                f"WHERE {_acl_scope_sql()} "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_facts')} "
                 "ORDER BY data->>'updated_at' DESC "
                 "OFFSET %s LIMIT %s",
                 (offset, limit),
@@ -1526,7 +1541,7 @@ class PostgresMemoryStore:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_preferences "
-                f"WHERE {_acl_scope_sql()} AND data->>'owner' = %s "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_preferences')} AND data->>'owner' = %s "
                 "ORDER BY data->>'updated_at' DESC OFFSET %s LIMIT %s",
                 (owner, offset, limit),
                 commit=False,
@@ -1534,7 +1549,7 @@ class PostgresMemoryStore:
         else:
             cur = self._execute(
                 "SELECT data FROM memplex_preferences "
-                f"WHERE {_acl_scope_sql()} "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_preferences')} "
                 "ORDER BY data->>'updated_at' DESC "
                 "OFFSET %s LIMIT %s",
                 (offset, limit),
@@ -1567,7 +1582,7 @@ class PostgresMemoryStore:
         cur = self._execute(
             "SELECT o.data FROM memplex_observations o "
             "JOIN (SELECT current_setting('memplex.tenant_id', true) AS tenant_id) scope "
-            f"ON {_acl_scope_sql('o')} "
+            f"ON {_read_acl_scope_sql(self, 'memplex_observations', 'o')} "
             f"{where}ORDER BY o.created_at DESC OFFSET %s LIMIT %s",
             (*params, offset, limit),
             commit=False,
@@ -1583,7 +1598,7 @@ class PostgresMemoryStore:
     def get_observation(self, observation_id: str) -> Observation | None:
         cur = self._execute(
             "SELECT data FROM memplex_observations "
-            f"WHERE {_acl_scope_sql()} AND id = %s",
+            f"WHERE {_read_acl_scope_sql(self, 'memplex_observations')} AND id = %s",
             (observation_id,),
             commit=False,
         )
@@ -1716,7 +1731,7 @@ class PostgresMemoryStore:
                     SELECT f.id, f.data, ts_rank(f.search_tsv, query.terms) AS score,
                            'function' AS row_kind
                     FROM memplex_functions f
-                    WHERE {_acl_scope_sql('f')}
+                    WHERE {_read_acl_scope_sql(self, 'memplex_functions', 'f')}
                       AND f.search_tsv @@ query.terms
                     ORDER BY score DESC, f.id
                     LIMIT %s
@@ -1735,11 +1750,11 @@ class PostgresMemoryStore:
                             )), ''), fact.data->>'name', ''
                         )) AS search_tsv
                     ) lexical
-                    WHERE {_acl_scope_sql('fact')}
+                    WHERE {_read_acl_scope_sql(self, 'memplex_facts', 'fact')}
                       AND lexical.search_tsv @@ query.terms
                       AND NOT EXISTS (
                           SELECT 1 FROM memplex_functions shadow
-                          WHERE shadow.id = fact.id AND {_acl_scope_sql('shadow')}
+                          WHERE shadow.id = fact.id AND {_read_acl_scope_sql(self, 'memplex_functions', 'shadow')}
                       )
                     ORDER BY score DESC, fact.id
                     LIMIT %s
@@ -1764,7 +1779,7 @@ class PostgresMemoryStore:
                         f"""
                         SELECT id, data, 1 - (embedding <=> %s::vector) AS score
                         FROM memplex_functions
-                        WHERE {_acl_scope_sql()}
+                        WHERE {_read_acl_scope_sql(self, 'memplex_functions')}
                           AND embedding IS NOT NULL
                         ORDER BY embedding <=> %s::vector
                         LIMIT %s
@@ -1859,7 +1874,7 @@ class PostgresMemoryStore:
         sql = (
             "SELECT f.data FROM memplex_functions f "
             "JOIN (SELECT current_setting('memplex.tenant_id', true) AS tenant_id) scope "
-            f"ON {_acl_scope_sql('f')}"
+            f"ON {_read_acl_scope_sql(self, 'memplex_functions', 'f')}"
         )
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -1873,7 +1888,7 @@ class PostgresMemoryStore:
 
     def get(self, func_id: str) -> Function | None:
         cur = self._execute(
-            f"SELECT data FROM memplex_functions WHERE {_acl_scope_sql()} AND id = %s",
+            f"SELECT data FROM memplex_functions WHERE {_read_acl_scope_sql(self, 'memplex_functions')} AND id = %s",
             (func_id,),
             commit=False,
         )
@@ -1900,13 +1915,13 @@ class PostgresMemoryStore:
                 "SELECT id, data, tenant_id, owner_subject, workspace, visibility, "
                 "source_agent, source_session, "
                 "EXISTS (SELECT 1 FROM memplex_functions current_function WHERE "
-                + _acl_scope_sql("current_function")
+                + _read_acl_scope_sql(self, "memplex_functions", "current_function")
                 + " AND current_function.tenant_id = memplex_paragraphs.tenant_id"
                 + " AND jsonb_typeof(current_function.data->'source_paragraphs') = 'array'"
                 + " AND current_function.data->'source_paragraphs' ? memplex_paragraphs.id"
                 + " AND coalesce(current_function.data->'attributes'->>'memplex_role_updates', '') <> '')"
                 + " AS context_historical FROM memplex_paragraphs WHERE id = %s AND "
-                + _acl_scope_sql("memplex_paragraphs"),
+                + _read_acl_scope_sql(self, "memplex_paragraphs", "memplex_paragraphs"),
                 (para_id,),
             )
             row = cur.fetchone()
@@ -2008,7 +2023,7 @@ class PostgresMemoryStore:
             )
             SELECT DISTINCT f.data FROM memplex_functions f
             JOIN hop ON f.id = hop.id
-            WHERE {_acl_scope_sql('f')}
+            WHERE {_read_acl_scope_sql(self, 'memplex_functions', 'f')}
             {result_limit}
         """
         params: list[Any] = [func_id, func_id, func_id]
@@ -2057,7 +2072,7 @@ class PostgresMemoryStore:
             SELECT f.data
             FROM memplex_functions f
             JOIN bounded_neighbors ON f.id = bounded_neighbors.neighbor_id
-            WHERE {_acl_scope_sql('f')}
+            WHERE {_read_acl_scope_sql(self, 'memplex_functions', 'f')}
         """
         params: list[Any] = [func_id]
         if edge_types:
@@ -2115,13 +2130,13 @@ class PostgresMemoryStore:
         if func_ids is None:
             cur = self._execute(
                 "SELECT data FROM memplex_functions "
-                f"WHERE {_acl_scope_sql()} ORDER BY id",
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_functions')} ORDER BY id",
                 commit=False,
             )
         else:
             cur = self._execute(
                 "SELECT data FROM memplex_functions "
-                f"WHERE {_acl_scope_sql()} AND id = ANY(%s) ORDER BY id",
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_functions')} AND id = ANY(%s) ORDER BY id",
                 (list(func_ids),),
                 commit=False,
             )
@@ -2170,7 +2185,7 @@ class PostgresMemoryStore:
         if owner:
             cur = self._execute(
                 "SELECT data FROM memplex_functions "
-                f"WHERE {_acl_scope_sql()} AND data->>'owner' = %s "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_functions')} AND data->>'owner' = %s "
                 "ORDER BY data->>'updated_at' DESC OFFSET %s LIMIT %s",
                 (owner, offset, limit),
                 commit=False,
@@ -2178,7 +2193,7 @@ class PostgresMemoryStore:
         else:
             cur = self._execute(
                 "SELECT data FROM memplex_functions "
-                f"WHERE {_acl_scope_sql()} "
+                f"WHERE {_read_acl_scope_sql(self, 'memplex_functions')} "
                 "ORDER BY data->>'updated_at' DESC "
                 "OFFSET %s LIMIT %s",
                 (offset, limit),

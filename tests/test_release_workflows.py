@@ -544,6 +544,7 @@ def test_ci_type_postgres_and_supply_chain_gates_cover_real_release_boundaries()
         "tests/test_source_v1_restore.py",
         "tests/test_source_v1_lifecycle_matrix.py",
         "tests/test_source_v1_case_manifest.py",
+        "tests/test_source_v1_read_grants.py",
     ):
         assert required_test in postgres_steps
 

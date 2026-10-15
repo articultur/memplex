@@ -33,6 +33,7 @@ from memplex.storage.migrations._constants import (
     _SOURCE_INDEX_KEYS,
     _SOURCE_POLICY_EXPRESSIONS,
     _SOURCE_PRIMARY_KEYS,
+    _SOURCE_READ_GRANTS_CAPABILITY,
     _SOURCE_TABLES,
     _SOURCE_UNIQUE_KEYS,
     _SYNC_FUNCTIONS,
@@ -902,13 +903,15 @@ def _matches_runtime_feedback_v1(table: dict[str, Any]) -> bool:
 
 def _matches_capabilities(
     table: dict[str, Any], rows: tuple[tuple[str, str], ...] | None, *, vector_dim: int | None,
-    source_validity: bool = False,
+    source_validity: bool = False, source_read_grants: bool = False,
 ) -> bool:
     expected_rows = (
         ()
         if vector_dim is None
         else (("pgvector_embedding", sha256(f"pgvector:{vector_dim}".encode("ascii")).hexdigest()),)
     )
+    if source_read_grants:
+        expected_rows = (*expected_rows, _SOURCE_READ_GRANTS_CAPABILITY)
     if source_validity:
         expected_rows = (*expected_rows, _SOURCE_CAPABILITY)
     return (
@@ -1225,7 +1228,7 @@ def _is_reliable_sync_current_variant(variant: str) -> bool:
 
 
 def _is_background_tasks_current_variant(variant: str) -> bool:
-    base_variant = variant.replace("_source_ingress_guard_v9", "", 1).replace("_source_validity_v1", "", 1)
+    base_variant = variant.replace("_source_read_grants_v10", "", 1).replace("_source_ingress_guard_v9", "", 1).replace("_source_validity_v1", "", 1)
     return base_variant.endswith("_background_tasks_v6") or "_background_tasks_v6_vector_" in base_variant
 
 
@@ -1235,6 +1238,8 @@ def _allowed_adoption_baselines(current_variant: str) -> frozenset[str]:
     A final runtime feedback layout cannot show whether feedback already existed
     before 0003, so only its two documented runtime ancestors are accepted.
     """
+    if "_source_read_grants_v10" in current_variant:
+        return _allowed_adoption_baselines(current_variant.replace("_source_read_grants_v10", "", 1))
     if "_source_ingress_guard_v9" in current_variant:
         return _allowed_adoption_baselines(current_variant.replace("_source_ingress_guard_v9", "", 1))
     if "_source_validity_v1" in current_variant:
@@ -1428,9 +1433,10 @@ def _source_validity_catalogue_matches(tables: dict[str, Any]) -> bool:
 
 
 def _is_source_validity_current_variant(variant: str) -> bool:
-    variant = variant.replace("_source_ingress_guard_v9", "", 1)
+    variant = variant.replace("_source_read_grants_v10", "", 1).replace("_source_ingress_guard_v9", "", 1)
     return variant.endswith("_source_validity_v1") or "_source_validity_v1_vector_" in variant
 
 
 def _is_source_ingress_guard_current_variant(variant: str) -> bool:
+    variant = variant.replace("_source_read_grants_v10", "", 1)
     return variant.endswith("_source_ingress_guard_v9") or "_source_ingress_guard_v9_vector_" in variant
