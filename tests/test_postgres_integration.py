@@ -5626,21 +5626,25 @@ def _alter_text_column_to_nondefault_collation(migration_dsn, table_name: str, c
     conn = psycopg2.connect(migration_dsn)
     try:
         cur = conn.cursor()
-        policy = None
-        if (table_name, column_name) == ("memplex_functions", "tenant_id"):
+        policies = None
+        if table_name == "memplex_functions":
             cur.execute(
                 """
-                SELECT pol.polname,
+                SELECT pol.polname, pol.polcmd, pol.polpermissive, pol.polroles,
                        pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
                        pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid)
                 FROM pg_catalog.pg_policy AS pol
                 WHERE pol.polrelid = 'memplex_functions'::regclass
-                  AND pol.polname = 'memplex_functions_scope'
+                ORDER BY pol.polname
                 """
             )
-            policy = cur.fetchone()
-            assert policy is not None
-            cur.execute("DROP POLICY memplex_functions_scope ON memplex_functions")
+            policies = cur.fetchall()
+            assert [(name, command, permissive, roles) for name, command, permissive, roles, _, _ in policies] == [
+                ("memplex_functions_scope", "*", True, [0]),
+                ("memplex_functions_source_read_grants", "r", True, [0]),
+            ]
+            for name, *_ in policies:
+                cur.execute(pg_sql.SQL("DROP POLICY {} ON memplex_functions").format(pg_sql.Identifier(name)))
         cur.execute(
             """
             SELECT namespace.nspname, coll.collname
@@ -5665,26 +5669,27 @@ def _alter_text_column_to_nondefault_collation(migration_dsn, table_name: str, c
                 pg_sql.Identifier(column_name),
             )
         )
-        if policy is not None:
-            policy_name, qualify, check = policy
-            cur.execute(
-                pg_sql.SQL("CREATE POLICY {} ON memplex_functions USING ({}) WITH CHECK ({})").format(
-                    pg_sql.Identifier(policy_name), pg_sql.SQL(qualify), pg_sql.SQL(check)
+        if policies is not None:
+            for policy_name, command, _, _, qualify, check in policies:
+                statement = pg_sql.SQL("CREATE POLICY {} ON memplex_functions AS PERMISSIVE FOR {} TO PUBLIC USING ({})").format(
+                    pg_sql.Identifier(policy_name), pg_sql.SQL({"*": "ALL", "r": "SELECT"}[command]), pg_sql.SQL(qualify)
                 )
-            )
+                if check is not None:
+                    statement += pg_sql.SQL(" WITH CHECK ({})").format(pg_sql.SQL(check))
+                cur.execute(statement)
         conn.commit()
-        if policy is not None:
+        if policies is not None:
             cur.execute(
                 """
-                SELECT pol.polname,
+                SELECT pol.polname, pol.polcmd, pol.polpermissive, pol.polroles,
                        pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
                        pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid)
                 FROM pg_catalog.pg_policy AS pol
                 WHERE pol.polrelid = 'memplex_functions'::regclass
-                  AND pol.polname = 'memplex_functions_scope'
+                ORDER BY pol.polname
                 """
             )
-            assert cur.fetchone() == policy
+            assert cur.fetchall() == policies
         cur.execute(
             """
             SELECT attribute.attcollation <> typ.typcollation

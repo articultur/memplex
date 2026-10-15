@@ -871,7 +871,7 @@ def test_source_head_protocol_versions(change):
 
 
 @pytest.mark.parametrize("tamper", [None, "payload", "row_identity", "head", "expired", "closed"])
-def test_detached_session_checks_persisted_binding_and_lifetime(tamper):
+def test_detached_session_checks_persisted_binding_and_lifetime(tamper, request):
     from datetime import UTC, datetime
 
     from memplex.source_codec import _wire
@@ -894,12 +894,14 @@ def test_detached_session_checks_persisted_binding_and_lifetime(tamper):
             self.query = sql
 
         def fetchone(self):
-            if "FROM memplex_source_authorities" in self.query:
+            # These known fixture queries put their main relation at the first FROM.
+            relation = self.query.partition(" FROM ")[2].partition(" ")[0]
+            if relation == "memplex_source_authorities":
                 return ("live", 1, 2, _wire(POLICY), 1)
-            if "FROM memplex_source_heads" in self.query:
+            if relation == "memplex_source_heads":
                 return (SCOPE.authority_id, "fact", "source", head.ref.token.incarnation, 1, 1, "live", "direct_input",
                         head.payload_locator, 1, "0" * 64 if tamper == "head" else head.ref.semantic_digest, 2,
-                        {"input_context": {}, "root_refs": []}, *_identity(payload))
+                        {"input_context": {}, "root_refs": []}, *_identity(payload), [])
             if "clock_timestamp" in self.query:
                 return (datetime.now(UTC),)
             body = dict(payload)
@@ -910,7 +912,8 @@ def test_detached_session_checks_persisted_binding_and_lifetime(tamper):
                 identity[1] = "mallory"
             return ("source", body, *identity)
 
-    session = _PostgresReadSession(Cursor(), SCOPE, time.monotonic_ns() + 100_000_000)
+    cursor = Cursor()
+    session = _PostgresReadSession(cursor, SCOPE, time.monotonic_ns() + 100_000_000)
     if tamper == "expired":
         session._deadline_ns = time.monotonic_ns() - 1
         with pytest.raises(SourceBusyError):
@@ -920,8 +923,12 @@ def test_detached_session_checks_persisted_binding_and_lifetime(tamper):
         with pytest.raises(SourceContractError):
             session.source(command.key)
     elif tamper is not None:
-        with pytest.raises(SourceIntegrityError):
+        with pytest.raises(SourceIntegrityError) as caught:
             session.source(command.key)
+        site = caught.traceback[-2]
+        request.node.user_properties.append(("binding_rejection_site", f"{site.name}:{site.lineno + 1}:{site.statement}"))
+        assert site.name == "source", "The payload binding must reject after a valid head was decoded"
+        assert cursor.query.partition(" FROM ")[2].partition(" ")[0] == "memplex_facts"
     else:
         snapshot = session.source(command.key)
         payload["object"] = "mutated outside the session"
@@ -929,6 +936,7 @@ def test_detached_session_checks_persisted_binding_and_lifetime(tamper):
         session.utc_now()
         with pytest.raises(SourceContractError):
             session.source(command.key)
+        request.node.user_properties.append(("copy_and_lifetime_tail", "passed"))
 
 
 def test_current_policy_compares_workspace_and_agent():

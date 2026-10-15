@@ -477,11 +477,12 @@ def test_native_private_grant_cannot_update_delete_or_change_projection(occupied
 @NATIVE
 @pytest.mark.parametrize("publication_backend", ["lite"], indirect=True)
 @pytest.mark.parametrize("vector", [False, True])
-def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never_seals(occupied_v9, monkeypatch, vector):
+def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never_seals(occupied_v9, monkeypatch, vector, request):
     from contextlib import closing
 
     import psycopg2
 
+    from memplex.storage import pool as pool_module
     from memplex.storage.migrations import source_read_grants as implementation
     from memplex.storage.migrations.runner import VectorCapabilityRequest
     from memplex.storage.postgres_resources import PostgresStorageResources
@@ -491,10 +492,25 @@ def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never
     before = _business_rows(bank)
     original = implementation._backfill_head
     observed = []
+    opened = []
+    readers = []
+    original_error = RuntimeError("original blocked-reader boundary")
+    new_runner = pool_module._new_migration_runner
+    def tracking_runner(dsn):
+        migration_runner = new_runner(dsn)
+        open_connection = migration_runner._open_connection
+        def tracking_open():
+            connection = open_connection()
+            opened.append(connection)
+            return connection
+        monkeypatch.setattr(migration_runner, "_open_connection", tracking_open)
+        return migration_runner
+    monkeypatch.setattr(pool_module, "_new_migration_runner", tracking_runner)
     with _application_role(bank) as (dsn, _role):
         def observe_then_fail(cur, row):
             original(cur, row)
             with closing(psycopg2.connect(dsn)) as reader:
+                readers.append(reader)
                 with reader.cursor() as check:
                     check.execute("SET LOCAL lock_timeout='100ms'")
                     with pytest.raises(psycopg2.errors.LockNotAvailable):
@@ -506,25 +522,37 @@ def test_native_maintenance_lock_blocks_ordinary_app_and_bootstrap_failure_never
                         check.execute("UPDATE memplex_facts SET data=data WHERE id='S'")
                 reader.rollback()
             observed.append(True)
-            raise RuntimeError("original blocked-reader boundary")
+            request.node.user_properties.append(("maintenance_stage", "read_and_write_lock_refused"))
+            raise original_error
         monkeypatch.setattr(implementation, "_backfill_head", observe_then_fail)
         resource = PostgresStorageResources._for_source_validity(dsn, migration_dsn=bank.owner_dsn,
                                                                issuer=_RESOURCE_ISSUER, capacity=2)
         try:
-            with pytest.raises(RuntimeError, match="original blocked-reader boundary"):
+            with pytest.raises(RuntimeError, match="original blocked-reader boundary") as failed:
                 resource.ensure_ready(VectorCapabilityRequest(8, "best_effort") if vector else VectorCapabilityRequest(0, "disabled"), "development")
+            assert failed.value is original_error
             assert observed == [True]
             assert resource.state == "FAULTED" and not resource.pool_created
             with pytest.raises(RuntimeError, match="not ready"):
                 _ = resource.ready_pool
+            with pytest.raises(RuntimeError, match="resources are faulted") as closed:
+                resource.close()
+            assert closed.value.__cause__ is original_error
+            assert opened and readers and all(connection.closed for connection in opened + readers)
+            assert resource._staged_manager is None and resource._staged_raw_pool is None
+            assert resource._pool_manager is None and resource._ready_pool is None
+            request.node.user_properties.append(("owned_connections_closed", str(len(opened) + len(readers))))
+            request.node.user_properties.append(("bootstrap_stage", "faulted_without_pool_or_seal"))
         finally:
-            resource.close()
+            if resource.state != "FAULTED":
+                resource.close()
     _assert_v9_rollback(bank, before)
+    request.node.user_properties.append(("rollback_stage", "exact_v9_restored"))
 
 
 @NATIVE
 @pytest.mark.parametrize("publication_backend", ["lite"], indirect=True)
-def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tmp_path):
+def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tmp_path, request):
     import time
     from contextlib import ExitStack, closing
 
@@ -534,6 +562,7 @@ def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tm
     from memplex.source_contract import (
         ExpectedAbsent,
         SourceClass,
+        SourceContractError,
         SourceKey,
         SourceKind,
         SourceMutation,
@@ -552,25 +581,35 @@ def test_native_vector_and_lexical_function_legs_use_read_grants(occupied_v9, tm
             SourceKind.FUNCTION, function.id), ExpectedAbsent.ABSENT, SourceOperation.CREATE,
             function.to_dict(), SourceClass.DIRECT_INPUT, {}, ())
         bank.backend.mutate_source(bank.context, command, deadline_ns=time.monotonic_ns() + 2_000_000_000)
-        cur = bank.store.authorized(bank.context)._execute(
-            f"UPDATE memplex_functions SET embedding=%s::vector WHERE id=%s AND {_acl_scope_sql()} RETURNING id",
-            (str([1.0] + [0.0] * 7), function.id))
-        try:
+        update = f"UPDATE memplex_functions SET embedding=%s::vector WHERE id=%s AND {_acl_scope_sql()} RETURNING id"
+        parameters = (str([1.0] + [0.0] * 7), function.id)
+        with pytest.raises(SourceContractError, match="unsupported_semantics"):
+            bank.store.authorized(bank.context)._execute(update, parameters)
+        # Fixture preparation uses the ordinary app role and the existing owner
+        # mutation predicate; source read cursors retain their SELECT-only guard.
+        with closing(psycopg2.connect(bank.dsn)) as connection, connection, connection.cursor() as cur:
+            bank.store._bind_transaction_scope(cur, bank.context)
+            cur.execute("SELECT current_user,session_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
+            identity = cur.fetchone()
+            assert identity[0] == bank.role and identity[0] != identity[1] and identity[2:] == (False, False)
+            request.node.user_properties.append(("embedding_identity", str(identity)))
+            cur.execute(update, parameters)
             assert cur.fetchone() == (function.id,)
-        finally:
-            cur.close()
+        assert connection.closed
+        request.node.user_properties.append(("embedding_fixture", "ordinary_owner_connection_closed"))
         reader = bank.store.authorized(bank.bob)
         assert function.id in {r.func_id for r in reader.fts_search("lexical-grant-token", 20)}
         assert function.id in {r.func_id for r in reader.vector_search("no-lexical-match-here", 20)}
         assert function.id not in {r.func_id for r in bank.store.authorized(bank.charlie).vector_search("no-lexical-match-here", 20)}
         service = _service(bank, tmp_path / "vector-query", cleanup)
         assert function.id in {r.func_id for r in service.query("no-lexical-match-here", authorization=bank.bob).results}
+        request.node.user_properties.append(("discovery_stage", "bob_fts_vector_service_allow_charlie_deny"))
 
 
 @NATIVE
 @pytest.mark.parametrize("publication_backend", ["lite"], indirect=True)
 @pytest.mark.parametrize("drift", ["force", "missing_policy", "or_true", "nullable", "default", "projection"])
-def test_native_new_grant_catalogue_or_projection_drift_fails_closed(occupied_v9, tmp_path, drift):
+def test_native_new_grant_catalogue_or_projection_drift_fails_closed(occupied_v9, tmp_path, drift, request):
     import time
     from contextlib import ExitStack, closing
 
@@ -607,7 +646,9 @@ def test_native_new_grant_catalogue_or_projection_drift_fails_closed(occupied_v9
             assert service.get("U", authorization=bank.context).object_ == "DRIFT_INDEPENDENT_U"
         else:
             with pytest.raises(runner.MigrationIntegrityError):
-                runner.PostgresMigrationRunner(bank.owner_dsn).plan(application_acl=runner.ApplicationAclContract(bank.role))
+                runner.PostgresMigrationRunner(bank.owner_dsn).plan(
+                    application_acl=runner.ApplicationAclContract(bank.role), deployment_profile="development")
+        request.node.user_properties.append(("drift_stage", drift + "_rejected"))
 
 
 @NATIVE
