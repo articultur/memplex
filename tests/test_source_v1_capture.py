@@ -324,6 +324,65 @@ def test_legacy_extracted_response_omits_only_empty_source_receipt(tmp_path):
         svc.stop()
 
 
+def _first_publication_failure_summary(result):
+    """Summarize only returned finite receipt fields, on this test's failure path."""
+    missing = object()
+
+    def field(value, key):
+        return value.get(key, missing) if type(value) is dict else missing
+
+    def scalar(value, allowed=()):
+        if value is missing:
+            return "missing"
+        if value is None:
+            return "null"
+        return value if type(value) is str and value in allowed else "malformed"
+
+    def count(value):
+        # This capture has at most 64 source inputs; cap diagnostic size too.
+        return value if type(value) is int and 0 <= value <= 64 else scalar(value)
+
+    def length(value):
+        return count(len(value)) if type(value) is list else scalar(value)
+
+    factual = getattr(result, "factual_capture", missing)
+    contract = getattr(result, "source_contract_receipt", missing)
+    sources = field(contract, "sources")
+    kinds = tuple(kind.value for kind in SourceKind)
+    kind_counts = scalar(sources)
+    if type(sources) is list and len(sources) <= 64:
+        kind_counts = dict.fromkeys((*kinds, "missing", "null", "malformed"), 0)
+        for entry in sources:
+            kind = field(field(field(field(entry, "receipt"), "ref"), "key"), "kind")
+            kind_counts[scalar(kind, kinds)] += 1
+    complete = field(contract, "complete")
+    summary = {
+        "factual_capture": {
+            "presence": "present" if type(factual) is dict else scalar(factual),
+            "status": scalar(field(factual, "status"), (
+                "success", "abstained", "invalid", "provider_failure", "timeout",
+                "unavailable", "source_unavailable", "publication_conflict",
+            )),
+            "accepted": count(field(factual, "accepted")),
+            "candidates": count(field(factual, "candidates")),
+        },
+        "source_contract_receipt": {
+            "presence": "present" if type(contract) is dict else scalar(contract),
+            "complete": complete if type(complete) is bool else scalar(complete),
+            "acknowledgement": scalar(field(contract, "acknowledgement"), ("incomplete", "complete", "unknown")),
+            "phase": scalar(field(contract, "phase"), ("preparation", "raw", "typed", "function", "sources_committed")),
+            "expected_sources": count(field(contract, "expected_sources")),
+            "sources": length(sources),
+            "source_kinds": kind_counts,
+            "publication_acknowledgement": scalar(field(contract, "publication_acknowledgement"),
+                                                  ("incomplete", "complete", "unknown")),
+            "publications": length(field(contract, "publications")),
+        },
+    }
+    return ("FIRST dependent write has no acknowledged publication; "
+            "SECOND independent accepted==1 passed; FIRST receipt: " + json.dumps(summary, sort_keys=True))
+
+
 def test_independent_b_only_publication_survives_unrelated_a_deletion(capture_service):
     h = capture_service
     dependent = write(h)
@@ -331,6 +390,7 @@ def test_independent_b_only_publication_survives_unrelated_a_deletion(capture_se
     h.inputs.facts[:] = extracted_input(both=False).facts
     independent = write(h)
     assert independent.factual_capture["accepted"] == 1
+    assert dependent.source_contract_receipt["publications"], _first_publication_failure_summary(dependent)
     dependent_id = dependent.source_contract_receipt["publications"][0]["publication_id"]
     independent_id = independent.source_contract_receipt["publications"][0]["publication_id"]
     assert h.service.get(dependent_id, authorization=CONTEXT) is not None
