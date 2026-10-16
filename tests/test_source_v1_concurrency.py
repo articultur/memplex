@@ -60,7 +60,10 @@ def _instrument_reader(bank, patch, gate, middle_id, proof, *, reader_name):
 
     cls = session_type(bank)
     source, clock = cls.source, cls.utc_now
-    finalize, check = QueryPipeline._finalize, cls._check
+    finalize = QueryPipeline._finalize
+    # PostgreSQL release checks only enforce lifetime/budget; SQL uses _execute.
+    access_name = "_execute" if bank.kind == "postgres" else "_check"
+    access = getattr(cls, access_name)
     active = False
 
     def final_projection(pipeline, result):
@@ -76,10 +79,10 @@ def _instrument_reader(bank, patch, gate, middle_id, proof, *, reader_name):
     def owned():
         return active and threading.current_thread().name == reader_name
 
-    def checked(session):
+    def accessed(session, *args, **kwargs):
         if owned():
             assert "L" not in proof, "storage access after final L"
-        return check(session)
+        return access(session, *args, **kwargs)
 
     def snapshot(session, key, *args, **kwargs):
         if owned():
@@ -111,7 +114,7 @@ def _instrument_reader(bank, patch, gate, middle_id, proof, *, reader_name):
 
     patch.setattr(cls, "source", snapshot)
     patch.setattr(cls, "utc_now", final_clock)
-    patch.setattr(cls, "_check", checked)
+    patch.setattr(cls, access_name, accessed)
     patch.setattr(QueryPipeline, "_finalize", final_projection)
 
 
