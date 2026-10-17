@@ -9,7 +9,7 @@ jobs:
   gates-on-self-hosted:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Static gates (ruff / lint-imports / mypy)
         run: |
           uv sync --locked --extra dev
