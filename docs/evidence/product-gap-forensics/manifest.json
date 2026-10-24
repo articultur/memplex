@@ -28,7 +28,8 @@
    "stage_counts": {"write": 0, "retrieval": 15, "context": 1, "answerer": 1},
    "counting_intent_questions": "15/17 (keyword heuristic, not ground truth)",
    "reading": "10 of the 11 former context-stage rows are counting-intent questions with partial top-24 gold-session coverage: under the corrected full-coverage rule they are retrieval-stage losses, not context-assembly losses. The one remaining context row (a1cc6108) is non-counting with an any-hit and genuinely lacks its 2-digit answer in the assembled context; the answerer row is unchanged. The 0.8796 upper bound is not derivable from the corrected attribution and must be recomputed before any decision use.",
-   "decision_memo": "docs/research/counting-retrieval-decision-2026-10.md - recomputed bounds (counting-only flip 117/133 ~= 0.880; all-17 flip 119/133 ~= 0.895) and the corrected direction: counting/aggregation intent needs retrieval-composition completeness (mean gold-session coverage 15/48 = 31.3%, 6/15 questions with zero coverage), not context prepend"
+   "decision_memo": "docs/research/counting-retrieval-decision-2026-10.md - recomputed bounds (counting-only flip 117/133 ~= 0.880; all-17 flip 119/133 ~= 0.895) and the corrected direction: counting/aggregation intent needs retrieval-composition completeness (mean gold-session coverage 15/48 = 31.3%, 6/15 questions with zero coverage), not context prepend",
+   "clean_head_verification": "2026-10-24: rerun on the committed clean tree (commit 3c8a936, after the security batch landed) from an out-of-repo cwd; all 17 per-question records byte-identical to records-rev1.json (diff count 0). The 'concurrent hot-tier edits present' caveat in the environment note above is hereby closed."
   }
  },
  "findings": [

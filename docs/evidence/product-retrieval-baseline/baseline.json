@@ -1,0 +1,62 @@
+{
+ "benchmark": "product_retrieval_baseline",
+ "n": 133,
+ "top_k": 24,
+ "store_mode": "per-question fresh store (repo runner lineage)",
+ "counting_classifier": "keyword heuristic (scripts/run_lme_official_j.py), not ground truth",
+ "limits": [
+  "retrieval-level instrument: no answer accuracy (scored harness protocol separately)",
+  "no query-enhancement LLM: orchestrated degrades to fail-closed single-query fanout",
+  "MEMPLEX_PRB_LIMIT=N truncates the pool for smoke runs only; full runs must leave it unset"
+ ],
+ "compositions": {
+  "default": {
+   "counting_n": 99,
+   "non_counting_n": 34,
+   "any": {
+    "counting": 0.5051,
+    "non_counting": 0.6176
+   },
+   "full": {
+    "counting": 0.0707,
+    "non_counting": 0.0882
+   }
+  },
+  "orchestrated": {
+   "counting_n": 99,
+   "non_counting_n": 34,
+   "any": {
+    "counting": 0.5051,
+    "non_counting": 0.6176
+   },
+   "full": {
+    "counting": 0.0707,
+    "non_counting": 0.0882
+   }
+  },
+  "parity": {
+   "counting_n": 99,
+   "non_counting_n": 34,
+   "any": {
+    "counting": 0.9697,
+    "non_counting": 1.0
+   },
+   "full": {
+    "counting": 0.404,
+    "non_counting": 0.4706
+   }
+  },
+  "rawrag": {
+   "counting_n": 99,
+   "non_counting_n": 34,
+   "any": {
+    "counting": 0.9899,
+    "non_counting": 1.0
+   },
+   "full": {
+    "counting": 0.8788,
+    "non_counting": 0.9412
+   }
+  }
+ }
+}

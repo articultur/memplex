@@ -97,8 +97,11 @@ The same caveat as the gap-forensics manifest applies: conclusions keyed to
   manifest's `evidence_level`; local deterministic instrument, per-question
   rows retained, aggregate reproduction verified).
 - **Runner**: `scripts/product_retrieval_baseline.py` (local, no API).
-- **Artifacts**: `benchmarks/results/product-retrieval-baseline/baseline.json`
-  (summary) and `benchmarks/results/product-retrieval-baseline/rows.json`
-  (per-question rows: `qid`, `gold_n`, `counting`, per-composition
-  `any`/`full`/`hits`) — gitignored with all `benchmarks/results/` artifacts.
+- **Artifacts**: `baseline.json` (summary) and `rows.json` (per-question
+  rows: `qid`, `gold_n`, `counting`, per-composition `any`/`full`/`hits`)
+  — committed alongside this manifest in
+  `docs/evidence/product-retrieval-baseline/` (byte-copies of the
+  runner's `benchmarks/results/product-retrieval-baseline/` outputs,
+  checked in 2026-10-24 so the evidence pack is self-contained instead
+  of referencing a gitignored directory).
 - **Date**: 2026-10-24.
