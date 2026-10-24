@@ -128,6 +128,15 @@ _PARAGRAPH_KEYS = {
     "premise_superseded",
     "observation_count",
     "last_observed_at",
+    # P0 identity binding (2026-10): the write's ACL identity, flat
+    # fields plus the ``memplex_*`` namespace copies is_node_visible
+    # reads through _RawParagraphView. Legacy rows load with these
+    # absent (None/{} defaults) and stay local-development-only.
+    "tenant_id",
+    "owner_subject_id",
+    "workspace_id",
+    "visibility",
+    "namespace",
 }
 # Every Nth commit pays the full double pre-durable decode audit even while
 # batching is not active, so a serializer regression cannot outlive an audit
@@ -447,6 +456,23 @@ def _validate_raw_paragraph(row: Any) -> dict:
     # A legacy row without a counter is one historical observation.
     row.setdefault("observation_count", 1)
     row.setdefault("last_observed_at", row.get("created_at"))
+    # P0 identity binding: absent identity means a legacy row - the ACL
+    # view fails it closed to the local-development context, matching
+    # the typed-node rule for identity-less history.
+    row.setdefault("tenant_id", None)
+    row.setdefault("owner_subject_id", None)
+    row.setdefault("workspace_id", None)
+    row.setdefault("visibility", None)
+    row.setdefault("namespace", {})
+    for field in ("tenant_id", "owner_subject_id", "workspace_id", "visibility"):
+        if row[field] is not None and (type(row[field]) is not str or not row[field]):
+            raise ValueError(f"invalid Lite paragraph {field}")
+    if type(row["namespace"]) is not dict:
+        raise ValueError("invalid Lite paragraph namespace")
+    for key, value in row["namespace"].items():
+        if type(key) is not str:
+            raise ValueError("invalid Lite paragraph namespace key")
+        _validate_json_value(value, "paragraph namespace")
     return row
 
 
@@ -1174,7 +1200,16 @@ class LiteMemoryStore:
 
     @_with_writer_lock
     def persist_paragraphs(
-        self, paragraphs: list, *, trust_tier: int, source_hint: str
+        self,
+        paragraphs: list,
+        *,
+        trust_tier: int,
+        source_hint: str,
+        tenant_id: str | None = None,
+        owner_subject_id: str | None = None,
+        workspace_id: str | None = None,
+        visibility: str | None = None,
+        source_agent: str | None = None,
     ) -> None:
         """Persist verbatim paragraphs into the raw layer (ADR-013 S2).
 
@@ -1186,22 +1221,42 @@ class LiteMemoryStore:
         included). F2b write-side: when MEMPLEX_TRUST_TIER2_CAP is set,
         unconsolidated tier<=2 rows are bounded (see
         :meth:`_enforce_tier2_paragraph_cap`).
+
+        P0 identity binding (2026-10): a NEW row carries the writing
+        context's ACL identity (flat fields plus the ``memplex_*``
+        namespace copies ``is_node_visible`` reads through
+        ``_RawParagraphView``), so an authenticated runtime recalls its
+        own paragraphs under the same boundary as typed nodes.
+        First-write bind wins: re-observing identical text never
+        re-stamps an existing row, and identity-less legacy rows stay
+        local-development-only - fail-closed, never widened.
         """
         self._reload_for_mutation()
         now = datetime.now(UTC).isoformat()
+        namespace: dict[str, Any] = {}
+        if tenant_id:
+            namespace["memplex_tenant_id"] = tenant_id
+        if owner_subject_id:
+            namespace["memplex_subject_id"] = owner_subject_id
+        if workspace_id:
+            namespace["memplex_workspace_id"] = workspace_id
+        if visibility:
+            namespace["memplex_visibility"] = visibility
+        if source_agent:
+            namespace["memplex_source_agent"] = source_agent
+        from memplex.models.paragraph import persisted_paragraph_id
+
         for para in paragraphs:
             raw_text = (getattr(para, "raw_text", "") or "").strip()
             if not raw_text:
                 continue
-            from memplex.models.paragraph import persisted_paragraph_id
-
             row_id = persisted_paragraph_id(source_hint, getattr(para, "id", ""), raw_text)
             existing = self._paragraphs.get(row_id)
             if existing is not None and existing.get("raw_text") == raw_text:
                 # F3 observation counter: identical text re-observed from
                 # the same source bumps the count instead of writing a
                 # duplicate row (content-addressed dedup); the first
-                # observed timestamp is kept for span computations.
+                # observed timestamp and identity binding are kept.
                 existing["observation_count"] = int(existing.get("observation_count", 1)) + 1
                 existing["last_observed_at"] = now
                 continue
@@ -1213,6 +1268,11 @@ class LiteMemoryStore:
                 "source": (getattr(para, "source", "") or "")[:200],
                 "observation_count": 1,
                 "last_observed_at": now,
+                "tenant_id": tenant_id,
+                "owner_subject_id": owner_subject_id,
+                "workspace_id": workspace_id,
+                "visibility": visibility,
+                "namespace": dict(namespace),
             }
         self._enforce_tier2_paragraph_cap()
         self._commit_current_state()

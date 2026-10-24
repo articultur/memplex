@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from memplex.models import ExtractedData, SearchResult
     from memplex.storage.feedback import FeedbackStore
 
+from memplex.models import SourceType
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,8 +88,8 @@ class _RawParagraphView:
     """
 
     __slots__ = (
-        "id", "namespace", "owner_subject", "raw_text",
-        "tenant_id", "trust_tier", "visibility", "workspace_id",
+        "id", "name", "namespace", "owner_subject", "owner_subject_id", "raw_text",
+        "source_type", "tenant_id", "trust_tier", "visibility", "workspace_id",
     )
 
     def __init__(self, row: dict) -> None:
@@ -95,10 +97,45 @@ class _RawParagraphView:
         self.tenant_id = row.get("tenant_id")
         self.workspace_id = row.get("workspace_id")
         self.owner_subject = row.get("owner_subject")
+        # is_node_visible reads the canonical ``owner_subject_id`` typed
+        # field first (identity_value); resolve both row spellings so a
+        # P0-bound row works through that path without the namespace
+        # fallback.
+        self.owner_subject_id = row.get("owner_subject_id") or row.get("owner_subject")
         self.visibility = row.get("visibility") or "workspace"
         self.namespace = dict(row.get("namespace") or {})
         self.trust_tier = int(row.get("trust_tier", 3))
         self.raw_text = row.get("raw_text", "")
+        # The context wrapper (wrap_for_context) reads ``source_type`` /
+        # ``name`` off every resolved node; paragraphs surface through
+        # search with the WIKI surface and a raw-text prefix name, so the
+        # view mirrors that projection.
+        self.source_type = SourceType.WIKI
+        self.name = self.raw_text[:50]
+
+    def to_dict(self) -> dict:
+        """The complete model-visible surface of this row.
+
+        The injection guard scans a node's full serialized projection
+        (``_extract_model_visible_text``); a __slots__ view has no
+        ``__dict__`` for its ``vars()`` fallback, which previously made
+        every paragraph view fail closed as "cannot be inspected safely"
+        and silently dropped raw-layer recall for authenticated contexts.
+        This projection puts the verbatim raw text (the only unbounded
+        string a paragraph can carry) under that scan - the read-side
+        counterpart of the typed nodes' write-time scan, which raw
+        paragraphs do not pass through.
+        """
+        return {
+            "id": self.id,
+            "raw_text": self.raw_text,
+            "namespace": dict(self.namespace),
+            "tenant_id": self.tenant_id,
+            "owner_subject_id": self.owner_subject_id,
+            "workspace_id": self.workspace_id,
+            "visibility": self.visibility,
+            "trust_tier": self.trust_tier,
+        }
 
 
 class AuthorizationGate:

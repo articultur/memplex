@@ -210,6 +210,94 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
 _PREFETCH_CACHE: dict[str, RecalledContext] = {}
 
 
+def hot_entry_visible(
+    entry: Any,
+    *,
+    recalling_tenant_id: str,
+    effective_tenant_id: str,
+    subject_id: str | None,
+    workspace_id: str | None,
+    session_id: str | None,
+    agent_id: str | None,
+) -> bool:
+    """ACL predicate for one hot-tier entry against the RECALLING runtime.
+
+    Store-boundary parity: the hot tier must never admit content the
+    store's ACL refuses. Concretely, mirroring
+    ``authorization.AuthorizationGate.is_node_visible``:
+
+    - **tenant equality** — an entry authored under one real principal
+      tenant is denied to a runtime of another tenant, whatever its
+      workspace/visibility say. Two documented exceptions: the local
+      compatibility tier below, and entries without tenant provenance
+      (``tenant_id is None`` — sleep-time precompute, direct tier users),
+      which have no tenant identity to cross and stay scope-partitioned.
+    - **workspace** — same workspace (the tier is the workspace's shared
+      hot context *within* one tenant).
+    - **user** — owner only; **session** — owner + session + capturing
+      agent, mirroring the store's origin_session/source_agent rule (an
+      entry without an agent stamp is denied to any named agent).
+    - unknown visibility — rejected, never default-allowed.
+
+    The local compatibility tier (entries authored by the service's
+    local-development principal) is honoured only inside the mapped
+    ``tenant:local`` scope and only for entries whose tenant stamp is the
+    development tenant (or absent) — a real-tenant runtime never takes
+    that branch, and a local-process writer claiming the compatibility
+    identity is betrayed by its tenant stamp.
+    """
+    from memplex.auth import (
+        LOCAL_DEVELOPMENT_SUBJECT_ID,
+        LOCAL_DEVELOPMENT_TENANT_ID,
+        LOCAL_DEVELOPMENT_WORKSPACE_ID,
+    )
+
+    entry_tenant = getattr(entry, "tenant_id", None)
+    entry_owner = getattr(entry, "owner_subject_id", None)
+    entry_ws = getattr(entry, "workspace_id", None)
+    entry_agent = getattr(entry, "agent_id", None)
+    visibility = getattr(entry, "visibility", None)
+    if visibility == "private":  # legacy alias for "user"
+        visibility = "user"
+
+    if (
+        effective_tenant_id == LOCAL_DEVELOPMENT_TENANT_ID
+        and entry_tenant in (None, LOCAL_DEVELOPMENT_TENANT_ID)
+        and entry_owner == LOCAL_DEVELOPMENT_SUBJECT_ID
+        and entry_ws == LOCAL_DEVELOPMENT_WORKSPACE_ID
+    ):
+        if visibility in ("tenant", "workspace"):
+            return True
+        if visibility == "user":
+            return entry_owner == subject_id
+        if visibility == "session":
+            return (
+                entry_owner == subject_id
+                and getattr(entry, "session_id", None) == session_id
+                and entry_agent == agent_id
+            )
+        return False
+
+    if entry_tenant is not None and entry_tenant != recalling_tenant_id:
+        return False
+    if entry_ws is not None and entry_ws != workspace_id:
+        return False
+    if visibility == "tenant":  # explicit tenant-wide entry
+        return True
+    if visibility == "workspace":
+        return entry_ws == workspace_id
+    if visibility == "user":
+        return entry_owner == subject_id
+    if visibility == "session":
+        return (
+            entry_owner == subject_id
+            and getattr(entry, "session_id", None) == session_id
+            and entry_agent == agent_id
+        )
+    # Unknown visibility: reject rather than default-allow.
+    return False
+
+
 def _normalise_agent(agent: str) -> str:
     key = (agent or "codex").strip().lower().replace("_", "-")
     aliases = {
@@ -238,6 +326,17 @@ def _manifest_from_profile(profile: AgentProfile) -> dict[str, Any]:
                 "workspace_identity": "canonical_project_path",
                 "shared_store": True,
                 "cross_host_recall": True,
+                "hot_tier": {
+                    # The in-process hot tier mirrors the store's ACL at
+                    # recall time: tenant equality (per capture tenant),
+                    # then workspace/user visibility, with session entries
+                    # bound to owner + session + capturing agent. The only
+                    # cross-tenant exception is the service's local-
+                    # development compatibility tier, honoured solely
+                    # inside the mapped tenant:local scope.
+                    "recall_acls_store_parity": True,
+                    "compatibility_scope": "local-development",
+                },
                 "provenance_fields": [
                     "memplex_source_agent",
                     "memplex_source_session_id",
@@ -732,32 +831,29 @@ class AgentMemoryRuntime:
             # Scope the recall to the runtime's tenant (V3 fix):
             # cross-tenant hot context never leaks. Local-process runtimes
             # share the service's development tenant so single-machine
-            # capture/recall stays seamless.
-            auth = self.authorization_context
-            tenant = auth.principal.tenant_id
-            if tenant.startswith("local-process-"):
-                from memplex.auth import local_development_context
+            # capture/recall stays seamless — the SAME effective-tenant
+            # mapping the capture side (service.write) applies, so a
+            # runtime's own hot entries are recallable by itself. Per-real-
+            # tenant isolation inside the shared local partition is then
+            # enforced by the entry ACL below (tenant parity).
+            from memplex.auth import hot_tier_tenant
 
-                auth = local_development_context()
-                tenant = auth.principal.tenant_id
-            scope = f"tenant:{tenant}"
-            # V4: re-check each hot entry against the RECALLING principal.
-            # The tier is the workspace's shared hot context (the stated
-            # V3 design); a capture whose write was workspace-restricted
-            # must not cross workspaces, and a private capture stays with
-            # its owner - the same boundary the store's ACL enforces.
-            workspace_id = getattr(auth, "workspace_id", None)
-            subject_id = getattr(auth.principal, "subject_id", None)
-
-            def _hot_acl(entry: Any) -> bool:
-                entry_ws = getattr(entry, "workspace_id", None)
-                if entry_ws is not None and workspace_id is not None and entry_ws != workspace_id:
-                    return False
-                if getattr(entry, "visibility", "workspace") == "private":
-                    return getattr(entry, "owner_subject_id", None) == subject_id
-                return True
-
-            hot = working_memory.recall_context(limit=limit, scope=scope, acl=_hot_acl)
+            recalling_tenant = self.authorization_context.principal.tenant_id
+            effective_tenant = hot_tier_tenant(recalling_tenant)
+            scope = f"tenant:{effective_tenant}"
+            hot = working_memory.recall_context(
+                limit=limit,
+                scope=scope,
+                acl=lambda entry: hot_entry_visible(
+                    entry,
+                    recalling_tenant_id=recalling_tenant,
+                    effective_tenant_id=effective_tenant,
+                    subject_id=self.user_id,
+                    workspace_id=self.workspace_id,
+                    session_id=self.session_id,
+                    agent_id=self.agent,
+                ),
+            )
             if hot:
                 prefix = "[WORKING MEMORY]\n" + "\n".join(f"- {line}" for line in hot)
                 context = prefix + ("\n\n" + context if context else "")

@@ -408,7 +408,12 @@ def test_legacy_typed_migration_failure_fails_closed(tmp_path, monkeypatch, capl
 
     recalled = reader.before_prompt("legacy-migration-failure-token")
 
-    assert "legacy-migration-failure-token" not in recalled.context
+    # The denied LEGACY TYPED node must not escape (its id appears in
+    # every wrapped-memory marker). The same turn's verbatim raw
+    # paragraph is a different surface: it carries the runtime's P0
+    # identity binding and passes the read-side injection scan, so the
+    # writing runtime recalls its own raw text by design.
+    assert stored.id not in recalled.context
     assert reloaded_service.get(stored.id).namespace == {}
     assert "legacy typed memory migration failed closed" in caplog.text
 
@@ -453,11 +458,15 @@ def test_legacy_typed_migration_failure_redacts_search_explanation(
 
     result = reader.search_memories(token, top_k=10, explain=True)
 
-    assert result.results == []
-    assert result.tokens_used == 0
-    assert result.explanation["results"] == []
+    # The denied LEGACY TYPED node must not survive in results or the
+    # public trace. The turn's raw paragraph is a separate identity-bound
+    # surface (see test_raw_paragraph_identity) and may legitimately
+    # remain for the writing runtime.
+    assert all(r.func_id != stored.id for r in result.results)
     serialized = json.dumps(result.explanation, sort_keys=True)
     assert stored.id not in serialized
+    for entry in result.explanation["results"]:
+        assert entry["id"] != stored.id
 
 
 def test_invalid_visibility_is_rejected_before_any_memory_is_written(tmp_path):

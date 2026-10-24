@@ -24,7 +24,7 @@ improve.py           Proactive fact maintenance (dedupe/expire/reindex) ⁴
 premise_resolution.py B1 maintenance pass: LLM inference-level stale-supersession stamps ⁴
 consolidation.py     F3 offline consolidation: episodic→sustained promotion + TTL forgetting ⁴
 sleep_time.py        Idle-time maintenance + inference precompute daemon ⁴
-working_memory.py    TTL hot-context tier (per-tenant scoped) ⁴
+working_memory.py    TTL hot-context tier (store-parity recall ACL) ⁴
 sync_crypto.py       Shared-key AES-GCM sync payload encryption ⁴
 llm/
   injection_guard.py  InjectionScanCounter + drop_injection_suspected ¹
@@ -100,7 +100,7 @@ task_repository.py    Durable background-task repository contract
 temporal.py           Bi-temporal fact validity (supersede/as_of) ⁴
 wiki/                 Wiki layer: compile, generate, search, lint
 worker.py             BackgroundWorker async task processor
-working_memory.py     TTL hot-context tier (per-tenant scoped) ⁴
+working_memory.py     TTL hot-context tier (store-parity recall ACL) ⁴
 ```
 
 ## Mechanism map

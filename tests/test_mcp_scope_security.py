@@ -410,10 +410,17 @@ def test_mcp_explain_redacts_legacy_record_when_migration_fails(
         {"query": token, "top_k": 10, "explain": True}
     )
 
-    assert payload["total"] == 0
-    assert payload["results"] == []
-    assert payload["explanation"]["results"] == []
-    assert stored.id not in json.dumps(payload, sort_keys=True)
+    # The denied LEGACY TYPED node must not survive in results or the
+    # explain trace (its id would appear in every entry). The turn's
+    # verbatim raw paragraph is a separate identity-bound surface: it
+    # carries the runtime's ACL identity and passes the read-side
+    # injection scan, so the writing runtime recalls it by design (see
+    # tests/test_raw_paragraph_identity.py).
+    serialized = json.dumps(payload, sort_keys=True)
+    assert stored.id not in serialized
+    assert all(r["id"] != stored.id for r in payload["results"])
+    for entry in payload["explanation"]["results"]:
+        assert entry["id"] != stored.id
 
 
 def test_scope_preview_uses_trusted_identity_without_global_corpus_count(tmp_path, monkeypatch):

@@ -1244,7 +1244,16 @@ class PostgresMemoryStore:
             )
 
     def persist_paragraphs(
-        self, paragraphs: list, *, trust_tier: int, source_hint: str
+        self,
+        paragraphs: list,
+        *,
+        trust_tier: int,
+        source_hint: str,
+        tenant_id: str | None = None,
+        owner_subject_id: str | None = None,
+        workspace_id: str | None = None,
+        visibility: str | None = None,
+        source_agent: str | None = None,
     ) -> None:
         """ADR-013 Stage 2 raw layer on PostgreSQL (B3): upsert verbatim
         paragraphs into ``memplex_paragraphs``.
@@ -1253,6 +1262,13 @@ class PostgresMemoryStore:
         so source_paragraphs references resolve on both backends. Rows
         ride the typed upsert without the sync context - carrying
         paragraphs over the wire is Stage 3 (SyncNodeType extension).
+
+        The identity kwargs are the service-projected write identity,
+        accepted for duck-type call parity with the lite backend; this
+        facade stamps the equivalent columns (tenant_id / owner_subject /
+        workspace / visibility / source_agent) from its own request-
+        scoped authorization context below, so the kwargs are
+        intentionally not persisted a second time.
         """
         import json as _json
 

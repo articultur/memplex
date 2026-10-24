@@ -305,6 +305,34 @@ class MultiPathRetriever:
                 return node
         return None
 
+    def _get_paragraph_row(self, node_id: str) -> dict | None:
+        """Resolve an ADR-013 raw-paragraph row (duck-typed) for the
+        namespace filter.
+
+        Lite keeps dict rows in ``_paragraphs``; the postgres backend
+        exposes ``get_paragraph`` (whose payload carries no identity
+        columns, so PG paragraph rows fail closed here until the Phase-B
+        retrieval integration). The caller projects the row's P0 identity
+        binding into the ``memplex_*`` keys the runtime's OR branches
+        match on - the same projection typed nodes get.
+        """
+        get_paragraph = getattr(self._store, "get_paragraph", None)
+        if callable(get_paragraph):
+            try:
+                return get_paragraph(node_id)
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
+                logger.debug(
+                    "filter_by_namespace: paragraph lookup failed for %s: %s",
+                    node_id,
+                    exc,
+                )
+                return None
+        rows = getattr(self._store, "_paragraphs", None)
+        if isinstance(rows, dict):
+            row = rows.get(node_id)
+            return dict(row) if isinstance(row, dict) else None
+        return None
+
     def filter_by_namespace(
         self,
         results: list[SearchResult],
@@ -341,6 +369,29 @@ class MultiPathRetriever:
             if func is None:
                 typed = self._get_typed_node(result.func_id)
                 if typed is None:
+                    # ADR-013 raw layer: paragraph rows join the filter
+                    # through their P0 identity binding. Identity-less
+                    # legacy rows (or a backend whose payload carries no
+                    # identity) cannot satisfy any runtime branch and
+                    # fail closed here; the local-development
+                    # compatibility context still reads them via plain
+                    # service.query, which applies no runtime filter.
+                    para = self._get_paragraph_row(result.func_id)
+                    if para is None:
+                        continue
+                    namespace = para.get("namespace")
+                    if not isinstance(namespace, dict) or not namespace:
+                        continue
+                    projection = dict(namespace)
+                    owner = para.get("owner_subject_id") or para.get("owner_subject")
+                    projection.setdefault("memplex_user_id", owner)
+                    projection.setdefault("memplex_subject_id", owner)
+                    if para.get("workspace_id"):
+                        projection.setdefault(
+                            "memplex_workspace_id", para.get("workspace_id")
+                        )
+                    if matches(projection):
+                        filtered.append(result)
                     continue
                 projection = dict(getattr(typed, "namespace", {}) or {})
                 projection.setdefault("memplex_user_id", getattr(typed, "owner", None))

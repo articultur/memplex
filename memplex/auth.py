@@ -100,21 +100,47 @@ class AuthorizationContext:
         )
 
 
+# The explicit local compatibility identity (development only). Single
+# source of truth for the service's unbound development principal and for
+# the hot-tier tenant mapping below.
+LOCAL_DEVELOPMENT_TENANT_ID = "local"
+LOCAL_DEVELOPMENT_SUBJECT_ID = "local-development"
+LOCAL_DEVELOPMENT_WORKSPACE_ID = "local-development"
+
+
 def local_development_context() -> AuthorizationContext:
     """Return the explicit, auditable identity used only in development."""
     return AuthorizationContext(
         principal=Principal(
-            tenant_id="local",
-            subject_id="local-development",
-            roles=frozenset({"local-development"}),
-            authentication_id="local-development",
+            tenant_id=LOCAL_DEVELOPMENT_TENANT_ID,
+            subject_id=LOCAL_DEVELOPMENT_SUBJECT_ID,
+            roles=frozenset({LOCAL_DEVELOPMENT_SUBJECT_ID}),
+            authentication_id=LOCAL_DEVELOPMENT_SUBJECT_ID,
         ),
-        workspace_id="local-development",
+        workspace_id=LOCAL_DEVELOPMENT_WORKSPACE_ID,
         agent_id="memplex",
-        session_id="local-development",
-        request_id="local-development",
+        session_id=LOCAL_DEVELOPMENT_SUBJECT_ID,
+        request_id=LOCAL_DEVELOPMENT_SUBJECT_ID,
         provenance={"trust_boundary": "local-development"},
     )
+
+
+def hot_tier_tenant(tenant_id: str) -> str:
+    """Map a principal tenant onto its working-memory (hot-tier) partition.
+
+    Adapter runtimes authenticate locally under per-user
+    ``local-process-*`` tenants, while the service's compatibility writes
+    and sleep-time precompute run under the local development tenant
+    (``local``). Capture and recall must resolve the SAME hot-tier
+    partition, so local-process tenants map onto the development tenant;
+    every real (host/server) tenant is partitioned as itself, keeping the
+    tier tenant-isolated.
+    """
+
+    tenant = str(tenant_id or "")
+    if tenant.startswith("local-process-"):
+        return LOCAL_DEVELOPMENT_TENANT_ID
+    return tenant
 
 
 @dataclass(frozen=True, slots=True)

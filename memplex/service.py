@@ -35,6 +35,7 @@ from memplex.auth import (
     MemoryNotFoundError,
     PrincipalRegistry,
     bind_node_identity,
+    hot_tier_tenant,
     resolve_environment_authorization,
 )
 from memplex.authorization import AuthorizationGate, _TypedNodeLookup
@@ -1238,19 +1239,37 @@ class MemplexService:
         # 1b2. Working-memory tier (opt-in): typed captures also land in the
         # TTL hot-context store for automatic injection on the next recall.
         if self._working_memory is not None:
-            # Scope hot-context per workspace (V3 fix): entries are
-            # invisible across workspaces; within a workspace the tier is
-            # the team's shared hot context (matching the knowledge-tier
-            # visibility model).
-            scope = f"tenant:{context.principal.tenant_id}"
+            # Scope hot-context per tenant (V3 fix), through the SAME
+            # effective-tenant mapping the recall side (agent runtime)
+            # applies: adapter-local ``local-process-*`` runtimes resolve to
+            # the local development tenant so their own captures are
+            # recallable by themselves; real tenants stay partitioned as
+            # themselves (no cross-tenant visibility).
+            scope = f"tenant:{hot_tier_tenant(context.principal.tenant_id)}"
             # V4: entries inherit their write's visibility contract so the
             # hot tier can never widen a restricted capture's audience.
             # Node-level visibility is the truth (bind_extracted_identity
-            # already stamped it); the workspace is the write's workspace.
+            # already stamped it); the workspace is the write's workspace
+            # and the session is the write's session ("default" bucket when
+            # the context carries none, matching the recall side's
+            # effective session). Unknown visibility fails closed inside
+            # WorkingMemory.add instead of being widened.
+            session_id = getattr(context, "session_id", "") or "default"
+
             def _acl_of(node: Any) -> dict[str, Any]:
                 return {
+                    # The principal's REAL tenant (before the scope mapping
+                    # above): recall enforces tenant equality against it so
+                    # the hot tier never admits content the store's tenant
+                    # check refuses (store-boundary parity).
+                    "tenant_id": context.principal.tenant_id,
                     "owner_subject_id": getattr(context.principal, "subject_id", None),
                     "workspace_id": getattr(context, "workspace_id", None),
+                    "session_id": session_id,
+                    # The capturing agent: session-visibility recall also
+                    # requires agent equality (store origin_session/
+                    # source_agent rule).
+                    "agent_id": context.agent_id or None,
                     "visibility": getattr(node, "visibility", "workspace") or "workspace",
                 }
 
@@ -1285,6 +1304,16 @@ class MemplexService:
                     extracted.paragraphs,
                     trust_tier=tier,
                     source_hint=getattr(source, "type", "text") or "text",
+                    # P0 identity binding: verbatim paragraphs carry the
+                    # write's ACL identity so the authenticated runtime
+                    # recalls them under the same tenant/visibility
+                    # boundary as its typed nodes (fail-closed for
+                    # identity-less legacy rows).
+                    tenant_id=context.principal.tenant_id,
+                    owner_subject_id=context.principal.subject_id,
+                    workspace_id=context.workspace_id,
+                    visibility=visibility,
+                    source_agent=context.agent_id,
                 )
 
         # 2. Persist Functions and graph edges after the unified typed scan.
