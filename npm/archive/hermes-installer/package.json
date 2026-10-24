@@ -6,7 +6,7 @@
     "memplex-install-hermes": "bin/memplex-install-hermes.js"
   },
   "dependencies": {
-    "memplex": "3.3.2"
+    "memplex": "3.4.0"
   },
   "license": "MIT",
   "engines": {

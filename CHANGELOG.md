@@ -4,7 +4,7 @@ All notable changes to Memplex are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres
 to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.4.0] - 2026-10-24
 
 ### Added
 
@@ -27,7 +27,7 @@ to [Semantic Versioning](https://semver.org/).
 2026-10-24 P0 delivery-batch instruments and research:
 
 - `docs/capability-parity-2026-10.md`: two capability-contract tables
-  (stable v3.3.2 vs unreleased HEAD; Lite vs PostgreSQL parity) with
+  (stable v3.3.2 vs 3.4.0 HEAD; Lite vs PostgreSQL parity) with
   per-row code/config/commit anchors.
 - `docs/research/claude-mem-v15-comparison-2026-10.md`: pinned-version
   (claude-mem@15.0.2, commit e717334) mechanism comparison — three
