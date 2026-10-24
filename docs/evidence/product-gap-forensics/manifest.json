@@ -10,6 +10,27 @@
    "overall": "15/17 losses are counting-intent questions"
   }
  },
+ "measurement_revision": {
+  "date": "2026-10-23",
+  "status": "superseded - two verified measurement defects invalidated the 2026-10-02 attribution; a corrected fresh rerun was completed the same day",
+  "defects": [
+   "defect-1 (short-answer misjudgment): the script's context_has_answer gated on len(gold_answer) >= 3, so every 1-2 digit gold answer was reported context-absent without inspecting the context; 9 of the 11 context-stage rows above have 1-2 digit gold answers, so 'context lacks the answer text' was never established for them.",
+   "defect-2 (coverage semantics): the retrieval stage passed when ANY gold session surfaced in the top-24, but counting/aggregation questions need the COMPLETE enumeration of all gold sessions; the corrected script records any_covered and full_covered per question and judges counting-intent questions on full coverage (any-hit semantics retained for non-counting questions)."
+  ],
+  "validity": "the stage_counts above (write 0 / retrieval 5 / context 11 / answerer 1), the counting_intent_correlation figures, and the 0.8796 upper bound derived from them MUST NOT be used for decisions; they are retained only as the record of the 2026-10-02 claim",
+  "counting_intent_provenance": "the corrected script copies the harness runner's counting_intent() keyword heuristic (scripts/run_lme_official_j.py) verbatim and labels it a heuristic, not ground truth; note that the committed script previously contained no counting_intent implementation, so the counting_intent_correlation figures above are not reproducible from committed artifacts",
+  "revised_run": {
+   "date": "2026-10-23",
+   "command": ".venv/bin/python scripts/gap_forensics.py, executed with cwd outside the repository so the original benchmarks/results/gap-forensics artifacts were not overwritten",
+   "runtime_seconds": 181,
+   "environment": "working tree at 7b64f87 with concurrent hot-tier ACL edits present in memplex/ (not part of this fix); per-question retrieval observations (write_lost, retrieved_gold, gold_sids) are identical to the 2026-10-02 run for all 17 questions, so every stage change is attributable to the corrected attribution logic, not runtime drift",
+   "artifacts": ["records-rev1.json", "summary-rev1.json"],
+   "stage_counts": {"write": 0, "retrieval": 15, "context": 1, "answerer": 1},
+   "counting_intent_questions": "15/17 (keyword heuristic, not ground truth)",
+   "reading": "10 of the 11 former context-stage rows are counting-intent questions with partial top-24 gold-session coverage: under the corrected full-coverage rule they are retrieval-stage losses, not context-assembly losses. The one remaining context row (a1cc6108) is non-counting with an any-hit and genuinely lacks its 2-digit answer in the assembled context; the answerer row is unchanged. The 0.8796 upper bound is not derivable from the corrected attribution and must be recomputed before any decision use.",
+   "decision_memo": "docs/research/counting-retrieval-decision-2026-10.md - recomputed bounds (counting-only flip 117/133 ~= 0.880; all-17 flip 119/133 ~= 0.895) and the corrected direction: counting/aggregation intent needs retrieval-composition completeness (mean gold-session coverage 15/48 = 31.3%, 6/15 questions with zero coverage), not context prepend"
+  }
+ },
  "findings": [
   "The write path loses NOTHING (0/17): paragraphs preserve every gold session verbatim - the earlier fidelity-audit worry is closed for this pool.",
   "The dominant bucket is CONTEXT ASSEMBLY (11/17): gold sessions surface in top-24 but the raw-first, 20k-budget context lacks the answer text. 10 of the 11 are counting-intent questions - exactly what the harness's COUNT_FULL mechanism (prepend complete candidate sessions for counting questions) covers and the product has no equivalent of. This is a context-assembly feature gap, not a retrieval-component gap.",

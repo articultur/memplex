@@ -9,14 +9,24 @@ the loss to the first failing stage:
 
   write      - a gold-evidence session has no paragraph in the store
                (the write path dropped it);
-  retrieval  - gold sessions are stored but none surface in the top-24
-               orchestrated results;
-  context    - gold sessions surface but the assembled answer context
-               (raw-first, budget-truncated) lacks the gold answer text
-               - including the harness's COUNT_FULL full-text prepend,
-               which the product path has no equivalent of;
+  retrieval  - gold sessions are stored but the top-24 orchestrated
+               results do not cover them: counting/aggregation questions
+               need the COMPLETE enumeration of gold sessions (judged on
+               full coverage), other questions keep any-hit semantics;
+  context    - the top-24 covers the question's gold sessions but the
+               assembled answer context (raw-first, budget-truncated)
+               lacks the gold answer text - including the harness's
+               COUNT_FULL full-text prepend, which the product path has
+               no equivalent of;
   answerer   - the context contains the gold answer text and the loss is
                on the generation side.
+
+Measurement revision 2026-10-23: fixes two verified defects in the
+2026-10-02 run - (1) the len>=3 answer gate made 1-2 digit gold
+answers always report context-absent; (2) retrieval was judged on
+any-hit even for counting questions that need full gold-session
+enumeration. Stage counts from before this revision are not
+comparable; see docs/evidence/product-gap-forensics/manifest.json.
 """
 
 from __future__ import annotations
@@ -32,12 +42,25 @@ _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
-os.environ.setdefault("MEMPLEX_LLM_QUERY_ENHANCEMENT", "false")
-os.environ.setdefault("MEMPLEX_PARAGRAPH_FUSION", "primary")
-
 from memplex.config import MemplexConfig
 from memplex.service import MemplexService
+
+
+def _apply_run_profile() -> None:
+    """Apply this script's retrieval run profile (operator-overridable).
+
+    Deliberately NOT executed at import time: importing the attribution
+    helpers must stay side-effect-free. The attribution regression tests
+    import this module inside the pytest process, and a module-level
+    ``MEMPLEX_PARAGRAPH_FUSION=primary`` setdefault leaked into every
+    later test's ``LiteMemoryStore.vector_search`` (paragraphs rank in
+    their own pool there, which emptied the vector leg on
+    extraction-node corpora and broke suite-ordered tests that pass in
+    isolation).
+    """
+    os.environ.setdefault("MEMPLEX_STORAGE_BACKEND", "lite")
+    os.environ.setdefault("MEMPLEX_LLM_QUERY_ENHANCEMENT", "false")
+    os.environ.setdefault("MEMPLEX_PARAGRAPH_FUSION", "primary")
 
 DATA = _PROJECT_ROOT / ".memplex/benchmarks/data/longmemeval_s_cleaned.json"
 TOP_K = 24
@@ -53,6 +76,65 @@ PRODUCT_RUN = (
 
 def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+def counting_intent(question: str) -> bool:
+    """Keyword heuristic for enumerate/count questions.
+
+    Copied verbatim from the harness runner's counting_intent()
+    (scripts/run_lme_official_j.py). This is a heuristic, NOT ground
+    truth: every output must disclose it as such.
+    """
+    lowered = question.lower()
+    signals = (
+        "how many", "how much", "how often", "number of",
+        "list all", "list every", "all the", "what are all",
+    )
+    return any(signal in lowered for signal in signals)
+
+
+def context_has_answer(gold_answer: str, context: str) -> bool:
+    """Whether the normalized context contains the normalized gold answer.
+
+    No minimum answer length: the previous len>=3 gate reported every
+    1-2 digit gold answer (mostly counting questions) as context-absent
+    without looking at the context at all. Short and pure-numeric
+    answers match on token boundaries instead of substrings, so "2"
+    does not match "20" or "1720".
+    """
+    gold = _norm(str(gold_answer or ""))
+    if not gold:
+        return False
+    ctx = _norm(context)
+    if len(gold) <= 2 or gold.isdigit():
+        pattern = r"(?<![a-z0-9])" + re.escape(gold) + r"(?![a-z0-9])"
+        return re.search(pattern, ctx) is not None
+    return gold in ctx
+
+
+def attribute_stage(
+    *,
+    gold_count: int,
+    write_lost_count: int,
+    any_covered: bool,
+    full_covered: bool,
+    counting: bool,
+    answer_in_context: bool,
+) -> str:
+    """Attribute the loss to the first failing stage.
+
+    Counting/aggregation questions need every gold session enumerated,
+    so their retrieval stage is judged on full coverage; other
+    questions keep the any-hit semantics.
+    """
+    if gold_count and write_lost_count == gold_count:
+        return "write"
+    retrieval_pass = full_covered if counting else any_covered
+    if gold_count and not retrieval_pass:
+        return "retrieval"
+    if not answer_in_context:
+        return "context"
+    return "answerer"
 
 
 def _session_text(session: list[dict]) -> str:
@@ -104,7 +186,6 @@ def _seed(svc: MemplexService, q: dict) -> None:
 
 def forensic(q: dict) -> dict:
     gold_sids = list(q.get("answer_session_ids") or [])
-    gold_answer = _norm(str(q.get("answer") or ""))
     tmp = pathlib.Path(tempfile.mkdtemp(prefix=f"gf-{q['question_id']}-"))
     svc = _build_service(tmp)
     try:
@@ -120,10 +201,12 @@ def forensic(q: dict) -> dict:
             )
         write_lost = [s for s, ok in stored.items() if not ok]
 
-        # Stage B: retrieval recall - any top-24 result covering a gold
-        # session: a paragraph hit resolves to its sid via the seeded
-        # prefix; an extraction digest counts when its text overlaps the
-        # normalized session body.
+        # Stage B: retrieval recall over the top-24 results: a paragraph
+        # hit resolves to its sid via the seeded prefix; an extraction
+        # digest counts when its text overlaps the normalized session
+        # body. any_covered = at least one gold session surfaced;
+        # full_covered = every gold session surfaced (what counting and
+        # other aggregation questions need for a complete enumeration).
         result = svc.query(q["question"], top_k=TOP_K, orchestrated=True, explain=False)
         top = result.results[:TOP_K]
         sid_of_para = {
@@ -149,7 +232,8 @@ def forensic(q: dict) -> dict:
                 body = body_by_sid.get(sid, "")
                 if body[:80] and body[:80] in text:
                     covered.add(sid)
-        retrieval_lost = [s for s in gold_sids if s not in covered and stored.get(s)]
+        any_covered = bool(covered)
+        full_covered = bool(gold_sids) and all(s in covered for s in gold_sids)
 
         # Stage C: context containment - the runner's raw-first context
         # assembly under its budget.
@@ -159,24 +243,26 @@ def forensic(q: dict) -> dict:
             para = para_by_id.get(r.func_id)
             parts.append(para["raw_text"] if para else r.summary)
         context = "\n\n".join(parts)[:CONTEXT_BUDGET]
-        context_has_answer = bool(gold_answer) and len(gold_answer) >= 3 and (
-            gold_answer in _norm(context)
-        )
+        has_answer = context_has_answer(str(q.get("answer") or ""), context)
+        counting = counting_intent(q["question"])
 
-        if write_lost and len(write_lost) == len(gold_sids):
-            stage = "write"
-        elif not covered and gold_sids:
-            stage = "retrieval"
-        elif not context_has_answer:
-            stage = "context"
-        else:
-            stage = "answerer"
+        stage = attribute_stage(
+            gold_count=len(gold_sids),
+            write_lost_count=len(write_lost),
+            any_covered=any_covered,
+            full_covered=full_covered,
+            counting=counting,
+            answer_in_context=has_answer,
+        )
         return {
             "qid": q["question_id"],
             "gold_sids": gold_sids,
             "write_lost": write_lost,
             "retrieved_gold": sorted(covered),
-            "context_has_answer": context_has_answer,
+            "any_covered": any_covered,
+            "full_covered": full_covered,
+            "counting_intent": counting,
+            "context_has_answer": has_answer,
             "stage": stage,
         }
     finally:
@@ -184,6 +270,7 @@ def forensic(q: dict) -> dict:
 
 
 def main() -> int:
+    _apply_run_profile()
     gap = set(_gap_questions())
     with open(DATA) as fh:
         data = [
@@ -200,6 +287,16 @@ def main() -> int:
         "benchmark": "product_gap_forensics",
         "n": len(rows),
         "stage_counts": dict(counts),
+        "counting_intent_classifier": (
+            "keyword heuristic copied from the harness runner's "
+            "counting_intent() (scripts/run_lme_official_j.py); "
+            "heuristic, not ground truth"
+        ),
+        "counting_intent_questions": sum(1 for r in rows if r["counting_intent"]),
+        "retrieval_rule": (
+            "counting-intent questions are judged on full gold-session "
+            "coverage in the top-24; other questions keep any-hit semantics"
+        ),
         "rows": rows,
     }
     print(json.dumps({k: v for k, v in summary.items() if k != "rows"}, indent=1))
