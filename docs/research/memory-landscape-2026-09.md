@@ -1,5 +1,12 @@
 # 业界记忆项目全景调研与深度对比（2026-09）
 
+> **勘误（2026-10-24）**：本文 claude-mem 部分为 2026-09-04 访问口径
+> （v13.24.0 快照），其中"无租户模型 / 仅 SQLite+Chroma / 覆盖式无历史"
+> 等表述对 v15.0.2 已过时（该版本有独立 PostgreSQL server Beta、
+> team/project 作用域 API key 等新形态）。claude-mem 对比一律以
+> [claude-mem-v15-comparison-2026-10.md](claude-mem-v15-comparison-2026-10.md)
+> （pin v15.0.2 / commit e717334）为准；本文其余部分保留为历史材料。
+
 ## 状态与口径
 
 - 调研执行日：**2026-09-04**（Asia/Shanghai）。外部信息来源为各项目官方仓库/文档，

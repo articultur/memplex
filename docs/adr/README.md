@@ -15,3 +15,5 @@ decision → consequences.
 | [008](008-complexity-freeze-gate.md) | C901 freeze-gate with per-function noqa |
 | [010](010-bounded-heuristic-graph-edges.md) | Bounded heuristic graph edges (per-function caps, linear graphs) |
 | [011](011-layered-pre-durable-validation.md) | Layered pre-durable validation in the lite write path |
+| [012](012-lite-sqlite-v2-authoritative-store.md) | Lite SQLite v2 authoritative store (shadow → rw authority → JSON as export; Status: Phase A landed, Phase B gated on shadow-exposure + acceptance thresholds) |
+| [013](013-provenance-trust-tier-and-raw-layer.md) | Provenance trust tiers + raw-text authoritative layer (Status: Stages 1/2/2B landed — tier fields, merge-takes-min, lite raw paragraphs; PG paragraphs deferred to the 012 Phase-B window; Stage 3 peer-mesh pending) |

@@ -24,6 +24,27 @@ to [Semantic Versioning](https://semver.org/).
   (`haystack_dates`) into the seeded turn text and `observed_at`, making
   temporal-reasoning questions answerable (+28.7pp on that type).
 
+2026-10-24 P0 delivery-batch instruments and research:
+
+- `docs/capability-parity-2026-10.md`: two capability-contract tables
+  (stable v3.3.2 vs unreleased HEAD; Lite vs PostgreSQL parity) with
+  per-row code/config/commit anchors.
+- `docs/research/claude-mem-v15-comparison-2026-10.md`: pinned-version
+  (claude-mem@15.0.2, commit e717334) mechanism comparison — three
+  runtime shapes, six mechanism contrasts, adopt / do-not-adopt lists
+  with local code anchors, four issue-sourced operational lessons, and
+  an errata note superseding the 2026-09 landscape snapshot.
+- `docs/research/counting-retrieval-decision-2026-10.md`: recomputed
+  upper bounds from the corrected gap forensics (counting-only flip
+  117/133 ~= 0.880, all-17 flip 119/133 ~= 0.895) and the corrected
+  direction — counting/aggregation intent needs retrieval-composition
+  completeness (mean gold-session coverage 31.3%, 6/15 questions with
+  zero coverage), not a context prepend.
+- `scripts/product_retrieval_baseline.py`: local no-API retrieval-level
+  baseline matrix over the multi-session pool (default / orchestrated /
+  parity / Raw-RAG control) reporting session-level any/full gold
+  coverage split by counting intent.
+
 ### Security
 
 2026-09-14 fail-closed gate for unpatched ChromaDB advisories:
@@ -40,7 +61,43 @@ to [Semantic Versioning](https://semver.org/).
   PostgreSQL + pgvector) never load chromadb and are unaffected. The
   advisory table and mitigations are documented in `SECURITY.md`.
 
+2026-10-24 hot-tier visibility vocabulary and raw-paragraph ACL identity:
+
+- The working-memory tier's visibility vocabulary is unified with the
+  host node model (`{user, workspace, session}` plus an explicit
+  `tenant`); unknown values now raise (fail-closed) instead of silently
+  widening to tenant visibility, and the legacy `private` spelling maps
+  to `user`. Recall-side ACL re-checks user/workspace/session per entry,
+  and local-process runtimes resolve one effective hot-tier tenant on
+  both capture and recall (previously a real runtime's hot entries were
+  written into a partition its own recall never read).
+- Lite raw-paragraph rows now carry the writing context's ACL identity
+  (tenant/subject/workspace/visibility, bound at first write): an
+  authenticated runtime recalls its own verbatim paragraphs under the
+  same boundary as its typed nodes, cross-tenant/cross-subject reads
+  are isolated, and identity-less legacy rows fail closed to the
+  local-development compatibility context. Paragraph views expose
+  `to_dict()` so the read-side injection guard scans their raw text
+  (write-time scanning covers typed nodes only), and the retriever's
+  namespace filter resolves paragraph rows through the same identity
+  projection. PostgreSQL accepts the identity kwargs for call-shape
+  parity (its paragraph rows already stamp identity columns
+  request-side).
+
 ### Fixed
+
+2026-10-23 product-gap forensics measurement revision:
+
+- Two verified defects in `scripts/gap_forensics.py` are fixed: the
+  `len>=3` answer gate (every 1-2 digit gold answer was reported
+  context-absent without inspecting the context) and any-hit retrieval
+  semantics for counting questions (they need complete gold-session
+  enumeration). The corrected local rerun (no API, per-question
+  observations identical to the 2026-10-02 run) reverses the dominant
+  bucket: retrieval 15 / context 1 / answerer 1 (was 5/11/1). The old
+  stage counts and the 0.8796 upper bound are frozen in the evidence
+  manifest (`measurement_revision`) and must not be used for decisions;
+  corrected artifacts are `records-rev1.json` / `summary-rev1.json`.
 
 2026-08-28 multi-dimensional review remediation:
 
