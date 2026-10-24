@@ -37,14 +37,14 @@
 - **PG parity 关闭**：段落不进检索（Phase B 窗口）、无 trust 惩罚/配额、
   `vector_search` 只查 functions——红队结论不可跨后端迁移
   （见 `docs/capability-parity-2026-10.md` 表 B）。
-- **hubs / consolidation 不走 derivation lineage**、无 agent_inferred tier：
-  派生内容的权限/信任合同缺口。
-- **working memory 失效联动**：进程内 TTL 层在主存储删除/更新时无失效机制
-  （独立短期一致性边界）。
 - **打分 harness（P3 协议）**：检索级基线无答案正确率维度；需 answerer/judge
   API 预算。
 - **四宿主真实安装矩阵**：受网络窗口限制未跑；MCP 2026-07-28 双时代兼容未做。
 - **legacy LWW 与 durable sync 双轨语义未收敛**（P2）。
+- **PG 段落本地同步发射**：入站 apply 已支持（ADR-013 Stage 3），本地捕获/
+  快照发射等 Phase-B 触发器迁移（快照读依赖触发器写入的 entity versions）。
+- **ADR-012 Phase B/C 故障矩阵**：crash 测试仍为 monkeypatch 替换（非真实
+  kill -9 矩阵）、30 分钟死锁 soak 未跑。
 
 ## 维护规则
 
