@@ -198,6 +198,28 @@ class WorkingMemory:
         with self._lock:
             return self._entries.pop(key, None) is not None
 
+    def remove_by_suffix(self, memory_id: str) -> int:
+        """Drop every entry whose bare key (sans ``scope::`` prefix) is the
+        node id or its function-mirrored ``fn:{id}`` form.
+
+        The invalidation hook for main-store mutations (delete/update):
+        capture keys are the node id (fact/preference) or ``fn:{id}``
+        (function) under tenant scopes, so removing both spellings across
+        every scope closes the consistency gap where a deleted memory
+        kept surfacing until TTL. Returns the number removed.
+        """
+        removed = 0
+        with self._lock:
+            stale = [
+                key
+                for key in self._entries
+                if key.endswith((memory_id, f"::{memory_id}", f"::fn:{memory_id}"))
+            ]
+            for key in stale:
+                self._entries.pop(key, None)
+                removed += 1
+        return removed
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()

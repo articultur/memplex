@@ -1723,6 +1723,9 @@ class MemplexService:
             replace(func)
         else:
             store.add(func, SD(type="manual_update", source_type=SourceType.WIKI))
+        # Hot-tier invalidation: the stale mirrored name must not outlive
+        # the store update (the entry text stays the pre-update name).
+        self._invalidate_hot_entries(memory_id)
 
         return UpdateResult(
             memory_id=memory_id,
@@ -1732,6 +1735,23 @@ class MemplexService:
             version=func.version,
             success=True,
         )
+
+    def _invalidate_hot_entries(self, memory_id: str) -> None:
+        """Drop the working-memory entries mirroring a mutated memory.
+
+        The hot tier keys typed captures as the node id (fact/preference)
+        or ``fn:{id}`` (function) under ``tenant:{effective}`` scopes.
+        Without this invalidation a deleted or superseded memory kept
+        surfacing in recall until its TTL elapsed - the hot tier was an
+        independent short-lived consistency boundary. Scope-agnostic key
+        removal covers every tenant scope that may hold the entry.
+        """
+        if self._working_memory is None:
+            return
+        try:
+            self._working_memory.remove_by_suffix(memory_id)
+        except Exception as exc:  # noqa: BLE001 - logged degradation path
+            logger.debug("hot-tier invalidation failed for %s: %s", memory_id, exc)
 
     def delete(
         self,
@@ -1761,6 +1781,9 @@ class MemplexService:
         if not callable(delete):
             raise MemoryNotFoundError("Memory not found")
         delete(memory_id)
+        # Hot-tier invalidation: the deleted node's mirrored entry must
+        # not keep surfacing in recall until TTL (consistency boundary).
+        self._invalidate_hot_entries(memory_id)
         self._cascade_orphaned_paragraphs(store, node)
 
     @staticmethod
