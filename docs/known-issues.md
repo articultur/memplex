@@ -43,8 +43,18 @@
 - **legacy LWW 与 durable sync 双轨语义未收敛**（P2）。
 - **PG 段落本地同步发射**：入站 apply 已支持（ADR-013 Stage 3），本地捕获/
   快照发射等 Phase-B 触发器迁移（快照读依赖触发器写入的 entity versions）。
-- **ADR-012 Phase B/C 故障矩阵**：crash 测试仍为 monkeypatch 替换（非真实
-  kill -9 矩阵）、30 分钟死锁 soak 未跑。
+- **ADR-012 死锁未根除（P0，2026-10-24 soak 实锤）**：30 分钟 soak
+  5 进程中 worker 0 于 ~42 分钟工作中途挂死（纯 CPU、非 MPS；
+  详见 `docs/evidence/adr012-fault-matrix/manifest.md` §2）。B4 单写者
+  队列的"构造性消灭"声明在长尺度不成立；根因未定位（无栈样本，
+  watchdog 先杀了进程）。真实 kill -9 崩溃矩阵与 rw 语义回归已达标
+  （§1/§3）；Phase C 不应开启直至死锁归零。
+- **rw 全量套件的 170 个 JSON 前提失败**：`test_lite_durability.py`
+  (160) / `test_lite_sync_repository.py` (8) / `test_backup.py` (1) /
+  `test_sync.py` e2e (2，含 shadow 模式 2) 在全局 rw 下失败——
+  测试手工构造 memory.json/journal 测 JSON 持久化协议，rw 下该协议
+  被 SQLite 权威取代（B2 既定语义，非回归）。rw 正确性由专项测试
+  背书（见 manifest §3）；若要 Phase C，这批测试需参数化双模式。
 
 ## 维护规则
 
