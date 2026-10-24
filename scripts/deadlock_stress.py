@@ -22,6 +22,7 @@ import json
 import multiprocessing
 import os
 import pathlib
+import signal
 import sys
 import tempfile
 import time
@@ -55,6 +56,12 @@ def _child(worker_id: int, rounds: int, result_path: str) -> None:
     os.environ.setdefault("MEMPLEX_EMBEDDING_MODEL", "bge-m3")
     os.environ.setdefault("MEMPLEX_EMBEDDING_DIMENSION", "1024")
     os.environ.setdefault("MEMPLEX_EMBEDDING_DEVICE", "cpu")
+    # Deadlock forensics: enable faulthandler so the parent's SIGABRT on
+    # a hang dumps every thread's Python stack to stderr (captured in
+    # the parent's stderr log) before the process dies.
+    import faulthandler
+
+    faulthandler.enable()
     from memplex.config import load_config
     from memplex.service import MemplexService
 
@@ -119,15 +126,23 @@ def main() -> int:
         proc.join(timeout=watchdog)
         row = {
             "worker": i,
+            "pid": proc.pid,
             "exitcode": proc.exitcode,
             "hung": proc.is_alive(),
         }
         if proc.is_alive():
             verdict = "fail"
-            proc.terminate()
+            # Forensics BEFORE the kill: children run with
+            # PYTHONFAULTHANDLER=1, so SIGABRT makes the hung child dump
+            # every thread's Python stack to stderr on its way down -
+            # the stack survives in the parent's captured stderr log.
+            # (The 2026-10-24 soak lost the root cause to kill-first.)
+            if proc.pid:
+                os.kill(proc.pid, signal.SIGABRT)
             proc.join(timeout=30)
             if proc.is_alive():
                 proc.kill()
+                proc.join(timeout=30)
         result_file = out_dir / f"worker-{i}.json"
         if result_file.exists():
             row.update(json.loads(result_file.read_text()))
