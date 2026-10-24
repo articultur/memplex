@@ -1325,24 +1325,14 @@ class MemplexService:
             # Invalidate graph builder cache so next write sees new data
             self._graph_builder.invalidate_cache()
 
-        # 3. Background tasks (index build, wiki compile, etc.)
-        # These are submitted to the background worker asynchronously.
-        if not self._is_production_profile():
-            try:
-                for func in extracted.functions:
-                    self._worker.submit(
-                        BackgroundTask.BUILD_INDEX,
-                        # NOTE: SourceDocument has no ``id`` attribute; this
-                        # lookup always raises AttributeError at runtime and
-                        # is swallowed by the surrounding ``except``. Kept
-                        # byte-for-byte via cast; tracked as a latent bug.
-                        {"func_id": func.id, "source_id": cast(Any, source).id if source else None},
-                    )
-            except Exception as exc:  # noqa: BLE001 - logged degradation path
-                # Background tasks are best-effort, but a submission failure
-                # should not vanish silently -- debug-log so the dropped index
-                # build is traceable.
-                logger.debug("background task submission failed: %s", exc)
+        # 3. Index maintenance: no background task is submitted here. The
+        # historical BUILD_INDEX submission never executed - it read
+        # ``source.id`` on a SourceDocument that has no ``id``, raised
+        # AttributeError on every attempt, and the surrounding except
+        # swallowed it. Enqueuing it for real is also unnecessary: the
+        # lite FTS sidecar rebuilds lazily (generation-signature
+        # invalidation on the next search), and the worker's
+        # BUILD_INDEX handler remains available for explicit ops runs.
 
         # 4. Threshold-triggered background compaction.
         # Previously compaction was manual-only (or Claude Code's Stop hook).

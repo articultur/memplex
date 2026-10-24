@@ -156,9 +156,11 @@ def test_lineage_revoked_source_hides_derived(tmp_path):
             SourceDocument(type="derivation", content="hub", source_type=SourceType.WIKI),
         )
 
-        # Same-caller read finds it while both sources live.
-        found = svc.query("parrot hub sessions", top_k=10)
-        assert any(r.func_id == "derived-hub-4" for r in found.results) or True
+        # Same-caller read finds it while both sources live. Assert the
+        # visibility contract directly (is_node_visible re-checks every
+        # lineage source at read time), ranking-independent: the previous
+        # `... or True` form asserted nothing.
+        assert svc._auth.visible_node("derived-hub-4", context) is not None
 
         # Revoke the user-private source: delete it from the store via
         # the kind-aware delete (generic delete() only covers functions).
@@ -168,9 +170,8 @@ def test_lineage_revoked_source_hides_derived(tmp_path):
             deleter(user_src.id)
         else:
             svc.store.delete(user_src.id)
-        post = svc.query("parrot hub sessions", top_k=10)
-        assert not any(
-            r.func_id == "derived-hub-4" for r in post.results
-        ), "derived must hide when a source is revoked"
+        # Fail-closed lineage: a deleted source counts as revoked, so the
+        # derivation must be invisible to the same caller now.
+        assert svc._auth.visible_node("derived-hub-4", context) is None
     finally:
         svc.stop()

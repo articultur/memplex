@@ -153,3 +153,36 @@ def test_store_mutations_through_queue_with_concurrent_reader(tmp_path):
         assert any("Writer 2 record 14" in r["raw_text"] for r in paragraphs.values())
     finally:
         svc.stop()
+
+
+def test_drain_timeout_semantics():
+    """drain(timeout) honours its deadline: False while the writer is
+    occupied, True once the queue empties; None keeps the old
+    indefinite wait. submit() blocks for its result, so the stuck job
+    rides in from a helper thread."""
+    q = SingleWriterQueue()
+    release = threading.Event()
+    try:
+        started = threading.Event()
+
+        def blocker():
+            started.set()
+            release.wait(5)
+            return "done"
+
+        holder = threading.Thread(target=lambda: q.submit(blocker))
+        holder.start()
+        try:
+            assert started.wait(2), "blocker never started"
+            assert q.drain(0.05) is False, "drain must report False while a job is in flight"
+            release.set()
+            holder.join(5)
+            assert not holder.is_alive(), "holder thread stuck"
+            assert q.drain(0.05) is True, "drain must report True once emptied"
+            assert q.drain() is True
+        finally:
+            release.set()
+            holder.join(5)
+    finally:
+        release.set()
+        q.close(drain=True)

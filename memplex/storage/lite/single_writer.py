@@ -18,6 +18,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -90,9 +91,27 @@ class SingleWriterQueue:
             raise job.error
         return job.result
 
-    def drain(self, timeout: float | None = None) -> None:
-        """Wait for queued jobs to finish; the queue stays usable."""
-        self._queue.join()
+    def drain(self, timeout: float | None = None) -> bool:
+        """Wait for queued jobs to finish; the queue stays usable.
+
+        Returns True when the queue emptied, or False when *timeout*
+        seconds elapsed first (pending jobs keep running; callers decide
+        whether to retry or escalate). timeout=None waits indefinitely -
+        the previous, and still default, behavior.
+        """
+        if timeout is None:
+            self._queue.join()
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        # unfinished_tasks is the authoritative pending count (queued +
+        # in-flight); all_tasks_done is notified on every task_done.
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        return True
 
     def close(self, drain: bool = True) -> None:
         """Stop the writer; queued jobs finish first when *drain*.
