@@ -24,6 +24,7 @@ import re
 import sqlite3
 import tarfile
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -189,30 +190,51 @@ def _validate_g002_historical_node_keys(raw: dict, memory_type: str) -> None:
 def _with_writer_lock(method: Callable[..., Any]) -> Callable[..., Any]:
     """Keep reload, COW mutation, and journal decision in one flock scope."""
 
+    def _call_depth(owner: Any) -> Any:
+        """Thread-local depth holder, absent on duck-typed stores (None)."""
+        return getattr(owner, "_writer_call_depth", None)
+
     def _locked_call(self: Any, args: tuple, kwargs: dict) -> Any:
-        with self._durability.writer_lock():
-            try:
-                return method(self, *args, **kwargs)
-            except BaseException:
-                # A mutation may have escaped mid-way, leaving resident state
-                # ahead of the durable pair.  Invalidate the cached pair /
-                # fingerprint so the next reload re-reads from disk instead
-                # of building on the speculative state.  Under deferred_commit
-                # the failed mutation never reached a durable decision, and
-                # the batch's consistent prefix must survive until the
-                # outermost exit revalidates it fail-closed.
-                if getattr(self, "_commit_defer_depth", 0) > 0:
-                    logger.debug("keeping resident prefix after failure under deferred_commit")
-                else:
-                    self._pair_fingerprint = None
-                    self._committed_pair = None
-                    self._committed_record = None
-                raise
+        depth_local = _call_depth(self)
+        depth = getattr(depth_local, "depth", 0) if depth_local is not None else 0
+        if depth_local is not None:
+            depth_local.depth = depth + 1
+        try:
+            with self._durability.writer_lock():
+                try:
+                    return method(self, *args, **kwargs)
+                except BaseException:
+                    # A mutation may have escaped mid-way, leaving resident state
+                    # ahead of the durable pair.  Invalidate the cached pair /
+                    # fingerprint so the next reload re-reads from disk instead
+                    # of building on the speculative state.  Under deferred_commit
+                    # the failed mutation never reached a durable decision, and
+                    # the batch's consistent prefix must survive until the
+                    # outermost exit revalidates it fail-closed.
+                    if getattr(self, "_commit_defer_depth", 0) > 0:
+                        logger.debug("keeping resident prefix after failure under deferred_commit")
+                    else:
+                        self._pair_fingerprint = None
+                        self._committed_pair = None
+                        self._committed_record = None
+                    raise
+        finally:
+            if depth_local is not None:
+                depth_local.depth = depth
 
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         from memplex.storage.lite.single_writer import single_writer_enabled
 
         if single_writer_enabled():
+            # Reentrancy guard: a thread ALREADY inside a locked call on
+            # this store must NOT submit to the single-writer queue - the
+            # job would re-acquire writer_lock on the writer thread and
+            # block on OUR hold (RLock is not cross-thread reentrant),
+            # deadlocking both. Same semantics as the queue's own
+            # writer-thread inline path, extended to any holding thread.
+            depth_local = _call_depth(self)
+            if depth_local is not None and getattr(depth_local, "depth", 0) > 0:
+                return _locked_call(self, args, kwargs)
             # B4: mutations execute on the single writer thread; the
             # caller blocks for the result. Embedding/extraction already
             # ran on the caller thread - only the durable mutation queues.
@@ -710,6 +732,12 @@ class LiteMemoryStore:
         self._observations: list[Observation] = []
         self._facts: dict[str, Fact] = {}
         self._preferences: dict[str, Preference] = {}
+        # Per-thread locked-call depth for the single-writer reentrancy
+        # guard in _with_writer_lock: a thread already inside a locked
+        # call runs further wrapped methods inline instead of queueing
+        # them (a queued job would re-acquire writer_lock on the writer
+        # thread and deadlock against this thread's hold).
+        self._writer_call_depth = threading.local()
         # ADR-013 Stage 2 raw-text authoritative layer: verbatim
         # paragraphs as JSON-safe dicts (id -> row), persisted in the
         # pair's "paragraphs" section and joined into both retrieval
