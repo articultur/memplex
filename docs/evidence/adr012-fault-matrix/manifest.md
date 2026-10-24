@@ -54,6 +54,18 @@
   一次未复现不是修复证明，延长窗口复跑进行中。
 - **取证复跑 #2**（860 轮 × 5，45 分钟，覆盖上次复发点 ~3 倍）：
   verdict **pass**，5/5 干净退出（各 6880 写 / 4300 查询）。
+- **取证复跑 #3（环境还原，原代码）**：首发挂死的环境假设（CPU
+  争抢）作为可测试假设复跑——子进程在守卫提交（ac537bb）前
+  启动（= 原代码），并发全量回归分片还原首发同构负载。verdict
+  **pass**：5/5 干净退出（各 3440 写 / 2150 查询）、24 分钟、
+  零 SIGABRT 转储——**CPU 争抢单独不足以复现**。
+- **复现统计终态（2026-10-24 收口）**：首发挂死在 **3 次复现尝试
+  / 15 个 worker 进程 / ~93 worker-分钟**（空闲 + 争抢两种环境、
+  原代码 + SIGABRT 协议）中**均未再现**。定性维持：单次真实事件、
+  根因未定位；确定性陷阱类已由守卫关闭（ac537bb，独立价值），
+  但"守卫即首发根因"**不成立**（无栈证据）。SIGABRT 协议作为
+  常设绊网：任何后续 soak 挂死将直接产出锁序证据。主动追查至此
+  收口，转入绊网待命。
 - **取证协议已入库**（ff13bdd）：子进程 faulthandler.enable() +
   挂死时父进程先 SIGABRT（全线程 Python 栈落 stderr 日志）再 kill。
 - **统计判定（2026-10-24 定稿）**：取证协议下累计 **69 分钟 /
@@ -70,6 +82,33 @@
   MPS 嵌入并发；首跑（2026-10-24 §2）是纯 CPU——**CPU 下也存在**
   该死锁类，根因需重新定位（候选：worker 线程与服务线程的锁序、
   EmbeddingService RLock 与单写者队列的交互）。
+- **静态锁序审计（2026-10-24）**：锁清单 = EmbeddingService
+  `_model_lock`（RLock，bge-m3 CPU 编码期间长持有）/
+  durability `writer_lock`（L2，进程 RLock+flock，跨线程不可重入）/
+  SingleWriterQueue（`_with_writer_lock` 包装方法的路由：任务在
+  写者线程取 L2）。三个结论：
+  1. **7 处手动直取 L2 的代码块**（store.py 805/908/1076/2519/
+     2732/2744/2790：backup/restore/add/_commit_current_state/
+     _reload_for_mutation/_refresh_for_read/_load）**全部只调用
+     非包装内部方法**——"持 L2 时调用包装方法→队列任务跨线程
+     再取 L2→确定性互等"这一最险形状在现有代码中**未发现实例**。
+     该陷阱本身值得防御（见下）。
+  2. **确认的放大形状（stall 非 cycle）**：`vector_search` 是
+     `@_with_writer_lock`——写者线程在 L2 内跨整个混合检索（含
+     L1 嵌入与向量回填）；BackgroundWorker 的 REFRESH_VECTOR
+     （refresh_all）在 L1 内批量编码。CPU 争抢下两侧持锁时间
+     膨胀数十秒——与首发挂死的环境（并行全量回归分片）吻合，
+     但纯 stall 不产生"0% CPU 全 cond_wait"的形态，**不能单独
+     解释挂死**。
+  3. **审计边界**：剩余可疑面（sync 仓库 `_mutation` 在 dispatcher
+     线程持 L2 与写者线程的交互、deferred_commit 退出路径）静态
+     读未闭合，需要栈样本裁决——环境还原复现（soak + 并行回归
+     分片，与首发同构负载）已启动，SIGABRT 协议在位。
+  4. **防御建议（无论根因）**：`SingleWriterQueue.submit` 的
+     reentrancy 检查只认写者线程自身；调用线程若已持 L2 而提交
+     任务即确定性死锁——可在 `_locked_call`/submit 加"调用线程
+     持 L2 时直接内联执行或立即报错"的守卫，把这类陷阱从静默
+     挂死变成显式失败。
 
 ## 3. rw 语义全量回归
 

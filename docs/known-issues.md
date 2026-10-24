@@ -43,15 +43,13 @@
 - **legacy LWW 与 durable sync 双轨语义未收敛**（P2）。
 - **PG 段落本地同步发射**：入站 apply 已支持（ADR-013 Stage 3），本地捕获/
   快照发射等 Phase-B 触发器迁移（快照读依赖触发器写入的 entity versions）。
-- **ADR-012 死锁未根除（P0，2026-10-24 soak 实锤 + 取证复跑两轮未再现）**：
-  首发 30 分钟 soak 5 进程中 worker 0 于 ~42 分钟工作中途挂死（纯 CPU、
-  非 MPS；manifest §2）。取证协议（ff13bdd：faulthandler + SIGABRT 先于
-  kill）下复跑 #1/#2 累计 69 分钟 / 10 worker 零挂死（manifest §2 更新）——
-  两种解读并存：首发环境有并行全量回归争抢 CPU 的差异、或概率性死锁未
-  触发。**"根因已定位并修复"不成立**（无栈样本无复现协议）；ADR-012
-  "超时阻塞=0" 门槛维持未达标，Phase C 维持关闭。真实 kill -9 崩溃矩阵
-  与 rw 语义回归已达标（§1/§3）。下次任何 soak 挂死，SIGABRT 栈会直接
-  给出锁序证据。
+- **ADR-012 死锁未根因（P1，主动追查已收口 2026-10-24）**：首发
+  soak 1/5 进程 ~42 分钟挂死（manifest §2）在 3 次复现尝试 / 15
+  worker / ~93 worker-分钟（空闲+争抢双环境、原代码+SIGABRT 协议）
+  中未再现——单次真实事件、根因未定位。静态审计证明的确定性陷阱
+  类已由重入守卫关闭（ac537bb，契约测试在库）；守卫是否即首发
+  根因无栈证据、不宣称。SIGABRT 协议常设：后续任何 soak 挂死直接
+  产出锁序证据。Phase C 仍建议等绊网安静一个周期后再议。
 - **rw 全量套件的 170 个 JSON 前提失败**：`test_lite_durability.py`
   (160) / `test_lite_sync_repository.py` (8) / `test_backup.py` (1) /
   `test_sync.py` e2e (2，含 shadow 模式 2) 在全局 rw 下失败——
