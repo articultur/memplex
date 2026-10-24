@@ -115,23 +115,29 @@ def _sessions_from_paragraphs(
     paragraphs: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Group paragraph rows by source hint into ordered sessions."""
-    by_source: dict[str, list[dict[str, Any]]] = {}
-    for row in paragraphs.values():
+    by_source: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for row_id, row in paragraphs.items():
         if not isinstance(row, dict):
             continue
         if row.get("premise_superseded"):
             continue
         source = str(row.get("source") or "")[:200] or "default"
-        by_source.setdefault(source, []).append(row)
+        by_source.setdefault(source, []).append((row_id, row))
     sessions: list[dict[str, Any]] = []
     for source in sorted(by_source):
-        rows = sorted(
-            by_source[source], key=lambda r: str(r.get("created_at") or "")
+        pairs = sorted(
+            by_source[source], key=lambda p: str(p[1].get("created_at") or "")
         )
+        rows = [row for _, row in pairs]
         date = str(rows[0].get("created_at") or "")[:10]
         text = " | ".join(str(r.get("raw_text") or "") for r in rows)
         sessions.append(
-            {"source": source, "date": date, "text": text[:_SESSION_CHAR_BUDGET]}
+            {
+                "source": source,
+                "date": date,
+                "text": text[:_SESSION_CHAR_BUDGET],
+                "row_ids": [row_id for row_id, _ in pairs],
+            }
         )
     return sessions[:_MAX_SESSIONS]
 
@@ -195,9 +201,44 @@ def build_entity_hubs(store: Any, complete_fn: Any) -> HubReport:
             name_normalized=entity.lower(),
             domain="entity-hub",
             source_type=SourceType.WIKI,
+            # ADR-013: hubs are cross-session conclusions the system
+            # synthesized, not user-authored text — the lowest trust tier.
+            trust_tier=1,
             action=[FieldValue(desc=body)],
         )
         hub.namespace = {_HUB_KEY: entity}
+        # Derivation lineage (ADR-013): the hub's sources are the paragraph
+        # rows from every session it enumerates; visibility clamps to the
+        # most restrictive source, and revoking any source hides the hub.
+        source_row_ids: list[str] = []
+        for n in nums:
+            if n < len(sessions):
+                source_row_ids.extend(sessions[n].get("row_ids") or [])
+        hub.source_paragraphs = source_row_ids
+        if source_row_ids:
+            from types import SimpleNamespace
+
+            from memplex.authorization import AuthorizationGate
+
+            source_views = [
+                SimpleNamespace(
+                    id=rid,
+                    visibility=str(
+                        paragraphs[rid].get("visibility") or "workspace"
+                    ),
+                )
+                for rid in source_row_ids
+                if rid in paragraphs
+            ]
+            if source_views:
+                try:
+                    AuthorizationGate.bind_derivation_lineage(
+                        hub, source_views
+                    )
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "entity-hub lineage bind failed for %s: %s", node_id, exc
+                    )
         try:
             from memplex.models import SourceDocument
 

@@ -328,6 +328,43 @@ def _pick_canonical(
     return _canonical_text(rows)
 
 
+def _bind_cluster_lineage(node: Any, paragraphs: dict[str, Any]) -> None:
+    """Bind derivation lineage from the node's source paragraph rows.
+
+    The promoted node's sources are its cluster's paragraph rows;
+    visibility clamps to the most restrictive source, and revoking any
+    source hides the promotion (ADR-013). trust_tier already follows
+    merge-takes-min (set at node creation from the cluster).
+    """
+    source_ids = list(getattr(node, "source_paragraphs", None) or [])
+    if not source_ids:
+        return
+    from types import SimpleNamespace
+
+    from memplex.authorization import AuthorizationGate
+
+    source_views = [
+        SimpleNamespace(
+            id=sid,
+            visibility=str(
+                (paragraphs.get(sid) or {}).get("visibility") or "workspace"
+            ),
+        )
+        for sid in source_ids
+        if sid in paragraphs
+    ]
+    if not source_views:
+        return
+    try:
+        AuthorizationGate.bind_derivation_lineage(node, source_views)
+    except (ValueError, TypeError) as exc:
+        logger.debug(
+            "consolidation lineage bind failed for %s: %s",
+            getattr(node, "id", "?"),
+            exc,
+        )
+
+
 def consolidate(
     store: Any,
     *,
@@ -462,6 +499,7 @@ def consolidate(
     try:
         with store.deferred_commit():
             for kind, node in promoted_nodes:
+                _bind_cluster_lineage(node, paragraphs)
                 if kind == "preference":
                     store.add_preference(node)
                 else:
