@@ -42,6 +42,13 @@ class SyncNodeType(str, Enum):
     PREFERENCE = "preference"
     OBSERVATION = "observation"
     EDGE = "edge"
+    # ADR-013 Stage 3: the raw-paragraph layer rides the existing node
+    # upsert/tombstone operations (no new sync methods). Lite captures and
+    # applies it end to end; PostgreSQL applies inbound paragraph events
+    # (postgres_sync) while local paragraph capture waits for the Phase-B
+    # trigger migration (its snapshot requires trigger-written entity
+    # versions, so emitting without the trigger would fail snapshot reads).
+    PARAGRAPH = "paragraph"
 
 
 class SyncOperation(str, Enum):

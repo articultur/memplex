@@ -143,8 +143,14 @@ class LiteSyncRepository(AbstractSyncRepository):
         for node in nodes:
             tenant_id = node.tenant_id
             if type(tenant_id) is not str or not tenant_id:
-                raise ValueError("sync-enabled Lite requires tenant-bound nodes")
+                continue
             tenants.add(tenant_id)
+        # ADR-013 Stage 3: identity-bound paragraph rows participate in the
+        # single-tenant invariant; identity-less legacy rows stay local-only.
+        for row in self._store._paragraphs.values():
+            tenant_id = row.get("tenant_id")
+            if type(tenant_id) is str and tenant_id:
+                tenants.add(tenant_id)
         return tenants
 
     def _assert_single_tenant_business_state(self) -> str | None:
@@ -401,6 +407,63 @@ class LiteSyncRepository(AbstractSyncRepository):
             str(SyncVersion.create(occurred_at, self._local_node_id, event_id)),
             self._scope_from_node(scope_node),
             payload,
+        )
+        return self.capture_local_event(event)
+
+    @staticmethod
+    def _scope_from_row(row: dict) -> SyncScope:
+        """Sync scope from a raw-paragraph row's bound identity."""
+        namespace = row.get("namespace") or {}
+        if not isinstance(namespace, dict):
+            namespace = {}
+        agent_id = namespace.get("memplex_source_agent")
+        session_id = namespace.get("memplex_source_session_id")
+        workspace_id = row.get("workspace_id")
+        return SyncScope(
+            row.get("tenant_id") or "",
+            row.get("owner_subject_id") or "",
+            workspace_id if isinstance(workspace_id, str) and workspace_id else None,
+            row.get("visibility") or "workspace",
+            agent_id if isinstance(agent_id, str) and agent_id else None,
+            session_id if isinstance(session_id, str) and session_id else None,
+        )
+
+    def capture_paragraph_row(
+        self,
+        row: dict,
+        *,
+        operation: SyncOperation,
+    ) -> int | None:
+        """Capture one raw-paragraph row (ADR-013 Stage 3).
+
+        Rows without bound identity (pre-binding legacy) are skipped:
+        sync capture requires a tenant/owner to scope the event, and
+        those rows are local-development-only by the ACL contract.
+        Payload carries the full validated row including ``trust_tier``
+        (the peer-mesh trust contract of ADR-013).
+        """
+        if self._capture_policy.mode == "off":
+            return None
+        tenant_id = row.get("tenant_id")
+        owner_subject_id = row.get("owner_subject_id")
+        if not (isinstance(tenant_id, str) and tenant_id):
+            logger.debug("paragraph sync capture skipped: row has no tenant identity")
+            return None
+        if not (isinstance(owner_subject_id, str) and owner_subject_id):
+            logger.debug("paragraph sync capture skipped: row has no owner identity")
+            return None
+        event_id = str(uuid.uuid4())
+        occurred_at = datetime.now(UTC)
+        event = SyncEvent(
+            1,
+            event_id,
+            self._local_node_id,
+            SyncNodeType.PARAGRAPH,
+            SyncEntityKey.node(str(row.get("id", ""))),
+            operation,
+            str(SyncVersion.create(occurred_at, self._local_node_id, event_id)),
+            self._scope_from_row(row),
+            None if operation is SyncOperation.TOMBSTONE else dict(row),
         )
         return self.capture_local_event(event)
 
@@ -878,6 +941,54 @@ class LiteSyncRepository(AbstractSyncRepository):
             (SyncNodeType.OBSERVATION, self._store._observations),
         ):
             events.extend(self._snapshot_event_for_node(node, node_type) for node in values)
+        # ADR-013 Stage 3: identity-bound paragraph rows join the snapshot
+        # (legacy identity-less rows are local-only and stay out).
+        for row in self._store._paragraphs.values():
+            if not (isinstance(row.get("tenant_id"), str) and row.get("tenant_id")):
+                continue
+            entity_key = SyncEntityKey.node(str(row["id"]))
+            version_row = next(
+                (
+                    item
+                    for item in self._state["entity_versions"]
+                    if item["node_type"] == SyncNodeType.PARAGRAPH.value
+                    and item["entity_key"] == str(entity_key)
+                ),
+                None,
+            )
+            if version_row is None:
+                event_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"memplex:paragraph:{row['id']}"
+                    )
+                )
+                occurred_at_raw = row.get("last_observed_at") or row.get("created_at")
+                try:
+                    occurred_at = datetime.fromisoformat(
+                        str(occurred_at_raw)
+                    ).astimezone(UTC)
+                except (TypeError, ValueError):
+                    occurred_at = datetime.now(UTC)
+                version = str(
+                    SyncVersion.create(occurred_at, self._local_node_id, event_id)
+                )
+            else:
+                event_id = version_row["event_id"]
+                version = version_row["version_key"]
+            origin_node_id = SyncVersion.parse(version).origin_node_id
+            events.append(
+                SyncEvent(
+                    1,
+                    event_id,
+                    origin_node_id,
+                    SyncNodeType.PARAGRAPH,
+                    entity_key,
+                    SyncOperation.UPSERT,
+                    version,
+                    self._scope_from_row(row),
+                    dict(row),
+                )
+            )
         for edge in self._store._edges:
             source = self._store._functions.get(edge.source)
             if source is None:
@@ -1166,6 +1277,36 @@ class LiteSyncRepository(AbstractSyncRepository):
         node_id = event.entity_key.node_id
         if node_id is None:
             raise ValueError("node event requires node entity key")
+
+        # ADR-013 Stage 3: raw-paragraph rows are dict-native; validate via
+        # the row validator and stamp the authenticated scope identity,
+        # mirroring the typed-node apply contract.
+        if event.node_type is SyncNodeType.PARAGRAPH:
+            from memplex.storage.lite.store import _validate_raw_paragraph
+
+            if event.operation is SyncOperation.TOMBSTONE:
+                self._store._paragraphs.pop(node_id, None)
+                return
+            payload = event.to_dict()["payload"]
+            if type(payload) is not dict or payload.get("id") != node_id:
+                raise ValueError("node payload identity mismatch")
+            row = _validate_raw_paragraph(dict(payload))
+            row["tenant_id"] = event.scope.tenant_id
+            row["owner_subject_id"] = event.scope.owner_subject_id
+            row["workspace_id"] = event.scope.workspace_id
+            row["visibility"] = event.scope.visibility
+            namespace = dict(row.get("namespace") or {})
+            namespace["memplex_tenant_id"] = event.scope.tenant_id
+            namespace["memplex_subject_id"] = event.scope.owner_subject_id
+            if event.scope.workspace_id:
+                namespace["memplex_workspace_id"] = event.scope.workspace_id
+            namespace["memplex_visibility"] = event.scope.visibility
+            if event.scope.agent_id:
+                namespace["memplex_source_agent"] = event.scope.agent_id
+            row["namespace"] = namespace
+            self._store._paragraphs[node_id] = row
+            return
+
         collection: Any
         if event.node_type is SyncNodeType.FUNCTION:
             collection = self._store._functions

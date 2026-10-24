@@ -924,6 +924,57 @@ class PostgresSyncRepository(AbstractSyncRepository):
         node_id = event.entity_key.node_id
         if node_id is None:
             raise ValueError("node event must carry a node key")
+
+        # ADR-013 Stage 3: inbound paragraph events upsert/delete the
+        # raw-paragraph table. Local paragraph EMISSION stays deferred to
+        # the Phase-B trigger migration (snapshot reads require
+        # trigger-written entity versions).
+        if event.node_type is SyncNodeType.PARAGRAPH:
+            if event.operation is SyncOperation.TOMBSTONE:
+                cursor.execute(
+                    "DELETE FROM memplex_paragraphs WHERE tenant_id=%s AND id=%s",
+                    (scope.tenant_id, node_id),
+                )
+                return
+            if type(payload) is not dict:
+                raise TypeError("paragraph upsert payload must be a JSON object")
+            raw_text = str(payload.get("raw_text") or "")
+            if not raw_text.strip():
+                raise ValueError("paragraph payload requires non-empty raw_text")
+            trust_tier_raw = payload.get("trust_tier", 3)
+            if type(trust_tier_raw) is not int:
+                raise TypeError("paragraph trust_tier must be an int")
+            trust_tier: int = trust_tier_raw
+            source = str(payload.get("source") or "")
+            data = json.dumps(
+                {"raw_text": raw_text, "trust_tier": trust_tier, "source": source[:200]},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cursor.execute(
+                "INSERT INTO memplex_paragraphs "
+                "(id, data, updated_at, tenant_id, owner_subject, workspace, "
+                "visibility, source_agent, source_session) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (tenant_id, id) DO UPDATE SET "
+                "data=EXCLUDED.data, updated_at=EXCLUDED.updated_at, "
+                "owner_subject=EXCLUDED.owner_subject, workspace=EXCLUDED.workspace, "
+                "visibility=EXCLUDED.visibility, source_agent=EXCLUDED.source_agent, "
+                "source_session=EXCLUDED.source_session",
+                (
+                    node_id,
+                    data,
+                    datetime.now(UTC),
+                    scope.tenant_id,
+                    scope.owner_subject_id,
+                    scope.workspace_id or "",
+                    scope.visibility,
+                    scope.agent_id or "",
+                    scope.session_id or "",
+                ),
+            )
+            return
+
         table = {
             SyncNodeType.FUNCTION: "memplex_functions",
             SyncNodeType.FACT: "memplex_facts",

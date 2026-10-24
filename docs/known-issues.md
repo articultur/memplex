@@ -1,0 +1,51 @@
+# Known issues & retained low-severity findings（2026-10-24 建档）
+
+本文件是仓库级的已知问题清单：评审/修复中保留的低危项与尚未开工的大块遗留。
+低危保留项的原文未随工作流报告完整保存，此处收录的是**可考证的实质内容**
+（来源：修复员自报风险、终审披露、能力合同表），不是逐字评审记录。
+
+## 低危保留项（已确认存在、暂不处理）
+
+1. **热层 user 可见性条目被 workspace 预检分区**：working-memory 层内 user 条目
+   先按 workspace 分区再做 owner 检查，比持久层的 user 分支（租户内全可见，
+   仅 owner 限定）更严。属 fail-closed 收紧而非放宽；持久层语义未动。
+2. **直调 `MemplexService.write` 传未知 visibility 字符串会整体抛 ValueError**
+   （fail-closed）而非旧静默改 tenant：仓库内所有调用方经 runtime 层白名单
+   校验不受影响，直调方（如有）会遇到新异常——是有意的行为变更。
+3. **本地单机兼容分支**：service 默认写入（local-development）与 local-process
+   runtime 共享 `tenant:local` 热层分区，该分支仅在 local scope 生效并有测试
+   钉死（`test_real_tenant_runtime_never_takes_compatibility_branch`）。
+4. **retrieval 判定仍是 top-24 gold-session 覆盖代理指标**：gap_forensics 的
+   full-coverage 是口径修正，不是新增真值来源；counting_intent 为关键词启发式
+   （99/133 判计数），无人工抽检。
+5. **基线矩阵单次运行、无方差口径**；orchestrated 组合臂在本地无增强 LLM 时
+   退化（default≡orchestrated 的零差只反映退化生效，不可外推）。
+6. **Mimosa normal 深度静态扫描 43 findings 未逐条复核**
+   （scanId `scan-2026-10-24T17-56-02`，seal `sha256:3e220cf…`，
+   static-only 边界；历次深扫画像为已知误报家族 + 占位符，但本次未复核）。
+7. **`scripts/` 目录 23 处 ruff 欠账**：不在 CI lint 门禁面（门禁只覆盖
+   `memplex tests`），属既有脚本的历史欠账，与近期提交无关。
+
+## 大块遗留（需独立决策或战役，未开工）
+
+- **发版**：141+ 提交未发布，两个安全修复（热记忆词表、段落 ACL 身份）不在
+  任何 release。版本九处声明 bump + tag + push 需用户明确授权。
+- **ADR-012 Phase B/C 验收缺口**：crash 测试为 monkeypatch 替换（非真实
+  kill -9/事务中/WAL checkpoint 矩阵）、30 分钟死锁 soak 未跑、全量 rw 语义
+  回归不全；"单一大库 5908 会话吞吐塌缩 ≥7 倍"的根治在此（短期以每题新库
+  runner 模式绕开）。
+- **PG parity 关闭**：段落不进检索（Phase B 窗口）、无 trust 惩罚/配额、
+  `vector_search` 只查 functions——红队结论不可跨后端迁移
+  （见 `docs/capability-parity-2026-10.md` 表 B）。
+- **hubs / consolidation 不走 derivation lineage**、无 agent_inferred tier：
+  派生内容的权限/信任合同缺口。
+- **working memory 失效联动**：进程内 TTL 层在主存储删除/更新时无失效机制
+  （独立短期一致性边界）。
+- **打分 harness（P3 协议）**：检索级基线无答案正确率维度；需 answerer/judge
+  API 预算。
+- **四宿主真实安装矩阵**：受网络窗口限制未跑；MCP 2026-07-28 双时代兼容未做。
+- **legacy LWW 与 durable sync 双轨语义未收敛**（P2）。
+
+## 维护规则
+
+- 每项落地后从本文件移除并在对应提交里注明；新保留项入档时注明来源与日期。

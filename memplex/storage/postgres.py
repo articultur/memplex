@@ -1326,6 +1326,29 @@ class PostgresMemoryStore:
         payload = row[0] if not isinstance(row[0], str) else _json.loads(row[0])
         return dict(payload)
 
+    def delete_paragraph(self, para_id: str) -> bool:
+        """Delete one raw-paragraph row (ADR-013 Stage 3 privacy path).
+
+        Local paragraph capture is NOT registered here (unlike typed
+        deletes): memplex_paragraphs has no sync capture trigger yet, so
+        the deletion does not emit an outbound event — the inbound side
+        (postgres_sync) applies paragraph tombstones from peers. Local
+        paragraph capture lands with the Phase-B trigger migration.
+        """
+        context = self._authorization_context()
+        with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
+            cur.execute(
+                f"DELETE FROM memplex_paragraphs WHERE {_acl_scope_sql('memplex_paragraphs')}"
+                " AND id = %s RETURNING id",
+                (para_id,),
+            )
+            deleted = cur.fetchone() is not None
+            if deleted:
+                self._record_changelog(
+                    cur, para_id, "deleted", f"Deleted paragraph: {para_id}", None
+                )
+        return deleted
+
     def add_preference(self, preference: Preference) -> None:
         """Persist a Preference (upsert by id) into ``memplex_preferences``."""
         self._stamp_node(preference)

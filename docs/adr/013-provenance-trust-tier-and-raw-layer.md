@@ -57,4 +57,12 @@ red-team baseline [redteam-poison-baseline](../evidence/redteam-poison-baseline/
 - Stage 2B premise resistance: rule-based demotion measured INEFFECTIVE
   (see stale-b2-premise-resistance evidence); kept disabled by default.
   The productive direction is inference-level resolution (open).
-- Stage 3: peer-mesh contract extension + hub/derived min propagation.
+- Stage 3 (in flight): `SyncNodeType.PARAGRAPH` rides existing
+  upsert/tombstone operations (no new sync methods); lite captures
+  paragraph rows with bound identity (legacy identity-less rows are
+  local-only), validates/applies inbound events with scope stamping,
+  and `delete_paragraph` + typed-delete cascade close the privacy
+  deletion path. PostgreSQL applies inbound paragraph events
+  (postgres_sync) but local paragraph capture waits for the Phase-B
+  trigger migration (snapshot reads require trigger-written entity
+  versions). peer-mesh trust_tier propagation rides the row payload.

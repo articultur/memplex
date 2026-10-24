@@ -1023,8 +1023,14 @@ class LiteMemoryStore:
         *,
         nodes: list[tuple[Any, SyncNodeType, SyncOperation]] | None = None,
         edges: list[tuple[GraphEdge, Function, SyncOperation]] | None = None,
+        paragraphs: list[tuple[dict, SyncOperation]] | None = None,
     ) -> None:
-        """Capture business changes and publish one pair or restore the base."""
+        """Capture business changes and publish one pair or restore the base.
+
+        ``paragraphs`` entries are raw-paragraph row snapshots (dicts) for
+        the ADR-013 Stage 3 sync surface; identity-less legacy rows are
+        skipped by the capture layer (sync requires bound identity).
+        """
         try:
             for edge, scope_node, operation in edges or []:
                 if operation is SyncOperation.TOMBSTONE:
@@ -1036,6 +1042,8 @@ class LiteMemoryStore:
                     self._sync_repository.capture_node(
                         node, node_type=node_type, operation=operation
                     )
+            for row, operation in paragraphs or []:
+                self._sync_repository.capture_paragraph_row(row, operation=operation)
             for node, node_type, operation in nodes or []:
                 if operation is SyncOperation.UPSERT:
                     self._sync_repository.capture_node(
@@ -1246,6 +1254,7 @@ class LiteMemoryStore:
             namespace["memplex_source_agent"] = source_agent
         from memplex.models.paragraph import persisted_paragraph_id
 
+        touched_ids: list[str] = []
         for para in paragraphs:
             raw_text = (getattr(para, "raw_text", "") or "").strip()
             if not raw_text:
@@ -1259,6 +1268,7 @@ class LiteMemoryStore:
                 # observed timestamp and identity binding are kept.
                 existing["observation_count"] = int(existing.get("observation_count", 1)) + 1
                 existing["last_observed_at"] = now
+                touched_ids.append(row_id)
                 continue
             self._paragraphs[row_id] = {
                 "id": row_id,
@@ -1274,8 +1284,16 @@ class LiteMemoryStore:
                 "visibility": visibility,
                 "namespace": dict(namespace),
             }
+            touched_ids.append(row_id)
         self._enforce_tier2_paragraph_cap()
-        self._commit_current_state()
+        # ADR-013 Stage 3: paragraph writes ride the sync change capture
+        # (identity-less legacy rows are skipped inside the capture layer).
+        # Rows evicted by the tier-2 cap above are no longer resident and
+        # therefore not captured as upserts.
+        touched_rows = [dict(self._paragraphs[i]) for i in touched_ids if i in self._paragraphs]
+        self._commit_sync_changes(
+            paragraphs=[(row, SyncOperation.UPSERT) for row in touched_rows]
+        )
 
     def _enforce_tier2_paragraph_cap(self) -> None:
         """ADR-013 F2b write-side: bound low-trust occupancy of the store.
@@ -1471,6 +1489,24 @@ class LiteMemoryStore:
                 (observation, SyncNodeType.OBSERVATION, SyncOperation.TOMBSTONE)
             ]
         )
+
+    @_with_writer_lock
+    def delete_paragraph(self, para_id: str) -> bool:
+        """Delete one raw-paragraph row (ADR-013 Stage 3 privacy path).
+
+        Previously the raw layer had no public deletion surface: typed
+        nodes were deletable while their verbatim source rows persisted
+        forever. Returns whether a row was removed; the tombstone rides
+        the sync capture (identity-less legacy rows are skipped there).
+        """
+        self._reload_for_mutation()
+        row = self._paragraphs.pop(para_id, None)
+        if row is None:
+            return False
+        self._commit_sync_changes(
+            paragraphs=[(row, SyncOperation.TOMBSTONE)]
+        )
+        return True
 
     @_with_writer_lock
     def increment_access(self, func_id: str) -> None:

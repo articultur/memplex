@@ -1739,7 +1739,16 @@ class MemplexService:
         *,
         authorization: AuthorizationContext | None = None,
     ) -> None:
-        """Delete a visible memory through its typed store boundary."""
+        """Delete a visible memory through its typed store boundary.
+
+        ADR-013 Stage 3: the delete cascades to the node's verbatim
+        paragraph rows once no remaining typed node references them
+        (previously the typed node vanished while its raw text persisted
+        forever). Paragraphs still referenced by other nodes are kept;
+        backends without resident-collection scanning (the PostgreSQL
+        request facade) skip the cascade - their ``delete_paragraph``
+        remains the explicit path.
+        """
         context = self._require_authorization(authorization)
         node = self._require_visible_node(memory_id, context)
         delete_method = {
@@ -1747,10 +1756,58 @@ class MemplexService:
             "preference": "delete_preference",
             "observation": "delete_observation",
         }.get(getattr(node, "memory_type", ""), "delete")
-        delete = getattr(self._store_for(context), delete_method, None)
+        store = self._store_for(context)
+        delete = getattr(store, delete_method, None)
         if not callable(delete):
             raise MemoryNotFoundError("Memory not found")
         delete(memory_id)
+        self._cascade_orphaned_paragraphs(store, node)
+
+    @staticmethod
+    def _cascade_orphaned_paragraphs(store: Any, deleted_node: Any) -> None:
+        """Delete the deleted node's paragraphs that no other typed node
+        still references. Shared rows (multiple referencing nodes, or the
+        content-addressed dedup of identical text observed elsewhere) stay
+        resident - deleting them would sever another node's verbatim
+        source."""
+        candidates = [
+            str(ref)
+            for ref in (getattr(deleted_node, "source_paragraphs", None) or [])
+            if ref
+        ]
+        if not candidates:
+            return
+        delete_paragraph = getattr(store, "delete_paragraph", None)
+        if not callable(delete_paragraph):
+            return
+        collections: list[Any] = []
+        for attr in ("_functions", "_facts", "_preferences"):
+            resident = getattr(store, attr, None)
+            if isinstance(resident, dict):
+                collections.append(resident.values())
+        if not collections:
+            # No resident-collection scan surface (e.g. the PostgreSQL
+            # request facade): references cannot be resolved here, so the
+            # cascade is skipped rather than over-deleting shared rows.
+            logger.debug(
+                "paragraph cascade skipped: store exposes no resident collections"
+            )
+            return
+        referenced: set[str] = set()
+        for nodes in collections:
+            for other in nodes:
+                referenced.update(
+                    str(ref)
+                    for ref in (getattr(other, "source_paragraphs", None) or [])
+                    if ref
+                )
+        for para_id in candidates:
+            if para_id in referenced:
+                continue
+            try:
+                delete_paragraph(para_id)
+            except Exception as exc:  # noqa: BLE001 - logged degradation path
+                logger.debug("paragraph cascade delete failed for %s: %s", para_id, exc)
 
     # ════════════════════════════════════════════════════════════════
     #  Feedback
