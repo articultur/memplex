@@ -36,16 +36,18 @@ python -m unittest tests.test_offline_comparison -v
 python -m benchmarks.offline_comparison.longmemeval run \
   --dataset /path/to/cache/longmemeval_s_cleaned.json \
   --manifest benchmarks/offline_comparison/manifest.json \
-  --out /path/to/results --timeout 120
+  --out /path/to/new-results --timeout 120 --run-id recovery-v2-001
 python -m benchmarks.offline_comparison.obsolete_audit --out /path/to/obsolete-audit.json
 ```
 
 The 120-second bound is per complete question bank. A timeout or ingestion/query
-exception is an explicit error, never zero recall. All 100 are attempted. BM25 is
+exception is an explicit product result, never zero recall. All 100 are attempted
+unless execution ownership or infrastructure evidence is unresolved. BM25 is
 retained independently if product ingestion fails. Nonzero exit status means the
 comparison is blocked or incomplete; inspect `summary.json` and `records.jsonl`.
-Resume is allowed only with the identical manifest, product source, harness,
-dependencies, runtime receipt and timeout. Use a new output directory after changes.
+Resume is allowed only with the identical run ID, manifest, product source, harness,
+recovery helper, dependencies, runtime receipt and timeout. Use a new output directory
+and a new run ID after changes. This version cannot resume or recertify an older run.
 A truncated JSONL final line fails closed and needs manual recovery; it is never
 silently discarded. Records without their matching receipt are rejected.
 No run option selects a favorable smaller subset. Gold answers are not used at all;
@@ -114,4 +116,61 @@ so the role prefix does not swallow the first standalone heading:
 
 ```sh
 python -m benchmarks.offline_comparison.reproduce_ingest_collision --out /path/to/diagnostic.json
+```
+
+
+## Recovery protocol 2 (new runs only)
+
+This is a local Linux supervisor for the existing harness, not a daemon. The runner
+holds `run.lock` before reading/writing run evidence. The supervisor and worker
+inherit that same flock descriptor. Closing the runner never explicitly unlocks
+an inherited lease. A second runner fails immediately while any owner retains it.
+The supervisor launches an isolated worker process group, uses Linux subreaping to
+adopt descendants (including children that make a new session), and terminates and
+reaps that tree after a deadline or lost owner pipe. Cleanup must be proven before
+an interruption can be retried. Cleanup failures or exceptions retain the supervisor
+and lock, publish a cleanup-unproven heartbeat, and keep attempting reaping. A killed supervisor leaves an unresolved journal
+and any surviving worker retains the lock; it never triggers automatic takeover.
+
+`heartbeat.json` is refreshed about every 20 seconds during a question. It names
+the owner, supervisor, attempt, question, immutable receipt digest, and last durable
+record checkpoint. PID values are meaningful only in the originating PID namespace.
+A stale heartbeat means unknown progress, never permission to break a lock.
+
+`attempts.json` is an atomically published journal separate from scored records:
+
+- A structured product success/error or intentional per-question deadline is a
+  terminal product result. Existing terminal records are never rerun.
+- Owner-pipe EOF proves that the runner disconnected. After the supervisor proves
+  complete tree cleanup, a later invocation may retry that pending question once.
+  The two-attempt limit is persisted across all invocations, not reset on restart.
+- A bare nonzero worker exit, signal, missing/malformed output, supervisor crash,
+  incomplete cleanup, or ambiguous journal blocks the run for diagnosis. It is
+  neither a product failure nor an automatic retry. No provider call is retried.
+- Worker result files are themselves atomically published and fsynced. After owner
+  EOF, the supervisor reaps first and preserves an already-published valid result;
+  malformed existing output blocks, while absent output may qualify for one retry.
+- A durable product result that precedes a crash during record publication is reused
+  from the journal; it does not launch another product worker. Complete/error result
+  schemas are checked before terminal journaling, on resume, and before checkpointing.
+
+`records.jsonl` keeps its existing format but is now a canonical snapshot: write a
+unique same-directory temporary file, fsync it, replace the checkpoint, then fsync
+the directory. The receipt is created once and never replaced during resume. The
+summary remains derived and can be rebuilt even if all 100 records already exist.
+Malformed existing JSONL/journals and receipt mismatches fail closed. There is no
+truncate, repair, reset-attempts, force-unlock, or stale-takeover option.
+
+Resume by repeating the exact original command against the same output directory
+only after the old local supervisor has exited and released the OS lock. If an
+attempt is unresolved, preserve all evidence and investigate; do not edit it into
+an eligible interruption. Cross-executor recovery requires independently confirmed
+old-executor closure or effective fencing. Local locks/fsync do not provide that
+proof, nor can they recover data lost to destroyed storage or a rolled-back workspace
+snapshot. Those cases require a separate new run after ownership is resolved.
+
+Offline recovery fault tests (no corpus fetch, product benchmark, or paid model):
+
+```sh
+python -m pytest tests/test_offline_comparison.py tests/test_offline_recovery.py -q
 ```
