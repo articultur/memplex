@@ -24,13 +24,11 @@ from memplex.auth import (
     bind_node_identity,
     local_development_context,
 )
-from memplex.models.source import SourceType
+from memplex.models import SourceType
 
 if TYPE_CHECKING:
     from memplex.models import ExtractedData, SearchResult
     from memplex.storage.feedback import FeedbackStore
-
-from memplex.models import SourceType
 
 logger = logging.getLogger(__name__)
 
