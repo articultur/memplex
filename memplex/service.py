@@ -1342,7 +1342,9 @@ class MemplexService:
         ) not in {"0", "false", "False"}:
             persist_paragraphs = getattr(store, "persist_paragraphs", None)
             if callable(persist_paragraphs):
-                identity_options = {"authorization": context, "visibility": visibility} if factual_capture else {}
+                identity_options: dict[str, Any] = (
+                    {"authorization": context} if factual_capture else {}
+                )
                 persist_paragraphs(
                     extracted.paragraphs,
                     trust_tier=tier,

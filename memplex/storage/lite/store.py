@@ -1877,13 +1877,29 @@ class LiteMemoryStore:
         self._vector_index.set_embedder(embedder)
 
     def _historical_source_paragraphs(self) -> set[str]:
-        """Raw evidence survives edits but is no longer a current answer body."""
-        return {
+        """Raw evidence survives edits but is no longer a current answer body.
+
+        Two authorship paths demote a paragraph to historical: an explicit
+        Function role edit (``memplex_role_updates``), and a Fact or
+        Preference superseded by bi-temporal conflict resolution
+        (``invalid_at`` set) - the replacement fact carries the current
+        answer, so the superseded capture's verbatim paragraph must not
+        resurface as a current body now that paragraphs resolve through
+        the runtime namespace filter.
+        """
+        historical = {
             source_id
             for func in self._functions.values()
             if func.attributes.get("memplex_role_updates")
             for source_id in func.source_paragraphs
         }
+        historical.update(
+            source_id
+            for node in (*self._facts.values(), *self._preferences.values())
+            if getattr(node, "invalid_at", None)
+            for source_id in getattr(node, "source_paragraphs", None) or []
+        )
+        return historical
 
     def _semantic_documents(self) -> list[tuple[str, str]]:
         """Document projection shared by the vector and sparse legs."""
