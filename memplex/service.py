@@ -1343,23 +1343,21 @@ class MemplexService:
             persist_paragraphs = getattr(store, "persist_paragraphs", None)
             if callable(persist_paragraphs):
                 identity_options: dict[str, Any] = (
-                    {"authorization": context} if factual_capture else {}
+                    {"authorization": context, "visibility": visibility}
+                    if factual_capture
+                    else {}
                 )
+                # Identity note (post-merge semantics, per the factual
+                # lifecycle contract): paragraphs gain write-bound identity
+                # ONLY through the authorized factual-capture path. Plain
+                # writes stay identity-less (local-development-readable,
+                # never adopted or widened by a later authorized replay) -
+                # runtime recall of paragraphs flows through the store ACL
+                # reference resolution either way.
                 persist_paragraphs(
                     extracted.paragraphs,
                     trust_tier=tier,
                     source_hint=getattr(source, "type", "text") or "text",
-                    # P0 identity binding: verbatim paragraphs carry the
-                    # write's ACL identity so the authenticated runtime
-                    # recalls them under the same tenant/visibility
-                    # boundary as its typed nodes (fail-closed for
-                    # identity-less legacy rows). The authorization-context
-                    # form rides along for the factual-capture path.
-                    tenant_id=context.principal.tenant_id,
-                    owner_subject_id=context.principal.subject_id,
-                    workspace_id=context.workspace_id,
-                    visibility=visibility,
-                    source_agent=context.agent_id,
                     **identity_options,
                 )
                 from memplex.models.paragraph import persisted_paragraph_id
