@@ -142,21 +142,57 @@ def test_raw_lineage_lookup_rejects_aliased_projection():
     assert _TypedNodeLookup(Store()).get("raw") is None
 
 
-def test_async_entry_point_is_bounded_when_provider_suppresses_cancellation():
-    import time
+def test_async_entry_point_is_bounded_when_provider_suppresses_cancellation(monkeypatch):
+    from threading import Event
+
+    from memplex.llm import factual_capture
+
+    cancelled, release, finished, worker_done = Event(), Event(), Event(), Event()
+    waits = []
+
+    class ObservedEvent(Event):
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return super().wait(timeout)
+
+        def set(self):
+            super().set()
+            worker_done.set()
+
+    # Observe the real foreground wait, without changing its timing or result.
+    monkeypatch.setattr(factual_capture, "Event", ObservedEvent)
 
     class Uncooperative:
         async def complete_json(self, prompt):
             try:
-                await asyncio.sleep(0.3)
-            except asyncio.CancelledError:
-                await asyncio.sleep(0.2)
-            return {"facts": []}
+                while not release.is_set():
+                    try:
+                        await asyncio.sleep(0.01)
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                return {"facts": []}
+            finally:
+                finished.set()
+
     enhancer = LLMEnhancer(Uncooperative(), LLMConfig(factual_capture_timeout_seconds=0.02))
-    start = time.monotonic()
-    outcome = asyncio.run(enhancer.factualize(EVIDENCE))
-    assert outcome.status == "timeout"
-    assert time.monotonic() - start < 0.15
+
+    async def scenario():
+        try:
+            # A deadlock watchdog, not a latency SLA: thread dispatch and loop
+            # shutdown on shared CI runners are outside the capture wait budget.
+            outcome = await asyncio.wait_for(enhancer.factualize(EVIDENCE), timeout=5)
+            assert waits == [0.02]
+            assert outcome.status == "timeout"
+            assert await asyncio.to_thread(cancelled.wait, 5)
+            # The provider cannot finish until this test releases it. Returning
+            # first proves we did not wait for cancellation acknowledgement.
+            assert not finished.is_set()
+        finally:
+            release.set()
+            assert await asyncio.to_thread(worker_done.wait, 5)
+            assert finished.is_set()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("name,value", [("TIMEOUT_SECONDS", "inf"), ("MAX_FACTS", "1000000")])
