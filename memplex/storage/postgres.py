@@ -37,8 +37,10 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from functools import wraps
 from hashlib import sha256
@@ -57,6 +59,7 @@ from memplex.models import (
     Function,
     GraphData,
     GraphEdge,
+    MemoryNode,
     MergeResult,
     Observation,
     Preference,
@@ -214,8 +217,15 @@ def _func_to_json(func: Function) -> dict:
     tsvector column (``trigger_text`` / ``action_text`` are PG-only keys,
     ignored by :meth:`Function.from_dict`)."""
     d = func.to_dict()
-    d["trigger_text"] = " ".join(fv.desc for fv in func.trigger)
-    d["action_text"] = " ".join(fv.desc for fv in func.action)
+    # The frozen generated tsvector indexes these two derived JSON keys.
+    # Include qualifiers/results alongside their corresponding roles so all
+    # current fields remain searchable without rewriting the schema.
+    d["trigger_text"] = " ".join(
+        fv.desc for fv in (*func.trigger, *func.condition) if fv.status == "active"
+    )
+    d["action_text"] = " ".join(
+        fv.desc for fv in (*func.action, *func.benefit) if fv.status == "active"
+    )
     return d
 
 
@@ -255,6 +265,37 @@ def _func_from_json(d: dict) -> Function:
     rows.
     """
     return Function.from_dict(d)
+
+
+def _fact_search_result(fid: str, data: dict[str, Any], score: float) -> SearchResult | None:
+    """Project one typed Fact candidate without letting corrupt rows poison a leg."""
+    if data.get("memory_type", "fact") != "fact":
+        return None
+    try:
+        fact = Fact.from_dict(data)
+    except (TypeError, ValueError):
+        return None
+    parts = (fact.subject, fact.predicate, fact.object_)
+    if not all(isinstance(value, str) for value in (fact.name, *parts)):
+        return None
+    if not all(value is None or isinstance(value, str) for value in (fact.domain, fact.origin_session)):
+        return None
+    if not all(value is None or isinstance(value, (str, datetime)) for value in (fact.created_at, fact.updated_at)):
+        return None
+    if not isinstance(fact.source_type, SourceType):
+        return None
+    body = " ".join(part for part in parts if part).strip()
+    return SearchResult(
+        func_id=fid,
+        name=fact.name,
+        domain=fact.domain or "",
+        relevance_score=score,
+        summary=body or fact.name,
+        source_type=fact.source_type,
+        created_at=fact.created_at,
+        updated_at=fact.updated_at,
+        origin=fact.origin_session or "",
+    )
 
 
 def _obs_to_json(obs: Observation) -> dict:
@@ -590,7 +631,8 @@ class PostgresMemoryStore:
         Legacy unscoped development calls retain their historical payload
         semantics, while the relational columns still receive the auditable
         local-development identity.  Authenticated store writes canonicalize
-        every identity and provenance field to the trusted context.  Ingress
+        every identity and authentication field to the trusted context. Capture
+        audit metadata survives this second bind without conferring authority. Ingress
         boundaries reject forged payload claims before reaching the store;
         canonicalization here also permits a workspace member to persist an
         update loaded from another member without preserving the prior owner.
@@ -601,12 +643,16 @@ class PostgresMemoryStore:
             # Validate session prerequisites before the first lookup or write;
             # relying on RLS alone is insufficient for bypass-RLS owners.
             self._row_identity_values(context, node, visibility=visibility)
+            from memplex.factual_lineage import capture_audit_provenance
+
+            capture_audit = capture_audit_provenance(node)
             bind_node_identity(
                 node,
                 context,
                 visibility=visibility,
                 reject_conflicts=False,
             )
+            node.provenance.update(capture_audit)
         return context
 
     @staticmethod
@@ -720,7 +766,9 @@ class PostgresMemoryStore:
             return None
         try:
             text = f"{func.name} {func.domain or ''} " + " ".join(
-                fv.desc for fv in (func.trigger + func.action)
+                fv.desc
+                for role in (func.trigger, func.condition, func.action, func.benefit)
+                for fv in role if fv.status == "active"
             )
             vec = self._embedder.embed(text)
             if vec and len(vec) == self._vector_dim:
@@ -734,6 +782,8 @@ class PostgresMemoryStore:
         cur: Any,
         func: Function,
         relational_identity: tuple[str, str, str, str, str, str] | None = None,
+        *,
+        clear_failed_embedding: bool = False,
     ) -> None:
         """Upsert *func* using the caller-owned transaction cursor.
 
@@ -781,6 +831,23 @@ class PostgresMemoryStore:
             )
             self._require_returning(cur, (func.id,))
         else:
+            # An explicit edit must never keep the previous text's vector
+            # when regeneration fails. A disabled writer can still share a
+            # vector-enabled schema with another process, so consult the
+            # actual column rather than equating disabled policy with no
+            # column. Ordinary metadata/merge writes retain their behavior.
+            has_embedding_column = self._vector_dim > 0
+            if clear_failed_embedding and not has_embedding_column:
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute "
+                    "WHERE attrelid = 'memplex_functions'::regclass "
+                    "AND attname = 'embedding' AND attnum > 0 AND NOT attisdropped)"
+                )
+                column_row = cur.fetchone()
+                has_embedding_column = bool(column_row and column_row[0] is True)
+            clear_embedding_sql = (
+                "embedding = NULL," if clear_failed_embedding and has_embedding_column else ""
+            )
             cur.execute(
                 f"""
                 INSERT INTO memplex_functions
@@ -790,6 +857,7 @@ class PostgresMemoryStore:
                 ON CONFLICT (tenant_id, id) DO UPDATE SET
                     data = EXCLUDED.data,
                     updated_at = EXCLUDED.updated_at,
+                    {clear_embedding_sql}
                     owner_subject = EXCLUDED.owner_subject,
                     workspace = EXCLUDED.workspace,
                     visibility = EXCLUDED.visibility,
@@ -881,6 +949,40 @@ class PostgresMemoryStore:
                 else "Merged fields from source"
             )
             self._record_changelog(cur, node.id, event_type, description, source, node=node)
+
+    def update_function_role(
+        self,
+        memory_id: str,
+        role: str,
+        new_value: str,
+        *,
+        before_persist: Callable[[Function], None] | None = None,
+    ) -> tuple[Function, str | None]:
+        """Edit one role on the locked canonical row, retaining its history.
+
+        Patching the locked row rather than replacing a caller snapshot
+        preserves concurrent edits to other roles.  The Function, current
+        search projection, embedding and audit entry share one transaction.
+        """
+        context = self._authorization_context()
+        with self._function_write_transaction(context, "update_function_role") as cur:
+            locked = self._locked_function_by_id(cur, memory_id, context)
+            if locked is None:
+                raise PostgresWriteRejected(_PG_WRITE_NO_AUTHORIZED_ROW)
+            canonical, identity = locked
+            # Keep the existing shared-workspace writer-attribution contract.
+            # Private/session records retain the locked identity and grants.
+            if canonical.visibility == "workspace":
+                self._write_identity(canonical)
+                identity = self._row_identity_values(context, canonical)
+            old_value = canonical.update_role(role, new_value)
+            if before_persist is not None:
+                before_persist(canonical)
+            self._upsert_function(cur, canonical, identity, clear_failed_embedding=True)
+            self._record_changelog(
+                cur, canonical.id, "updated", f"Updated {role}", None, node=canonical,
+            )
+        return canonical, old_value
 
     @staticmethod
     def _is_unique_violation(exc: BaseException) -> bool:
@@ -1254,6 +1356,7 @@ class PostgresMemoryStore:
         workspace_id: str | None = None,
         visibility: str | None = None,
         source_agent: str | None = None,
+        authorization: AuthorizationContext | None = None,
     ) -> None:
         """ADR-013 Stage 2 raw layer on PostgreSQL (B3): upsert verbatim
         paragraphs into ``memplex_paragraphs``.
@@ -1275,6 +1378,8 @@ class PostgresMemoryStore:
         from memplex.models.paragraph import persisted_paragraph_id
 
         context = self._authorization_context()
+        if authorization is not None and authorization != context:
+            raise PermissionError("paragraph identity must match the scoped store")
         now = datetime.now(UTC)
         with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
             for para in paragraphs:
@@ -1284,7 +1389,9 @@ class PostgresMemoryStore:
                 row_id = persisted_paragraph_id(
                     source_hint, getattr(para, "id", ""), raw_text
                 )
-                identity = self._row_identity_values(context)
+                identity = self._row_identity_values(
+                    context, visibility=visibility or "workspace"
+                )
                 cur.execute(
                     """
                     INSERT INTO memplex_paragraphs
@@ -1595,21 +1702,55 @@ class PostgresMemoryStore:
     def vector_search(self, text: str, top_k: int = 5) -> list[SearchResult]:
         """Hybrid search: tsvector full-text + optional pgvector cosine.
 
-        When pgvector is enabled and an embedder is configured, runs both a
-        tsvector and a vector-cosine query and merges them with Reciprocal
-        Rank Fusion (RRF). Otherwise degrades to tsvector-only.
+        Functions and Facts share a bounded lexical leg. The optional
+        pgvector leg searches only Functions; Reciprocal Rank Fusion (RRF)
+        merges the two legs. Current-state authorization still belongs to
+        the service/runtime before any candidate reaches model context.
         """
+        if top_k <= 0:
+            return []
         # --- tsvector leg (always runs) ---
         cur = self._execute(
             f"""
-            SELECT id, data, ts_rank(search_tsv, plainto_tsquery('simple', %s)) AS score
-            FROM memplex_functions
-            WHERE {_acl_scope_sql()}
-              AND search_tsv @@ plainto_tsquery('simple', %s)
-            ORDER BY score DESC
+            WITH query AS (SELECT plainto_tsquery('simple', %s) AS terms)
+            SELECT id, data, score, row_kind FROM (
+                (
+                    SELECT f.id, f.data, ts_rank(f.search_tsv, query.terms) AS score,
+                           'function' AS row_kind
+                    FROM memplex_functions f CROSS JOIN query
+                    WHERE {_acl_scope_sql('f')}
+                      AND f.search_tsv @@ query.terms
+                    ORDER BY score DESC, f.id
+                    LIMIT %s
+                )
+                UNION ALL
+                (
+                    SELECT fact.id, fact.data,
+                           ts_rank(lexical.search_tsv, query.terms) AS score,
+                           'fact' AS row_kind
+                    FROM memplex_facts fact CROSS JOIN query
+                    CROSS JOIN LATERAL (
+                        SELECT to_tsvector('simple', COALESCE(
+                            NULLIF(btrim(concat_ws(' ',
+                                fact.data->>'subject', fact.data->>'predicate',
+                                COALESCE(fact.data->>'object', fact.data->>'object_')
+                            )), ''), fact.data->>'name', ''
+                        )) AS search_tsv
+                    ) lexical
+                    WHERE {_acl_scope_sql('fact')}
+                      AND lexical.search_tsv @@ query.terms
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memplex_functions shadow
+                          WHERE shadow.id = fact.id AND {_acl_scope_sql('shadow')}
+                      )
+                    ORDER BY score DESC, fact.id
+                    LIMIT %s
+                )
+            ) lexical_matches
+            ORDER BY score DESC, id
             LIMIT %s
             """,
-            (text, text, top_k * 2),
+            (text, top_k * 2, top_k * 2, top_k * 2),
             commit=False,
         )
         tsv_rows = cur.fetchall()
@@ -1644,31 +1785,39 @@ class PostgresMemoryStore:
     @staticmethod
     def _rrf_merge(tsv_rows: Any, vec_rows: Any, top_k: Any, k: int = 60) -> list[SearchResult]:
         """Reciprocal Rank Fusion of the two result legs."""
+        if top_k <= 0:
+            return []
         scores: dict = {}
         meta: dict = {}
         for rank, row in enumerate(tsv_rows):
             fid = row[0]
             scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
-            meta[fid] = row[1]
+            meta[fid] = (row[1], row[3] if len(row) > 3 else None)
         for rank, row in enumerate(vec_rows):
             fid = row[0]
             scores[fid] = scores.get(fid, 0.0) + 1.0 / (k + rank + 1)
             if fid not in meta:
-                meta[fid] = row[1]
-        ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+                meta[fid] = (row[1], "function")
+        ordered = sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         results = []
         for fid, score in ordered:
-            data = meta[fid]
+            data, row_kind = meta[fid]
             data = data if isinstance(data, dict) else json.loads(data)
-            results.append(
-                SearchResult(
+            if (row_kind or data.get("memory_type")) == "fact":
+                result = _fact_search_result(fid, data, score)
+                if result is None:
+                    continue
+            else:
+                result = SearchResult(
                     func_id=fid,
                     name=data.get("name", ""),
                     domain=data.get("domain", ""),
                     relevance_score=score,
                     summary=data.get("trigger_text", "") or data.get("name", ""),
                 )
-            )
+            results.append(result)
+            if len(results) == top_k:
+                break
         return results
 
     def fts_search(self, text: str, top_k: int = 10) -> list[SearchResult]:
@@ -1736,6 +1885,88 @@ class PostgresMemoryStore:
             return None
         data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         return _func_from_json(data)
+
+    def _read_context_paragraph(self, para_id: str) -> dict[str, Any] | None:
+        """Read a coherent raw body and its actual SQL identity for context.
+
+        ``get_paragraph`` intentionally retains its payload-only CRUD shape.
+        This committed projection reads body and ACL columns together, and
+        never promotes payload claims or the caller's identity to row proof.
+        Linked evidence stays available to lineage checks; a SQL-derived
+        historical flag prevents explicitly edited sources becoming current
+        model context, including cached raw IDs from another process.
+        """
+        context = self._authorization_context()
+        with self._pool_manager.transaction(self._bind_transaction_scope, context) as (_, cur):
+            cur.execute(
+                "SELECT id, data, tenant_id, owner_subject, workspace, visibility, "
+                "source_agent, source_session, "
+                "EXISTS (SELECT 1 FROM memplex_functions current_function WHERE "
+                + _acl_scope_sql("current_function")
+                + " AND current_function.tenant_id = memplex_paragraphs.tenant_id"
+                + " AND jsonb_typeof(current_function.data->'source_paragraphs') = 'array'"
+                + " AND current_function.data->'source_paragraphs' ? memplex_paragraphs.id"
+                + " AND coalesce(current_function.data->'attributes'->>'memplex_role_updates', '') <> '')"
+                + " AS context_historical FROM memplex_paragraphs WHERE id = %s AND "
+                + _acl_scope_sql("memplex_paragraphs"),
+                (para_id,),
+            )
+            row = cur.fetchone()
+        if row is None or len(row) != 9:
+            return None
+        row_id, payload, tenant, owner, workspace, visibility, agent, session, historical = row
+        if type(historical) is not bool:
+            return None
+        if not isinstance(row_id, str) or not row_id or row_id != para_id:
+            return None
+        # Every identity column is TEXT NOT NULL in 0007. An invalid
+        # SQL row must not fall into the identity-less Lite compatibility
+        # path or acquire the raw view's default workspace visibility.
+        if any(not isinstance(value, str)
+               for value in (tenant, owner, workspace, visibility, agent, session)):
+            return None
+        if not tenant.strip() or not visibility.strip():
+            return None
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        node = dict(payload)
+        # Persisted raw payloads carry no canonical ACL or source type.
+        # Clear all identity fallbacks, including grants and provenance, so
+        # contradictory or missing SQL claims cannot be supplied by JSON.
+        node.update(
+            id=row_id, tenant_id=tenant, owner=owner, owner_subject=owner,
+            owner_subject_id=owner, workspace_id=workspace, visibility=visibility,
+            origin_session=session, provenance={"agent_id": agent} if agent else {},
+            namespace={}, source_type=SourceType.WIKI, context_historical=historical,
+        )
+        return node
+
+    def read_context_nodes(
+        self, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryNode | dict[str, Any]]:
+        """Read through committed typed queries in the current request scope.
+
+        ``authorized(context)`` installs immutable scope around this entire
+        call; each getter retains its existing transaction-local ACL checks.
+        """
+        self._authorization_context()
+        getters = [self.get, self.get_fact, self.get_preference, self.get_observation]
+        paragraph_getter = getattr(self, "_read_context_paragraph", None)
+        if callable(paragraph_getter):
+            getters.append(paragraph_getter)
+        nodes: dict[str, MemoryNode | dict[str, Any]] = {}
+        for memory_id in dict.fromkeys(memory_ids):
+            for getter in getters:
+                node = getter(memory_id)
+                if node is not None:
+                    nodes[memory_id] = deepcopy(node)
+                    break
+        return nodes
 
     def get_neighbors(
         self,

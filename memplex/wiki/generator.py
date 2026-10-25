@@ -65,10 +65,10 @@ class LLMWikiGenerator:
         func_data = {
             "name": func.name,
             "domain": func.domain or "uncategorized",
-            "trigger": [fv.desc for fv in func.trigger],
-            "condition": [fv.desc for fv in func.condition],
-            "action": [fv.desc for fv in func.action],
-            "benefit": [fv.desc for fv in func.benefit],
+            "trigger": [fv.desc for fv in func.trigger if fv.status == "active"],
+            "condition": [fv.desc for fv in func.condition if fv.status == "active"],
+            "action": [fv.desc for fv in func.action if fv.status == "active"],
+            "benefit": [fv.desc for fv in func.benefit if fv.status == "active"],
         }
 
         prompt = LLMPromptSanitizer.build_structured_prompt(
@@ -88,7 +88,10 @@ class LLMWikiGenerator:
         Produces a concept-level overview including core responsibilities,
         functional components, collaboration patterns, and key workflows.
         """
-        funcs_data = [{"name": f.name, "action": [fv.desc for fv in f.action]} for f in functions]
+        funcs_data = [
+            {"name": f.name, "action": [fv.desc for fv in f.action if fv.status == "active"]}
+            for f in functions
+        ]
 
         prompt = LLMPromptSanitizer.build_structured_prompt(
             instruction=(
@@ -117,8 +120,8 @@ class LLMWikiGenerator:
         funcs_summary = [
             {
                 "name": f.name,
-                "trigger": [fv.desc for fv in f.trigger[:2]],
-                "action": [fv.desc for fv in f.action[:2]],
+                "trigger": [fv.desc for fv in f.trigger if fv.status == "active"][:2],
+                "action": [fv.desc for fv in f.action if fv.status == "active"][:2],
             }
             for f in functions[:20]
         ]
@@ -249,7 +252,8 @@ class LLMWikiGenerator:
         Parsed JSON dict from the LLM response.
         """
         func_summaries = [
-            f"{f.name}: {', '.join(fv.desc for fv in f.action[:1])}" for f in community_funcs[:20]
+            f"{f.name}: {', '.join([fv.desc for fv in f.action if fv.status == 'active'][:1])}"
+            for f in community_funcs[:20]
         ]
         safe_text = LLMPromptSanitizer.sanitize(
             "\n".join(func_summaries),

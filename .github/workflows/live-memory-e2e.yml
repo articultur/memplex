@@ -1,0 +1,65 @@
+name: Live memory E2E (manual, paid)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Exact reviewed commit SHA (must equal this workflow run SHA)
+        required: true
+        type: string
+      confirm_live:
+        description: Run 12 synthetic cases, at most 17 paid GLM-5.3 requests
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memplex-live-memory-e2e
+  cancel-in-progress: false
+
+jobs:
+  live-memory:
+    if: >-
+      github.repository == 'articultur/memplex' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      inputs.confirm_live && inputs.reviewed_sha == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: '0.10.9'
+          enable-cache: false
+      - name: Install locked offline test dependencies
+        run: uv sync --locked --extra dev
+      - name: Check harness before using a secret
+        run: uv run pytest tests/test_live_memory_e2e.py -q
+      - name: Run bounded synthetic live cases
+        timeout-minutes: 21
+        env:
+          MEMPLEX_LIVE_API_KEY: ${{ secrets.MEMPLEX_LIVE_API_KEY }}
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+        run: >-
+          uv run python scripts/run_live_memory_e2e.py
+          --confirm-live --reviewed-sha "$REVIEWED_SHA"
+          --out artifacts/live-memory-e2e.json
+      - name: Upload sanitized synthetic evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: live-memory-e2e-${{ github.sha }}
+          path: artifacts/live-memory-e2e.json
+          if-no-files-found: ignore
+          retention-days: 7

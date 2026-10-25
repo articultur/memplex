@@ -26,12 +26,13 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Final, cast
 
+from memplex.auth import AuthorizationContext, bind_node_identity
 from memplex.backup import (
     BackupArtifactWriter,
     BackupConfigurationError,
@@ -49,6 +50,7 @@ from memplex.models import (
     Function,
     GraphData,
     GraphEdge,
+    MemoryNode,
     MergeResult,
     Observation,
     Preference,
@@ -133,10 +135,16 @@ _PARAGRAPH_KEYS = {
     # fields plus the ``memplex_*`` namespace copies is_node_visible
     # reads through _RawParagraphView. Legacy rows load with these
     # absent (None/{} defaults) and stay local-development-only.
+    # ``owner``/``origin_session``/``provenance`` join from the parallel
+    # context-revalidation work (origin_session/provenance project
+    # through _RawParagraphView; owner is the legacy row spelling).
     "tenant_id",
     "owner_subject_id",
+    "owner",
     "workspace_id",
     "visibility",
+    "origin_session",
+    "provenance",
     "namespace",
 }
 # Every Nth commit pays the full double pre-durable decode audit even while
@@ -470,6 +478,14 @@ def _validate_raw_paragraph(row: Any) -> dict:
         raise ValueError("invalid Lite paragraph id")
     if type(row.get("raw_text")) is not str:
         raise ValueError("invalid Lite paragraph raw_text")
+    for name in ("tenant_id", "owner_subject_id", "owner", "workspace_id", "visibility", "origin_session"):
+        if name in row and row[name] is not None and type(row[name]) is not str:
+            raise ValueError("invalid Lite paragraph identity")
+    for name in ("provenance", "namespace"):
+        if name in row and (type(row[name]) is not dict or any(
+            type(key) is not str or type(value) is not str for key, value in row[name].items()
+        )):
+            raise ValueError("invalid Lite paragraph provenance")
     row.setdefault("trust_tier", 3)
     row.setdefault("created_at", None)
     row.setdefault("source", "")
@@ -730,6 +746,7 @@ class LiteMemoryStore:
         self._edges: list[GraphEdge] = []
         self._edges_by_node: dict[str, dict[str, list[GraphEdge]]] = {}
         self._observations: list[Observation] = []
+        self._observations_by_id: dict[str, Observation] = {}
         self._facts: dict[str, Fact] = {}
         self._preferences: dict[str, Preference] = {}
         # Per-thread locked-call depth for the single-writer reentrancy
@@ -1246,6 +1263,7 @@ class LiteMemoryStore:
         workspace_id: str | None = None,
         visibility: str | None = None,
         source_agent: str | None = None,
+        authorization: AuthorizationContext | None = None,
     ) -> None:
         """Persist verbatim paragraphs into the raw layer (ADR-013 S2).
 
@@ -1268,18 +1286,41 @@ class LiteMemoryStore:
         local-development-only - fail-closed, never widened.
         """
         self._reload_for_mutation()
-        now = datetime.now(UTC).isoformat()
-        namespace: dict[str, Any] = {}
+        # Identity sources, unioned: the service kwargs path (P0 binding)
+        # and the authorization-context bind (context-revalidation path).
+        # Explicit kwargs win when both are supplied; neither may widen a
+        # legacy identity-less row (replay keeps first-write identity).
+        identity: dict[str, Any] = {}
+        if authorization is not None:
+            # Only newly written rows gain actual write-boundary identity.
+            # Replay must never adopt or widen a legacy identity-less row.
+            bound = bind_node_identity(Fact(), authorization, visibility=visibility or "workspace")
+            identity = {key: getattr(bound, key) for key in (
+                "tenant_id", "owner_subject_id", "owner", "workspace_id", "visibility",
+                "origin_session", "provenance", "namespace",
+            )}
+        if tenant_id is not None:
+            identity["tenant_id"] = tenant_id
+        if owner_subject_id is not None:
+            identity["owner_subject_id"] = owner_subject_id
+        if workspace_id is not None:
+            identity["workspace_id"] = workspace_id
+        if visibility is not None:
+            identity["visibility"] = visibility
+        merged_namespace: dict[str, Any] = dict(identity.get("namespace") or {})
         if tenant_id:
-            namespace["memplex_tenant_id"] = tenant_id
+            merged_namespace["memplex_tenant_id"] = tenant_id
         if owner_subject_id:
-            namespace["memplex_subject_id"] = owner_subject_id
+            merged_namespace["memplex_subject_id"] = owner_subject_id
         if workspace_id:
-            namespace["memplex_workspace_id"] = workspace_id
+            merged_namespace["memplex_workspace_id"] = workspace_id
         if visibility:
-            namespace["memplex_visibility"] = visibility
+            merged_namespace["memplex_visibility"] = visibility
         if source_agent:
-            namespace["memplex_source_agent"] = source_agent
+            merged_namespace["memplex_source_agent"] = source_agent
+        if merged_namespace:
+            identity["namespace"] = merged_namespace
+        now = datetime.now(UTC).isoformat()
         from memplex.models.paragraph import persisted_paragraph_id
 
         touched_ids: list[str] = []
@@ -1299,6 +1340,7 @@ class LiteMemoryStore:
                 touched_ids.append(row_id)
                 continue
             self._paragraphs[row_id] = {
+                **identity,
                 "id": row_id,
                 "raw_text": raw_text,
                 "trust_tier": int(trust_tier),
@@ -1306,11 +1348,6 @@ class LiteMemoryStore:
                 "source": (getattr(para, "source", "") or "")[:200],
                 "observation_count": 1,
                 "last_observed_at": now,
-                "tenant_id": tenant_id,
-                "owner_subject_id": owner_subject_id,
-                "workspace_id": workspace_id,
-                "visibility": visibility,
-                "namespace": dict(namespace),
             }
             touched_ids.append(row_id)
         self._enforce_tier2_paragraph_cap()
@@ -1473,9 +1510,13 @@ class LiteMemoryStore:
     @_with_writer_lock
     def get_observation(self, observation_id: str) -> Observation | None:
         self._refresh_for_read()
-        return copy.deepcopy(
-            next((item for item in self._observations if item.id == observation_id), None)
-        )
+        # Ordinary getters retain their established resident semantics during
+        # a deferred batch. Final context reads exclude that batch entirely.
+        if self._commit_defer_depth > 0:
+            return copy.deepcopy(
+                next((item for item in self._observations if item.id == observation_id), None)
+            )
+        return copy.deepcopy(self._observations_by_id.get(observation_id))
 
     @_with_writer_lock
     def delete_fact(self, fact_id: str) -> None:
@@ -1835,6 +1876,15 @@ class LiteMemoryStore:
         """
         self._vector_index.set_embedder(embedder)
 
+    def _historical_source_paragraphs(self) -> set[str]:
+        """Raw evidence survives edits but is no longer a current answer body."""
+        return {
+            source_id
+            for func in self._functions.values()
+            if func.attributes.get("memplex_role_updates")
+            for source_id in func.source_paragraphs
+        }
+
     def _semantic_documents(self) -> list[tuple[str, str]]:
         """Document projection shared by the vector and sparse legs."""
         documents: list[tuple[str, str]] = [
@@ -1851,8 +1901,9 @@ class LiteMemoryStore:
         # under mixed fusion; the default fallback keeps them out of the
         # ranked pool (top-8 dilution evidence) and fills slots later.
         if self._paragraph_fusion_mode() == "mixed":
+            historical = self._historical_source_paragraphs()
             for row in self._paragraphs.values():
-                if not row.get("premise_superseded"):
+                if not row.get("premise_superseded") and row["id"] not in historical:
                     documents.append((row["id"], row["raw_text"]))
         return documents
 
@@ -2001,6 +2052,35 @@ class LiteMemoryStore:
     def get(self, func_id: str) -> Function | None:
         self._refresh_for_read()
         return copy.deepcopy(self._functions.get(func_id))
+
+    @_with_writer_lock
+    def read_context_nodes(
+        self, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryNode | dict[str, Any]]:
+        """Resolve committed sources without disturbing an in-flight batch."""
+        if self._commit_defer_depth > 0:
+            return {}
+        self._refresh_for_read()
+        nodes: dict[str, MemoryNode | dict[str, Any]] = {}
+        historical = self._historical_source_paragraphs() if any(
+            memory_id in self._paragraphs for memory_id in memory_ids
+        ) else set()
+        for memory_id in dict.fromkeys(memory_ids):
+            node = (
+                self._functions.get(memory_id)
+                or self._facts.get(memory_id)
+                or self._preferences.get(memory_id)
+                or self._observations_by_id.get(memory_id)
+                or self._paragraphs.get(memory_id)
+            )
+            if node is not None:
+                snapshot = copy.deepcopy(node)
+                if isinstance(snapshot, dict) and memory_id in historical:
+                    # Current-body eligibility is separate from source
+                    # existence/ACL: dependent nodes still resolve lineage.
+                    snapshot["context_historical"] = True
+                nodes[memory_id] = snapshot
+        return nodes
 
     def _index_edge(self, edge: GraphEdge) -> None:
         node_ids = (edge.source,) if edge.source == edge.target else (edge.source, edge.target)
@@ -2281,6 +2361,22 @@ class LiteMemoryStore:
         )
 
     @_with_writer_lock
+    def update_function_role(
+        self, memory_id: str, role: str, new_value: str, *,
+        before_persist: Callable[[Function], None] | None = None,
+    ) -> tuple[Function, str | None]:
+        """Edit the locked current row, retaining concurrent unrelated fields."""
+        self._reload_for_mutation()
+        if memory_id not in self._functions:
+            raise KeyError(memory_id)
+        func = copy.deepcopy(self._functions[memory_id])
+        old_value = func.update_role(role, new_value)
+        if before_persist is not None:
+            before_persist(func)
+        self.replace_function(func)
+        return copy.deepcopy(func), old_value
+
+    @_with_writer_lock
     def replace_function(self, func: Function) -> None:
         """Replace one Function through the durable mutation boundary.
 
@@ -2459,16 +2555,31 @@ class LiteMemoryStore:
         the seeding fast path: per-write cost drops from O(state) to
         O(delta) plus one amortized commit.  An exception propagates after
         the best-effort final commit, so the consistent prefix of the batch
-        survives (the commit's own failure recovery republishes the last
-        durable pair and its error replaces the original).
+        survives when finalization succeeds. Failed finalization invalidates
+        cached commit proof so the next read recovers authoritative state;
+        its error replaces the original body error.
         """
         self._commit_defer_depth += 1
         try:
             yield
         finally:
-            self._commit_defer_depth -= 1
-            if self._commit_defer_depth == 0:
-                self._commit_current_state()
+            # Keep the last batch transition and its durable publication in
+            # the same lock scope as context reads. Otherwise depth reaches
+            # zero while pending resident nodes are still uncommitted.
+            with self._durability.writer_lock():
+                self._commit_defer_depth -= 1
+                if self._commit_defer_depth == 0:
+                    try:
+                        self._commit_current_state()
+                    except BaseException:
+                        # Validation/serialization may fail before the commit
+                        # helper's recovery blocks. Never let speculative
+                        # residents survive a freshness short-circuit, and
+                        # never restore a stale base after an ambiguous write.
+                        self._pair_fingerprint = None
+                        self._committed_pair = None
+                        self._committed_record = None
+                        raise
 
     def _raw_memory(self) -> dict[str, Any]:
         """Serialize the complete resident state, never a partial sidecar."""
@@ -3045,6 +3156,7 @@ class LiteMemoryStore:
         self._functions = loaded_functions
         self._name_index = loaded_name_index
         self._observations = loaded_observations
+        self._rebuild_observation_index()
         self._facts = loaded_facts
         self._preferences = loaded_preferences
         # ADR-013 Stage 2: raw paragraphs ride the same publish boundary;
@@ -3116,6 +3228,19 @@ class LiteMemoryStore:
         self._pair_fingerprint = tuple(stats)
 
 
+    def _rebuild_observation_index(self) -> None:
+        """Derive a first-ID-wins lookup at an existing publication boundary.
+
+        This is a resident accelerator, not commit proof. Both fresh loads and
+        successful local publication rebuild it under the existing writer lock;
+        failed finalization invalidates freshness and forces an authoritative
+        reload before it can be used. Rebuilding costs O(observations) per
+        publication; repeated stable context/lineage reads then avoid scans.
+        """
+        self._observations_by_id = {}
+        for observation in self._observations:
+            self._observations_by_id.setdefault(observation.id, observation)
+
     def _publish_committed_locally(self, committed: LitePair) -> None:
         """Bind commit results without re-decoding the freshly written pair.
 
@@ -3126,6 +3251,7 @@ class LiteMemoryStore:
         per write.  Only the commit metadata and caches need updating.
         """
         self._rebuild_edge_index()
+        self._rebuild_observation_index()
         # The index keeps a reference to the functions dict; the resident
         # dict identity is unchanged, but keep the rebind for parity with
         # ``_publish_pair``.
@@ -3246,10 +3372,11 @@ class LiteMemoryStore:
         paragraphs (stamped by the premise-resolution maintenance pass)
         are excluded from the pool.
         """
+        historical = self._historical_source_paragraphs()
         pool = {
             pid: row
             for pid, row in self._paragraphs.items()
-            if not row.get("premise_superseded")
+            if not row.get("premise_superseded") and pid not in historical
         }
         if not pool:
             return []
@@ -3384,12 +3511,8 @@ class LiteMemoryStore:
     @staticmethod
     def _function_to_search_text(func: Function) -> str:
         parts = [func.name, func.domain or ""]
-        for fv in func.trigger:
-            parts.append(fv.desc)
-        for fv in func.action:
-            parts.append(fv.desc)
-        for fv in func.benefit:
-            parts.append(fv.desc)
+        for role in (func.trigger, func.condition, func.action, func.benefit):
+            parts.extend(fv.desc for fv in role if fv.status == "active")
         return " ".join(parts)
 
     @staticmethod

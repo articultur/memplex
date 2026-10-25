@@ -1,0 +1,132 @@
+{
+  "kind": "synthetic obsolete-evidence exposure audit",
+  "cases_sha256": "8b549e131ca1f3546ca4c46c5dd76bee0de435155f041de2c27c20293d6e6a30",
+  "claim": "Presence of old evidence is not proof of wrong generated answers; no model/maintenance calls",
+  "rows": [
+    {
+      "case": "city",
+      "result": {
+        "status": "complete",
+        "ranked_session_ids": [
+          "older",
+          "newer"
+        ],
+        "ingest_ms": 29.457453999839345,
+        "query_ms": 66.19309400002749,
+        "returned_word_tokens": {
+          "5": 37,
+          "10": 37
+        },
+        "storage_bytes": 53481,
+        "storage_measure": "on-disk Lite bank before shutdown",
+        "unmapped_results": 0,
+        "candidate_nodes_returned": 4,
+        "ingest_sessions": 2,
+        "ingest_path": "MemplexService.write"
+      },
+      "old_evidence_present_at_10": true,
+      "new_evidence_present_at_10": true,
+      "outcome": "both"
+    },
+    {
+      "case": "editor",
+      "result": {
+        "status": "complete",
+        "ranked_session_ids": [
+          "older",
+          "newer"
+        ],
+        "ingest_ms": 27.6179399998,
+        "query_ms": 81.19314499981556,
+        "returned_word_tokens": {
+          "5": 32,
+          "10": 32
+        },
+        "storage_bytes": 54186,
+        "storage_measure": "on-disk Lite bank before shutdown",
+        "unmapped_results": 0,
+        "candidate_nodes_returned": 4,
+        "ingest_sessions": 2,
+        "ingest_path": "MemplexService.write"
+      },
+      "old_evidence_present_at_10": true,
+      "new_evidence_present_at_10": true,
+      "outcome": "both"
+    },
+    {
+      "case": "project",
+      "result": {
+        "status": "complete",
+        "ranked_session_ids": [
+          "older",
+          "newer"
+        ],
+        "ingest_ms": 26.498949000142602,
+        "query_ms": 52.99114599984023,
+        "returned_word_tokens": {
+          "5": 28,
+          "10": 28
+        },
+        "storage_bytes": 53252,
+        "storage_measure": "on-disk Lite bank before shutdown",
+        "unmapped_results": 0,
+        "candidate_nodes_returned": 4,
+        "ingest_sessions": 2,
+        "ingest_path": "MemplexService.write"
+      },
+      "old_evidence_present_at_10": true,
+      "new_evidence_present_at_10": true,
+      "outcome": "both"
+    },
+    {
+      "case": "commute",
+      "result": {
+        "status": "complete",
+        "ranked_session_ids": [
+          "older",
+          "newer"
+        ],
+        "ingest_ms": 23.213696000311757,
+        "query_ms": 51.43815800010998,
+        "returned_word_tokens": {
+          "5": 30,
+          "10": 30
+        },
+        "storage_bytes": 54171,
+        "storage_measure": "on-disk Lite bank before shutdown",
+        "unmapped_results": 0,
+        "candidate_nodes_returned": 4,
+        "ingest_sessions": 2,
+        "ingest_path": "MemplexService.write"
+      },
+      "old_evidence_present_at_10": true,
+      "new_evidence_present_at_10": true,
+      "outcome": "both"
+    },
+    {
+      "case": "notes",
+      "result": {
+        "status": "complete",
+        "ranked_session_ids": [
+          "older",
+          "newer"
+        ],
+        "ingest_ms": 24.307611000040197,
+        "query_ms": 89.41638200030866,
+        "returned_word_tokens": {
+          "5": 30,
+          "10": 30
+        },
+        "storage_bytes": 54156,
+        "storage_measure": "on-disk Lite bank before shutdown",
+        "unmapped_results": 0,
+        "candidate_nodes_returned": 4,
+        "ingest_sessions": 2,
+        "ingest_path": "MemplexService.write"
+      },
+      "old_evidence_present_at_10": true,
+      "new_evidence_present_at_10": true,
+      "outcome": "both"
+    }
+  ]
+}

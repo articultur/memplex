@@ -1,0 +1,30 @@
+{
+  "product_source_sha256": "a083b1a0dd85b90e5f074782eae8c472a1c8ce3a0ba86720b9cba704893f1e48",
+  "input": {
+    "question_id": "minimal-repeated-heading",
+    "query": "What is the cost?",
+    "question_date": "2024/01/02 (Tue) 12:00",
+    "sessions": [
+      {
+        "id": "repeated-heading-session",
+        "date": "2024/01/01 (Mon) 12:00",
+        "turns": [
+          {
+            "role": "assistant",
+            "content": "Overview.\n\n**Cost:**\n\nOne price.\n\n**Cost:**\n\nAnother price."
+          }
+        ]
+      }
+    ]
+  },
+  "result": {
+    "status": "error",
+    "phase": "ingestion",
+    "error_type": "ValueError",
+    "error": "LiteMemoryStore merge contains duplicate Function id",
+    "ingest_sessions": 0,
+    "expected_sessions": 1,
+    "failed_session_id": "repeated-heading-session",
+    "elapsed_ms": 25.25546199967721
+  }
+}

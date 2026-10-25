@@ -8,6 +8,8 @@ implements this interface.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from typing import Any
 
 from memplex.models import (
     BatchResult,
@@ -15,6 +17,7 @@ from memplex.models import (
     Fact,
     Function,
     GraphData,
+    MemoryNode,
     MergeResult,
     Observation,
     Preference,
@@ -182,6 +185,16 @@ class MemoryStore(ABC):
         """Structured filter over stored Functions."""
 
     # ── Read operations ─────────────────────────────────────────────
+
+    def read_context_nodes(
+        self, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryNode | dict[str, Any]]:
+        """OPTIONAL: return detached, current committed nodes for context.
+
+        Unsupported backends fail closed instead of treating ordinary
+        getters or resident caches as proof that a node was committed.
+        """
+        return {}
 
     @abstractmethod
     def get(self, func_id: str) -> Function | None:

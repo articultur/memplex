@@ -96,6 +96,10 @@ from memplex.sync_repository import (
     SyncCapturePolicy,
     SyncCursorExpired,
 )
+from tests.helpers.context_peer import (
+    replace_function_action_for_context_test,
+    run_completed_peer_mutation,
+)
 
 
 def _ready_resources(dsn: str, dim: int = 0) -> PostgresStorageResources:
@@ -9237,3 +9241,472 @@ def test_v5_ingress_preflight_rejects_later_bad_event_without_outbox_sequence_le
     assert _admin_query(migration_dsn, "SELECT count(*) FROM memplex_sync_deliveries") == [(0,)]
     assert _admin_query(migration_dsn, "SELECT last_value, is_called FROM memplex_sync_outbox_stream_seq_seq") == [(1, False)]
     _drop_unprivileged_role(migration_dsn, role)
+
+
+@pytest.mark.parametrize("bob_tenant", ["context-tenant-a", "context-tenant-b"])
+def test_context_read_nodes_keeps_request_principal(pg_dsn, pgvector_available, monkeypatch, bob_tenant):
+    """Real committed queries retain Alice/Bob scopes on the same store."""
+    assert pgvector_available, "context source contract requires real pgvector"
+    resources = _ready_resources(pg_dsn)
+    store = PostgresMemoryStore(
+        dsn=pg_dsn, ready_pool=resources.ready_pool, require_authorization=True,
+    )
+    alice_context = _authorization(tenant="context-tenant-a", subject="alice")
+    bob_context = _authorization(tenant=bob_tenant, subject="bob")
+    alice = store.authorized(alice_context)
+    bob = store.authorized(bob_context)
+    alice_ids = ["context-function", "context-fact", "context-preference", "context-observation"]
+    bob_ids = (
+        [f"bob-{node_id}" for node_id in alice_ids]
+        if bob_tenant == alice_context.principal.tenant_id else alice_ids
+    )
+
+    def write_nodes(facade, ids, marker):
+        function = _func(ids[0], f"{marker} function", visibility="user")
+        fact = Fact(id=ids[1], subject=marker, predicate="is", object_=marker, visibility="user")
+        preference = Preference(
+            id=ids[2], aspect="context", preference=marker, visibility="user",
+        )
+        observation = Observation(id=ids[3], event=marker, context=marker, visibility="user")
+        facade.add(function, SRC)
+        facade.add_fact(fact)
+        facade.add_preference(preference)
+        facade.add_observation(observation)
+
+    try:
+        write_nodes(alice, alice_ids, "alice committed")
+        write_nodes(bob, bob_ids, "bob committed")
+        original_bind = store._bind_transaction_scope
+        first_queries = Barrier(2)
+        paused_subjects = set()
+        pause_lock = threading.Lock()
+
+        def bind_with_barrier(cur, context):
+            original_bind(cur, context)
+            with pause_lock:
+                first_query = context.principal.subject_id not in paused_subjects
+                paused_subjects.add(context.principal.subject_id)
+            if first_query:
+                first_queries.wait(timeout=5)
+
+        monkeypatch.setattr(store, "_bind_transaction_scope", bind_with_barrier)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            alice_read = pool.submit(alice.read_context_nodes, [*alice_ids, alice_ids[0], "missing"])
+            bob_read = pool.submit(bob.read_context_nodes, bob_ids)
+            alice_nodes = alice_read.result(timeout=10)
+            bob_nodes = bob_read.result(timeout=10)
+        assert set(alice_nodes) == set(alice_ids)
+        assert set(bob_nodes) == set(bob_ids)
+        assert alice_nodes[alice_ids[0]].name == "alice committed function"
+        assert bob_nodes[bob_ids[0]].name == "bob committed function"
+        for node in alice_nodes.values():
+            assert node.owner_subject_id == "alice"
+            assert node.tenant_id == "context-tenant-a"
+        for node in bob_nodes.values():
+            assert node.owner_subject_id == "bob"
+            assert node.tenant_id == bob_tenant
+        if bob_tenant == alice_context.principal.tenant_id:
+            assert bob.read_context_nodes(alice_ids) == {}
+            assert alice.read_context_nodes(bob_ids) == {}
+        with pytest.raises(PermissionError, match="authorization context"):
+            store.read_context_nodes(alice_ids)
+    finally:
+        resources.close()
+
+
+def _write_context_peer_node(service, owner, identifier, query, text, node_type):
+    from memplex.auth import bind_node_identity
+
+    if node_type == "fact":
+        node = Fact(id=identifier, name=identifier, subject=query, predicate="is", object_=text)
+        bind_node_identity(node, owner)
+        service._store_for(owner).add_fact(node)
+    else:
+        node = Function(id=identifier, name=f"{query} {identifier}", action=[FieldValue(desc=text)])
+        bind_node_identity(node, owner)
+        service._store_for(owner).add(node, SourceDocument(type="test"))
+
+
+def _mutate_context_peer(peer, owner, reader, node_type, mutation):
+    from memplex.auth import bind_node_identity
+    from memplex.temporal import supersede_contradicted
+
+    scoped = peer._store_for(owner)
+    if mutation == "delete":
+        peer.delete("peer-target", authorization=owner)
+        assert peer.get("peer-target", authorization=owner) is None
+    elif node_type == "function":
+        replace_function_action_for_context_test(scoped, owner, "peer-target", "CURRENT-PEER-TEXT")
+    else:
+        target = scoped.get_fact("peer-target")
+        assert target is not None
+        if mutation == "update":
+            target.object_ = "CURRENT-PEER-TEXT"
+        elif mutation == "revoke":
+            target.visibility = "session"
+        else:
+            assert mutation == "supersede"
+            successor = Fact(
+                id="peer-successor", subject=target.subject, predicate=target.predicate,
+                object_="SUCCESSOR-PEER-TEXT", valid_from=datetime.now(UTC).isoformat(),
+            )
+            bind_node_identity(successor, owner)
+            assert supersede_contradicted(successor, [target], now=successor.valid_from) == [target]
+            scoped.add_fact(successor)
+            assert scoped.get_fact(successor.id).object_ == "SUCCESSOR-PEER-TEXT"
+        scoped.add_fact(target)
+        committed = scoped.get_fact(target.id)
+        assert committed is not None
+        assert committed.object_ == target.object_
+        assert committed.invalid_at == target.invalid_at
+        assert committed.visibility == target.visibility
+        if mutation == "revoke":
+            assert peer._store_for(reader).get_fact(target.id) is None
+
+
+def _assert_context_after_completed_peer_mutation(
+    migration_dsn, pgvector_available, path, mutation, node_type, monkeypatch,
+):
+    """Mutate committed PG rows after genuine retrieval, before final assembly."""
+    from copy import deepcopy
+
+    assert pgvector_available, "this contract requires the real pgvector test environment"
+    cfg, role = _production_service_config(migration_dsn)
+    cfg.working_memory.enabled = node_type == "function"
+    cfg.embedding.model = "tfidf"
+    first = peer = None
+    owner = _authorization(
+        tenant="context-tenant", subject="alice", workspace="workspace", agent="codex", session="session",
+    )
+    reader = _authorization(
+        tenant="context-tenant", subject="alice", workspace="workspace", agent="codex", session="reader-session",
+    )
+    query = "database transaction evidence"
+    try:
+        assert _admin_query(
+            cfg.storage.path,
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        ) == [(False, False)]
+        first = MemplexService(config=cfg)
+        peer = MemplexService(config=deepcopy(cfg))
+        if node_type == "fact":
+            assert first._working_memory is None
+        for identifier, text in (("peer-target", "OLD-PEER-TEXT"), ("peer-control", "OWNER-POSITIVE-CONTROL")):
+            _write_context_peer_node(first, owner, identifier, query, text, node_type)
+        runtime = AgentMemoryRuntime(service=first, authorization=reader)
+        assert "OLD-PEER-TEXT" in runtime.before_prompt(query).context
+
+        def mutate():
+            _mutate_context_peer(peer, owner, reader, node_type, mutation)
+
+        if path == "prefetch":
+            assert "OLD-PEER-TEXT" in runtime.prefetch(query).context
+            run_completed_peer_mutation(mutate)
+        else:
+            real_collect = runtime._collect_context_candidates
+
+            def collect_then_commit(text):
+                candidates = real_collect(text)
+                assert {candidate.memory_id for candidate in candidates} == {"peer-target", "peer-control"}
+                assert all(candidate.origin == "retrieval" for candidate in candidates)
+                # The real store has already returned the old candidate. The
+                # peer transaction completes before authoritative assembly.
+                run_completed_peer_mutation(mutate)
+                return candidates
+
+            monkeypatch.setattr(runtime, "_collect_context_candidates", collect_then_commit)
+        result = runtime.before_prompt(query)
+        assert result.source == path
+        assert "OWNER-POSITIVE-CONTROL" in result.context
+        assert "OLD-PEER-TEXT" not in result.context
+        assert ("CURRENT-PEER-TEXT" in result.context) is (mutation == "update")
+        assert result.total == (2 if mutation == "update" else 1)
+    finally:
+        if first is not None:
+            first.stop()
+        if peer is not None:
+            peer.stop()
+        _drop_unprivileged_role(migration_dsn, role)
+
+
+@pytest.mark.parametrize("node_type", ["function", "fact"])
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_context_after_completed_peer_update(migration_dsn, pgvector_available, path, node_type, monkeypatch):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, "update", node_type, monkeypatch,
+    )
+
+
+@pytest.mark.parametrize("node_type", ["function", "fact"])
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_context_after_completed_peer_delete(migration_dsn, pgvector_available, path, node_type, monkeypatch):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, "delete", node_type, monkeypatch,
+    )
+
+
+@pytest.mark.parametrize("mutation", ["supersede", "revoke"])
+@pytest.mark.parametrize("path", ["live", "prefetch"])
+def test_fact_context_after_completed_peer_validity_change(
+    migration_dsn, pgvector_available, path, mutation, monkeypatch,
+):
+    _assert_context_after_completed_peer_mutation(
+        migration_dsn, pgvector_available, path, mutation, "fact", monkeypatch,
+    )
+
+
+def test_function_role_update_replaces_current_values_and_preserves_history(store, pg_dsn):
+    node = _func(
+        "role-update", "Stable title", trigger=[_fv("obsoletelexeme")],
+        action=[_fv("retained first"), _fv("retained second")],
+    )
+    store.add(node, SRC)
+    updated, old_value = store.update_function_role(node.id, "trigger", "currentlexeme")
+    assert old_value == "obsoletelexeme"
+    assert [(value.desc, value.status) for value in updated.trigger] == [
+        ("currentlexeme", "active"), ("obsoletelexeme", "deprecated"),
+    ]
+    assert [value.desc for value in updated.action] == ["retained first", "retained second"]
+    assert updated.version == node.version + 1
+    assert store.get(node.id).to_dict() == updated.to_dict()
+    assert store.fts_search("currentlexeme")[0].func_id == node.id
+    assert store.fts_search("obsoletelexeme") == []
+    payload = _admin_query(pg_dsn, "SELECT data FROM memplex_functions WHERE id = %s", (node.id,))[0][0]
+    assert payload["trigger_text"] == "currentlexeme"
+    assert payload["trigger"][1]["desc"] == "obsoletelexeme"
+
+
+def test_function_role_update_callback_failure_rolls_back_data_and_audit(store, pg_dsn):
+    node = _func("role-rollback", "Rollback title")
+    store.add(node, SRC)
+    before = store.get(node.id).to_dict()
+    audit_before = _admin_query(pg_dsn, "SELECT count(*) FROM memplex_changelog")[0][0]
+
+    def fail_after_edit(updated):
+        assert updated.action[0].desc == "speculative replacement"
+        raise OSError("before-persist rejected")
+
+    with pytest.raises(OSError, match="before-persist rejected"):
+        store.update_function_role(node.id, "action", "speculative replacement", before_persist=fail_after_edit)
+    assert store.get(node.id).to_dict() == before
+    assert _admin_query(pg_dsn, "SELECT count(*) FROM memplex_changelog")[0][0] == audit_before
+
+
+def test_function_role_update_serializes_concurrent_independent_roles(store):
+    node = _func("role-concurrent", "Concurrent title")
+    store.add(node, SRC)
+    barrier = Barrier(2)
+
+    def update(role):
+        barrier.wait(timeout=10)
+        return store.update_function_role(node.id, role, f"current {role}")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(update, ("trigger", "action")))
+    current = store.get(node.id)
+    assert current.trigger[0].desc == "current trigger"
+    assert current.action[0].desc == "current action"
+    assert current.version == node.version + 2
+
+
+def test_function_role_update_rejects_invisible_and_missing_ids(store):
+    from memplex.storage.postgres import PostgresWriteRejected
+
+    owner = _authorization(tenant="role-owner", subject="owner")
+    foreign = _authorization(tenant="role-foreign", subject="other")
+    owner_store = store.authorized(owner)
+    foreign_store = store.authorized(foreign)
+    node = _func("role-private", "Private title", visibility="user")
+    owner_store.add(node, SRC)
+    before = owner_store.get(node.id).to_dict()
+    for identifier in (node.id, "missing-role-id"):
+        with pytest.raises(PostgresWriteRejected):
+            foreign_store.update_function_role(identifier, "action", "forbidden replacement")
+    assert owner_store.get(node.id).to_dict() == before
+    assert foreign_store.get("missing-role-id") is None
+
+
+def test_function_role_update_preserves_private_identity_and_attributes(store):
+    owner = _authorization(tenant="role-private", subject="owner", session="original-session")
+    later = _authorization(tenant="role-private", subject="owner", session="later-session")
+    node = _func("role-owned", "Owned title", visibility="user", attributes={"audit": "keep"})
+    store.authorized(owner).add(node, SRC)
+    before = store.authorized(owner).get(node.id)
+    current, _ = store.authorized(later).update_function_role(node.id, "action", "updated action")
+    assert current.provenance == before.provenance
+    assert current.owner_subject_id == before.owner_subject_id
+    assert current.visibility == "user"
+    assert current.attributes == before.attributes | {"memplex_role_updates": "action"}
+
+
+def test_function_role_update_refreshes_embedding_and_clears_failed_refresh(pg_dsn, pgvector_available):
+    if not pgvector_available:
+        pytest.skip("pgvector extension not available in this PostgreSQL build")
+
+    class RecordingEmbedder:
+        fail = False
+
+        def __init__(self):
+            self.texts = []
+
+        def embed(self, text):
+            self.texts.append(text)
+            if self.fail:
+                raise OSError("embedding unavailable")
+            return [1.0, 0.0, 0.0]
+
+    embedder = RecordingEmbedder()
+    resources = _ready_resources(pg_dsn, 3)
+    try:
+        store = PostgresMemoryStore(dsn=pg_dsn, embedder=embedder, ready_pool=resources.ready_pool)
+        node = _func("role-vector", "Vector title", action=[_fv("obsoletevectorlexeme")])
+        store.add(node, SRC)
+        store.update_function_role(node.id, "action", "currentvectorlexeme")
+        assert "currentvectorlexeme" in embedder.texts[-1]
+        assert "obsoletevectorlexeme" not in embedder.texts[-1]
+        assert _admin_query(pg_dsn, "SELECT embedding IS NOT NULL FROM memplex_functions WHERE id = %s", (node.id,)) == [(True,)]
+        embedder.fail = True
+        store.update_function_role(node.id, "action", "latestvectorlexeme")
+        assert _admin_query(pg_dsn, "SELECT embedding IS NULL FROM memplex_functions WHERE id = %s", (node.id,)) == [(True,)]
+        assert store.get(node.id).action[0].desc == "latestvectorlexeme"
+    finally:
+        resources.close()
+
+
+def test_function_role_current_projection_omits_inactive_values():
+    from memplex.storage.postgres import _func_to_json
+
+    node = _func(
+        "role-projection", "Projection title",
+        trigger=[FieldValue("current trigger"), FieldValue("old trigger", status="deprecated")],
+        action=[FieldValue("current action"), FieldValue("disputed action", status="disputed")],
+    )
+    payload = _func_to_json(node)
+    assert payload["trigger_text"] == "current trigger"
+    assert payload["action_text"] == "current action"
+    assert len(payload["trigger"]) == 2
+    assert len(payload["action"]) == 2
+
+    class RecordingEmbedder:
+        def embed(self, text):
+            assert "current trigger" in text
+            assert "current action" in text
+            assert "old trigger" not in text
+            assert "disputed action" not in text
+            return [1.0, 0.0, 0.0]
+
+    store = PostgresMemoryStore.__new__(PostgresMemoryStore)
+    store._vector_dim = 3
+    store._embedder = RecordingEmbedder()
+    assert store._embed_text(node) == "[1.0, 0.0, 0.0]"
+
+
+def test_function_role_update_fresh_runtime_reads_current_text_and_preserves_raw(migration_dsn):
+    from memplex.context import ContextCandidate
+
+    config, role = _production_service_config(migration_dsn)
+    config.embedding.model = "tfidf"
+    config.llm.provider = "rule-based"
+    config.sync.enabled = False
+    owner = _authorization(tenant="role-runtime", subject="alice")
+    original_text = "Remember Kestrel workflow action code A8F6EB881DD6FC5A for this workspace."
+    replacement_text = "Use Kestrel workflow action code 98AF5F1FBE81942F."
+    service = peer = None
+    try:
+        service = MemplexService(config=config)
+        result = service.write_text(original_text, authorization=owner)
+        node, = result.functions
+        assert node.source_paragraphs
+        raw_id = node.source_paragraphs[0]
+        assert service._store_for(owner).get_paragraph(raw_id)["raw_text"] == original_text
+        raw_candidate = [ContextCandidate(raw_id, "retrieval")]
+        assert original_text in service.assemble_context(
+            raw_candidate, authorization=owner, runtime_filter=lambda _node: True, max_tokens=2048,
+        ).context
+        assert service.update_memory(node.id, "action", replacement_text, authorization=owner).success
+        service.stop()
+        service = None
+
+        peer = MemplexService(config=config)
+        runtime = AgentMemoryRuntime(service=peer, authorization=owner)
+        context = runtime.before_prompt("Kestrel workflow").context
+        assert "98AF5F1FBE81942F" in context
+        assert "A8F6EB881DD6" not in context
+        assert peer.assemble_context(
+            raw_candidate, authorization=owner, runtime_filter=lambda _node: True, max_tokens=2048,
+        ).context == ""
+        raw_snapshot = peer._store_for(owner).read_context_nodes([raw_id])[raw_id]
+        assert raw_snapshot["context_historical"] is True
+        assert raw_snapshot["raw_text"] == original_text
+        assert peer._store_for(owner).get_paragraph(raw_id)["raw_text"] == original_text
+        assert "context_historical" not in peer._store_for(owner).get_paragraph(raw_id)
+        current = peer.get(node.id, authorization=owner)
+        assert current.action[1].desc == original_text
+        assert current.action[1].status == "deprecated"
+    finally:
+        if service is not None:
+            service.stop()
+        if peer is not None:
+            peer.stop()
+        _drop_unprivileged_role(migration_dsn, role)
+
+
+@pytest.mark.parametrize("role", ["condition", "benefit"])
+def test_function_role_update_condition_and_benefit_are_searchable(store, role):
+    node = _func("role-qualifier", "Qualifier title")
+    setattr(node, role, [FieldValue("obsoletequalifierlexeme")])
+    store.add(node, SRC)
+    store.update_function_role(node.id, role, "currentqualifierlexeme")
+    assert store.fts_search("currentqualifierlexeme")[0].func_id == node.id
+    assert store.fts_search("obsoletequalifierlexeme") == []
+
+
+@pytest.mark.parametrize("linked_function", ["visible", "private", "foreign", "unedited"])
+def test_function_role_update_raw_context_suppression_respects_function_acl(store, linked_function):
+    from memplex.models.paragraph import Paragraph, persisted_paragraph_id
+
+    owner = _authorization(tenant="raw-context-owner", subject="alice")
+    scoped = store.authorized(owner)
+    paragraph = Paragraph(id="raw", source="test", section="", raw_text="original raw evidence")
+    scoped.persist_paragraphs([paragraph], trust_tier=4, source_hint="test")
+    raw_id = persisted_paragraph_id("test", paragraph.id, paragraph.raw_text)
+    assert scoped._read_context_paragraph(raw_id)["raw_text"] == paragraph.raw_text
+    writer = owner
+    if linked_function == "private":
+        writer = _authorization(tenant=owner.principal.tenant_id, subject="bob")
+    elif linked_function == "foreign":
+        writer = _authorization(tenant="raw-context-foreign", subject="alice")
+    node = _func(
+        "linked-function", "Linked title", visibility="user", source_paragraphs=[raw_id],
+        attributes={"memplex_role_updates": "" if linked_function == "unedited" else "action"},
+    )
+    store.authorized(writer).add(node, SRC)
+    current = scoped._read_context_paragraph(raw_id)
+    assert current is not None
+    assert current["context_historical"] is (linked_function == "visible")
+    assert scoped.get_paragraph(raw_id)["raw_text"] == paragraph.raw_text
+
+
+def test_function_role_update_disabled_writer_clears_vector_for_enabled_reader(pg_dsn, pgvector_available):
+    if not pgvector_available:
+        pytest.skip("pgvector extension not available in this PostgreSQL build")
+    vector_resources = _ready_resources(pg_dsn, 4)
+    disabled_resources = None
+    try:
+        enabled = PostgresMemoryStore(
+            dsn=pg_dsn, embedder=_BagOfWordsEmbedder(4), ready_pool=vector_resources.ready_pool,
+        )
+        node = _func("role-disabled-vector", "Vector transition", action=[_fv("obsoletevectorlexeme")])
+        enabled.add(node, SRC)
+        assert _admin_query(pg_dsn, "SELECT embedding IS NOT NULL FROM memplex_functions WHERE id = %s", (node.id,)) == [(True,)]
+        disabled_resources = _ready_resources(pg_dsn, 0)
+        disabled = PostgresMemoryStore(dsn=pg_dsn, ready_pool=disabled_resources.ready_pool)
+        assert disabled._vector_dim == 0
+        disabled.update_function_role(node.id, "action", "currentvectorlexeme")
+        assert _admin_query(pg_dsn, "SELECT embedding IS NULL FROM memplex_functions WHERE id = %s", (node.id,)) == [(True,)]
+        assert enabled.vector_search("obsoletevectorlexeme") == []
+        assert enabled.vector_search("currentvectorlexeme")[0].func_id == node.id
+    finally:
+        if disabled_resources is not None:
+            disabled_resources.close()
+        vector_resources.close()

@@ -29,6 +29,8 @@ import logging
 import os
 import sys
 import traceback
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, ClassVar, Optional
 
 from memplex.adapters._shared import (
@@ -41,6 +43,9 @@ from memplex.adapters._shared import (
     dataclass_to_dict as _dataclass_to_dict,
 )
 from memplex.auth import MemoryNotFoundError
+from memplex.context import MAX_CONTEXT_CANDIDATES
+from memplex.models import Fact, Observation
+from memplex.temporal import facts_valid_at, is_valid_at
 
 logger = logging.getLogger(__name__)
 
@@ -553,6 +558,9 @@ class MCPServer:
             "scope": result.scope.value if hasattr(result.scope, "value") else str(result.scope),
             "latency_ms": result.latency_ms,
             "tokens_used": result.tokens_used,
+            # Includes complete wrappers and separators, but not the JSON
+            # transport envelope or duplicated result/trace metadata.
+            "token_budget_scope": "wrapped_memory_fragments_only",
             "max_tokens": result.max_tokens,
             "truncated": result.truncated,
             "results": [
@@ -562,8 +570,8 @@ class MCPServer:
                     "relevance": round(r.relevance_score, 4),
                     "summary": r.summary,
                     "domain": r.domain,
-                    # Backfilled per-result by the service when max_tokens > 0;
-                    # otherwise fall back to the same summary-length formula.
+                    # This is the complete accepted current fragment,
+                    # including its protective memory wrapper.
                     "est_tokens": r.token_estimate or _estimate_tokens(r.summary),
                 }
                 for r in result.results
@@ -588,11 +596,33 @@ class MCPServer:
             "function_ids": [f.id for f in result.functions],
         }
 
+    def _resolve_model_nodes(self, memory_ids: Sequence[str], runtime: Any) -> list[Any]:
+        """Current committed objects, before model-visible metadata projection.
+
+        Explicit history uses this authority boundary without current expiry.
+        Collection callers retain their separate bounded scan/temporal policy.
+        """
+        accepted: list[Any] = []
+        ids = list(dict.fromkeys(memory_ids))[:MAX_MODEL_SCAN_ITEMS]
+        for offset in range(0, len(ids), MAX_CONTEXT_CANDIDATES):
+            try:
+                current = self._service.resolve_context_nodes(
+                    ids[offset:offset + MAX_CONTEXT_CANDIDATES],
+                    authorization=runtime.authorization_context,
+                )
+                accepted.extend(
+                    node for node in current.values() if runtime._context_node_allowed(node)
+                )
+            except Exception:  # noqa: BLE001 - uncertain model reads are neutral
+                return []
+        return accepted
+
     def _tool_memory_get(self, args: dict) -> dict:
         """Get a memory by ID."""
-        func = self._agent_runtime(args).get_accessible_memory(args["memory_id"])
-        if func is None:
-            return {"error": "Memory not found", "memory_id": args["memory_id"]}
+        nodes = self._resolve_model_nodes([args["memory_id"]], self._agent_runtime(args))
+        func = nodes[0] if nodes else None
+        if func is None or (isinstance(func, Fact) and not is_valid_at(func)):
+            return {"error": "Memory not found"}
         payload = _dataclass_to_dict(func)
         # Full-detail reads are the expensive layer (~500-1000 tokens);
         # annotate the cost so callers can budget progressively.
@@ -641,12 +671,22 @@ class MCPServer:
     def _tool_memory_facts(self, args: dict) -> dict:
         """List facts with optional point-in-time filtering."""
         runtime = self._agent_runtime(args)
-        facts = self._service.list_facts(
-            as_of=args.get("as_of"),
-            limit=int(args.get("limit", 50)),
-            include_invalidated=bool(args.get("include_invalidated", False)),
+        limit = min(MAX_MODEL_COLLECTION_RESULTS, max(0, int(args.get("limit", 50))))
+        candidates = self._service.list_facts(
+            limit=MAX_MODEL_SCAN_ITEMS, include_invalidated=True,
             authorization=runtime.authorization_context,
-        )
+        ) if limit else []
+        facts = [
+            node for node in self._resolve_model_nodes([f.id for f in candidates], runtime)
+            if isinstance(node, Fact)
+        ]
+        if not args.get("include_invalidated", False):
+            try:
+                point = datetime.fromisoformat(args["as_of"]) if args.get("as_of") else None
+            except ValueError:
+                point = None  # Preserve malformed-as_of fallback to current time.
+            facts = facts_valid_at(facts, as_of=point)
+        facts = facts[:limit]
         return {
             "count": len(facts),
             "facts": [
@@ -696,22 +736,26 @@ class MCPServer:
         limit = min(MAX_MODEL_COLLECTION_RESULTS, max(0, int(args.get("limit", 100))))
         if limit == 0:
             return {"total": 0, "reviews": []}
-        get_pending_reviews = self._service.get_pending_reviews
-        if "authorization" in inspect.signature(get_pending_reviews).parameters:
-            reviews = get_pending_reviews(
-                limit=MAX_MODEL_SCAN_ITEMS,
-                authorization=runtime.authorization_context,
-            )
-        else:
-            # Narrow compatibility for test doubles and third-party service
-            # facades predating the authorization keyword. The production
-            # service path above is always authorization-bound.
-            reviews = get_pending_reviews(limit=MAX_MODEL_SCAN_ITEMS)
-        reviews = [
-            review
-            for review in reviews
-            if runtime.get_accessible_memory(review.memory_id) is not None
-        ][:limit]
+        try:
+            get_pending_reviews = self._service.get_pending_reviews
+            if "authorization" in inspect.signature(get_pending_reviews).parameters:
+                reviews = get_pending_reviews(
+                    limit=MAX_MODEL_SCAN_ITEMS,
+                    authorization=runtime.authorization_context,
+                )
+            else:
+                # Narrow compatibility for test doubles and third-party service
+                # facades predating the authorization keyword. The production
+                # service path above is always authorization-bound.
+                reviews = get_pending_reviews(limit=MAX_MODEL_SCAN_ITEMS)
+            current_ids = {
+                node.id for node in self._resolve_model_nodes(
+                    [review.memory_id for review in reviews], runtime,
+                )
+            }
+            reviews = [review for review in reviews if review.memory_id in current_ids][:limit]
+        except Exception:  # noqa: BLE001 - model inspection fails closed
+            reviews = []
         return {
             "total": len(reviews),
             "reviews": _dataclass_to_dict(reviews),
@@ -788,24 +832,25 @@ class MCPServer:
         page_size = min(MAX_MODEL_SCAN_ITEMS, max(limit, 100))
         while len(matched) < limit and scanned < MAX_MODEL_SCAN_ITEMS:
             request_size = min(page_size, MAX_MODEL_SCAN_ITEMS - scanned)
-            batch = list(
-                store_list(
-                    offset=offset,
-                    limit=request_size,
-                    category=category,
-                    owner=runtime.user_id,
-                )
-            )[:request_size]
+            try:
+                batch = list(
+                    store_list(
+                        offset=offset,
+                        limit=request_size,
+                        category=category,
+                        owner=runtime.user_id,
+                    )
+                )[:request_size]
+            except Exception as exc:  # Preserve backend error without record data.
+                raise RuntimeError("observation backend unavailable") from exc
             if not batch:
                 break
             scanned += len(batch)
-            for obs in batch:
-                if not runtime.can_access_node(obs):
+            for obs in self._resolve_model_nodes([item.id for item in batch], runtime):
+                # Use current category/owner as well as current serialized body.
+                if not isinstance(obs, Observation):
                     continue
-                # Observation payloads are model-visible here just like
-                # query and memory_get results.  Run the service-owned typed
-                # injection decision before constructing any serialized text.
-                if not self._service.is_safe_for_model(obs):
+                if (category and obs.category != category) or obs.owner != runtime.user_id:
                     continue
                 summary = obs.context or obs.event or ""
                 if not query or query in f"{obs.event}\n{summary}".lower():
@@ -847,6 +892,8 @@ class MCPServer:
                 self._service,
                 runtime.read_namespace_filters(),
                 scan_limit=MAX_MODEL_SCAN_ITEMS,
+                authorization=runtime.authorization_context,
+                resolve_nodes=lambda ids: self._resolve_model_nodes(ids, runtime),
             )
             explained["preview"] = preview
         return explained

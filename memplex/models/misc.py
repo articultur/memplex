@@ -106,6 +106,8 @@ class ExtractedData:
     # so the write path can persist the authoritative raw layer. Empty
     # for legacy callers that opt out.
     paragraphs: list = field(default_factory=list)  # List[Paragraph]
+    # Optional operational extraction receipt, never a model/billing attestation.
+    factual_capture: dict | None = None
 
 
 @dataclass

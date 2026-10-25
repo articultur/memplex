@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 from memplex.models import EnhancedQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+
     from memplex.config import LLMConfig
+    from memplex.llm.factual_capture import Evidence, FactualCaptureResult
     from memplex.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -136,50 +140,35 @@ class LLMEnhancer:
 
     # -- LLM Enhancement 5: Factual capture (retain-style) ----------------
 
-    async def factualize(self, text: str, max_facts: int = 8) -> list[str]:
-        """Extract self-contained, temporally-normalised facts from *text*.
+    async def factualize(
+        self, evidence: Sequence[Evidence], *, reference_datetime: datetime | None = None,
+        author_role: str | None = None,
+    ) -> FactualCaptureResult:
+        """Return validated candidates and an explicit extraction outcome.
 
-        Hindsight-``retain()``-style capture: resolves pronouns/coreferences
-        to explicit subjects, converts relative time expressions ("last
-        week", "yesterday") into absolute dates against *reference_date*,
-        and returns each fact as one standalone sentence. The prompt pins
-        JSON output; malformed results fall back to an empty list rather
-        than blocking the capture path.
-
-        With a rule-based provider (no LLM configured) this returns ``[]``;
-        callers keep their existing extraction as the source of truth.
+        The source evidence remains authoritative. This method cannot persist,
+        replace, or elevate the trust of anything produced by the provider.
         """
-        from memplex.llm.providers.rule_based import RuleBasedProvider
+        import asyncio
+        from functools import partial
 
-        if isinstance(self.llm, RuleBasedProvider) or not text.strip():
-            return []
-        try:
-            from memplex.llm.sanitizer import LLMPromptSanitizer
+        return await asyncio.to_thread(partial(
+            self.factualize_sync, evidence, reference_datetime=reference_datetime,
+            author_role=author_role,
+        ))
 
-            prompt = LLMPromptSanitizer.build_structured_prompt(
-                instruction=(
-                    "Extract at most "
-                    f"{max_facts} self-contained facts from the text. Rules: "
-                    "(1) resolve every pronoun or coreference to the explicit "
-                    "subject it refers to; (2) normalise relative time "
-                    "expressions to absolute ISO dates using the reference "
-                    "date; (3) each fact must be a single standalone sentence "
-                    "understandable without any other context; (4) skip "
-                    "opinions, filler, and questions."
-                ),
-                user_input=text,
-                output_schema={"facts": ["str"]},
-                max_length=self.config.max_input_length,
-            )
-            result = await self.llm.complete_json(prompt)
-            facts = result.get("facts", [])
-            if not isinstance(facts, list):
-                return []
-            cleaned = [str(f).strip() for f in facts if isinstance(f, str) and str(f).strip()]
-            return cleaned[:max_facts]
-        except Exception as exc:  # noqa: BLE001 - logged degradation path
-            logger.debug("Factual capture failed, returning no facts: %s", exc)
-            return []
+    def factualize_sync(
+        self, evidence: Sequence[Evidence], *, reference_datetime: datetime | None = None,
+        author_role: str | None = None,
+    ) -> FactualCaptureResult:
+        """Same bounded contract for synchronous writers, without nested executors."""
+        from memplex.llm.factual_capture import extract_candidates, run_bounded_capture
+
+        return run_bounded_capture(lambda: extract_candidates(
+            self.llm, evidence, reference_datetime=reference_datetime,
+            author_role=author_role, max_facts=self.config.factual_capture_max_facts,
+            timeout_seconds=self.config.factual_capture_timeout_seconds,
+        ), self.config.factual_capture_timeout_seconds)
 
     @staticmethod
     def _rule_truncate(content: str, max_length: int) -> str:

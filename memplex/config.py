@@ -377,6 +377,8 @@ class LLMConfig:
     # retain()-style factual capture on write (coreference resolution +
     # temporal normalisation); requires a real LLM provider, off by default.
     factual_capture: bool = False
+    factual_capture_timeout_seconds: float = 10.0
+    factual_capture_max_facts: int = 8
     provider: str = "anthropic"
     anthropic_api_key: str | None = None  # falls back to ANTHROPIC_API_KEY env var
     anthropic_model: str = "claude-sonnet-4-6"  # any anthropic-compatible endpoint model
@@ -389,6 +391,13 @@ class LLMConfig:
     local_model: str | None = None
     fallback_chain: list[str] = field(default_factory=lambda: ["anthropic"])
     max_input_length: int = 10000
+
+    def __post_init__(self) -> None:
+        timeout = self.factual_capture_timeout_seconds
+        if type(timeout) not in {float, int} or not math.isfinite(timeout) or not 0 < timeout <= 120:
+            raise ValueError("factual capture timeout must be finite and in (0, 120]")
+        if type(self.factual_capture_max_facts) is not int or not 1 <= self.factual_capture_max_facts <= 64:
+            raise ValueError("factual capture max facts must be an integer in [1, 64]")
 
 
 @dataclass
@@ -714,6 +723,8 @@ _ENV_TYPE_COERCIONS: dict[str, type] = {
     # LLMConfig
     "llm.query_enhancement": bool,
     "llm.factual_capture": bool,
+    "llm.factual_capture_timeout_seconds": float,
+    "llm.factual_capture_max_facts": int,
     "working_memory.enabled": bool,
     "working_memory.max_entries": int,
     "working_memory.default_ttl_seconds": float,
@@ -1011,6 +1022,7 @@ def load_config(path: str | None = None) -> MemplexConfig:
 
     # Apply environment variable overrides (highest priority)
     _apply_env_overrides(config)
+    config.llm.__post_init__()
     config.sync.validate()
     for remote_url in config.sync.targets.values():
         config.sync.validate_remote_url(
@@ -1019,6 +1031,7 @@ def load_config(path: str | None = None) -> MemplexConfig:
         )
     config.worker.validate()
 
+    config.llm.__post_init__()
     profile, backend = normalize_deployment_contract(config)
     if profile == "production" and backend == "postgres":
         if yaml_parse_error:
@@ -1047,6 +1060,7 @@ def normalize_deployment_contract(config: MemplexConfig) -> tuple[str, str]:
 def validate_deployment_contract(config: MemplexConfig) -> None:
     """Reject deployment topologies that Memplex does not support."""
 
+    config.llm.__post_init__()
     profile, backend = normalize_deployment_contract(config)
     if profile not in {"development", "production"}:
         raise ValueError(

@@ -42,13 +42,19 @@ def test_model_controlled_search_budget_and_fanout_are_hard_capped(tmp_path, mon
 
     monkeypatch.setattr(service, "query", query)
 
-    runtime.search_memories("bounded", top_k=1_000_000, max_tokens=10_000_000)
-    runtime.search_memories("bounded", top_k=1, max_tokens=0)
+    capped = runtime.search_memories("bounded", top_k=1_000_000, max_tokens=10_000_000)
+    empty = runtime.search_memories("bounded", top_k=1, max_tokens=0)
 
+    # Candidate count stays bounded; stale summaries do not spend the model
+    # budget. The final current-source result owns that budget and zero is empty.
     assert calls[0]["top_k"] == 500
-    assert calls[0]["max_tokens"] == 32_000
+    assert calls[0]["max_tokens"] == 0
+    assert capped.max_tokens == 32_000
+    assert capped.tokens_used <= 32_000
     assert calls[1]["top_k"] == 21
-    assert calls[1]["max_tokens"] == 1
+    assert calls[1]["max_tokens"] == 0
+    assert empty.max_tokens == empty.tokens_used == 0
+    assert empty.results == []
 
 
 def test_workspace_memory_is_shared_across_agents_and_sessions(tmp_path):
@@ -436,7 +442,8 @@ def test_legacy_typed_migration_failure_redacts_search_explanation(
     token = "legacy-explanation-failure-token"
     writer.after_response(
         user_message=f"I prefer {token} responses.",
-        assistant_message="Captured.",
+        # Seed only the denied legacy Preference, with no independent reply memory.
+        assistant_message="",
     )
     stored = service.store.list_preferences(owner="alice")[0]
     stored.namespace = {}

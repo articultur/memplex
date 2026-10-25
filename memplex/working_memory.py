@@ -1,33 +1,10 @@
-"""Working memory: TTL-bounded hot context automatically injected on recall.
+"""Bounded hot source references and an independent legacy text container.
 
-Mnemosyne-style "working memory" tier. Recent writes (and explicitly pinned
-entries) live in a bounded in-process store; every :meth:`recall` call
-prepends the live entries as ready-to-use context so the most recent turns
-are available before any retrieval path runs.
-
-Design boundaries
------------------
-- **In-process, per-service**: working memory is a latency tier, not a
-  durable store — it is not synced and never persisted. Durability remains
-  the job of the ordinary write path (which still runs for every capture).
-- **Bounded**: a max-entry cap plus per-entry TTL; expired entries are
-  dropped lazily on access, so the tier cannot grow without bound.
-- **Opt-in injection**: disabled by default (``working_memory.enabled``);
-  when enabled, ``recall_context()`` returns the live entries for callers
-  to prepend. The retrieval pipeline itself is untouched.
-- **Store-parity recall ACL**: every service-captured entry carries the
-  capturing principal's real tenant, subject, workspace, session, agent,
-  and visibility. Recall callers must re-check entries (see
-  ``adapters.agent_runtime.hot_entry_visible``): tenant equality first —
-  an entry authored under one real tenant never crosses to another —
-  then workspace / user visibility, with session entries bound to owner
-  + session + capturing agent (mirroring the store ACL's
-  origin_session/source_agent rule), and unknown visibility denied. The
-  single cross-tenant exception is the service's local-development
-  compatibility tier inside the mapped ``tenant:local`` scope
-  (single-machine development seamlessness, V3 design). Entries without
-  tenant provenance (``tenant_id is None`` — sleep-time precompute,
-  direct tier users) stay scope-partitioned as before.
+Source references retain lifecycle data only. The service registers them
+only after a current committed read, and context consumers must resolve the
+current source rather than trusting any cached content or authorization.
+Legacy add/recall_context remain usable as a local string container; both
+containers share the same TTL pruning and hard capacity limit.
 """
 
 from __future__ import annotations
@@ -36,34 +13,6 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-
-# Hot-tier visibility vocabulary, aligned with the node model the host
-# runtimes write ({user, workspace, session} — see
-# adapters.agent_runtime.MEMORY_VISIBILITIES) plus explicit tenant-wide
-# "tenant" for entries that deliberately address the whole scope partition.
-# Unknown values are rejected fail-closed by :meth:`WorkingMemory.add`;
-# the legacy "private" spelling is accepted as an alias for "user".
-WORKING_MEMORY_VISIBILITIES = frozenset({"user", "workspace", "session", "tenant"})
-_LEGACY_PRIVATE_ALIAS = "private"
-
-
-def normalise_working_memory_visibility(visibility: str) -> str:
-    """Map *visibility* onto the hot-tier vocabulary, fail-closed.
-
-    Raises ``ValueError`` for unknown values instead of silently widening
-    them (the historical behaviour coerced host "user"/"session" writes to
-    tenant-wide visibility — a privilege-escalation surface).
-    """
-
-    selected = str(visibility or "").strip().lower()
-    if selected == _LEGACY_PRIVATE_ALIAS:
-        selected = "user"
-    if selected not in WORKING_MEMORY_VISIBILITIES:
-        supported = ", ".join(sorted(WORKING_MEMORY_VISIBILITIES))
-        raise ValueError(
-            f"Unsupported working-memory visibility {visibility!r}. Supported: {supported}"
-        )
-    return selected
 
 
 @dataclass
@@ -77,33 +26,31 @@ class WorkingMemoryEntry:
     created_at: float = field(default_factory=time.monotonic)
     # ACL provenance (V4): the writer's visibility contract. Entries
     # inherit the visibility of their write; recall re-checks them so a
-    # workspace-, user-, or session-restricted capture cannot reach a
-    # broader audience through the hot tier than through the store.
+    # workspace- or user-restricted capture cannot reach a broader
+    # audience through the hot tier than through the store.
     owner_subject_id: str | None = None
-    # Capturing principal's REAL tenant id (before any scope mapping).
-    # Recall enforces tenant equality (store-boundary parity); ``None``
-    # marks entries without tenant provenance (sleep-time precompute,
-    # direct tier users), which stay scope-partitioned as before.
-    tenant_id: str | None = None
     workspace_id: str | None = None
-    session_id: str | None = None
-    # Capturing agent id (AuthorizationContext.agent_id of the write).
-    # Session-visibility recall additionally requires agent equality,
-    # mirroring the store ACL's origin_session/source_agent rule; entries
-    # without an agent stamp are denied to any named agent.
-    agent_id: str | None = None
-    visibility: str = "tenant"  # user | workspace | session | tenant
+    visibility: str = "tenant"  # tenant | workspace | private
+
+
+@dataclass
+class WorkingMemoryReference:
+    """A source ID and its hot-candidate lifecycle, never text or ACLs."""
+
+    memory_id: str
+    ttl_seconds: float
+    pinned: bool
+    expires_at: float | None
+    insertion_sequence: int
 
 
 class WorkingMemory:
-    """Thread-safe TTL hot-context store with a hard entry cap.
+    """Thread-safe TTL candidates with one hard cap across both containers.
 
-    Multi-principal safety (V3 fix): entries are keyed under an optional
-    ``scope`` prefix so one principal's hot context never leaks into
-    another's recall. The service pins capture-side entries under the
-    capturing principal's scope and reads with the requesting context's
-    scope; a missing scope (local development) shares the single default
-    tier, preserving the original single-tenant behaviour.
+    Reference keys are structured (storage namespace, tenant, memory ID)
+    tuples, independent of the legacy string container's scope syntax.
+    A pin suspends TTL expiry only; it never bypasses capacity or grants
+    permission to output a reference's source.
     """
 
     def __init__(self, max_entries: int = 64, default_ttl_seconds: float = 900.0) -> None:
@@ -111,6 +58,9 @@ class WorkingMemory:
         self._default_ttl = float(default_ttl_seconds)
         self._lock = threading.Lock()
         self._entries: dict[str, WorkingMemoryEntry] = {}
+        self._entry_sequences: dict[str, int] = {}
+        self._references: dict[tuple[str, str, str], WorkingMemoryReference] = {}
+        self._insertion_sequence = 0
 
     # ── Capture ─────────────────────────────────────────────────────
 
@@ -130,24 +80,17 @@ class WorkingMemory:
         ttl_seconds: float | None = None,
         pinned: bool = False,
         scope: str | None = None,
-        tenant_id: str | None = None,
         owner_subject_id: str | None = None,
         workspace_id: str | None = None,
-        session_id: str | None = None,
-        agent_id: str | None = None,
         visibility: str = "tenant",
     ) -> None:
         """Add or refresh one entry; evicts the oldest unpinned entry at cap.
 
         ``scope`` partitions the tier per principal (V3 fix); entries added
         under one scope are invisible to ``recall_context`` calls with a
-        different scope. The ACL sextuple (tenant/owner/workspace/session/
-        agent/visibility) records the write's visibility contract for
-        recall-time re-checking (V4): ``tenant_id`` is the capturing
-        principal's REAL tenant and ``agent_id`` the capturing agent, so
-        recall can enforce store-boundary parity. Unknown visibility
-        values raise ``ValueError`` (fail-closed); the legacy ``"private"``
-        spelling maps onto ``"user"``.
+        different scope. The ACL triple (owner/workspace/visibility)
+        records the write's visibility contract for recall-time
+        re-checking (V4).
         """
         if not key or not content:
             return
@@ -158,22 +101,114 @@ class WorkingMemory:
             category=category,
             pinned=pinned,
             expires_at=None if pinned else time.monotonic() + max(0.0, ttl),
-            tenant_id=tenant_id or None,
             owner_subject_id=owner_subject_id or None,
             workspace_id=workspace_id or None,
-            session_id=session_id or None,
-            agent_id=agent_id or None,
-            visibility=normalise_working_memory_visibility(visibility),
+            visibility=visibility if visibility in {"tenant", "workspace", "private"} else "tenant",
         )
         with self._lock:
-            if key in self._entries:
-                self._entries[key] = entry
+            self._prune_locked()
+            if key not in self._entries and not self._make_room_locked():
                 return
-            if len(self._entries) >= self._max_entries:
-                unpinned = [k for k, e in self._entries.items() if not e.pinned]
-                if unpinned:
-                    self._entries.pop(unpinned[0], None)  # FIFO among unpinned
             self._entries[key] = entry
+            self._entry_sequences[key] = self._next_sequence_locked()
+
+    def _next_sequence_locked(self) -> int:
+        self._insertion_sequence += 1
+        return self._insertion_sequence
+
+    def _make_room_locked(self) -> bool:
+        """Evict the oldest unpinned item from either container, if needed."""
+        if len(self._entries) + len(self._references) < self._max_entries:
+            return True
+        oldest_legacy = min(
+            (key for key, entry in self._entries.items() if not entry.pinned),
+            key=lambda key: self._entry_sequences[key],
+            default=None,
+        )
+        oldest_reference = min(
+            (key for key, entry in self._references.items() if not entry.pinned),
+            key=lambda key: self._references[key].insertion_sequence,
+            default=None,
+        )
+        if oldest_legacy is None and oldest_reference is None:
+            return False
+        if oldest_reference is not None and (
+            oldest_legacy is None
+            or self._references[oldest_reference].insertion_sequence
+            < self._entry_sequences[oldest_legacy]
+        ):
+            self._references.pop(oldest_reference, None)
+        elif oldest_legacy is not None:
+            self._entries.pop(oldest_legacy, None)
+            self._entry_sequences.pop(oldest_legacy, None)
+        return True
+
+    def add_reference(
+        self,
+        memory_id: str,
+        *,
+        storage_namespace: str,
+        tenant_id: str,
+        pinned: bool = False,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """Add/refresh a source candidate; reject growth when all are pinned."""
+        if not memory_id or not storage_namespace or not tenant_id:
+            return False
+        key = (storage_namespace, tenant_id, memory_id)
+        ttl = max(0.0, self._default_ttl if ttl_seconds is None else float(ttl_seconds))
+        with self._lock:
+            self._prune_locked()
+            if key not in self._references and not self._make_room_locked():
+                return False
+            self._references[key] = WorkingMemoryReference(
+                memory_id=memory_id,
+                ttl_seconds=ttl,
+                pinned=pinned,
+                expires_at=None if pinned else time.monotonic() + ttl,
+                insertion_sequence=self._next_sequence_locked(),
+            )
+            return True
+
+    def recall_references(
+        self, *, storage_namespace: str, tenant_id: str, limit: int = 8,
+    ) -> tuple[str, ...]:
+        """Return live source IDs in newest-insertion order for one scope."""
+        with self._lock:
+            self._prune_locked()
+            references = [
+                entry for key, entry in self._references.items()
+                if key[:2] == (storage_namespace, tenant_id)
+            ]
+            references.sort(key=lambda entry: entry.insertion_sequence, reverse=True)
+            return tuple(entry.memory_id for entry in references[:max(0, limit)])
+
+    def remove_reference(
+        self, memory_id: str, *, storage_namespace: str, tenant_id: str,
+    ) -> bool:
+        with self._lock:
+            return self._references.pop((storage_namespace, tenant_id, memory_id), None) is not None
+
+    def set_reference_pinned(
+        self,
+        memory_id: str,
+        *,
+        storage_namespace: str,
+        tenant_id: str,
+        pinned: bool,
+        ttl_seconds: float | None = None,
+    ) -> bool:
+        """Suspend expiry, or restart the retained/requested TTL from now."""
+        with self._lock:
+            self._prune_locked()
+            entry = self._references.get((storage_namespace, tenant_id, memory_id))
+            if entry is None:
+                return False
+            if ttl_seconds is not None:
+                entry.ttl_seconds = max(0.0, float(ttl_seconds))
+            entry.pinned = pinned
+            entry.expires_at = None if pinned else time.monotonic() + entry.ttl_seconds
+            return True
 
     def pin(self, key: str) -> bool:
         with self._lock:
@@ -196,33 +231,14 @@ class WorkingMemory:
 
     def remove(self, key: str) -> bool:
         with self._lock:
+            self._entry_sequences.pop(key, None)
             return self._entries.pop(key, None) is not None
-
-    def remove_by_suffix(self, memory_id: str) -> int:
-        """Drop every entry whose bare key (sans ``scope::`` prefix) is the
-        node id or its function-mirrored ``fn:{id}`` form.
-
-        The invalidation hook for main-store mutations (delete/update):
-        capture keys are the node id (fact/preference) or ``fn:{id}``
-        (function) under tenant scopes, so removing both spellings across
-        every scope closes the consistency gap where a deleted memory
-        kept surfacing until TTL. Returns the number removed.
-        """
-        removed = 0
-        with self._lock:
-            stale = [
-                key
-                for key in self._entries
-                if key.endswith((memory_id, f"::{memory_id}", f"::fn:{memory_id}"))
-            ]
-            for key in stale:
-                self._entries.pop(key, None)
-                removed += 1
-        return removed
 
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+            self._entry_sequences.clear()
+            self._references.clear()
 
     # ── Recall ───────────────────────────────────────────────────────
 
@@ -235,6 +251,13 @@ class WorkingMemory:
         ]
         for key in expired:
             self._entries.pop(key, None)
+            self._entry_sequences.pop(key, None)
+        expired_references = [
+            key for key, entry in self._references.items()
+            if entry.expires_at is not None and entry.expires_at <= now
+        ]
+        for reference_key in expired_references:
+            self._references.pop(reference_key, None)
 
     def recall_context(
         self,
@@ -247,9 +270,8 @@ class WorkingMemory:
         Scope-filtered: a recall under scope A never returns entries pinned
         under scope B (V3 fix). Unscoped recall sees only unscoped entries.
         ``acl`` (V4) re-checks each entry against the RECALLING principal:
-        entries whose write was workspace-, user-, or session-restricted
-        stay inside that boundary even though the scope (tenant) is
-        broader.
+        entries whose write was workspace- or user-restricted stay inside
+        that boundary even though the scope (tenant) is broader.
         """
         prefix = f"{scope}::" if scope else ""
         with self._lock:
@@ -271,4 +293,4 @@ class WorkingMemory:
     def __len__(self) -> int:
         with self._lock:
             self._prune_locked()
-            return len(self._entries)
+            return len(self._entries) + len(self._references)

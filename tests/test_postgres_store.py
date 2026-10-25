@@ -41,6 +41,10 @@ from memplex.storage.postgres import (
     _obs_to_json,
 )
 from memplex.sync_repository import SyncCapturePolicy
+from tests.helpers.context_peer import (
+    replace_function_action_for_context_test,
+    run_completed_peer_mutation,
+)
 
 # ── Serialization round-trip ─────────────────────────────────────────
 
@@ -110,6 +114,197 @@ def test_func_from_json_tolerates_missing_fields():
 def test_func_from_json_bad_source_type_falls_back_to_wiki():
     restored = _func_from_json({"id": "x", "source_type": "not-a-real-type"})
     assert restored.source_type == SourceType.WIKI
+
+
+def test_role_update_patches_locked_canonical_and_records_one_transaction():
+    node = _sample_func()
+    node.action.append(FieldValue("second current step"))
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    commits_before = connection.commits
+
+    def mark_before_persist(current):
+        assert current.action[0].desc == "replacement step"
+        current.attributes["checked"] = "yes"
+
+    current, old_value = store.update_function_role(
+        node.id, "action", "replacement step", before_persist=mark_before_persist,
+    )
+    assert old_value == "call auth()"
+    assert [(value.desc, value.status) for value in current.action] == [
+        ("replacement step", "active"), ("call auth()", "deprecated"),
+        ("second current step", "deprecated"),
+    ]
+    assert current.trigger == node.trigger
+    assert current.version == node.version + 1
+    writes = connection._cursor.executed
+    lock_index = next(i for i, (query, _) in enumerate(writes) if "pg_advisory_xact_lock" in query)
+    lookup_index = next(i for i, (query, _) in enumerate(writes) if "FOR UPDATE" in query)
+    upserts = [(query, params) for query, params in writes if "INSERT INTO memplex_functions" in query]
+    assert lock_index < lookup_index
+    assert len(upserts) == 1
+    payload = json.loads(upserts[0][1][1])
+    assert payload["action_text"] == "replacement step"
+    assert payload["attributes"]["checked"] == "yes"
+    assert len([query for query, _ in writes if "INSERT INTO memplex_changelog" in query]) == 1
+    assert connection.commits == commits_before + 1
+
+
+def test_role_update_callback_failure_rolls_back_without_business_writes():
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    commits_before = connection.commits
+    rollbacks_before = connection.rollbacks
+
+    def reject(_current):
+        raise OSError("speculative scan failed")
+
+    with pytest.raises(OSError, match="speculative scan failed"):
+        store.update_function_role(node.id, "action", "new value", before_persist=reject)
+    assert not any("INSERT INTO memplex_functions" in query for query, _ in connection._cursor.executed)
+    assert not any("INSERT INTO memplex_changelog" in query for query, _ in connection._cursor.executed)
+    assert connection.commits == commits_before
+    assert connection.rollbacks == rollbacks_before + 1
+
+
+def test_role_update_missing_row_is_rejected_without_insert():
+    from memplex.storage.postgres import PostgresWriteRejected
+
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = None
+    connection._cursor.executed.clear()
+    with pytest.raises(PostgresWriteRejected):
+        store.update_function_role("missing", "action", "new value")
+    assert not any("INSERT INTO" in query for query, _ in connection._cursor.executed)
+
+
+@pytest.mark.parametrize("dim", [0, 4])
+def test_role_update_failed_vector_refresh_clears_only_existing_vector_column(dim):
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool(dim=dim))
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node))
+    connection._cursor.executed.clear()
+    store.update_function_role(node.id, "action", "new value")
+    upsert = next(query for query, _ in connection._cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert ("embedding = NULL" in upsert) is (dim > 0)
+
+
+@pytest.mark.parametrize("column_exists", [False, True])
+def test_role_update_disabled_vector_policy_checks_persisted_column(monkeypatch, column_exists):
+    node = _sample_func()
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool(dim=0))
+    connection = store._pool_manager._pool.connection
+    cursor = connection._cursor
+    cursor._fetchone_val = (node.id, _func_to_json(node))
+    cursor.executed.clear()
+    real_fetchone = cursor.fetchone
+
+    def fetchone():
+        statement = cursor.executed[-1][0]
+        if "pg_catalog.pg_attribute" in statement and "attname = 'embedding'" in statement:
+            return (column_exists,)
+        return real_fetchone()
+
+    monkeypatch.setattr(cursor, "fetchone", fetchone)
+    store.update_function_role(node.id, "action", "new value")
+    catalog_reads = [query for query, _ in cursor.executed if "pg_catalog.pg_attribute" in query]
+    assert len(catalog_reads) == 1
+    upsert = next(query for query, _ in cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert ("embedding = NULL" in upsert) is column_exists
+
+
+@pytest.mark.parametrize("visibility", ["workspace", "user", "session"])
+def test_role_update_preserves_scoped_identity_contract(visibility):
+    from memplex.auth import bind_node_identity
+
+    creator = _authorization()
+    writer = _authorization(subject="bob") if visibility == "workspace" else creator
+    node = _sample_func()
+    bind_node_identity(node, creator, visibility=visibility)
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    identity = store._row_identity_values(creator, node)
+    connection._cursor._fetchone_val = (node.id, _func_to_json(node), *identity)
+    connection._cursor.executed.clear()
+    current, _ = store.authorized(writer).update_function_role(node.id, "action", "new value")
+    expected = writer if visibility == "workspace" else creator
+    assert current.owner_subject_id == expected.principal.subject_id
+    assert current.provenance["authentication_id"] == expected.principal.authentication_id
+    assert current.visibility == visibility
+    upsert = next(params for query, params in connection._cursor.executed if "INSERT INTO memplex_functions" in query)
+    assert upsert[3:] == store._row_identity_values(expected, current)
+
+
+@pytest.mark.parametrize("role", ["condition", "benefit"])
+def test_role_update_search_projection_indexes_current_condition_and_benefit(role):
+    node = _sample_func()
+    setattr(node, role, [FieldValue("obsolete qualifier")])
+    node.update_role(role, "current qualifier")
+    payload = _func_to_json(node)
+    search_text = payload["trigger_text"] + " " + payload["action_text"]
+    assert "current qualifier" in search_text
+    assert "obsolete qualifier" not in search_text
+
+    class RecordingEmbedder:
+        def embed(self, text):
+            assert "current qualifier" in text
+            assert "obsolete qualifier" not in text
+            return [1.0, 0.0, 0.0, 0.0]
+
+    store = PostgresMemoryStore(
+        dsn="dbname=fake", ready_pool=_test_ready_pool(dim=4), embedder=RecordingEmbedder(),
+    )
+    assert store._embed_text(node) == "[1.0, 0.0, 0.0, 0.0]"
+
+
+def test_context_paragraph_marks_only_visible_edited_function_sources():
+    from memplex.storage.postgres import _acl_scope_sql
+
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = None
+    connection._cursor.executed.clear()
+    assert store._read_context_paragraph("raw-id") is None
+    statement, parameters = next(
+        (query, params) for query, params in connection._cursor.executed
+        if "FROM memplex_paragraphs" in query
+    )
+    assert parameters == ("raw-id",)
+    assert _acl_scope_sql("memplex_paragraphs") in statement
+    assert "EXISTS" in statement
+    assert "NOT EXISTS" not in statement
+    assert "AS context_historical" in statement
+    assert "FROM memplex_functions current_function" in statement
+    assert _acl_scope_sql("current_function") in statement
+    assert "current_function.tenant_id = memplex_paragraphs.tenant_id" in statement
+    assert "current_function.data->'source_paragraphs' ? memplex_paragraphs.id" in statement
+    assert "memplex_role_updates" in statement
+
+    connection._cursor.executed.clear()
+    assert store.get_paragraph("raw-id") is None
+    historical_query = next(query for query, _ in connection._cursor.executed if "FROM memplex_paragraphs" in query)
+    assert "memplex_role_updates" not in historical_query
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_context_paragraph_history_flag_comes_from_sql_not_payload(historical):
+    store = PostgresMemoryStore(dsn="dbname=fake", ready_pool=_test_ready_pool())
+    connection = store._pool_manager._pool.connection
+    connection._cursor._fetchone_val = (
+        "raw-id", {"raw_text": "unchanged evidence", "context_historical": not historical},
+        "tenant-a", "alice", "workspace", "user", "agent", "session", historical,
+    )
+    node = store._read_context_paragraph("raw-id")
+    assert node is not None
+    assert node["raw_text"] == "unchanged evidence"
+    assert node["context_historical"] is historical
 
 
 # ── Mock-connection fixture ──────────────────────────────────────────
@@ -3014,6 +3209,83 @@ def pg_store(monkeypatch):
 # ── Write operations (SQL + params verified) ─────────────────────────
 
 
+def test_context_peer_fixture_worker_propagates_original_exception():
+    error = AttributeError("peer mutation failed before completion")
+
+    def fail():
+        raise error
+
+    with pytest.raises(AttributeError) as caught:
+        run_completed_peer_mutation(fail, timeout=0.1)
+    assert caught.value is error
+
+
+def test_context_peer_fixture_worker_returns_after_success():
+    outcomes = []
+    run_completed_peer_mutation(lambda: outcomes.append("committed"))
+    assert outcomes == ["committed"]
+
+
+@pytest.mark.parametrize("write_rejected", [False, True])
+def test_context_peer_fixture_replaces_exact_body_with_preserved_identity(
+    pg_store, monkeypatch, write_rejected,
+):
+    from memplex.auth import bind_node_identity
+    from memplex.storage.postgres import PostgresWriteRejected
+
+    store, conn = pg_store
+    owner = _authorization()
+    node = _sample_func()
+    node.action = [FieldValue(desc="OLD-PEER-TEXT")]
+    bind_node_identity(node, owner, visibility="user")
+    identity = store._row_identity_values(owner, node)
+    cursor = conn._cursor
+    original_fetchone = cursor.fetchone
+
+    def fetchone():
+        statement, _params = cursor.executed[-1]
+        if "SELECT id, data, tenant_id" in statement:
+            return (node.id, _func_to_json(node), *identity)
+        if "SELECT data FROM memplex_functions" in statement:
+            return (_func_to_json(node),)
+        if "INSERT INTO memplex_functions" in statement and write_rejected:
+            return None
+        return original_fetchone()
+
+    monkeypatch.setattr(cursor, "fetchone", fetchone)
+    before_commits, before_rollbacks = conn.commits, conn.rollbacks
+    scoped = store.authorized(owner)
+    if write_rejected:
+        with pytest.raises(PostgresWriteRejected):
+            replace_function_action_for_context_test(scoped, owner, node.id, "CURRENT-PEER-TEXT")
+        assert conn.commits == before_commits
+        assert conn.rollbacks == before_rollbacks + 1
+        assert not any("INSERT INTO memplex_changelog" in sql for sql, _ in cursor.executed)
+    else:
+        replace_function_action_for_context_test(scoped, owner, node.id, "CURRENT-PEER-TEXT")
+        assert conn.commits == before_commits + 1
+        assert conn.rollbacks == before_rollbacks
+        params = next(p for sql, p in cursor.executed if "INSERT INTO memplex_functions" in sql)
+        replacement = _func_from_json(json.loads(params[1]))
+        assert [value.desc for value in replacement.action] == ["CURRENT-PEER-TEXT"]
+        assert replacement.id == node.id
+        assert replacement.name_normalized == node.name_normalized
+        assert replacement.trigger == node.trigger
+        assert params[-6:] == identity
+        assert replacement.tenant_id == owner.principal.tenant_id
+        assert replacement.owner_subject_id == owner.principal.subject_id
+        audit = next(p for sql, p in cursor.executed if "INSERT INTO memplex_changelog" in sql)
+        assert audit[0] == node.id
+        assert audit[2] == "updated"
+        assert audit[-6:] == identity
+        statements = [sql for sql, _ in cursor.executed]
+        scope = next(i for i, sql in enumerate(statements) if "set_config('memplex.tenant_id'" in sql)
+        lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        row = next(i for i, sql in enumerate(statements) if "SELECT id, data, tenant_id" in sql)
+        write = next(i for i, sql in enumerate(statements) if "INSERT INTO memplex_functions" in sql)
+        assert scope < lock < row < write
+
+
 def test_add_executes_upsert_sql(pg_store):
     store, conn = pg_store
     store.add(_sample_func(), SourceDocument(type="text", source_type=SourceType.WIKI))
@@ -3474,6 +3746,150 @@ def test_vector_search_uses_tsquery(pg_store):
     assert "plainto_tsquery" in sql
 
 
+def test_vector_search_lexical_sql_scopes_and_bounds_functions_and_facts(pg_store):
+    """Each typed branch is scoped before its bounded lexical candidates merge."""
+    store, conn = pg_store
+    query = "owner's nebula ); DROP TABLE memplex_facts; --"
+
+    assert store.vector_search(query, top_k=3) == []
+
+    sql, params = conn._cursor.executed[-1]
+    normalized = " ".join(sql.split())
+    assert query not in sql
+    assert params == (query, 6, 6, 6)
+    assert "plainto_tsquery('simple', %s)" in sql
+    assert "FROM memplex_functions f" in sql
+    assert "FROM memplex_facts fact" in sql
+    assert "UNION ALL" in sql
+    assert normalized.count("LIMIT %s") == 3
+    assert "ORDER BY score DESC, f.id" in normalized
+    assert "ORDER BY score DESC, fact.id" in normalized
+    assert "ORDER BY score DESC, id" in normalized
+    assert "f.search_tsv @@" in sql
+    assert "to_tsvector('simple'," in sql
+    for key in ("subject", "predicate", "object", "object_", "name"):
+        assert f"fact.data->>'{key}'" in sql
+    assert "NULLIF" in sql and "btrim" in sql
+    for alias in ("f", "fact"):
+        assert f"{alias}.tenant_id <> '__memplex_legacy__'" in sql
+        assert f"{alias}.tenant_id = current_setting('memplex.tenant_id', true)" in sql
+        assert f"{alias}.owner_subject = current_setting('memplex.subject_id', true)" in sql
+        assert f"{alias}.workspace = current_setting('memplex.workspace_id', true)" in sql
+        assert f"{alias}.source_agent = current_setting('memplex.agent_id', true)" in sql
+        assert f"{alias}.source_session = current_setting('memplex.session_id', true)" in sql
+        for visibility in ("user", "workspace", "session"):
+            assert f"{alias}.visibility = '{visibility}'" in sql
+    for excluded in ("memplex_observations", "memplex_preferences", "raw_text", "embedding"):
+        assert excluded not in sql
+
+
+def test_vector_search_fact_branch_excludes_visible_function_ids_before_ranking(pg_store):
+    """A cross-table ID receives only one lexical credit, using Function precedence."""
+    store, conn = pg_store
+    conn._cursor._result = [("shared-id", _func_to_json(_sample_func("shared-id")), 0.9)]
+
+    result = store.vector_search("login", top_k=3)
+
+    sql = " ".join(conn._cursor.executed[-1][0].split())
+    fact_branch = sql.split("UNION ALL", 1)[1]
+    assert "AND NOT EXISTS ( SELECT 1 FROM memplex_functions shadow" in fact_branch
+    assert "shadow.id = fact.id" in fact_branch
+    assert fact_branch.index("AND NOT EXISTS") < fact_branch.index("ORDER BY score DESC, fact.id")
+    # A visible Function wins even when it does not match this lexical query.
+    assert "shadow.search_tsv" not in fact_branch
+    assert [row.func_id for row in result] == ["shared-id"]
+    assert result[0].summary == "user logs in"
+    assert result[0].relevance_score == pytest.approx(1 / 61)
+
+
+def test_vector_search_denied_function_cannot_shadow_allowed_fact_sql(pg_store):
+    """The collision check must independently scope the shadow Function."""
+    store, conn = pg_store
+
+    store.authorized(_authorization(subject="alice")).vector_search("nebula", top_k=3)
+
+    sql = " ".join(conn._cursor.executed[-1][0].split())
+    assert "AND NOT EXISTS ( SELECT 1 FROM memplex_functions shadow" in sql
+    assert "shadow.tenant_id <> '__memplex_legacy__'" in sql
+    assert "shadow.tenant_id = current_setting('memplex.tenant_id', true)" in sql
+    assert "shadow.owner_subject = current_setting('memplex.subject_id', true)" in sql
+    assert "shadow.workspace = current_setting('memplex.workspace_id', true)" in sql
+    assert "shadow.source_agent = current_setting('memplex.agent_id', true)" in sql
+    assert "shadow.source_session = current_setting('memplex.session_id', true)" in sql
+    for visibility in ("user", "workspace", "session"):
+        assert f"shadow.visibility = '{visibility}'" in sql
+
+
+def test_vector_search_fact_kind_comes_from_table_not_legacy_json(pg_store):
+    """Missing or misleading JSON memory_type cannot select Function projection."""
+    store, conn = pg_store
+
+    store.vector_search("nebula", top_k=3)
+
+    sql = " ".join(conn._cursor.executed[-1][0].split())
+    function_branch, fact_branch = sql.split("UNION ALL", 1)
+    assert "SELECT id, data, score, row_kind FROM" in sql
+    assert "SELECT f.id, f.data," in function_branch
+    assert "'function' AS row_kind" in function_branch
+    assert "SELECT fact.id, fact.data," in fact_branch
+    assert "'fact' AS row_kind" in fact_branch
+    assert "jsonb_build_object" not in sql
+    assert "UPDATE" not in sql
+
+
+@pytest.mark.parametrize("method", ["vector_search", "fts_search"])
+@pytest.mark.parametrize("top_k", [0, -1])
+def test_search_nonpositive_budget_avoids_database_and_embedder(pg_store, method, top_k):
+    store, conn = pg_store
+    store._vector_dim = 4
+
+    class UnexpectedEmbedder:
+        def embed(self, _text):
+            pytest.fail("A nonpositive search budget must not embed the query")
+
+    store._embedder = UnexpectedEmbedder()
+    assert getattr(store, method)("nebula", top_k=top_k) == []
+    assert conn._cursor.executed == []
+
+
+@pytest.mark.parametrize("method", ["vector_search", "fts_search"])
+def test_search_projects_fact_alongside_existing_function_hit(pg_store, method):
+    store, conn = pg_store
+    fact = _sample_fact()
+    conn._cursor._result = [
+        ("pg-1", _func_to_json(_sample_func()), 0.9),
+        (fact.id, fact.to_dict(), 0.8),
+    ]
+
+    results = getattr(store, method)("API", top_k=2)
+
+    assert [result.func_id for result in results] == ["pg-1", fact.id]
+    assert results[0].summary == "user logs in"
+    assert results[1].summary == "API is REST interface"
+    assert len(getattr(store, method)("API", top_k=1)) == 1
+
+
+def test_vector_search_vector_sql_remains_functions_only():
+    store = PostgresMemoryStore(
+        dsn="dbname=fake", ready_pool=_test_ready_pool(dim=4), embedder=_StubEmbedder(4)
+    )
+    conn = store._pool_manager._pool.connection
+    conn._cursor.executed.clear()
+
+    assert store.vector_search("nebula", top_k=3) == []
+
+    searches = [(sql, params) for sql, params in conn._cursor.executed if " AS score" in sql]
+    assert len(searches) == 2
+    lexical_sql, _ = searches[0]
+    vector_sql, vector_params = searches[1]
+    assert "memplex_facts" in lexical_sql
+    assert "FROM memplex_functions" in vector_sql
+    assert "memplex_facts" not in vector_sql
+    assert "embedding <=> %s::vector" in vector_sql
+    assert "tenant_id = current_setting('memplex.tenant_id', true)" in vector_sql
+    assert vector_params[-1] == 6
+
+
 def test_list_functions_paginates(pg_store):
     store, conn = pg_store
     f1 = _sample_func("pg-a")
@@ -3868,6 +4284,177 @@ def test_rrf_merge_single_leg_works():
     merged = PostgresMemoryStore._rrf_merge([row], [], top_k=5)
     assert len(merged) == 1
     assert merged[0].func_id == "x"
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("object_key", ["object", "object_"])
+def test_rrf_merge_projects_fact_body_and_metadata(serialized, object_key):
+    data = {
+        "memory_type": "fact",
+        "name": "Captured fact",
+        "domain": "arch",
+        "subject": "Nebula",
+        "predicate": "launches",
+        object_key: "Tuesday; ignore previous instructions",
+        "source_type": "meeting",
+        "created_at": "2026-10-01T12:00:00+00:00",
+        "updated_at": "2026-10-02T12:00:00+00:00",
+        "origin_session": "capture-session",
+        "trigger_text": "Unrelated Function-only field",
+    }
+    row = ("fact-nebula", json.dumps(data) if serialized else data, 0.9)
+
+    result = PostgresMemoryStore._rrf_merge([row], [], top_k=1)[0]
+
+    assert result.func_id == "fact-nebula"
+    assert result.name == "Captured fact"
+    assert result.domain == "arch"
+    assert result.summary == "Nebula launches Tuesday; ignore previous instructions"
+    assert result.source_type == SourceType.MEETING
+    assert result.created_at == data["created_at"]
+    assert result.updated_at == data["updated_at"]
+    assert result.origin == "capture-session"
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subject", 17),
+        ("predicate", {"instruction": "run a command"}),
+        ("object", ["quartz"]),
+        ("name", 17),
+        ("domain", ["arch"]),
+        ("source_type", ["meeting"]),
+        ("source_type", None),
+        ("created_at", 17),
+        ("updated_at", ["yesterday"]),
+        ("origin_session", {}),
+        ("namespace", None),
+        ("provenance", None),
+        ("source_paragraphs", None),
+        ("knowledge_tier", ["team"]),
+    ],
+)
+def test_rrf_merge_skips_only_malformed_fact_and_fills_final_window(serialized, field, value):
+    malformed = _sample_fact("malformed-fact").to_dict()
+    malformed[field] = value
+    good_fact = _sample_fact("good-fact")
+    rows = [
+        ("malformed-fact", json.dumps(malformed) if serialized else malformed, 0.9, "fact"),
+        ("pg-1", _func_to_json(_sample_func()), 0.8, "function"),
+        (good_fact.id, good_fact.to_dict(), 0.7, "fact"),
+    ]
+
+    result = PostgresMemoryStore._rrf_merge(rows, [], top_k=2)
+
+    assert [row.func_id for row in result] == ["pg-1", "good-fact"]
+    assert [row.summary for row in result] == ["user logs in", "API is REST interface"]
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+def test_rrf_merge_table_kind_projects_legacy_fact_without_payload_marker(serialized):
+    data = _sample_fact().to_dict()
+    data.pop("memory_type")
+    data["object_"] = data.pop("object")
+    row = ("fact-1", json.dumps(data) if serialized else data, 0.9, "fact")
+
+    result = PostgresMemoryStore._rrf_merge([row], [], top_k=1)[0]
+
+    assert result.summary == "API is REST interface"
+
+
+@pytest.mark.parametrize("marker", ["function", "preference", "observation", "unknown", None])
+def test_rrf_merge_fact_table_contradictory_marker_fails_closed(marker):
+    data = _sample_fact("malformed-fact").to_dict()
+    data["memory_type"] = marker
+    rows = [
+        ("malformed-fact", data, 0.9, "fact"),
+        ("pg-1", _func_to_json(_sample_func()), 0.8, "function"),
+    ]
+
+    result = PostgresMemoryStore._rrf_merge(rows, [], top_k=1)
+
+    assert [row.func_id for row in result] == ["pg-1"]
+
+
+@pytest.mark.parametrize("leg", ["lexical", "vector"])
+def test_rrf_merge_function_table_kind_keeps_function_projection(leg):
+    data = _func_to_json(_sample_func())
+    data.update(memory_type="fact", subject="untrusted", predicate="is", object="not a fact row")
+    lexical = [("pg-1", data, 0.9, "function")] if leg == "lexical" else []
+    vector = [("pg-1", data, 0.9)] if leg == "vector" else []
+
+    result = PostgresMemoryStore._rrf_merge(lexical, vector, top_k=1)[0]
+
+    assert result.summary == "user logs in"
+    assert result.source_type == SourceType.WIKI
+
+
+def test_rrf_merge_mixed_three_and_four_column_rows_remain_compatible():
+    fact = _sample_fact()
+    data = fact.to_dict()
+    data.pop("memory_type")
+    function = ("pg-1", _func_to_json(_sample_func()), 0.9)
+
+    results = PostgresMemoryStore._rrf_merge(
+        [(fact.id, data, 0.9, "fact"), function], [function], top_k=2,
+    )
+
+    assert [result.func_id for result in results] == ["pg-1", fact.id]
+    assert results[0].summary == "user logs in"
+    assert results[1].summary == "API is REST interface"
+
+
+@pytest.mark.parametrize("source_type", [None, "unknown"])
+def test_rrf_merge_empty_fact_uses_name_and_safe_metadata_defaults(source_type):
+    data = {
+        "memory_type": "fact",
+        "name": "Legacy fact name",
+        "subject": " ",
+        "predicate": "",
+        "object": "",
+        "domain": None,
+        "source_type": source_type,
+    }
+    if source_type is None:
+        data.pop("source_type")
+
+    result = PostgresMemoryStore._rrf_merge([("fact-legacy", data, 0.9)], [], top_k=1)[0]
+
+    assert result.summary == "Legacy fact name"
+    assert result.domain == ""
+    assert result.source_type == SourceType.WIKI
+    assert result.created_at is None
+    assert result.updated_at is None
+
+
+def test_rrf_merge_preserves_function_projection():
+    data = _func_to_json(_sample_func())
+    result = PostgresMemoryStore._rrf_merge([("pg-1", data, 0.9)], [], top_k=1)[0]
+
+    assert result.func_id == "pg-1"
+    assert result.name == "login"
+    assert result.domain == "auth"
+    assert result.summary == "user logs in"
+    assert result.source_type == SourceType.WIKI
+    assert result.created_at is None
+    assert result.updated_at is None
+
+
+def test_rrf_merge_equal_scores_use_id_tiebreak():
+    row_a = ("a", {"name": "a"}, 0.9)
+    row_z = ("z", {"name": "z"}, 0.9)
+
+    result = PostgresMemoryStore._rrf_merge([row_z, row_a], [row_a, row_z], top_k=2)
+
+    assert [row.func_id for row in result] == ["a", "z"]
+
+
+@pytest.mark.parametrize("top_k", [0, -1])
+def test_rrf_merge_nonpositive_budget_returns_empty(top_k):
+    rows = [("a", {"name": "a"}, 0.9), ("b", {"name": "b"}, 0.8)]
+    assert PostgresMemoryStore._rrf_merge(rows, [], top_k=top_k) == []
 
 
 def test_pgvector_dim_is_explicit_not_re_read_from_env(monkeypatch):
@@ -5101,3 +5688,34 @@ def test_postgres_merge_field_values_enforces_max_values_per_field():
     merged = _merge_field_values(existing, incoming)
     assert len(merged) == Function.MAX_VALUES_PER_FIELD
     assert merged[-1].desc == f"existing-{Function.MAX_VALUES_PER_FIELD - 1}"
+
+
+@pytest.mark.parametrize("capture_kind", ["derived", "input"])
+def test_authorized_store_preserves_capture_audit_but_rebinds_identity(pg_store, capture_kind):
+    """Generated provenance must survive PG's second, authoritative identity bind."""
+    from memplex.models import Fact
+
+    store, conn = pg_store
+    capture = ({
+        "extraction": "factual_capture_v1", "authority": "agent_inferred",
+        "source_snapshots": '{"raw-source": "digest"}', "evidence": "[]",
+        "reference_datetime": "2026-10-07T12:00:00+00:00", "author_role": "user",
+    } if capture_kind == "derived" else {
+        "capture_input": "factual_capture_v1", "author_role": "assistant",
+    })
+    fact = Fact(id="capture-provenance", subject="database", predicate="is", object_="SQLite",
+                trust_tier=1, provenance={
+                    **capture, "agent_id": "forged-agent", "authentication_id": "forged-auth",
+                    "session_id": "forged-session", "request_id": "forged-request",
+                    "untrusted_extra": "discard",
+                })
+    context = _authorization()
+    store.authorized(context).add_fact(fact)
+    assert fact.provenance == {**capture, "agent_id": context.agent_id,
+                              "authentication_id": context.principal.authentication_id,
+                              "session_id": context.session_id, "request_id": context.request_id}
+    params = next(params for sql, params in conn._cursor.executed
+                  if "INSERT INTO memplex_facts" in sql)
+    stored = json.loads(params[1])
+    assert stored["provenance"] == fact.provenance
+    assert stored["trust_tier"] == 1

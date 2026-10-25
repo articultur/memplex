@@ -1,0 +1,76 @@
+{
+  "protocol_tests": {
+    "command": "python -S -m unittest tests.test_offline_comparison -v",
+    "passed": 14
+  },
+  "lint": "pass",
+  "architecture_contracts": {
+    "kept": 4,
+    "broken": 0
+  },
+  "mypy": {
+    "checked_source_files": 128,
+    "status": "pass"
+  },
+  "uv_lock_offline": "pass",
+  "full_suite": {
+    "command": "python -m pytest tests -q --cov=memplex --cov-fail-under=75",
+    "passed": 4873,
+    "failed": 5,
+    "errors": 15,
+    "skipped": 26,
+    "subtests_passed": 236,
+    "coverage_percent": 80.92,
+    "seconds": 554.31,
+    "failures": [
+      "FAILED tests/test_cli_operations.py::test_operations_alert_rules_ship_and_verify_from_isolated_wheel",
+      "FAILED tests/test_industrial_readiness.py::test_release_supply_chain_gate_accepts_only_current_signed_bundle",
+      "FAILED tests/test_reproducible_release.py::test_release_artifacts_are_reproducible_across_paths_locale_and_umask",
+      "FAILED tests/test_reproducible_release.py::test_release_archives_are_sorted_normalized_and_private_asset_free",
+      "FAILED tests/test_storage_migrations.py::test_discover_migrations_from_built_wheel_contains_all_sql",
+      "ERROR tests/test_release_evidence.py::test_release_bundle_verifies_exact_artifacts_sbom_and_checksums",
+      "ERROR tests/test_release_evidence.py::test_release_bundle_fails_closed_on_artifact_drift[tamper]",
+      "ERROR tests/test_release_evidence.py::test_release_bundle_fails_closed_on_artifact_drift[unknown]",
+      "ERROR tests/test_release_evidence.py::test_release_bundle_fails_closed_on_artifact_drift[missing]",
+      "ERROR tests/test_release_evidence.py::test_signed_release_evidence_binds_current_bundle",
+      "ERROR tests/test_release_evidence.py::test_installed_runtime_readiness_verifies_exact_signed_bundle",
+      "ERROR tests/test_release_evidence.py::test_installed_runtime_readiness_rejects_version_or_bundle_drift",
+      "ERROR tests/test_release_evidence.py::test_readiness_rejects_self_consistent_archive_with_private_member",
+      "ERROR tests/test_release_evidence.py::test_unsigned_or_tampered_release_evidence_never_verifies",
+      "ERROR tests/test_release_evidence.py::test_supply_chain_verifier_emits_redacted_signed_evidence",
+      "ERROR tests/test_release_evidence.py::test_evidence_writer_rejects_symlinked_ancestor",
+      "ERROR tests/test_release_install_matrix.py::test_wheel_fresh_install_reinstall_assets_and_uninstall_are_isolated[3.12]",
+      "ERROR tests/test_release_install_matrix.py::test_sdist_installs_in_isolated_python_environment",
+      "ERROR tests/test_release_install_matrix.py::test_npm_tgz_fresh_install_reinstall_dry_run_and_uninstall_are_isolated",
+      "ERROR tests/test_release_install_matrix.py::test_failed_npm_install_does_not_replace_verified_package"
+    ],
+    "environment": "Isolated HOME, no credentials, network disabled for uv/pip/npm; cold build cache. No new packages fetched."
+  },
+  "supplemental_release_recheck": {
+    "passed": 21,
+    "failed": 4,
+    "environment": "Existing approved restored package cache, uv/pip/npm still offline",
+    "remaining_failures": [
+      "FAILED tests/test_release_install_matrix.py::test_wheel_fresh_install_reinstall_assets_and_uninstall_are_isolated[3.12]",
+      "FAILED tests/test_release_install_matrix.py::test_sdist_installs_in_isolated_python_environment",
+      "FAILED tests/test_cli_operations.py::test_operations_alert_rules_ship_and_verify_from_isolated_wheel",
+      "FAILED tests/test_storage_migrations.py::test_discover_migrations_from_built_wheel_contains_all_sql"
+    ],
+    "reason": "Isolated install environments could not find required registry packages in their offline caches (including PyYAML)."
+  },
+  "supplemental_subprocess_recheck": {
+    "passed": 8,
+    "reason": "Repo-local .venv path linked to existing approved restored environment; no installation."
+  },
+  "independent_review": {
+    "status": "pass for scoped protocol and loader",
+    "reviewed_code_diff_sha256": "bf59f5f6fbe2c7fa44a821a447d940cd7c36157c584d950e09d9425ad8e588b1",
+    "harness_sha256": "9a8abb6d3520168f19ca66d73e4b77d951e3ee1a6dea98b7c903019e2676b3a3"
+  },
+  "gitnexus": {
+    "targeted_helper_risk": "LOW",
+    "staged_change_risk": "HIGH",
+    "note": "Seven added benchmark/test/docs/workflow files, 58 new symbols, 15 reachable flows. Zero production-file edits. Index and scans used existing local tooling with FTS/embeddings disabled."
+  },
+  "merge_ready": false
+}
